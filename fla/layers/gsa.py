@@ -87,6 +87,8 @@ class GatedSlotAttention(nn.Module):
                 "when creating this class."
             )
 
+        self.bound_f = 100.0
+
         if norm_first:
             self.norm = RMSNorm(self.hidden_size, eps=norm_eps)
         self.register_module('feature_map', None)
@@ -181,6 +183,9 @@ class GatedSlotAttention(nn.Module):
         if self.feature_map is not None:
             q, k = map(lambda x: self.feature_map(x), (q, k))
         v = swish(v)
+
+        # Bound f for safety
+        f = self.bound_f * F.softsign(f / self.bound_f)
 
         f = F.logsigmoid(f) / self.gate_logit_normalizer
         s = (1 - f.exp()).to(f.dtype)

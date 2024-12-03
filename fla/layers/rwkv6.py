@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch.nn as nn
 from einops import rearrange
+import torch.nn.functional as F
 
 from fla.modules import GroupNorm
 from fla.modules.activations import ACT2FN
@@ -72,6 +73,9 @@ class RWKV6Attention(nn.Module):
         self.v_proj = DDLerpLinear(hidden_size, self.value_dim)
         self.g_proj = DDLerpLinear(hidden_size, self.value_dim)
         self.bonus = nn.Parameter(torch.zeros(num_heads, self.head_qk_dim))
+
+        # For bounding the forgetting gate
+        self.bound_w = 100.0
 
         # TODO: fuse GroupNorm and output gate
         self.g_norm = GroupNorm(self.num_heads, self.value_dim, elementwise_affine=elementwise_affine, bias=True, eps=norm_eps)
@@ -139,6 +143,10 @@ class RWKV6Attention(nn.Module):
         if attention_mask is not None:
             v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
         r, w, k, v = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=self.num_heads), (r, w, k, v))
+        
+        # Bounding w for safe
+        w = self.bound_w * F.softsign(w / self.bound_w)
+        
         w = -torch.exp(w)
         u = self.bonus
 
