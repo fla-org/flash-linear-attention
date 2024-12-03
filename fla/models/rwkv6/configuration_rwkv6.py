@@ -37,6 +37,7 @@ class RWKV6Config(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
+        gate_bound: float = 50.0,
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -60,6 +61,7 @@ class RWKV6Config(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
+        self.gate_bound = gate_bound
 
         if attn is not None:
             if not isinstance(attn, Dict):

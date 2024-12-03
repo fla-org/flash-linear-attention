@@ -112,6 +112,7 @@ class RWKV6Block(nn.Module):
                 gate_low_rank_dim=config.gate_low_rank_dim,
                 norm_eps=config.norm_eps,
                 fuse_norm=config.fuse_norm,
+                gate_bound=config.gate_bound,
                 layer_idx=layer_idx
             )
         self.ffn_norm = LayerNorm(hidden_size=config.hidden_size, bias=config.norm_bias, eps=config.norm_eps)
