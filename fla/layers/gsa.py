@@ -45,6 +45,7 @@ class GatedSlotAttention(nn.Module):
         use_norm: bool = True,
         layer_idx: Optional[int] = None,
         scale: Optional[float] = 1.,
+        gate_bound: float = 50.0,
         **kwargs
     ) -> GatedSlotAttention:
         super().__init__()
@@ -87,7 +88,7 @@ class GatedSlotAttention(nn.Module):
                 "when creating this class."
             )
 
-        self.bound_f = 100.0
+        self.bound_w = gate_bound
 
         if norm_first:
             self.norm = RMSNorm(self.hidden_size, eps=norm_eps)

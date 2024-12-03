@@ -36,6 +36,8 @@ class RWKV6Attention(nn.Module):
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
+        gate_bound: float = 50.0,
+
         **kwargs
     ) -> RWKV6Attention:
         super().__init__()
@@ -75,7 +77,7 @@ class RWKV6Attention(nn.Module):
         self.bonus = nn.Parameter(torch.zeros(num_heads, self.head_qk_dim))
 
         # For bounding the forgetting gate
-        self.bound_w = 100.0
+        self.bound_w = gate_bound
 
         # TODO: fuse GroupNorm and output gate
         self.g_norm = GroupNorm(self.num_heads, self.value_dim, elementwise_affine=elementwise_affine, bias=True, eps=norm_eps)
