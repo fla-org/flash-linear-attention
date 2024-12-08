@@ -15,6 +15,7 @@
 """PyTorch MAMBA model."""
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -33,22 +34,28 @@ from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
 
 logger = logging.get_logger(__name__)
 
-try:
-    from mamba_ssm.ops.selective_scan_interface import (mamba_inner_fn,
-                                                        selective_scan_fn)
-    from mamba_ssm.ops.triton.selective_state_update import \
-        selective_state_update
-except ImportError:
-    selective_state_update, selective_scan_fn, mamba_inner_fn = None, None, None
 
-try:
-    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-except ImportError:
-    causal_conv1d_update, causal_conv1d_fn = None, None
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore')
+    try:
+        from mamba_ssm.ops.selective_scan_interface import (mamba_inner_fn,
+                                                            selective_scan_fn)
+        from mamba_ssm.ops.triton.selective_state_update import \
+            selective_state_update
+    except ImportError:
+        selective_state_update, selective_scan_fn, mamba_inner_fn = None, None, None
 
-is_fast_path_available = all(
-    (selective_state_update, selective_scan_fn, causal_conv1d_fn, causal_conv1d_update, mamba_inner_fn)
-)
+    try:
+        from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+    except ImportError:
+        causal_conv1d_update, causal_conv1d_fn = None, None
+    is_fast_path_available = all((
+        selective_state_update,
+        selective_scan_fn,
+        causal_conv1d_fn,
+        causal_conv1d_update,
+        mamba_inner_fn
+    ))
 
 
 class MambaCache:

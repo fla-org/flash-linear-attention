@@ -8,20 +8,20 @@ import triton
 import triton.language as tl
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-    ],
-    key=['BT', 'BK', 'BV', 'USE_G', 'USE_GK', 'USE_GV'],
-)
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
+@triton.autotune(
+    configs=[
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
+        for BK in [32, 64, 128]
+        for BV in [32, 64, 128]
+        for num_warps in [1, 2, 4, 8]
+    ],
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+)
 @triton.jit
 def chunk_fwd_kernel_h(
     k,
@@ -134,20 +134,20 @@ def chunk_fwd_kernel_h(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-    ],
-    key=['BT', 'BK', 'BV', 'USE_G', 'USE_GK', 'USE_GV'],
-)
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
+@triton.autotune(
+    configs=[
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
+        for BK in [32, 64, 128]
+        for BV in [32, 64, 128]
+        for num_warps in [1, 2, 4, 8]
+    ],
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+)
 @triton.jit
 def chunk_bwd_kernel_dh(
     q,
@@ -294,9 +294,6 @@ def chunk_fwd_h(
         if c_offsets is None:
             c_offsets = torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], BT)]).cumsum(-1)
         NT = c_offsets[-1]
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
-    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
     if head_first:
         h = k.new_empty(B, H, NT, K, V, dtype=k.dtype if not states_in_fp32 else torch.float32)
@@ -304,7 +301,7 @@ def chunk_fwd_h(
         h = k.new_empty(B, NT, H, K, V, dtype=k.dtype if not states_in_fp32 else torch.float32)
     ht = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
-    grid = (NK, NV, N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
     chunk_fwd_kernel_h[grid](
         k=k,
         v=v,
@@ -321,8 +318,6 @@ def chunk_fwd_h(
         K=K,
         V=V,
         BT=BT,
-        BK=BK,
-        BV=BV,
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
@@ -363,9 +358,6 @@ def chunk_bwd_dh(
         if c_offsets is None:
             c_offsets = torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], BT)]).cumsum(-1)
         NT = c_offsets[-1]
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
-    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     # number of groups in GQA
     NG = HQ // H
 
@@ -375,7 +367,7 @@ def chunk_bwd_dh(
         dh = k.new_empty(B, NT, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float32)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
 
-    grid = (NK, NV, N * H)
+    def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
     chunk_bwd_kernel_dh[grid](
         q=q,
         g=g,
@@ -394,8 +386,6 @@ def chunk_bwd_dh(
         K=K,
         V=V,
         BT=BT,
-        BK=BK,
-        BV=BV,
         NG=NG,
         USE_G=g is not None,
         USE_GK=gk is not None,

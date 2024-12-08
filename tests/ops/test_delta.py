@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -7,10 +9,20 @@ import torch.nn.functional as F
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 
 
+def get_abs_err(x, y):
+    return (x-y).flatten().abs().max().item()
+
+
 def get_err_ratio(x, y):
     err = (x-y).flatten().square().mean().sqrt().item()
     base = (x).flatten().square().mean().sqrt().item()
     return err / base
+
+
+def assert_close(prefix, ref, tri, ratio):
+    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
+    print(msg)
+    assert get_err_ratio(ref, tri) < ratio, msg
 
 
 @pytest.mark.parametrize("B", [2])
@@ -72,17 +84,80 @@ def test_chunk(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
 
-    assert get_err_ratio(tri, ref) < 0.005, \
-        f" o diff: {torch.abs(ref - tri).max()}, ratio: {get_err_ratio(ref, tri)}"
-    assert get_err_ratio(tri_ht, ref_ht) < 0.005, \
-        f"ht diff: {torch.abs(ref_ht - tri_ht).max()}, ratio: {get_err_ratio(ref_ht, tri_ht)}"
-    assert get_err_ratio(tri_dq, ref_dq) < 0.007, \
-        f"dq diff: {torch.abs(ref_dq - tri_dq).max()}, ratio: {get_err_ratio(ref_dq, tri_dq)}"
-    assert get_err_ratio(tri_dk, ref_dk) < 0.008, \
-        f"dk diff: {torch.abs(ref_dk - tri_dk).max()}, ratio: {get_err_ratio(ref_dk, tri_dk)}"
-    assert get_err_ratio(tri_dv, ref_dv) < 0.007, \
-        f"dv diff: {torch.abs(ref_dv - tri_dv).max()}, ratio: {get_err_ratio(ref_dv, tri_dv)}"
-    assert get_err_ratio(tri_dbeta, ref_dbeta) < 0.007, \
-        f"dbeta diff: {torch.abs(ref_dbeta - tri_dbeta).max()}, ratio: {get_err_ratio(ref_dbeta, tri_dbeta)}"
-    assert get_err_ratio(tri_dh0, ref_dh0) < 0.007, \
-        f"dh0 diff: {torch.abs(ref_dh0 - tri_dh0).max()}, ratio: {get_err_ratio(ref_dh0, tri_dh0)}"
+    assert_close("  o", ref, tri, 0.005)
+    assert_close(" ht", ref_ht, tri_ht, 0.005)
+    assert_close(" dq", ref_dq, tri_dq, 0.007)
+    assert_close(" dk", ref_dk, tri_dk, 0.008)
+    assert_close(" dv", ref_dv, tri_dv, 0.007)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.007)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.007)
+
+
+@pytest.mark.parametrize("N", [4])
+@pytest.mark.parametrize("T", [64, 128, 200, 250, 256, 300, 400, 512, 1000, 2048])
+@pytest.mark.parametrize("H", [2, 16])
+@pytest.mark.parametrize("D", [50, 100, 200])
+@pytest.mark.parametrize("scale", [1])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_chunk_varlen(
+    N: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    # randomly split the sequence into N segments
+    offsets = torch.cat([
+        torch.tensor([0], dtype=torch.long),
+        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.tensor([T], dtype=torch.long)
+    ], 0).cuda().sort()[0]
+    # seq-first required for inputs with variable lengths
+    q = torch.randn((1, T, H, D), dtype=dtype)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn((1, T, H, D), dtype=dtype)
+    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
+    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    q, k, v, beta, h0 = map(lambda x: x.cuda().requires_grad_(), (q, k, v, beta, h0))
+    do = torch.randn_like(v)
+    dht = torch.rand_like(h0)
+
+    tri, tri_ht = chunk_delta_rule(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        beta.clone(),
+        scale=scale,
+        output_final_state=True,
+        initial_state=h0.clone(),
+        offsets=offsets,
+        head_first=False
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = h0.grad = None
+
+    ref, ref_ht = fused_recurrent_delta_rule(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        beta.clone(),
+        scale=scale,
+        output_final_state=True,
+        initial_state=h0.clone(),
+        offsets=offsets,
+        head_first=False
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+
+    assert_close("  o", ref, tri, 0.005)
+    assert_close(" ht", ref_ht, tri_ht, 0.005)
+    assert_close(" dq", ref_dq, tri_dq, 0.007)
+    assert_close(" dk", ref_dk, tri_dk, 0.008)
+    assert_close(" dv", ref_dv, tri_dv, 0.007)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.007)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.007)
