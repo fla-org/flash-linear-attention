@@ -84,8 +84,6 @@ class DeltaNetBlock(nn.Module):
         if hasattr(self, 'ln_1'):
             hidden_states = self.ln_1(hidden_states)
 
-        print(hidden_states.shape)
-
         # Apply attention
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
