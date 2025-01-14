@@ -39,8 +39,10 @@ class DeltaNetVisionConfig(PretrainedConfig):
         hidden_dropout_prob: float = 0.0,
         use_mask_token: bool = False,
         layer_norm_eps: float = 1e-6,
+        interpolate_pos_encoding: bool = False,
         mlp_dim: int = None,
-        pool_type: str = "mean", # use "mean" by default
+        # FLA-for-vision-related parameters
+        scan_type: str = "uni-scan", # scaning type, "uni-scan" or "bi-scan" or "cross-scan", default to "uni-scan"
         **kwargs
     ):
         # Initialize DeltaNet core parameters
@@ -77,7 +79,10 @@ class DeltaNetVisionConfig(PretrainedConfig):
         self.hidden_dropout_prob = hidden_dropout_prob
         self.use_mask_token = use_mask_token
         self.layer_norm_eps = layer_norm_eps
-        self.pool_type = pool_type
+        self.interpolate_pos_encoding = interpolate_pos_encoding
+        self.scan_type = scan_type
+
+
         if mlp_dim is None:
             self.mlp_dim = 4 * hidden_size # default value set to 4 * hidden_size
         else:

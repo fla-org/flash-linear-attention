@@ -12,7 +12,7 @@ from transformers.modeling_utils import PreTrainedModel
 from .configuration_delta_net import DeltaNetVisionConfig
 from fla.layers.delta_net import DeltaNet
 from fla.models.utils import Cache
-from ..utils import ImageEmbeddings, Pooler
+from ..utils import ImageEmbeddings, Pooler, prepare_hidden_states_for_cross_scan, prepare_hidden_states_for_cross_merge
 
 logger = logging.get_logger(__name__)
 
@@ -70,6 +70,8 @@ class DeltaNetBlock(nn.Module):
             
         self.mlp = DeltaNetMLP(config)
 
+        self.scan_type = config.scan_type
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -85,6 +87,9 @@ class DeltaNetBlock(nn.Module):
             hidden_states = self.ln_1(hidden_states)
 
         # Apply attention
+        
+        hidden_states = prepare_hidden_states_for_cross_scan(hidden_states, self.scan_type)
+        
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
             past_key_values=past_key_values,
@@ -93,6 +98,8 @@ class DeltaNetBlock(nn.Module):
             **kwargs
         )
         
+        hidden_states = prepare_hidden_states_for_cross_merge(hidden_states, self.scan_type)
+
         # First residual connection
         hidden_states = residual + hidden_states
         residual = hidden_states
@@ -133,12 +140,6 @@ class DeltaNetVisionPreTrainedModel(PreTrainedModel):
                 std=self.config.initializer_range,
             ).to(module.position_embeddings.dtype)
 
-            module.cls_token.data = nn.init.trunc_normal_(
-                module.cls_token.data.to(torch.float32),
-                mean=0.0,
-                std=self.config.initializer_range,
-            ).to(module.cls_token.dtype)
-
 class DeltaNetForImageClassification(DeltaNetVisionPreTrainedModel):
     config_class = DeltaNetVisionConfig
     
@@ -154,7 +155,7 @@ class DeltaNetForImageClassification(DeltaNetVisionPreTrainedModel):
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.pooler = Pooler(config)
         self.classifier = nn.Linear(config.hidden_size, config.num_classes)
-        
+        self.interpolate_pos_encoding = config.interpolate_pos_encoding
         self.init_weights()
         
     def forward(
@@ -166,12 +167,11 @@ class DeltaNetForImageClassification(DeltaNetVisionPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        interpolate_pos_encoding: Optional[bool] = None,
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, ImageClassifierOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding)
+        hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding=self.interpolate_pos_encoding)
         
         for block in self.blocks:
             hidden_states, attentions, past_key_values = block(
