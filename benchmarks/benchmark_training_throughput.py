@@ -29,6 +29,7 @@ def sizeof_fmt(num, suffix='B'):
 def prepare_inputs(
     batch_size: int,
     seq_len: int,
+    context_len: int,
     varlen: bool,
     vocab_size: int,
     device: torch.device
@@ -36,10 +37,15 @@ def prepare_inputs(
     if varlen:
         tokens = torch.randint(high=vocab_size, size=(1, batch_size * seq_len), device=device)
         offsets = torch.cat([
-            torch.tensor([0], dtype=torch.long, device=device),
-            torch.randperm(batch_size * seq_len - 16, device=device)[:batch_size-1] + 16,
-            torch.tensor([batch_size * seq_len], dtype=torch.long, device=device)
-        ], 0).sort()[0]
+            torch.tensor([0]),
+            torch.randperm(batch_size * seq_len - 16)[:torch.randint(8, 64, size=(1,))] + 16,
+            torch.tensor([batch_size * seq_len])
+        ], 0).sort()[0].to(dtype=torch.int32, device=device)
+        if context_len is not None:
+            offsets = torch.cat(
+                [torch.arange(i, j, context_len) for i, j in zip(offsets[:-1].tolist(), offsets[1:].tolist())] +
+                [torch.tensor([len(tokens[0])])]
+            ).to(dtype=torch.int32, device=device)
     else:
         tokens = torch.randint(high=vocab_size, size=(batch_size, seq_len), device=device)
         offsets = None
@@ -50,6 +56,7 @@ def profile(
     name: str,
     batch_size: int = 8,
     seq_len: int = 2048,
+    context_len: int = 2048,
     varlen: bool = False,
     warmup_steps: int = 16,
     steps: int = 32,
@@ -87,6 +94,7 @@ def profile(
         tokens, offsets = prepare_inputs(
             batch_size=batch_size,
             seq_len=seq_len,
+            context_len=context_len,
             varlen=varlen,
             vocab_size=config.vocab_size,
             device=device
@@ -107,6 +115,7 @@ def profile(
         tokens, offsets = prepare_inputs(
             batch_size=batch_size,
             seq_len=seq_len,
+            context_len=context_len,
             varlen=varlen,
             vocab_size=config.vocab_size,
             device=device
@@ -128,6 +137,7 @@ if __name__ == "__main__":
     parser.add_argument("--name", default='retnet')
     parser.add_argument("--batch_size", default=8, type=int)
     parser.add_argument("--seq_len", default=2048, type=int)
+    parser.add_argument("--context_len", default=None, type=int)
     parser.add_argument("--varlen", action='store_true')
     parser.add_argument("--warmup_steps", default=16, type=int)
     parser.add_argument("--steps", default=32, type=int)
@@ -136,6 +146,7 @@ if __name__ == "__main__":
         name=args.name,
         batch_size=args.batch_size,
         seq_len=args.seq_len,
+        context_len=args.context_len,
         varlen=args.varlen,
         warmup_steps=args.warmup_steps,
         steps=args.steps
