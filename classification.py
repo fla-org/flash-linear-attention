@@ -51,9 +51,9 @@ def get_args():
     parser.add_argument('--expand_k', type=float, default=1.0, help='Key expansion ratio')
     parser.add_argument('--expand_v', type=float, default=1.0, help='Value expansion ratio')
     parser.add_argument('--attn_mode', type=str, default='chunk', choices=['chunk', 'fused_recurrent', 'fused_chunk'])
-    parser.add_argument('--pool_type', type=str, default='mean', choices=['mean', 'cls'])
     parser.add_argument('--model', type=str, required=True, help='Model type (currently only supports "deltanet")')
     parser.add_argument('--fuse_cross_entropy', action='store_true', help='Fuse cross entropy with logits')
+    parser.add_argument('--scan_type', type=str, default='uni-scan', choices=['uni-scan', 'bi-scan', 'cross-scan'],)
     
     # Learning rate schedule related arguments
     parser.add_argument('--lr_scheduler_type', type=str, default='constant_with_warmup',
@@ -220,9 +220,9 @@ def get_model(args, num_classes):
             expand_k=args.expand_k,
             expand_v=args.expand_v,
             attn_mode=args.attn_mode,
-            pool_type=args.pool_type,
             fuse_cross_entropy=args.fuse_cross_entropy,
-            attn=attn_config  # Add attention config for hybrid model
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
         )
         return DeltaNetForImageClassification(config).to(device=device, dtype=dtype)
     else:
