@@ -300,8 +300,8 @@ def chunk_dplr_delta_rule(
     a: torch.Tensor,
     b: torch.Tensor,
     gk: torch.Tensor,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
+    scale: Optional[float] = None,
+    initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
     head_first: bool = False
