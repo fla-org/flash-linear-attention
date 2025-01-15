@@ -24,10 +24,6 @@ def rotate_half(x, interleaved=False):
 
 
 def rotary_embedding_ref(x, cos, sin, interleaved=False):
-    """
-    x: (N, T, H, D)
-    cos, sin: (TR, DR / 2) or (N, TR, DR / 2)
-    """
     ro_dim = cos.shape[-1] * 2
     assert ro_dim <= x.shape[-1]
     cos = repeat(cos, '... d -> ... 1 (2 d)' if not interleaved else '... d -> ... 1 (d 2)')
@@ -37,8 +33,8 @@ def rotary_embedding_ref(x, cos, sin, interleaved=False):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BM': BM}, num_warps=num_warps)
-        for BM in [4, 8, 16, 32, 64, 128]
+        triton.Config({'BT': BT}, num_warps=num_warps)
+        for BT in [4, 8, 16, 32, 64, 128]
         for num_warps in [2, 4, 8, 16]
     ],
     key=['B', 'T', 'H', 'INTERLEAVED'],
@@ -48,64 +44,65 @@ def rotary_embedding_kernel(
     x,
     cos,
     sin,
-    out,
+    y,
     cu_seqlens,
     seq_offsets,  # this could be int or a pointer
     # Matrix dimensions
-    B,
-    T,
-    H,
-    D,
-    TR,
+    B: tl.constexpr,
+    T: tl.constexpr,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    R: tl.constexpr,
+    TR: tl.constexpr,
     # strides
     # Meta-parameters
-    BK: tl.constexpr,
-    BM: tl.constexpr,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
     IS_SEQLEN_OFFSETS_TENSOR: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     INTERLEAVED: tl.constexpr,
     CONJUGATE: tl.constexpr
 ):
-    i_m, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    DR = D // 2
+    i_t, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if not IS_VARLEN:
         x = x + i_b * T*H*D + i_h * D
-        out = out + i_b * T*H*D + i_h * D
+        y = y + i_b * T*H*D + i_h * D
     else:
         bos, eos = tl.load(cu_seqlens + i_b), tl.load(cu_seqlens + i_b + 1)
         T = eos - bos
         x = x + bos * H*D + i_h * D
-        out = out + bos * H*D + i_h * D
+        y = y + bos * H*D + i_h * D
 
-    if i_m * BM >= T:
+    if i_t * BT >= T:
         return
-    rm = i_m * BM + tl.arange(0, BM)
+
+    o_t = i_t * BT + tl.arange(0, BT)
     if not IS_SEQLEN_OFFSETS_TENSOR:
-        rm_cs = rm + seq_offsets
+        o_cs = o_t + seq_offsets
     else:
-        rm_cs = rm + tl.load(seq_offsets + i_b)
-    ok, ok2 = tl.arange(0, BK), tl.arange(0, BK // 2)
+        o_cs = o_t + tl.load(seq_offsets + i_b)
 
     if not INTERLEAVED:
         # Load the 1st and 2nd halves of x, do calculation, then store to 1st and 2nd halves of out
-        p_x = x + (rm[:, None] * H*D + ok2[None, :])
-        p_cos = cos + (rm_cs[:, None] * DR + ok2[None, :])
-        p_sin = sin + (rm_cs[:, None] * DR + ok2[None, :])
-        mask = (rm[:, None] < T) & (ok2[None, :] < DR)
+        o_r = tl.arange(0, BD // 2)
+        p_x = x + o_t[:, None] * H*D + o_r[None, :]
+        p_cos = cos + (o_cs[:, None] * R + o_r[None, :])
+        p_sin = sin + (o_cs[:, None] * R + o_r[None, :])
+        mask = (o_t[:, None] < T) & (o_r[None, :] < R)
 
         b_cos = tl.load(p_cos, mask=mask, other=1.0).to(tl.float32)
         b_sin = tl.load(p_sin, mask=mask, other=0.0).to(tl.float32)
         b_x0 = tl.load(p_x, mask=mask, other=0.0).to(tl.float32)
-        b_x1 = tl.load(p_x + DR, mask=mask, other=0.0).to(tl.float32)
+        b_x1 = tl.load(p_x + R, mask=mask, other=0.0).to(tl.float32)
         if CONJUGATE:
             b_sin = -b_sin
         b_o0 = b_x0 * b_cos - b_x1 * b_sin
         b_o1 = b_x0 * b_sin + b_x1 * b_cos
         # write back result
-        p_out = out + (rm[:, None] * H*D + ok2[None, :])
-        tl.store(p_out, b_o0, mask=mask)
-        tl.store(p_out + DR, b_o1, mask=mask)
+        p_y = y + (o_t[:, None] * H*D + o_r[None, :])
+        tl.store(p_y, b_o0, mask=mask)
+        tl.store(p_y + R, b_o1, mask=mask)
     else:
         # We don't want to load x[0, 2, 4, ...] and x[1, 3, 5, ...] separately since both are slow.
         # Instead, we load x0 = x[0, 1, 2, 3, ...] and x1 = x[1, 0, 3, 2, ...].
@@ -113,13 +110,14 @@ def rotary_embedding_kernel(
         # Then we load cos = cos[0, 0, 1, 1, ...] and sin = sin[0, 0, 1, 1, ...].
         # Then we do the calculation and use tl.where to pick put the right outputs for the even
         # and for the odd indices.
-        rk_swap = ok + ((ok + 1) % 2) * 2 - 1  # 1, 0, 3, 2, 5, 4, ...
-        rk_repeat = tl.arange(0, BK) // 2
-        p_x0 = x + (rm[:, None] * H*D + ok[None, :])
-        p_x1 = x + (rm[:, None] * H*D + rk_swap[None, :])
-        p_cos = cos + (rm_cs[:, None] * DR + rk_repeat[None, :])
-        p_sin = sin + (rm_cs[:, None] * DR + rk_repeat[None, :])
-        mask = (rm_cs[:, None] < TR) & (rk_repeat[None, :] < DR)
+        o_d = tl.arange(0, BD)
+        o_d_swap = o_d + ((o_d + 1) % 2) * 2 - 1  # 1, 0, 3, 2, 5, 4, ...
+        o_d_repeat = tl.arange(0, BD) // 2
+        p_x0 = x + o_t[:, None] * H*D + o_d[None, :]
+        p_x1 = x + o_t[:, None] * H*D + o_d_swap[None, :]
+        p_cos = cos + (o_cs[:, None] * R + o_d_repeat[None, :])
+        p_sin = sin + (o_cs[:, None] * R + o_d_repeat[None, :])
+        mask = (o_cs[:, None] < TR) & (o_d_repeat[None, :] < R)
 
         b_cos = tl.load(p_cos, mask=mask, other=1.0).to(tl.float32)
         b_sin = tl.load(p_sin, mask=mask, other=0.0).to(tl.float32)
@@ -127,11 +125,11 @@ def rotary_embedding_kernel(
         b_x1 = tl.load(p_x1, mask=mask, other=0.0).to(tl.float32)
         if CONJUGATE:
             b_sin = -b_sin
-        b_x0_cos = b_x0 * b_cos
-        b_x1_sin = b_x1 * b_sin
-        b_out = tl.where(ok[None, :] % 2 == 0, b_x0_cos - b_x1_sin, b_x0_cos + b_x1_sin)
-        p_out = out + (rm[:, None] * H*D + ok[None, :])
-        tl.store(p_out, b_out, mask=mask)
+        b_o0 = b_x0 * b_cos
+        b_o1 = b_x1 * b_sin
+        b_y = tl.where(o_d[None, :] % 2 == 0, b_o0 - b_o1, b_o0 + b_o1)
+        p_y = y + (o_t[:, None] * H*D + o_d[None, :])
+        tl.store(p_y, b_y, mask=mask)
 
 
 @contiguous
@@ -149,13 +147,14 @@ def rotary_embedding_fwdbwd(
     """
     Args:
         x: (N, T, H, D).
-        cos: (TR, DR / 2)
-        sin: (TR, DR / 2)
+        cos: (TR, R / 2)
+        sin: (TR, R / 2)
         seqlen_offsets: integer or integer tensor of size (N,)
         cu_seqlens: (N + 1,) or None
         max_seqlen: int
+
     Returns:
-        y: (N, T, H, D)
+        y: [N, T, H, D]
     """
     is_varlen = cu_seqlens is not None
 
@@ -165,13 +164,12 @@ def rotary_embedding_fwdbwd(
     else:
         assert max_seqlen is not None, "If cu_seqlens is passed in, then max_seqlen must be passed"
         N, T = cu_seqlens.shape[0] - 1, max_seqlen
-    TR, DR = cos.shape
+    TR, R = cos.shape
     assert sin.shape == cos.shape
-    DR *= 2
+    R2 = R * 2
 
     assert D <= 256, "Only support D <= 256"
     assert TR >= T, "TR must be >= T"
-    assert DR <= D, "DR must be <= D"
 
     assert cos.dtype == sin.dtype, f"cos and sin must have the same dtype, got {cos.dtype} and {sin.dtype}"
     assert x.dtype == cos.dtype, f"Input and cos/sin must have the same dtype, got {x.dtype} and {cos.dtype}"
@@ -182,17 +180,13 @@ def rotary_embedding_fwdbwd(
     else:
         assert seqlen_offsets + T <= TR
 
-    output = torch.empty_like(x) if not inplace else x
-    if DR < D and not inplace:
-        output[..., DR:].copy_(x[..., DR:])
+    y = torch.empty_like(x) if not inplace else x
+    if R2 < D and not inplace:
+        y[..., R2:].copy_(x[..., R2:])
 
-    BK = (
-        32
-        if DR <= 32
-        else (64 if DR <= 64 else (128 if DR <= 128 else 256))
-    )
+    BD = triton.next_power_of_2(R2)
 
-    def grid(META): return (triton.cdiv(T, META['BM']), N, H)  # noqa
+    def grid(META): return (triton.cdiv(T, META['BT']), N, H)  # noqa
     # Need this, otherwise Triton tries to launch from cuda:0 and we get
     # ValueError: Pointer argument (at 0) cannot be accessed from Triton (cpu tensor?)
     with torch.cuda.device(x.device.index):
@@ -200,21 +194,22 @@ def rotary_embedding_fwdbwd(
             x,
             cos,
             sin,
-            output,
+            y,
             cu_seqlens,
             seqlen_offsets,
-            B,
-            T,
-            H,
-            DR,
-            TR,
-            BK,
+            B=B,
+            T=T,
+            H=H,
+            D=D,
+            R=R,
+            TR=TR,
+            BD=BD,
             IS_SEQLEN_OFFSETS_TENSOR=isinstance(seqlen_offsets, torch.Tensor),
             IS_VARLEN=is_varlen,
             INTERLEAVED=interleaved,
             CONJUGATE=conjugate
         )
-    return output
+    return y
 
 
 class RotaryEmbeddingFunction(torch.autograd.Function):
@@ -232,7 +227,7 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
         cu_seqlens: Optional[torch.Tensor] = None,
         max_seqlen: Optional[int] = None,
     ):
-        out = rotary_embedding_fwdbwd(
+        y = rotary_embedding_fwdbwd(
             x,
             cos,
             sin,
@@ -252,7 +247,7 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
         ctx.interleaved = interleaved
         ctx.inplace = inplace
         ctx.max_seqlen = max_seqlen
-        return out if not inplace else x
+        return y if not inplace else x
 
     @staticmethod
     @contiguous
@@ -292,20 +287,20 @@ def rotary_embedding(
 ):
     """
     Args:
-        x: (N, T, H, D)
-        cos, sin: (TR, DR / 2)
-        interleaved: if True, rotate pairs of even and odd dimensions (GPT-J style) instead
-            of 1st half and 2nd half (GPT-NeoX style).
-        inplace: if True, apply rotary embedding in-place.
-        seqlen_offsets: (N,) or int.
+        x: [N, T, H, D]
+        cos, sin: [TR, R//2]
+        interleaved:
+            If True, rotate pairs of even and odd dimensions (GPT-J style) instead of 1st half and 2nd half (GPT-NeoX style).
+        inplace:
+            If True, apply rotary embedding in-place.
+        seqlen_offsets: [N,] or int.
             Each sequence in x is shifted by this amount.
             Most commonly used in inference when we have KV cache.
-        cu_seqlens: (N + 1,) or None
+        cu_seqlens: [N + 1,] or None
         max_seqlen: int
-    Return:
-        out: (N, T, H, D)
-    DR must be <= D
-    Apply rotary embedding to the first DR of x.
+
+    Returns:
+        out: [N, T, H, D]
     """
     return RotaryEmbeddingFunction.apply(
         x,
@@ -341,8 +336,8 @@ class RotaryEmbedding(nn.Module):
         self,
         dim: int,
         base: float = 10000.0,
-        interleaved: bool = False,
         scale_base: Optional[float] = None,
+        interleaved: bool = False,
         pos_idx_in_fp32: bool = True,
         device: Optional[torch.device] = None,
     ):
@@ -360,10 +355,11 @@ class RotaryEmbedding(nn.Module):
             To maintain compatibility with models previously trained in pure bf16, we add this option.
         """
         super().__init__()
+
         self.dim = dim
         self.base = float(base)
-        self.interleaved = interleaved
         self.scale_base = scale_base
+        self.interleaved = interleaved
         self.pos_idx_in_fp32 = pos_idx_in_fp32
         self.device = device
 
@@ -463,8 +459,8 @@ class RotaryEmbedding(nn.Module):
         max_seqlen: Optional[int] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        q: (N, T, H, D)
-        k: (N, T, H, D)
+        q: [N, T, H, D]
+        k: [N, T, H, D]
         seqlen_offset:
             (N,) or int. Each sequence in x is shifted by this amount.
             Most commonly used in inference when we have KV cache.
