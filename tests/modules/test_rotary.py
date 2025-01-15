@@ -82,8 +82,8 @@ def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torc
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
     torch.manual_seed(42)
-    q = torch.randn(T, H, D).cuda().to(dtype=dtype).requires_grad_()
-    k = torch.randn(T, H//G, D).cuda().to(dtype=dtype).requires_grad_()
+    q = torch.randn(1, T, H, D).cuda().to(dtype=dtype).requires_grad_()
+    k = torch.randn(1, T, H//G, D).cuda().to(dtype=dtype).requires_grad_()
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(1, T)[torch.randperm(T - 1)[:N-1]],
@@ -96,14 +96,18 @@ def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtyp
     tri_dq = torch.autograd.grad(tri_q.sum(), q, retain_graph=True)[0]
     tri_dk = torch.autograd.grad(tri_k.sum(), k, retain_graph=True)[0]
 
-    ref_q = torch.cat([rotary_embedding_ref(q[start:end].float(),
-                                            rotary._cos_cached[:end-start],
-                                            rotary._sin_cached[:end-start])
-                       for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist())]).to(dtype=dtype)
-    ref_k = torch.cat([rotary_embedding_ref(k[start:end].float(),
-                                            rotary._cos_cached[:end-start],
-                                            rotary._sin_cached[:end-start])
-                       for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist())]).to(dtype=dtype)
+    ref_q = torch.cat(
+        [rotary_embedding_ref(q[0, start:end].float(),
+                              rotary._cos_cached[:end-start],
+                              rotary._sin_cached[:end-start])
+         for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist())]
+    ).to(dtype=dtype).unsqueeze(0)
+    ref_k = torch.cat(
+        [rotary_embedding_ref(k[0, start:end].float(),
+                              rotary._cos_cached[:end-start],
+                              rotary._sin_cached[:end-start])
+         for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist())]
+    ).to(dtype=dtype).unsqueeze(0)
     ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
     ref_dk = torch.autograd.grad(ref_k.sum(), k, retain_graph=True)[0]
 
