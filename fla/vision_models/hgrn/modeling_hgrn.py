@@ -9,14 +9,14 @@ from transformers.utils import logging
 from fla.layers.attn import Attention
 from transformers.modeling_outputs import ImageClassifierOutput
 from transformers.modeling_utils import PreTrainedModel
-from .configuration_delta_net import DeltaNetVisionConfig
-from fla.layers.delta_net import DeltaNet
+from .configuration_hgrn import HGRNVisionConfig
+from fla.layers.hgrn import HGRNAttention
 from fla.models.utils import Cache
 from ..utils import ImageEmbeddings, Pooler, prepare_hidden_states_for_cross_scan, prepare_hidden_states_for_cross_merge
 
 logger = logging.get_logger(__name__)
 
-class DeltaNetMLP(nn.Module):
+class HGRNMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.net = nn.Sequential(
@@ -30,7 +30,7 @@ class DeltaNetMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-class DeltaNetBlock(nn.Module):
+class HGRNBlock(nn.Module):
     def __init__(self, config, layer_idx: int):
         super().__init__()
         
@@ -47,20 +47,13 @@ class DeltaNetBlock(nn.Module):
                 layer_idx=layer_idx
             )
         else:
-            self.attn = DeltaNet(
+            self.attn = HGRNAttention(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
-                expand_k=config.expand_k,
-                expand_v=config.expand_v,
-                num_heads=config.num_heads,
-                use_gate=config.use_gate,
-                use_beta=config.use_beta,
+                expand_ratio=config.expand_ratio,
                 use_short_conv=config.use_short_conv,
-                use_output_norm=config.use_output_norm,
                 conv_size=config.conv_size,
-                qk_norm=config.qk_norm,
-                qk_activation=config.qk_activation,
-                norm_first=config.norm_first,
+                elementwise_affine=config.elementwise_affine,
                 norm_eps=config.norm_eps,
                 layer_idx=layer_idx
             )
@@ -68,7 +61,7 @@ class DeltaNetBlock(nn.Module):
         if not config.norm_first:
             self.ln_2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
             
-        self.mlp = DeltaNetMLP(config)
+        self.mlp = HGRNMLP(config)
 
         self.scan_type = config.scan_type
 
@@ -118,9 +111,9 @@ class DeltaNetBlock(nn.Module):
 
         return outputs
 
-class DeltaNetVisionPreTrainedModel(PreTrainedModel):
+class HGRNVisionPreTrainedModel(PreTrainedModel):
     # this part of the code is adapted from huggingface/transformers vit implementation
-    config_class = DeltaNetVisionConfig
+    config_class = HGRNVisionConfig
     
     def _init_weights(self, module):
         if isinstance(module, (nn.Linear, nn.Conv2d)):
@@ -139,8 +132,8 @@ class DeltaNetVisionPreTrainedModel(PreTrainedModel):
                 std=self.config.initializer_range,
             ).to(module.position_embeddings.dtype)
 
-class DeltaNetForImageClassification(DeltaNetVisionPreTrainedModel):
-    config_class = DeltaNetVisionConfig
+class HGRNForImageClassification(HGRNVisionPreTrainedModel):
+    config_class = HGRNVisionConfig
     
     def __init__(self, config):
         super().__init__(config)
@@ -148,7 +141,7 @@ class DeltaNetForImageClassification(DeltaNetVisionPreTrainedModel):
         
         self.embeddings = ImageEmbeddings(config)
         self.blocks = nn.ModuleList([
-            DeltaNetBlock(config, layer_idx) 
+            HGRNBlock(config, layer_idx) 
             for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)

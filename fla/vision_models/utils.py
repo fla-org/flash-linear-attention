@@ -433,9 +433,48 @@ def prepare_hidden_states_for_cross_merge(hidden_states: torch.Tensor, scan_type
 
 # check the implementation
 if __name__ == "__main__":
-    B, L, D = 2, 16, 2048
-    hidden_states = torch.randn(B, L, D).cuda()
-    hidden_states = prepare_hidden_states_for_cross_scan(hidden_states, scan_type="cross-scan")
-    hidden_states = prepare_hidden_states_for_cross_merge(hidden_states, scan_type="cross-scan")
-    print(hidden_states.shape)
-    print("Cross scan applied successfully!")
+    B, L, D = 1, 4, 3
+    transformation = nn.Linear(D, D).cuda()
+    # firstly test bi-scan
+    print("Checking bi-scan")
+    h1 = torch.randn(B, L, D).cuda()
+    h2 = h1.clone().cuda()
+    h1 = prepare_hidden_states_for_cross_scan(h1, scan_type="bi-scan")
+    h1 = transformation(h1)
+    h1 = prepare_hidden_states_for_cross_merge(h1, scan_type="bi-scan")
+    h2_ = h2.clone().cuda()
+    h2_ = h2_.flip(-2)
+    h2 = transformation(h2)
+    h2_ = transformation(h2_)
+    h2 = h2 + h2_  
+    # check whether the two sequences are the same
+    print(f"h1: \n{h1}")
+    print(f"h2: \n{h2}")
+    print(f"""The two sequences are the same: {torch.allclose(h1, h2)}""")
+    # Then check cross-scan
+    print("checking cross-scan")
+    h1 = torch.randn(B, L, D).cuda()
+    h2 = h1.clone().cuda()
+    h1 = prepare_hidden_states_for_cross_scan(h1, scan_type="cross-scan")
+    h1 = transformation(h1)
+    h1 = prepare_hidden_states_for_cross_merge(h1, scan_type="cross-scan")
+    B, L, D  = h2.shape
+    hw = int(math.sqrt(L))
+    assert (hw * hw == L)   # make sure L is a square
+    h2 = einops.rearrange(h2, "b (h w) d -> b h w d", h=hw, w=hw) # change the shape to feed to cross_scan
+    h2 = cross_scan_fn(h2, in_channel_first=False, out_channel_first=False, one_by_one=False, scans=0)
+    h2 = h2.permute(2, 0, 1, 3)
+    h2_0 = h2[0]
+    h2_1 = h2[1]
+    h2_2 = h2[2]
+    h2_3 = h2[3]
+    h2_0 = transformation(h2_0)
+    h2_1 = transformation(h2_1)
+    h2_2 = transformation(h2_2)
+    h2_3 = transformation(h2_3)
+    h2 = torch.cat([h2_0, h2_1, h2_2, h2_3], dim=0)
+    h2 = prepare_hidden_states_for_cross_merge(h2, scan_type="cross-scan")
+    # check whether the two sequences are the same
+    print(f"h1: \n{h1}")
+    print(f"h2: \n{h2}")
+    print(f"""The two sequences are the same: {torch.allclose(h1, h2)}""")

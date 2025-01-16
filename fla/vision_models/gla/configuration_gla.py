@@ -1,35 +1,37 @@
 from typing import Dict, Optional
+
 from transformers.configuration_utils import PretrainedConfig
 
-class DeltaNetVisionConfig(PretrainedConfig):
-    model_type = 'delta_net_vision'
+class GLAVisionConfig(PretrainedConfig):
+
+    model_type = 'gla_vision'
 
     def __init__(
         self,
-        # DeltaNet core parameters
-        attn_mode: str = "chunk",
+        # GLA core parameters
         hidden_size: int = 2048,
-        expand_k: int = 1,
-        expand_v: int = 1, 
-        use_gate: bool = False,
-        use_short_conv: bool = True,
+        expand_k: int = 0.5,
+        expand_v: int = 1,
+        num_hidden_layers: int = 24,
+        num_heads: int = 4,
+        num_kv_heads: Optional[int] = None,
+        feature_map: Optional[str] = None,
+        attn_mode: str = "chunk",
+        use_short_conv: bool = False,
         conv_size: int = 4,
-        use_beta: bool = True,
-        use_output_norm: bool = True,
-        num_heads: int = 16,
-        qk_norm: str = 'l2',
-        qk_activation: str = 'silu',
-        intermediate_size: Optional[int] = None,
+        use_output_gate: bool = True,
+        clamp_min: Optional[float] = None,
         hidden_act: str = "swish",
-        num_hidden_layers: int = 12,
-        norm_first: bool = False,
+        max_position_embeddings: int = 2048,
+        elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-6,
+        use_gk: bool = True,
+        use_gv: bool = False,
         attn: Optional[Dict] = None,
         use_cache: bool = True,
         initializer_range: float = 0.02,
+        fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
-        max_position_embeddings: int = 2048,
-
         # Vision specific parameters
         image_size: int = 224,
         patch_size: int = 16,
@@ -45,28 +47,29 @@ class DeltaNetVisionConfig(PretrainedConfig):
         **kwargs
     ):
         # Initialize DeltaNet core parameters
-        self.attn_mode = attn_mode
         self.hidden_size = hidden_size
-        self.expand_k = expand_k 
+        self.expand_k = expand_k
         self.expand_v = expand_v
-        self.use_gate = use_gate
+        self.num_hidden_layers = num_hidden_layers
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.feature_map = feature_map
+        self.attn_mode = attn_mode
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
-        self.use_beta = use_beta
-        self.use_output_norm = use_output_norm
-        self.num_heads = num_heads
-        self.qk_norm = qk_norm
-        self.qk_activation = qk_activation
-        self.intermediate_size = intermediate_size
+        self.use_output_gate = use_output_gate
+        self.clamp_min = clamp_min
         self.hidden_act = hidden_act
-        self.num_hidden_layers = num_hidden_layers
-        self.norm_first = norm_first
+        self.max_position_embeddings = max_position_embeddings
+        self.elementwise_affine = elementwise_affine
         self.norm_eps = norm_eps
+        self.use_gk = use_gk
+        self.use_gv = use_gv
+        self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
+        self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
-        self.attn = attn
-        self.max_position_embeddings = max_position_embeddings
 
         # Initialize vision specific parameters
         self.image_size = image_size
@@ -88,10 +91,5 @@ class DeltaNetVisionConfig(PretrainedConfig):
                 raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
             attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
             attn['window_size'] = attn.get('window_size', None)
-            
-        if mlp_dim is None:
-            self.mlp_dim = 4 * hidden_size # default value set to 4 * hidden_size
-        else:
-            self.mlp_dim = mlp_dim
-        
+
         super().__init__(**kwargs)
