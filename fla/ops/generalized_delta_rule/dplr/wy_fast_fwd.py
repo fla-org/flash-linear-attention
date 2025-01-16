@@ -56,14 +56,14 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     tl.store(p_Aab_inv, b_A_ab.to(p_Aab_inv.dtype.element_ty), boundary_check=(0, 1))
     
 
-
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
     key=["BC"]
 )
@@ -90,10 +90,10 @@ def fwd_prepare_wy_repr_kernel_chunk64(
         bos, eos = i_b * T, i_b * T + T
 
     if HEAD_FIRST:
+
         p_A1 = tl.make_block_ptr(A_ab + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
         p_A2 = tl.make_block_ptr(A_ab + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
         p_A3 = tl.make_block_ptr(A_ab + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
-        p_A4 = tl.make_block_ptr(A_ab + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, BC), (BC, BC), (1, 0))
         p_A_inv1 = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
         p_A_inv2 = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
         p_A_inv3 = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
@@ -102,7 +102,6 @@ def fwd_prepare_wy_repr_kernel_chunk64(
         p_A1 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
         p_A2 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
         p_A3 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
-        p_A4 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, BC), (BC, BC), (1, 0))
         p_A_inv1 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
         p_A_inv2 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
         p_A_inv3 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
@@ -127,8 +126,8 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     # i.e., [A11, 0; A21, A22]^-1 = [A11^-1, 0; -A22^-1 A21 A11^-1, A22^-1]
     b_A += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
     b_A2 += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
-    b_A3 = -tl.dot(tl.dot(b_A2, b_A3, allow_tf32=False), b_A, allow_tf32=False)
-
+    b_A3 = tl.dot(tl.dot(b_A2, b_A3, allow_tf32=False), b_A, allow_tf32=False)
+    tl.debug_barrier()
     tl.store(p_A_inv1, b_A.to(p_A_inv1.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_A_inv2, b_A2.to(p_A_inv2.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_A_inv3, b_A3.to(p_A_inv3.dtype.element_ty), boundary_check=(0, 1))
@@ -187,10 +186,10 @@ def fwd_wu_kernel(
     b_Aab_inv = tl.where(o_s[:, None] >= o_s[None, :], b_Aab_inv, 0)
     b_Aak = tl.where(o_s[:, None] > o_s[None, :], b_Aak, 0)
     # let's use fp32 here
-    b_Aak = tl.dot(b_Aab_inv, b_Aak, allow_tf32=False)
+    b_Aak = tl.dot(b_Aab_inv, b_Aak, allow_tf32=True)
     # (SY 01/04) should be bf16 or tf32? To verify.
-    b_Aak = b_Aak
-    b_Aab_inv = b_Aab_inv
+    b_Aak = b_Aak.to(u.dtype.element_ty)
+    b_Aab_inv = b_Aab_inv.to(u.dtype.element_ty)
 
     for i_k in range(tl.cdiv(K, BK)):
         if HEAD_FIRST:
@@ -200,9 +199,10 @@ def fwd_wu_kernel(
             p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_ag = tl.load(p_ag, boundary_check=(0, 1))
-        b_w = tl.dot(b_Aab_inv, b_ag.to(b_Aab_inv.dtype), allow_tf32=False)
+        b_w = tl.dot(b_Aab_inv.to(b_ag.dtype), b_ag, allow_tf32=False)
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
  
+
     for i_v in range(tl.cdiv(V, BV)):
         if HEAD_FIRST:
             p_v = tl.make_block_ptr(v + i_bh * T * V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -211,9 +211,8 @@ def fwd_wu_kernel(
             p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_u = tl.dot(b_Aak, b_v.to(b_Aak.dtype), allow_tf32=False)
+        b_u = tl.dot(b_Aak.to(b_v.dtype), b_v, allow_tf32=False)
         tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
-
 
 
 def fwd_prepare_wy_repr(
@@ -240,9 +239,8 @@ def fwd_prepare_wy_repr(
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
     BC = min(BT, 32)
-    fwd_fn = fwd_prepare_wy_repr_kernel_chunk32
-    A_ab_inv = torch.zeros_like(A_ab)
-
+    fwd_fn = fwd_prepare_wy_repr_kernel_chunk64 if BT == 64 else fwd_prepare_wy_repr_kernel_chunk32
+    A_ab_inv = torch.empty_like(A_ab)
     fwd_fn[(NT, B * H)](
         A_ab=A_ab,
         A_ab_inv=A_ab_inv,
@@ -254,7 +252,6 @@ def fwd_prepare_wy_repr(
         BC=BC,
         HEAD_FIRST=head_first
     )
-
     w, u = fwd_wu(
         ag=ag,
         v=v,
@@ -315,6 +312,5 @@ def fwd_wu(
         HEAD_FIRST=head_first
     )
     return w, u
-
 
 

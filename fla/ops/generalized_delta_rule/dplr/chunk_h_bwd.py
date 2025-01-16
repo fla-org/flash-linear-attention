@@ -26,7 +26,7 @@ def prepare_varlen_inputs(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8, 16]
     ],
-    key=['BT', 'BK', 'BV'],
+    key=['BT', 'BK', 'BV', "V"],
 )
 @triton.jit
 def chunk_dplr_bwd_kernel_dhu(

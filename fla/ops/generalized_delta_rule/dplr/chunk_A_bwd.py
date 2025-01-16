@@ -16,7 +16,7 @@ from fla.ops.utils.exp import safe_exp
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=["BK", "NC", "BT"],
+    key=["BK", "NC", "BT", "K"],
 )
 @triton.jit
 def chunk_dplr_bwd_kernel_intra(
@@ -267,7 +267,7 @@ def chunk_dplr_bwd_kernel_intra(
         for num_warps in [1, 2, 4, 8]
         for BK in [32, 64]
     ],
-    key=["BK", "BT"],
+    key=["BK", "BT", "K"],
 )
 @triton.jit
 def chunk_dplr_bwd_dgk_kernel(
