@@ -65,7 +65,6 @@ class GLAVisionConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.use_gk = use_gk
         self.use_gv = use_gv
-        self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
         self.fuse_norm = fuse_norm
@@ -91,5 +90,12 @@ class GLAVisionConfig(PretrainedConfig):
                 raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
             attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
             attn['window_size'] = attn.get('window_size', None)
+
+        self.attn = attn
+
+        if mlp_dim is None:
+            self.mlp_dim = 4 * hidden_size
+        else:
+            self.mlp_dim = mlp_dim
 
         super().__init__(**kwargs)

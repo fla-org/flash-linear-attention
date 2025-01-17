@@ -50,7 +50,6 @@ class HGRNVisionConfig(PretrainedConfig):
         self.use_lower_bound = use_lower_bound
         self.max_position_embeddings = max_position_embeddings
         self.elementwise_affine = elementwise_affine
-        self.attn = attn
         self.norm_eps = norm_eps
         self.hidden_act = hidden_act
         self.use_cache = use_cache
@@ -76,6 +75,8 @@ class HGRNVisionConfig(PretrainedConfig):
                 raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
             attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
             attn['window_size'] = attn.get('window_size', None)
+
+        self.attn = attn
 
         if mlp_dim is None:
             self.mlp_dim = 4 * hidden_size # default value set to 4 * hidden_size

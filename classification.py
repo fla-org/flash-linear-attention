@@ -9,14 +9,28 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from transformers import get_scheduler
 from torch.amp import GradScaler, autocast
+from fla.vision_models.abc import ABCVisionConfig, ABCForImageClassification
+from fla.vision_models.bitnet import BitNetVisionConfig, BitNetForImageClassification
 from fla.vision_models.delta_net import DeltaNetVisionConfig, DeltaNetForImageClassification
+from fla.vision_models.gated_deltanet import GatedDeltaNetVisionConfig, GatedDeltaNetForImageClassification
+from fla.vision_models.gla import GLAVisionConfig, GLAForImageClassification
+from fla.vision_models.gsa import GSAVisionConfig, GSAForImageClassification
+from fla.vision_models.hgrn import HGRNVisionConfig, HGRNForImageClassification
+from fla.vision_models.hgrn2 import HGRN2VisionConfig, HGRN2ForImageClassification
+from fla.vision_models.linear_attn import LinearAttentionVisionConfig, LinearAttentionForImageClassification
+from fla.vision_models.retnet import RetNetVisionConfig, RetNetForImageClassification
+from fla.vision_models.rwkv6 import RWKV6VisionConfig, RWKV6ForImageClassification
+from fla.vision_models.transformer import TransformerVisionConfig, TransformerForImageClassification
 import time
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = torch.bfloat16 # deafult dtype for FLA
 
 def setup_logging(args):
-    log_filename = f'training_{args.model}_vision_{args.dataset}.log'
+    # check whether logs directory exists
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+    log_filename = f'logs/training_{args.model}_vision_{args.dataset}{"_hybrid" if args.use_attn else ""}_{args.scan_type}.log'
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -55,7 +69,7 @@ def get_args():
     parser.add_argument('--fuse_cross_entropy', action='store_true', help='Fuse cross entropy with logits')
     parser.add_argument('--scan_type', type=str, default='uni-scan', choices=['uni-scan', 'bi-scan', 'cross-scan'],)
     
-    # Learning rate schedule related arguments
+    # Learning rate scheduler related arguments
     parser.add_argument('--lr_scheduler_type', type=str, default='constant_with_warmup',
                        choices=['linear', 'cosine', 'cosine_with_restarts', 'polynomial', 
                                'constant', 'constant_with_warmup'])
@@ -65,6 +79,7 @@ def get_args():
     parser.add_argument('--use_attn', action='store_true', help='Use hybrid attention in some layers')
     parser.add_argument('--attn_layers', type=str, default='0,1',
                        help='Comma separated list of layer indices to use attention, e.g. "0,1,2"')
+    # Hybrid architecture related arguments
     parser.add_argument('--attn_num_heads', type=int, default=16, 
                        help='Number of attention heads for hybrid attention layers')
     parser.add_argument('--attn_num_kv_heads', type=int, default=None,
@@ -78,11 +93,12 @@ def get_data(args):
     """
     Prepare data transforms and loaders.
     Ensures consistent data types with model.
+    Current suppport only training with CIFAR-10 and CIFAR-100.
     """
     transform = transforms.Compose([
         transforms.Resize((args.image_size, args.image_size)),
         transforms.ToTensor(),
-        transforms.ConvertImageDtype(dtype),  # Match model dtype
+        transforms.ConvertImageDtype(dtype),
     ])
     
     if args.dataset == 'cifar10':
@@ -102,7 +118,7 @@ def get_data(args):
     return train_loader, test_loader, num_classes
 
 def setup_deterministic_mode(args):
-    """Setup deterministic mode for reproducibility"""
+    """Setup deterministic mode for reproducibility on the same device"""
     import numpy as np
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -146,7 +162,6 @@ def log_gpu_memory(args, epoch):
 def evaluate(model, test_loader, device, args):
     """
     Evaluation loop with proper CUDA timing.
-    Uses CUDA events for accurate GPU timing and ensures proper synchronization.
     """
     model.eval()
     correct = 0
@@ -193,23 +208,23 @@ def get_model(args, num_classes):
     Initialize model based on configuration.
     Supports both pure DeltaNet and hybrid models.
     """
-    if args.model == 'deltanet':
-        # Prepare attention config for hybrid model if enabled
-        attn_config = None
-        if args.use_attn:
-            attn_config = {
-                'layers': [int(i) for i in args.attn_layers.split(',')],
-                'num_heads': args.attn_num_heads,
-                'num_kv_heads': args.attn_num_kv_heads,
-                'window_size': args.attn_window_size
-            }
-            # Log hybrid attention configuration
-            logging.info("Hybrid Attention Configuration:")
-            logging.info(f"- Attention Layers: {attn_config['layers']}")
-            logging.info(f"- Number of Heads: {attn_config['num_heads']}")
-            logging.info(f"- Number of KV Heads: {attn_config['num_kv_heads']}")
-            logging.info(f"- Window Size: {attn_config['window_size']}")
+    # Prepare attention config for hybrid model if enabled
+    attn_config = None
+    if args.use_attn:
+        attn_config = {
+            'layers': [int(i) for i in args.attn_layers.split(',')],
+            'num_heads': args.attn_num_heads,
+            'num_kv_heads': args.attn_num_kv_heads,
+            'window_size': args.attn_window_size
+        }
+        # Log hybrid attention configuration
+        logging.info("Hybrid Attention Configuration:")
+        logging.info(f"- Attention Layers: {attn_config['layers']}")
+        logging.info(f"- Number of Heads: {attn_config['num_heads']}")
+        logging.info(f"- Number of KV Heads: {attn_config['num_kv_heads']}")
+        logging.info(f"- Window Size: {attn_config['window_size']}")
 
+    if args.model == 'deltanet':
         config = DeltaNetVisionConfig(
             num_hidden_layers=args.num_hidden_layers,
             hidden_size=args.hidden_size,
@@ -217,21 +232,177 @@ def get_model(args, num_classes):
             patch_size=args.patch_size,
             image_size=args.image_size,
             num_classes=num_classes,
-            expand_k=args.expand_k,
-            expand_v=args.expand_v,
             attn_mode=args.attn_mode,
             fuse_cross_entropy=args.fuse_cross_entropy,
             attn=attn_config,  # Add attention config for hybrid model
             scan_type=args.scan_type # Add scan type to choose different scaning strategy
         )
         return DeltaNetForImageClassification(config).to(device=device, dtype=dtype)
-    else:
-        raise NotImplementedError(f"Model {args.model} is not implemented yet.")
+    
+    elif args.model == 'abc':
+        config = ABCVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return ABCForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'gated_deltanet':
+        config = GatedDeltaNetVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return GatedDeltaNetForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'bitnet':
+        config = BitNetVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return BitNetForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'gla':
+        config = GLAVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return GLAForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'gsa':
+        config = GSAVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return GSAForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'hgrn':
+        config = HGRNVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return HGRNForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'hgrn2':
+        config = HGRN2VisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return HGRN2ForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'linear_attn':
+        config = LinearAttentionVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return LinearAttentionForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'retnet':
+        config = RetNetVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return RetNetForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'rwkv6':
+        config = RWKV6VisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes,
+            attn_mode=args.attn_mode,
+            fuse_cross_entropy=args.fuse_cross_entropy,
+            attn=attn_config,  # Add attention config for hybrid model
+            scan_type=args.scan_type # Add scan type to choose different scaning strategy
+        )
+        return RWKV6ForImageClassification(config).to(device=device, dtype=dtype)
+    
+    elif args.model == 'transformer':
+        config = TransformerVisionConfig(
+            num_hidden_layers=args.num_hidden_layers,
+            hidden_size=args.hidden_size,
+            num_heads=args.num_heads,
+            patch_size=args.patch_size,
+            image_size=args.image_size,
+            num_classes=num_classes
+        )
+        return TransformerForImageClassification(config).to(device=device, dtype=dtype)
 
 def train_one_epoch(model, train_loader, criterion, optimizer, scheduler, device, args, epoch):
     """
     Training loop for one epoch with proper CUDA timing.
-    Uses CUDA events for accurate GPU timing and ensures proper synchronization.
     """
     model.train()
     total_loss = 0
@@ -312,8 +483,8 @@ def main():
     
     # Setup wandb after logging is initialized
     if args.wandb:
-        project_name = f"{args.model}_vision_classification"
-        run_name = f"e{args.epochs}_b_lr{args.b_lr}_h_lr_{args.h_lr}_mode{args.attn_mode}_bs{args.train_bs}_p{args.patch_size}_i{args.image_size}_h{args.num_heads}_{args.dataset}"
+        project_name = "fla-vision"
+        run_name = f'training_{args.model}_{args.dataset}{"_hybrid" if args.use_attn else ""}_{args.scan_type}_e{args.epochs}_blr_{args.b_lr}_hlr_{args.h_lr}_bs{args.train_bs}_mode_{args.attn_mode}'
         wandb.init(
             project=project_name,
             name=run_name,

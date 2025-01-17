@@ -79,6 +79,8 @@ class GatedDeltaNetVisionConfig(PretrainedConfig):
             attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
             attn['window_size'] = attn.get('window_size', None)
 
+        self.attn = attn
+
         if mlp_dim is None:
             self.mlp_dim = 4 * hidden_size
         else:

@@ -34,8 +34,7 @@ class LinearAttentionBlock(nn.Module):
     def __init__(self, config, layer_idx: int):
         super().__init__()
         
-        if not config.norm_first:
-            self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         
         if config.attn is not None and layer_idx in config.attn['layers']:
             self.attn = Attention(
@@ -64,8 +63,7 @@ class LinearAttentionBlock(nn.Module):
                 layer_idx=layer_idx
             )
             
-        if not config.norm_first:
-            self.ln_2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.ln_2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
             
         self.mlp = LinearAttentionMLP(config)
 
@@ -89,13 +87,7 @@ class LinearAttentionBlock(nn.Module):
         
         hidden_states = prepare_hidden_states_for_cross_scan(hidden_states, self.scan_type)
         
-        hidden_states, attentions, past_key_values = self.attn(
-            hidden_states=hidden_states,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            **kwargs
-        )
+        hidden_states = self.attn(hidden_states)
         
         hidden_states = prepare_hidden_states_for_cross_merge(hidden_states, self.scan_type)
 
@@ -113,7 +105,7 @@ class LinearAttentionBlock(nn.Module):
         # Second residual connection
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, attentions, past_key_values)
+        outputs = (hidden_states,)
 
         return outputs
 
@@ -172,7 +164,7 @@ class LinearAttentionForImageClassification(LinearAttentionVisionPreTrainedModel
         hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding=self.interpolate_pos_encoding)
         
         for block in self.blocks:
-            hidden_states, attentions, past_key_values = block(
+            hidden_states = block(
                 hidden_states,
                 past_key_values=past_key_values,
                 use_cache=use_cache,

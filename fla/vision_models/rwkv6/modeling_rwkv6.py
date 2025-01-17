@@ -34,8 +34,7 @@ class RWKV6Block(nn.Module):
     def __init__(self, config, layer_idx: int):
         super().__init__()
         
-        if not config.norm_first:
-            self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         
         if config.attn is not None and layer_idx in config.attn['layers']:
             self.attn = Attention(
@@ -60,8 +59,7 @@ class RWKV6Block(nn.Module):
                 layer_idx=layer_idx
             )
             
-        if not config.norm_first:
-            self.ln_2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.ln_2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
             
         self.mlp = RWKV6MLP(config)
 
