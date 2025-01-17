@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import functools
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 from packaging import version
@@ -38,26 +38,23 @@ def tensor_cache(
     Returns:
         Callable[..., torch.Tensor]:
             A wrapped version of the input function with single-entry caching.
-
-    NOTE:
-        This cache uses tensor memory addresses as keys, so it won't detect changes to tensor contents if modified in-place.
     """
-    last_key: Optional[Tuple] = None
+    last_args: Optional[Tuple] = None
+    last_kwargs: Optional[Dict] = None
     last_result: Any = None
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        nonlocal last_key, last_result
+        nonlocal last_args, last_kwargs, last_result
 
-        # Convert all tensor arguments to a single hash key
-        key = tuple(arg.data_ptr() for arg in args if torch.is_tensor(arg))
-        key += tuple((k, v.data_ptr()) for k, v in kwargs.items() if torch.is_tensor(v))
-
-        if key == last_key and last_result is not None:
-            return last_result
+        if last_args is not None and last_kwargs is not None:
+            if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
+                if all(a is b for a, b in zip(args, last_args)) and \
+                        all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()):
+                    return last_result
 
         result = fn(*args, **kwargs)
-        last_key, last_result = key, result
+        last_args, last_kwargs, last_result = args, kwargs, result
         return result
 
     return wrapper

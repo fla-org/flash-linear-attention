@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import torch
 import triton
 
+from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import (chunk_gated_delta_rule_bwd_dhu,
                                           chunk_gated_delta_rule_fwd_h)
 from fla.ops.common.chunk_o import (chunk_bwd_dqkwg, chunk_bwd_dv_local,
@@ -14,8 +15,6 @@ from fla.ops.delta_rule.wy_fast import (bwd_prepare_wy_repr,
                                         fwd_prepare_wy_repr, fwd_recompute_w_u)
 from fla.utils import (autocast_custom_bwd, autocast_custom_fwd, contiguous,
                        tensor_cache)
-
-from fla.modules.l2norm import l2norm_fwd, l2norm_bwd
 
 
 def chunk_delta_rule_fwd(
