@@ -39,6 +39,7 @@ class DeltaNetVisionConfig(PretrainedConfig):
         use_mask_token: bool = False,
         layer_norm_eps: float = 1e-6,
         interpolate_pos_encoding: bool = False,
+        encoder_stride=16,
         mlp_dim: int = None,
         # FLA-for-vision-related parameters
         scan_type: str = "uni-scan", # scaning type, "uni-scan" or "bi-scan" or "cross-scan", default to "uni-scan"
@@ -77,6 +78,8 @@ class DeltaNetVisionConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.interpolate_pos_encoding = interpolate_pos_encoding
         self.scan_type = scan_type
+        self.encoder_stride = encoder_stride
+
 
         if attn is not None:
             if not isinstance(attn, Dict):
