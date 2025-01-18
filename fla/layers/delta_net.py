@@ -11,8 +11,7 @@ from einops import rearrange
 from torch.nn import functional as F
 
 from fla.modules import FusedRMSNormSwishGate, RMSNorm, ShortConvolution
-from fla.ops.delta_rule import (chunk_delta_rule,
-                                fused_recurrent_delta_rule)
+from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -199,19 +198,22 @@ class DeltaNet(nn.Module):
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            seq_idx=kwargs.get('seq_idx', None)
+            position_ids = kwargs.get('position_ids', None)
             q, conv_state_q = self.q_conv1d(x=self.q_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_q,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
             k, conv_state_k = self.k_conv1d(x=self.k_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_k,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
             v, conv_state_v = self.v_conv1d(x=self.v_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_v,
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
         else:
             q = self.q_proj(hidden_states)
             k = self.k_proj(hidden_states)
@@ -229,7 +231,6 @@ class DeltaNet(nn.Module):
                 pass
             else:
                 raise NotImplementedError
-
 
         if self.qk_norm == 'sum':
             q = sum_norm(q).to(q)
