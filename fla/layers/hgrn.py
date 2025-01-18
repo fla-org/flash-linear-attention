@@ -103,14 +103,17 @@ class HGRNAttention(nn.Module):
             if last_state is not None:
                 conv_state_i, conv_state_f = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
+            position_ids = kwargs.get('position_ids', None)
             i, conv_state_i = self.i_conv1d(x=self.i_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_i,
-                                            output_final_state=use_cache)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
             f, conv_state_f = self.f_conv1d(x=self.f_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_f,
-                                            output_final_state=use_cache)
+                                            output_final_state=use_cache,
+                                            seq_idx=position_ids)
         else:
             i = self.i_proj(hidden_states)
             f = self.f_proj(hidden_states)
