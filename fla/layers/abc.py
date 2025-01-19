@@ -38,7 +38,6 @@ class ABCAttention(nn.Module):
         use_input_gate: bool = False,
         use_output_gate: bool = True,
         use_norm: bool = True,
-        use_rope: bool = False, # FIXME
         clamp_min: Optional[float] = -32,
         clamp_max: Optional[float] = 32,
         layer_idx: Optional[int] = None,
@@ -65,7 +64,6 @@ class ABCAttention(nn.Module):
         self.use_input_gate = use_input_gate
         self.use_output_gate = use_output_gate
         self.use_norm = use_norm
-        self.use_rope = use_rope # FIXME
 
         if num_slots is None:
             num_slots = self.head_k_dim
