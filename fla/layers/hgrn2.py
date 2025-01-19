@@ -201,7 +201,7 @@ class HGRN2Attention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_f, conv_state_i) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[2]
+                offset=q.shape[1]
             )
 
         o = rearrange(o, '... h d -> ... (h d)')

@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024, Songlin Yang, Yu Zhang
 
-# Gated Linear Attention Transformers with Hardware-Efficient Training: https://arxiv.org/abs/2312.06635
-
 from typing import Tuple
 
 import torch
@@ -13,6 +11,7 @@ from einops import rearrange
 from packaging import version
 
 from fla.ops.utils import chunk_local_cumsum
+from fla.ops.utils.exp import safe_exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 
 
@@ -23,30 +22,29 @@ def prepare_qg_kg(
     g,
     qg,
     kg,
-    s_k_h,
     scale,
+    T: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr
 ):
-
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    p_q = q + i_bh * s_k_h + i_c * BT * K + i_k * BK + tl.arange(0, BK)
-    p_g = g + i_bh * s_k_h + i_c * BT * K + i_k * BK + tl.arange(0, BK)
-    p_k = k + i_bh * s_k_h + i_c * BT * K + i_k * BK + tl.arange(0, BK)
-    p_qg = qg + i_bh * s_k_h + i_c * BT * K + i_k * BK + tl.arange(0, BK)
-    p_kg = kg + i_bh * s_k_h + i_c * BT * K + i_k * BK + tl.arange(0, BK)
+    p_q = q + i_bh * T*K + i_c * BT * K + i_k * BK + tl.arange(0, BK)
+    p_g = g + i_bh * T*K + i_c * BT * K + i_k * BK + tl.arange(0, BK)
+    p_k = k + i_bh * T*K + i_c * BT * K + i_k * BK + tl.arange(0, BK)
+    p_qg = qg + i_bh * T*K + i_c * BT * K + i_k * BK + tl.arange(0, BK)
+    p_kg = kg + i_bh * T*K + i_c * BT * K + i_k * BK + tl.arange(0, BK)
 
     mask = (i_k * BK + tl.arange(0, BK)) < K
 
-    last_decay = tl.load(g + i_bh * s_k_h + (i_c * BT + BT - 1) * K + i_k * BK + tl.arange(0, BK))
+    last_decay = tl.load(g + i_bh * T*K + (i_c * BT + BT - 1) * K + i_k * BK + tl.arange(0, BK))
 
-    for i in range(BT):
+    for _ in range(BT):
         b_q = tl.load(p_q, mask=mask, other=0)
         b_k = tl.load(p_k, mask=mask, other=0)
-        _g = tl.load(p_g, mask=mask, other=0).to(tl.float32)
-        b_q *= tl.exp(_g) * scale
-        b_k *= tl.exp(last_decay - _g)
+        b_g = tl.load(p_g, mask=mask, other=0).to(tl.float32)
+        b_q *= tl.exp(b_g) * scale
+        b_k *= tl.exp(last_decay - b_g)
         tl.store(p_kg, b_k.to(p_kg.dtype.element_ty), mask=mask)
         tl.store(p_qg, b_q.to(p_qg.dtype.element_ty), mask=mask)
         p_q += K
@@ -62,36 +60,39 @@ def bwd_decay_global_cumsum(
     dq_inter,
     dk_inner,
     dk_inter,
-    q, k, g, dg,
-    s_k_h,
+    q,
+    k,
+    g,
+    dg,
+    T: tl.constexpr,
+    K: tl.constexpr,
     BT: tl.constexpr,
-    BK: tl.constexpr,
-    K: tl.constexpr
+    BK: tl.constexpr
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    p_q = q + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
-    p_k = k + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
-    p_g = g + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
-    p_dg = dg + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
-    p_dq_inner = dq_inner + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
-    p_dk_inner = dk_inner + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
-    p_dq_inter = dq_inter + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
-    p_dk_inter = dk_inter + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
+    p_q = q + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
+    p_k = k + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
+    p_g = g + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
+    p_dg = dg + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
+    p_dq_inner = dq_inner + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
+    p_dk_inner = dk_inner + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
+    p_dq_inter = dq_inter + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
+    p_dk_inter = dk_inter + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
     cum_grad_dg = tl.zeros([BK], dtype=tl.float32)
     mask = (i_k * BK + tl.arange(0, BK)) < K
     last_g = tl.zeros([BK], dtype=tl.float32)
     for j in range(BT-1, -1, -1):
-        _g = tl.load(p_g, mask=mask, other=0).to(tl.float32)
+        b_g = tl.load(p_g, mask=mask, other=0).to(tl.float32)
         if j == (BT-1):
-            last_g = _g
+            last_g = b_g
         b_dq1 = tl.load(p_dq_inner, mask=mask, other=0)
         b_dq2 = tl.load(p_dq_inter, mask=mask, other=0)
-        b_dq2 *= tl.exp(_g)
+        b_dq2 *= tl.exp(b_g)
         b_dq = b_dq1 + b_dq2
         tl.store(p_dq_inter, b_dq, mask=mask)
         b_dk1 = tl.load(p_dk_inner, mask=mask, other=0)
         b_dk2 = tl.load(p_dk_inter, mask=mask, other=0)
-        b_dk2 *= tl.exp(last_g - _g)
+        b_dk2 *= safe_exp(last_g - b_g)
         b_dk = b_dk1 + b_dk2
         tl.store(p_dk_inter, b_dk, mask=mask)
         b_q = tl.load(p_q, mask=mask, other=0)
@@ -111,22 +112,15 @@ def bwd_decay_global_cumsum(
 
 @triton.jit
 def fused_chunk_gla_fwd_kernel(
-    q,  # query [B, H, L, K]
-    k,  # key [B, H, L, K]
-    v,  # value [B, H, L, V]
-    g,  # cumulative sum of log decay [B, H, L, K]
-    o,  # output [B, H, L, V]
+    q,  # query [B, H, T, K]
+    k,  # key [B, H, T, K]
+    v,  # value [B, H, T, V]
+    g,  # cumulative sum of log decay [B, H, T, K]
+    o,  # output [B, H, T, V]
 
     h0,  # initial state of the chunk [B, H, K, V]
     ht,  # final state of the chunk [B, H, K, V]
 
-    s_k_h,  # stride size: L * K
-    s_k_t,  # stride size: K
-    s_k_d,  # stride size: 1
-
-    s_v_h,  # stride size: L * V
-    s_v_t,  # stride size: V
-    s_v_d,  # stride size: 1
 
     B: tl.constexpr,  # batch size
     H: tl.constexpr,  # H
@@ -146,11 +140,11 @@ def fused_chunk_gla_fwd_kernel(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
     # make block pointers
-    p_q = tl.make_block_ptr(q + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (0, i_k * BK), (BT, BK), (1, 0))
-    p_db = g + i_bh * s_k_h + (BT - 1) * s_k_t + i_k * BK + tl.arange(0, BK)
-    p_k = tl.make_block_ptr(k + i_bh * s_k_h, (K, T), (s_k_d, s_k_t), (i_k * BK, 0), (BK, BT), (0, 1))
-    p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (0, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o + (i_bh + i_k * B * H) * s_v_h, (T, V), (s_v_t, s_v_d), (0, i_v * BV), (BT, BV), (1, 0))
+    p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (0, i_k * BK), (BT, BK), (1, 0))
+    p_gn = g + i_bh * T*K + (BT - 1) * K + i_k * BK + tl.arange(0, BK)
+    p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (i_k * BK, 0), (BK, BT), (0, 1))
+    p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
+    p_o = tl.make_block_ptr(o + (i_bh + i_k * B * H) * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
 
     if USE_INITIAL_STATE:
         p_h = tl.make_block_ptr(h0 + i_bh * K * V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
@@ -165,20 +159,20 @@ def fused_chunk_gla_fwd_kernel(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         # [BT, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
-        d_b = tl.load(p_db, mask=mask, other=0).to(tl.float32)
+        b_gn = tl.load(p_gn, mask=mask, other=0).to(tl.float32)
         if CHECK and i == 0:
             b_o = tl.dot(b_q.to(b_v.dtype), b_h.to(b_v.dtype), allow_tf32=False)
-            b_h = b_h * tl.exp(d_b)[:, None] + tl.dot(b_k.to(b_v.dtype), b_v, allow_tf32=False)
+            b_h = b_h * tl.exp(b_gn)[:, None] + tl.dot(b_k.to(b_v.dtype), b_v, allow_tf32=False)
         else:
             b_o = tl.dot(b_q.to(b_v.dtype), b_h.to(b_v.dtype), allow_tf32=False)
-            b_h = b_h * tl.exp(d_b)[:, None] + tl.dot(b_k.to(b_v.dtype), b_v, allow_tf32=False)
+            b_h = b_h * tl.exp(b_gn)[:, None] + tl.dot(b_k.to(b_v.dtype), b_v, allow_tf32=False)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
         p_q = tl.advance(p_q, (BT, 0))
         p_k = tl.advance(p_k, (0, BT))
         p_v = tl.advance(p_v, (BT, 0))
         p_o = tl.advance(p_o, (BT, 0))
-        p_db += BT * K
+        p_gn += BT * K
 
     if STORE_FINAL_STATE:
         p_final = tl.make_block_ptr(ht + i_bh * K * V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
@@ -189,20 +183,13 @@ def fused_chunk_gla_fwd_kernel(
 @triton.jit
 def fused_chunk_gla_bwd_kernel(
     q, k, v, g,
-    do,  # gradient of output [B, H, L, V]
-    dq,  # gradient of query [NV, B, H, L, K]
-    dk,  # gradient of key [NV, B, H, L, K]
-    dv,  # gradient of value [NK, B, H, L, V]
+    do,  # gradient of output [B, H, T, V]
+    dq,  # gradient of query [NV, B, H, T, K]
+    dk,  # gradient of key [NV, B, H, T, K]
+    dv,  # gradient of value [NK, B, H, T, V]
 
     h0,  # initial state of the chunk [B, H, K, V]
 
-    s_k_h,  # stride size: L * K
-    s_k_t,  # stride size: K
-    s_k_d,  # stride size: 1
-
-    s_v_h,  # stride size: L * V
-    s_v_t,  # stride size: V
-    s_v_d,  # stride size: 1
     scale,  # K ** -0.5
 
     B: tl.constexpr,  # B
@@ -227,15 +214,15 @@ def fused_chunk_gla_bwd_kernel(
 
     mask = (i_k * BK + tl.arange(0, BK)) < K
     for i in range(0, tl.cdiv(T, BT)):
-        p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_db = g + i_bh * s_k_h + ((i+1) * BT - 1) * s_k_t + i_k * BK + tl.arange(0, BK)
-        p_v = tl.make_block_ptr(v + i_bh * s_v_h, (V, T), (s_v_d, s_v_t), (i_v * BV, i * BT), (BV, BT), (0, 1))
-        p_do = tl.make_block_ptr(do + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dq = tl.make_block_ptr(dq + (i_bh+i_v*B*H)*s_k_h, (T, K), (s_k_t, s_k_d), (i * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i * BT, i_k * BK), (BT, BK), (1, 0))
+        p_gn = g + i_bh * T*K + ((i+1) * BT - 1) * K + i_k * BK + tl.arange(0, BK)
+        p_v = tl.make_block_ptr(v + i_bh * T*V, (V, T), (1, V), (i_v * BV, i * BT), (BV, BT), (0, 1))
+        p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dq = tl.make_block_ptr(dq + (i_bh+i_v*B*H)*T*K, (T, K), (K, 1), (i * BT, i_k * BK), (BT, BK), (1, 0))
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)
         # [BT, K]
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        d_b = tl.load(p_db, mask=mask, other=0).to(tl.float32)
+        b_gn = tl.load(p_gn, mask=mask, other=0).to(tl.float32)
 
         # [V, BT]
         b_v = tl.load(p_v, boundary_check=(0, 1))
@@ -244,10 +231,10 @@ def fused_chunk_gla_bwd_kernel(
         # [V, K]
         if CHECK and i == 0:
             b_dq += tl.dot(b_do, b_h.to(b_do.dtype), allow_tf32=False)
-            b_h = b_h * tl.exp(d_b)[None, :] + tl.dot(b_v, b_k.to(b_v.dtype), allow_tf32=False)
+            b_h = b_h * tl.exp(b_gn)[None, :] + tl.dot(b_v, b_k.to(b_v.dtype), allow_tf32=False)
         else:
             b_dq += tl.dot(b_do, b_h.to(b_do.dtype), allow_tf32=False)
-            b_h = b_h * tl.exp(d_b)[None, :] + tl.dot(b_v, b_k.to(b_v.dtype), allow_tf32=False)
+            b_h = b_h * tl.exp(b_gn)[None, :] + tl.dot(b_v, b_k.to(b_v.dtype), allow_tf32=False)
         b_dq *= scale
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
@@ -259,15 +246,15 @@ def fused_chunk_gla_bwd_kernel(
 
     # cum = tl.zeros([BK], dtype=tl.float32)
     for i in range(1, tl.cdiv(T, BT) + 1):
-        p_q = tl.make_block_ptr(q + i_bh * s_k_h, (K, T), (s_k_d, s_k_t), (i_k * BK, T - i * BT), (BK, BT), (0, 1))
-        p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (T - i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_db = g + i_bh * s_k_h + (T - (i-1) * BT - 1) * s_k_t + i_k * BK + tl.arange(0, BK)
-        p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_do = tl.make_block_ptr(do + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dk = tl.make_block_ptr(dk + (i_bh + i_v * B * H) * s_k_h, (T, K),
-                                 (s_k_t, s_k_d), (T - i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dv = tl.make_block_ptr(dv + (i_bh + i_k * B * H) * s_v_h, (T, V),
-                                 (s_v_t, s_v_d), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
+        p_q = tl.make_block_ptr(q + i_bh * T*K, (K, T), (1, K), (i_k * BK, T - i * BT), (BK, BT), (0, 1))
+        p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (T - i * BT, i_k * BK), (BT, BK), (1, 0))
+        p_gn = g + i_bh * T*K + (T - (i-1) * BT - 1) * K + i_k * BK + tl.arange(0, BK)
+        p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
+        p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dk = tl.make_block_ptr(dk + (i_bh + i_v * B * H) * T*K, (T, K),
+                                 (K, 1), (T - i * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dv = tl.make_block_ptr(dv + (i_bh + i_k * B * H) * T*V, (T, V),
+                                 (V, 1), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
         # [K, BT]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         # [BT, K]
@@ -275,7 +262,7 @@ def fused_chunk_gla_bwd_kernel(
         # [BT, V]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_db = tl.load(p_db, mask=mask, other=0).to(tl.float32)
+        b_db = tl.load(p_gn, mask=mask, other=0).to(tl.float32)
 
         # inter-chunk
         # [K, V]
@@ -295,9 +282,6 @@ def fused_chunk_gla_bwd_kernel(
 @triton.jit
 def fwd_inner_chunk(
     q, k, g, A,
-    s_k_h,  # stride size: L * K
-    s_k_t,  # stride size: K
-    s_k_d,  # stride size: 1
     scale,  # K ** -0.5
     B: tl.constexpr,  # B
     H: tl.constexpr,  # H
@@ -309,25 +293,23 @@ def fwd_inner_chunk(
 
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
-    p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_g = tl.make_block_ptr(g + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
 
     b_k = tl.load(p_k, boundary_check=(0, 1))
-
-    p_g = tl.make_block_ptr(g + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
 
     mask = (i_k * BK + tl.arange(0, BK)) < K
     o_i = tl.arange(0, BT)
 
-    p_q = q + i_bh * s_k_h + i_k * BK + i_t * BT * K + tl.arange(0, BK)
-    p_gq = g + i_bh * s_k_h + i_k * BK + i_t * BT * K + tl.arange(0, BK)
+    p_q = q + i_bh * T*K + i_k * BK + i_t * BT * K + tl.arange(0, BK)
+    p_gq = g + i_bh * T*K + i_k * BK + i_t * BT * K + tl.arange(0, BK)
     p_A = A + (i_bh + (i_k * B * H)) * (tl.cdiv(T, BT) * BT * BT) + i_t * BT * BT + tl.arange(0, BT)
 
     for i in range(BT):
-        _q = tl.load(p_q, mask=mask, other=0) * scale
-        gq = tl.load(p_gq, mask=mask, other=0).to(tl.float32)
-        s = _q[None, :] * b_k * tl.exp(gq[None, :] - b_g)
+        b_q = tl.load(p_q, mask=mask, other=0) * scale
+        b_gq = tl.load(p_gq, mask=mask, other=0).to(tl.float32)
+        s = b_q[None, :] * b_k * safe_exp(b_gq[None, :] - b_g)
         score = tl.sum(s, axis=1)
         score = tl.where(o_i <= i, score, 0)
         tl.store(p_A, score.to(p_A.dtype.element_ty))
@@ -344,9 +326,6 @@ def bwd_inner_chunk(
     dA,
     dq,
     dk,
-    s_k_h,  # stride size: L * K
-    s_k_t,  # stride size: K
-    s_k_d,  # stride size: 1
     T: tl.constexpr,  # T
     K: tl.constexpr,  # K
     # clamp_min, # minimum log value of the gate for numerical stability. default: -5
@@ -354,37 +333,37 @@ def bwd_inner_chunk(
     BK: tl.constexpr,  # BLOCK SIZE along the K dimension
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     b_k = tl.load(p_k, boundary_check=(0, 1))
-    p_g = tl.make_block_ptr(g + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_g = tl.make_block_ptr(g + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
 
     mask = (i_k * BK + tl.arange(0, BK)) < K
     o_i = tl.arange(0, BT)
 
-    p_q = q + i_bh * s_k_h + i_k * BK + i_t * BT * K + tl.arange(0, BK)
-    p_dq = dq + (i_bh) * s_k_h + i_k * BK + i_t * BT * K + tl.arange(0, BK)
-    p_gq = g + i_bh * s_k_h + i_k * BK + i_t * BT * K + tl.arange(0, BK)
+    p_q = q + i_bh * T*K + i_k * BK + i_t * BT * K + tl.arange(0, BK)
+    p_dq = dq + (i_bh) * T*K + i_k * BK + i_t * BT * K + tl.arange(0, BK)
+    p_gq = g + i_bh * T*K + i_k * BK + i_t * BT * K + tl.arange(0, BK)
     p_dA = dA + i_bh * (tl.cdiv(T, BT) * BT * BT) + i_t * BT * BT + tl.arange(0, BT)
 
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
 
     for i in range(BT):
-        _q = tl.load(p_q, mask=mask, other=0)
-        gq = tl.load(p_gq, mask=mask, other=0).to(tl.float32)
-        score = tl.exp(gq[None, :] - b_g)
+        b_q = tl.load(p_q, mask=mask, other=0)
+        b_gq = tl.load(p_gq, mask=mask, other=0).to(tl.float32)
+        score = safe_exp(b_gq[None, :] - b_g)
         score = tl.where(o_i[:, None] <= i, score, 0)
-        _dA = tl.load(p_dA)
-        _dA = tl.where(o_i <= i, _dA, 0)
-        b_dk += (_dA[:, None] * score * _q[None, :])
-        b_dq = tl.sum(_dA[:, None] * score * b_k, axis=0)
+        b_dA = tl.load(p_dA)
+        b_dA = tl.where(o_i <= i, b_dA, 0)
+        b_dk += (b_dA[:, None] * score * b_q[None, :])
+        b_dq = tl.sum(b_dA[:, None] * score * b_k, axis=0)
         tl.store(p_dq, b_dq, mask=mask)
         p_q += K
         p_dq += K
         p_gq += K
         p_dA += BT
 
-    p_dk = tl.make_block_ptr(dk + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_dk = tl.make_block_ptr(dk + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     tl.store(p_dk, b_dk.to(dk.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -412,9 +391,13 @@ class FusedChunkGLAFunction(torch.autograd.Function):
 
         grid = (NK, triton.cdiv(T, BT), B * H)
         prepare_qg_kg[grid](
-            q, k, g, q_g, k_g,
-            q.stride(1),
+            q,
+            k,
+            g,
+            q_g,
+            k_g,
             scale,
+            T=T,
             K=K,
             BT=BT,
             BK=BK,
@@ -442,8 +425,6 @@ class FusedChunkGLAFunction(torch.autograd.Function):
         grid = (NV, NK, B * H)
         fused_chunk_gla_fwd_kernel[grid](
             q_g, k_g, v, g, o, initial_state, final_state,
-            q.stride(1), q.stride(2), q.stride(3),
-            v.stride(1), v.stride(2), v.stride(3),
             B=B,
             H=H,
             T=T,
@@ -471,7 +452,6 @@ class FusedChunkGLAFunction(torch.autograd.Function):
         grid = (NK, triton.cdiv(T, BT), B * H)
         fwd_inner_chunk[grid](
             q, k, g, A,
-            q.stride(1), q.stride(2), q.stride(3),
             scale,
             B=B,
             H=H,
@@ -509,17 +489,19 @@ class FusedChunkGLAFunction(torch.autograd.Function):
         k_g = torch.empty_like(k)
         grid = (NK, triton.cdiv(T, BT), B * H)
         prepare_qg_kg[grid](
-            q, k, g, q_g, k_g,
-            q.stride(1),
+            q,
+            k,
+            g,
+            q_g,
+            k_g,
             scale,
+            T=T,
             K=K,
             BT=BT,
             BK=BK,
             num_warps=1
         )
 
-        # inter-chunk
-        BT = 16
         BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
         NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
         num_stages = 1
@@ -532,8 +514,6 @@ class FusedChunkGLAFunction(torch.autograd.Function):
 
         fused_chunk_gla_bwd_kernel[grid](
             q_g, k_g, v, g, do, dq, dk, dv, initial_state,
-            q.stride(1), q.stride(2), q.stride(3),
-            v.stride(1), v.stride(2), v.stride(3),
             scale,
             B=B,
             H=H,
@@ -553,23 +533,24 @@ class FusedChunkGLAFunction(torch.autograd.Function):
         dv = dv.sum(0)
 
         # intra chunk
-        num_chunk = T // BT
-        v2 = rearrange(v, 'b h (n c) d -> b h n c d', n=num_chunk)
-        do2 = rearrange(do, 'b h (n c) d -> b h n c d', n=num_chunk)
+        NT = T // BT
+        v2 = rearrange(v, 'b h (n c) d -> b h n c d', n=NT)
+        do2 = rearrange(do, 'b h (n c) d -> b h n c d', n=NT)
         dA2 = (do2 @ v2.transpose(-2, -1)) * scale
         dv2 = A.transpose(-1, -2) @ do2
-        dv2 = rearrange(dv2, 'b h n c d -> b h (n c) d', n=num_chunk)
+        dv2 = rearrange(dv2, 'b h n c d -> b h (n c) d', n=NT)
 
         BK = min(triton.next_power_of_2(K), 16)
         NK = triton.cdiv(K, BK)
         dk2 = torch.empty_like(k)
         dq2 = torch.empty_like(q)
 
-        grid = (NK, triton.cdiv(T, BT), B * H)
+        grid = (NK, NT, B * H)
         bwd_inner_chunk[grid](
             q, k, g,
-            dA2, dq2, dk2,
-            q.stride(1), q.stride(2), q.stride(3),
+            dA2,
+            dq2,
+            dk2,
             T=T,
             K=K,
             BT=BT,
@@ -583,8 +564,15 @@ class FusedChunkGLAFunction(torch.autograd.Function):
         dg = torch.empty_like(g, dtype=torch.float32)
         grid = (NK, triton.cdiv(T, BT), B * H)
         bwd_decay_global_cumsum[grid](
-            dq2, dq, dk2, dk, q, k, g, dg,
-            q.stride(1),
+            dq2,
+            dq,
+            dk2,
+            dk,
+            q,
+            k,
+            g,
+            dg,
+            T=T,
             K=K,
             BT=BT,
             BK=BK,
@@ -606,17 +594,16 @@ class FusedChunkGLAFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.g_dtype), None, None, None
 
 
+def ceildiv(a, b):
+    return -(a // -b)
+
+
 def pad(x, chunk_size=16):
     T = x.shape[-2]
     padded_seq_len = ceildiv(T, chunk_size) * chunk_size
     if x.shape[-2] % chunk_size != 0:
         x = F.pad(x, (0, 0, 0, padded_seq_len - T))
-
     return x
-
-
-def ceildiv(a, b):
-    return -(a // -b)
 
 
 def fused_chunk_gla(
@@ -631,14 +618,12 @@ def fused_chunk_gla(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if scale == -1:
         scale = q.shape[-1] ** -0.5
-    if initial_state is not None:
-        initial_state = initial_state.detach()
     if not head_first:
         q, k, v, g = map(lambda x: x.transpose(1, 2), (q, k, v, g))
     seq_len = q.shape[-2]
     q, k, v, g = map(lambda x: pad(x), [q, k, v, g])
     o, final_state = FusedChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
-    o = o[..., :seq_len, :]
+    o = o[..., :seq_len, :].contiguous()
     if not head_first:
         o = o.transpose(1, 2)
     return o, final_state
