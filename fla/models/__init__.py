@@ -19,6 +19,20 @@ from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
 from fla.models.transformer import (TransformerConfig, TransformerForCausalLM,
                                     TransformerModel)
 from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
+
+from fla.models.abc import ABCVisionConfig, ABCForImageClassification, ABCForMaskedImageModeling, ABCVisionModel
+from fla.models.bitnet import BitNetVisionConfig, BitNetForImageClassification, BitNetForMaskedImageModeling, BitNetVisionModel
+from fla.models.delta_net import DeltaNetVisionConfig, DeltaNetForImageClassification, DeltaNetForMaskedImageModeling, DeltaNetVisionModel
+from fla.models.gated_deltanet import GatedDeltaNetVisionConfig, GatedDeltaNetForImageClassification, GatedDeltaNetVisionModel, GatedDeltaNetForMaskedImageModeling
+from fla.models.gla import GLAVisionConfig, GLAForImageClassification, GLAForMaskedImageModeling, GLAVisionModel
+from fla.models.gsa import GSAVisionConfig, GSAForImageClassification, GSAForMaskedImageModeling, GSAVisionModel
+from fla.models.hgrn import HGRNVisionConfig, HGRNForImageClassification, HGRNForMaskedImageModeling, HGRNVisionModel
+from fla.models.hgrn2 import HGRN2VisionConfig, HGRN2ForImageClassification, HGRN2ForMaskedImageModeling, HGRN2VisionModel
+from fla.models.linear_attn import LinearAttentionVisionConfig, LinearAttentionForImageClassification, LinearAttentionForMaskedImageModeling, LinearAttentionVisionModel
+from fla.models.retnet import RetNetVisionConfig, RetNetForImageClassification, RetNetForMaskedImageModeling, RetNetVisionModel
+from fla.models.rwkv6 import RWKV6VisionConfig, RWKV6ForImageClassification, RWKV6ForMaskedImageModeling, RWKV6VisionModel
+from fla.models.transformer import TransformerVisionConfig, TransformerForImageClassification, TransformerForMaskedImageModeling, TransformerVisionModel
+
 __all__ = [
     'ABCConfig', 'ABCForCausalLM', 'ABCModel',
     'BitNetConfig', 'BitNetForCausalLM', 'BitNetModel',
@@ -34,5 +48,17 @@ __all__ = [
     'RWKV6Config', 'RWKV6ForCausalLM', 'RWKV6Model',
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
-    'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel'
+    'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
+    'ABCVisionConfig', 'ABCForImageClassification', 'ABCForMaskedImageModeling', 'ABCVisionModel',
+    'BitNetVisionConfig', 'BitNetForImageClassification', 'BitNetForMaskedImageModeling', 'BitNetVisionModel',
+    'DeltaNetVisionConfig', 'DeltaNetForImageClassification', 'DeltaNetForMaskedImageModeling', 'DeltaNetVisionModel',
+    'GatedDeltaNetVisionConfig', 'GatedDeltaNetForImageClassification', 'GatedDeltaNetVisionModel', 'GatedDeltaNetForMaskedImageModeling',
+    'GLAVisionConfig', 'GLAForImageClassification', 'GLAForMaskedImageModeling', 'GLAVisionModel',
+    'GSAVisionConfig', 'GSAForImageClassification', 'GSAForMaskedImageModeling', 'GSAVisionModel',
+    'HGRNVisionConfig', 'HGRNForImageClassification', 'HGRNForMaskedImageModeling', 'HGRNVisionModel',
+    'HGRN2VisionConfig', 'HGRN2ForImageClassification', 'HGRN2ForMaskedImageModeling', 'HGRN2VisionModel',
+    'LinearAttentionVisionConfig', 'LinearAttentionForImageClassification', 'LinearAttentionForMaskedImageModeling', 'LinearAttentionVisionModel',
+    'RetNetVisionConfig', 'RetNetForImageClassification', 'RetNetForMaskedImageModeling', 'RetNetVisionModel',
+    'RWKV6VisionConfig', 'RWKV6ForImageClassification', 'RWKV6ForMaskedImageModeling', 'RWKV6VisionModel',
+    'TransformerVisionConfig', 'TransformerForImageClassification', 'TransformerForMaskedImageModeling', 'TransformerVisionModel',
 ]
