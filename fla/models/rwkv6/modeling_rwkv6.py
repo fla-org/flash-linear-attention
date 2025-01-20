@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Optional, Tuple, Union, List, Unpack, Dict
+from typing import Dict, Optional, Tuple, Union, Unpack, List, Unpack, Dict
 
 import torch
 import torch.nn as nn
@@ -143,7 +143,8 @@ class RWKV6Block(nn.Module):
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            output_attentions=output_attentions
+            output_attentions=output_attentions,
+            **kwargs
         )
         hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
         hidden_states, past_key_values = self.ffn(hidden_states, attention_mask, past_key_values)
@@ -231,7 +232,8 @@ class RWKV6Model(RWKV6PreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None
+        return_dict: Optional[bool] = None,
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
             warnings.warn("`RWKV6Model` does not `output_attentions` now, setting it to `False`.")
@@ -271,7 +273,8 @@ class RWKV6Model(RWKV6PreTrainedModel):
                     attention_mask,
                     past_key_values,
                     use_cache,
-                    output_attentions
+                    output_attentions,
+                    **kwargs
                 )
             else:
                 hidden_states, attentions, past_key_values = layer(
@@ -279,7 +282,8 @@ class RWKV6Model(RWKV6PreTrainedModel):
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=use_cache,
-                    output_attentions=output_attentions
+                    output_attentions=output_attentions,
+                    **kwargs
                 )
 
             if output_attentions:
@@ -392,7 +396,8 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        num_logits_to_keep: Optional[int] = 0
+        num_logits_to_keep: Optional[int] = 0,
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -408,7 +413,8 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            return_dict=return_dict,
+            **kwargs
         )
 
         hidden_states = outputs[0]
