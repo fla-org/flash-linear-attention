@@ -6,8 +6,56 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.ops.generalized_delta_rule.dplr.chunk import chunk_dplr_delta_rule
+from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
 from utils import assert_close
+
+def recurrent_dplr_delta_rule_ref(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    gk: torch.Tensor,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    output_final_state: bool = False,
+    head_first=False,
+):
+    q, k, v, a, b, gk = map(lambda x: x.to(torch.float32), [q, k, v, a, b, gk])
+    if not head_first:
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        a = a.transpose(1, 2)
+        b = b.transpose(1, 2)
+        gk = gk.transpose(1, 2)
+    B, H, L, DK = q.shape
+    DV = v.shape[-1]
+    o = torch.zeros_like(v)
+    S = torch.zeros(B, H, DK, DV).to(v)
+    if initial_state is not None:
+        S = initial_state
+    if scale is None:
+        scale = 1 / (q.shape[-1] ** 0.5)
+    q = q * scale
+    for i in range(L):
+        _k = k[:, :, i]
+        _q = q[:, :, i]
+        _v = v[:, :, i].clone()
+        a_i = a[:, :, i]
+        b_i = b[:, :, i]
+        # first matmul then decay in DPLR. 
+        _v2 = (S.clone() * a_i[..., None]).sum(-2)
+        S = S.clone() * gk[:, :, i].exp()[..., None]
+        S = S.clone() + _k.unsqueeze(-1) * _v.unsqueeze(-2) + b_i.unsqueeze(-1) * _v2.unsqueeze(-2)
+        o[:, :, i] = torch.einsum('bhd,bhdm->bhm', _q, S)
+    if not output_final_state:
+        S = None
+    if not head_first:
+        o = o.transpose(1, 2)
+    return o, S
+
+
 
 def chunk_dplr_delta_rule_ref(
     q: torch.Tensor,
@@ -93,6 +141,135 @@ def chunk_dplr_delta_rule_ref(
     if not head_first:
         o = o.transpose(1, 2)
     return o, S
+
+
+@pytest.mark.parametrize("B", [2])
+@pytest.mark.parametrize("T", [300])
+@pytest.mark.parametrize("H", [2])
+@pytest.mark.parametrize("D", [100])
+@pytest.mark.parametrize("scale", [0.25])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_ref_equivalence(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+):
+    head_first = True
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    os.environ['TORCH_CUDA_MATMUL_PRECISION'] = 'highest'
+    if head_first:
+        q = torch.randn(B, H, T, D, dtype=dtype)
+        k = torch.randn(B, H, T, D, dtype=dtype)
+        v = torch.randn(B, H, T, D, dtype=dtype)
+        a = torch.rand(B, H, T, D, dtype=dtype)
+        gk = (torch.randn(B, H, T, D, dtype=torch.float)) 
+    else:
+        q = torch.randn(B, T, H, D, dtype=dtype)
+        k = torch.randn(B, T, H, D, dtype=dtype)
+        v = torch.randn(B, T, H, D, dtype=dtype)
+        a = torch.rand(B, T, H, D, dtype=dtype)
+        gk = torch.randn(B, T, H, D, dtype=torch.float)
+
+    a = torch.nn.functional.normalize(a, p=2, dim=-1)
+    b = -a
+    gk = torch.nn.functional.logsigmoid(gk) / 16
+
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q, k, v, a, b, gk, h0 = map(lambda x: x.cuda().requires_grad_(False), (q, k, v, a, b, gk, h0))
+    ref, ref_ht = chunk_dplr_delta_rule_ref(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        gk=gk.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        head_first=head_first
+    )
+    tri, tri_ht = recurrent_dplr_delta_rule_ref(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        gk=gk.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        head_first=head_first
+    )
+    assert_close("  o", ref, tri, 0.001)
+    assert_close(" ht", ref_ht, tri_ht, 0.001)
+
+
+
+@pytest.mark.parametrize("B", [1])
+@pytest.mark.parametrize("T", [300])
+@pytest.mark.parametrize("H", [2])
+@pytest.mark.parametrize("D", [60, 120, 250])
+@pytest.mark.parametrize("scale", [0.25])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("head_first", [True, False])
+def test_fused_recurrent_fwd(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+    head_first: bool,
+):
+    if head_first:
+        q = torch.randn(B, H, T, D, dtype=dtype)
+        k = torch.randn(B, H, T, D, dtype=dtype)
+        v = torch.randn(B, H, T, D, dtype=dtype)
+        a = torch.rand(B, H, T, D, dtype=dtype)
+        gk = (torch.randn(B, H, T, D, dtype=torch.float)) 
+    else:
+        q = torch.randn(B, T, H, D, dtype=dtype)
+        k = torch.randn(B, T, H, D, dtype=dtype)
+        v = torch.randn(B, T, H, D, dtype=dtype)
+        a = torch.rand(B, T, H, D, dtype=dtype)
+        gk = torch.randn(B, T, H, D, dtype=torch.float)
+
+    a = torch.nn.functional.normalize(a, p=2, dim=-1)
+    b = -a
+    gk = torch.nn.functional.logsigmoid(gk) / 4
+ 
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q, k, v, a, b, gk, h0 = map(lambda x: x.cuda().requires_grad_(False), (q, k, v, a, b, gk, h0))
+    ref, ref_ht = recurrent_dplr_delta_rule_ref(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        gk=gk.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        head_first=head_first
+    )
+
+    tri, tri_ht = fused_recurrent_dplr_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        gk=gk.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        head_first=head_first
+    )
+    assert_close("  o", ref, tri, 0.002)
+    assert_close(" ht", ref_ht, tri_ht, 0.002)
 
 
 @pytest.mark.parametrize("B", [2])

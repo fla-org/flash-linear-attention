@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -11,9 +11,11 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.layers.rwkv6 import LoRA
-from fla.models.utils import Cache
 from fla.modules import GroupNorm
-from fla.ops.rwkv7 import chunk_rwkv7
+from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
+
+if TYPE_CHECKING:
+    from fla.models.utils import Cache
 
 
 class RWKV7Attention(nn.Module):
@@ -22,10 +24,8 @@ class RWKV7Attention(nn.Module):
         self,
         mode: str = 'chunk',
         hidden_size: int = 1024,
-        expand_k: float = 1.0,
-        expand_v: float = 1.0,
-        num_heads: int = 4,
-        proj_low_rank_dim: int = 28,
+        head_dim: Optional[int] = 64,
+        num_heads: Optional[int] = None,
         decay_low_rank_dim: int = 64,
         gate_low_rank_dim: int = 128,
         a_low_rank_dim: int = 64,
@@ -38,16 +38,21 @@ class RWKV7Attention(nn.Module):
         super().__init__()
 
         self.mode = mode
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
         self.hidden_size = hidden_size
-        self.expand_k = expand_k
-        self.expand_v = expand_v
-        self.num_heads = num_heads
 
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
-        self.head_dim = int(hidden_size // num_heads)
-
-        self.proj_low_rank_dim = proj_low_rank_dim
+        self.key_dim = hidden_size
+        self.value_dim = hidden_size
+        if head_dim is not None and num_heads is not None:
+            raise ValueError("Cannot specify both `head_dim` and `num_heads`.")
+        elif head_dim is not None:
+            self.head_dim = head_dim
+            self.num_heads = int(hidden_size // head_dim)
+        elif num_heads is not None:
+            self.head_dim = int(hidden_size // num_heads)
+            self.num_heads = num_heads
+        else:
+            raise ValueError("Either `head_dim` or `num_heads` must be specified.")
 
         self.decay_low_rank_dim = decay_low_rank_dim
         self.gate_low_rank_dim = gate_low_rank_dim
@@ -66,7 +71,7 @@ class RWKV7Attention(nn.Module):
 
         self.k_k = nn.Parameter(torch.empty(1, 1, self.key_dim))
         self.k_a = nn.Parameter(torch.empty(1, 1, self.key_dim))
-        self.r_k = nn.Parameter(torch.empty(num_heads, self.head_dim))
+        self.r_k = nn.Parameter(torch.empty(self.num_heads, self.head_dim))
 
         self.r_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
@@ -111,7 +116,7 @@ class RWKV7Attention(nn.Module):
 
         batch_size, seq_len, hidden_size = hidden_states.shape
         # launching the triton kernel for just one token will actually be slower
-        mode = self.mode
+        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
@@ -158,21 +163,22 @@ class RWKV7Attention(nn.Module):
         r, w, k, v, kk, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=self.num_heads), (r, w, k, v, kk, a))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        if mode == 'chunk':
-            o, recurrent_state = chunk_rwkv7(
-                r=r,
-                log_w=w,
-                k=k,
-                v=v,
-                a=-kk,
-                b=kk * a,
-                scale=1.,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                head_first=False
-            )
-        else:
-            raise NotImplementedError(f"Not supported mode `{mode}`.")
+
+        rwkv7_fn = chunk_rwkv7 if mode == 'chunk' else fused_recurrent_rwkv7
+        cu_seqlens = kwargs.get('cu_seqlens', None)
+        o, recurrent_state = rwkv7_fn(
+            r=r,
+            log_w=w,
+            k=k,
+            v=v,
+            a=-kk,
+            b=kk * a,
+            scale=1.,
+            initial_state=recurrent_state,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens,
+            head_first=False
+        )
 
         if past_key_values is not None:
             past_key_values.update(

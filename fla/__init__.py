@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 
 from fla.layers import (ABCAttention, Attention, BasedLinearAttention,
-                        BitAttention, DeltaNet, GatedLinearAttention,
-                        GatedSlotAttention, HGRN2Attention, HGRNAttention,
-                        LinearAttention, MultiScaleRetention,
-                        ReBasedLinearAttention)
+                        BitAttention, DeltaNet, GatedDeltaNet,
+                        GatedLinearAttention, GatedSlotAttention,
+                        HGRN2Attention, HGRNAttention, LinearAttention,
+                        MultiScaleRetention, ReBasedLinearAttention,
+                        RWKV6Attention, RWKV7Attention)
 from fla.models import (ABCForCausalLM, ABCModel, BitNetForCausalLM,
                         BitNetModel, DeltaNetForCausalLM, DeltaNetModel,
+                        GatedDeltaNetForCausalLM, GatedDeltaNetModel,
                         GLAForCausalLM, GLAModel, GSAForCausalLM, GSAModel,
                         HGRN2ForCausalLM, HGRN2Model, HGRNForCausalLM,
                         LinearAttentionForCausalLM, LinearAttentionModel,
                         RetNetForCausalLM, RetNetModel, RWKV6ForCausalLM,
-                        RWKV6Model, TransformerForCausalLM, TransformerModel)
+                        RWKV6Model, RWKV7ForCausalLM, RWKV7Model,
+                        TransformerForCausalLM, TransformerModel)
 
 __all__ = [
     'ABCAttention',
@@ -19,6 +22,7 @@ __all__ = [
     'BasedLinearAttention',
     'BitAttention',
     'DeltaNet',
+    'GatedDeltaNet',
     'HGRNAttention',
     'HGRN2Attention',
     'GatedLinearAttention',
@@ -26,12 +30,16 @@ __all__ = [
     'LinearAttention',
     'MultiScaleRetention',
     'ReBasedLinearAttention',
+    'RWKV6Attention',
+    'RWKV7Attention',
     'ABCForCausalLM',
     'ABCModel',
     'BitNetForCausalLM',
     'BitNetModel',
     'DeltaNetForCausalLM',
     'DeltaNetModel',
+    'GatedDeltaNetForCausalLM',
+    'GatedDeltaNetModel',
     'HGRNForCausalLM',
     'HGRNModel',
     'HGRN2ForCausalLM',
@@ -46,13 +54,10 @@ __all__ = [
     'RetNetModel',
     'RWKV6ForCausalLM',
     'RWKV6Model',
+    'RWKV7ForCausalLM',
+    'RWKV7Model',
     'TransformerForCausalLM',
-    'TransformerModel',
-    'chunk_gla',
-    'chunk_retention',
-    'fused_chunk_based',
-    'fused_chunk_gla',
-    'fused_chunk_retention'
+    'TransformerModel'
 ]
 
 __version__ = '0.1'

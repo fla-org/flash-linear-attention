@@ -35,7 +35,7 @@ def chunk_dplr_fwd(
 ):
     T = q.shape[2] if head_first else q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, head_first=head_first)
+    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, indices=indices, head_first=head_first)
  
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
         q=q,
@@ -158,7 +158,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         scale = ctx.scale
         
         # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
-        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, head_first=head_first)
+        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, indices=indices, head_first=head_first)
 
         A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
             q=q,

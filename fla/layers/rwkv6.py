@@ -143,6 +143,7 @@ class RWKV6Attention(nn.Module):
         u = self.bonus
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_rwkv6(
                 r=r,
@@ -153,6 +154,7 @@ class RWKV6Attention(nn.Module):
                 scale=1.,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         elif mode == 'chunk':
@@ -165,6 +167,7 @@ class RWKV6Attention(nn.Module):
                 scale=1.,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         else:
