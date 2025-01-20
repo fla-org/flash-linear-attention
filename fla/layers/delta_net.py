@@ -249,7 +249,7 @@ class DeltaNet(nn.Module):
             beta = beta.mul(attention_mask[:, -beta.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_delta_rule(
                 q=q,
@@ -258,7 +258,7 @@ class DeltaNet(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
             )
@@ -270,7 +270,7 @@ class DeltaNet(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
             )

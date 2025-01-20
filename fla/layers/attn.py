@@ -99,7 +99,7 @@ class Attention(nn.Module):
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
 
         # equivalent to cu_seqlens in `flash_attn`
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
 
         seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
@@ -113,7 +113,7 @@ class Attention(nn.Module):
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=offsets)
+        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
             k, v = past_key_values.update(
@@ -143,11 +143,11 @@ class Attention(nn.Module):
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
             o = pad_input(o, indices_q, batch_size, q_len)
-        elif offsets is not None:
+        elif cu_seqlens is not None:
             o = flash_attn_varlen_func(
                 q.squeeze(0), k.squeeze(0), v.squeeze(0),
-                cu_seqlens_q=offsets,
-                cu_seqlens_k=offsets,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
                 causal=True,

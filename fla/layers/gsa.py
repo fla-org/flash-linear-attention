@@ -196,7 +196,7 @@ class GatedSlotAttention(nn.Module):
             v = v.mul_(attention_mask[:, -v.shape[1]:, None, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gsa(
                 q=q,
@@ -207,7 +207,7 @@ class GatedSlotAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 scale=self.scale,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         elif mode == 'chunk':
@@ -220,7 +220,7 @@ class GatedSlotAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 scale=self.scale,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         else:

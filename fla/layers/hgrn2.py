@@ -160,7 +160,7 @@ class HGRN2Attention(nn.Module):
         q, k, i, g = map(lambda x: rearrange(x, '... (h d) -> ... h d', h=self.num_heads), (q, k.to(i), i, g))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gla(
                 q=q,
@@ -169,7 +169,7 @@ class HGRN2Attention(nn.Module):
                 gk=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         elif mode == 'fused_chunk':
@@ -190,7 +190,7 @@ class HGRN2Attention(nn.Module):
                 g=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                offsets=offsets,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         else:
