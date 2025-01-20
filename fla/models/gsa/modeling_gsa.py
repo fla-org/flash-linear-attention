@@ -462,7 +462,6 @@ class GSAVisionMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.net = nn.Sequential(
-            nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps),
             nn.Linear(config.hidden_size, config.mlp_dim),
             nn.GELU(),
             nn.Linear(config.mlp_dim, config.hidden_size),
