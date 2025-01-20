@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
+from einops import einsum, rearrange
 
 from fla.layers.rwkv6 import LoRA
 from fla.modules import GroupNorm
@@ -62,12 +62,7 @@ class RWKV7Attention(nn.Module):
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
-        self.x_r = nn.Parameter(torch.empty(1, 1, self.key_dim))
-        self.x_w = nn.Parameter(torch.empty(1, 1, self.key_dim))
-        self.x_k = nn.Parameter(torch.empty(1, 1, self.key_dim))
-        self.x_v = nn.Parameter(torch.empty(1, 1, self.value_dim))
-        self.x_a = nn.Parameter(torch.empty(1, 1, self.key_dim))
-        self.x_g = nn.Parameter(torch.empty(1, 1, self.value_dim))
+        self.x_x = nn.Parameter(torch.empty(6, self.key_dim))
 
         self.k_k = nn.Parameter(torch.empty(1, 1, self.key_dim))
         self.k_a = nn.Parameter(torch.empty(1, 1, self.key_dim))
@@ -114,7 +109,7 @@ class RWKV7Attention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        batch_size, seq_len, hidden_size = hidden_states.shape
+        batch_size, seq_len, _ = hidden_states.shape
         # launching the triton kernel for just one token will actually be slower
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
@@ -133,12 +128,7 @@ class RWKV7Attention(nn.Module):
 
         # [batch_size, seq_len, hidden_size]
         delta = shifted - hidden_states
-        r = hidden_states + delta * self.x_r
-        w = hidden_states + delta * self.x_w
-        k = hidden_states + delta * self.x_k
-        v = hidden_states + delta * self.x_v
-        a = hidden_states + delta * self.x_a
-        g = hidden_states + delta * self.x_g
+        r, w, k, v, a, g = (hidden_states + einsum(delta, self.x_x, 'b t d, n d -> n b t d')).unbind(0)
 
         r = self.r_proj(r)
         w = -F.softplus(-self.w_lora(w)) - 0.5

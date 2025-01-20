@@ -40,7 +40,7 @@ class RWKV7FeedForward(nn.Module):
 
         self.hidden_size = hidden_size
         if hidden_ratio is None:
-            hidden_ratio = 3.5
+            hidden_ratio = 4
         if intermediate_size is None:
             intermediate_size = int(hidden_size * hidden_ratio)
             intermediate_size = 32 * ((intermediate_size + 32 - 1) // 32)
@@ -49,7 +49,7 @@ class RWKV7FeedForward(nn.Module):
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
-        self.x_k = nn.Parameter(torch.empty(1, 1, hidden_size))
+        self.x_k = nn.Parameter(torch.empty(hidden_size))
 
         self.key = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.value = nn.Linear(intermediate_size, hidden_size, bias=False)
@@ -57,14 +57,8 @@ class RWKV7FeedForward(nn.Module):
 
         self.layer_idx = layer_idx
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        **kwargs
-    ) -> torch.Tensor:
-        delta = self.time_shift(x) - x
-        key = self.act_fn(self.key(x + delta * self.x_k))
-        return self.value(key)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.value(self.act_fn(self.key(x + (self.time_shift(x) - x) * self.x_k)))
 
 
 class RWKV7Block(nn.Module):

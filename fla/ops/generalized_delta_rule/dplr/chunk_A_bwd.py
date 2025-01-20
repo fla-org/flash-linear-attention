@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
-from typing import Optional
-from fla.ops.utils.exp import safe_exp
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
@@ -65,7 +66,6 @@ def chunk_dplr_bwd_kernel_intra(
     if i_t * BT + i_i * BC >= T:
         return
 
-
     # offset calculation
     ge += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
     gi += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
@@ -114,9 +114,9 @@ def chunk_dplr_bwd_kernel_intra(
     b_b = tl.load(p_b, boundary_check=(0, 1)).to(tl.float32)
     b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
     b_a = tl.load(p_a, boundary_check=(0, 1)).to(tl.float32)
-    b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1)).to(tl.float32) 
+    b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1)).to(tl.float32)
     b_dAab = tl.load(p_dAab, boundary_check=(0, 1)).to(tl.float32)
-    b_dAqb = tl.load(p_dAqb, boundary_check=(0, 1)).to(tl.float32) 
+    b_dAqb = tl.load(p_dAqb, boundary_check=(0, 1)).to(tl.float32)
     b_dAak = tl.load(p_dAak, boundary_check=(0, 1)).to(tl.float32)
 
     # inter chunk gradient calculation
@@ -132,9 +132,9 @@ def chunk_dplr_bwd_kernel_intra(
             p_kj = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
             p_bj = tl.make_block_ptr(b, (T, K), (stride_qk, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
             p_gkj = tl.make_block_ptr(gi, (T, K), (stride_qk, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
-            p_dAqikj = tl.make_block_ptr(dAqk, (T, BT), (stride_A, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0)) 
+            p_dAqikj = tl.make_block_ptr(dAqk, (T, BT), (stride_A, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
             p_dAaibj = tl.make_block_ptr(dAab, (T, BT), (stride_A, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
-            p_dAqibj = tl.make_block_ptr(dAqb, (T, BT), (stride_A, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0)) 
+            p_dAqibj = tl.make_block_ptr(dAqb, (T, BT), (stride_A, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
             p_dAaikj = tl.make_block_ptr(dAak, (T, BT), (stride_A, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
             # [BC, BK]
             b_kj = tl.load(p_kj, boundary_check=(0, 1))
@@ -144,9 +144,9 @@ def chunk_dplr_bwd_kernel_intra(
             b_kjg = b_kj * tmp
             b_bjg = b_bj * tmp
             # [BC, BC]
-            b_dAqikj = tl.load(p_dAqikj, boundary_check=(0, 1)) 
+            b_dAqikj = tl.load(p_dAqikj, boundary_check=(0, 1))
             b_dAaibj = tl.load(p_dAaibj, boundary_check=(0, 1))
-            b_dAqibj = tl.load(p_dAqibj, boundary_check=(0, 1)) 
+            b_dAqibj = tl.load(p_dAqibj, boundary_check=(0, 1))
             b_dAaikj = tl.load(p_dAaikj, boundary_check=(0, 1))
             # [BC, BK]
             b_dq += tl.dot(b_dAqikj, b_kjg)
@@ -169,9 +169,9 @@ def chunk_dplr_bwd_kernel_intra(
             p_aj = tl.make_block_ptr(a, (T, K), (stride_qk, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
             p_gij = tl.make_block_ptr(gi, (T, K), (stride_qk, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
             p_gej = tl.make_block_ptr(ge, (T, K), (stride_qk, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
-            p_dAqjki = tl.make_block_ptr(dAqk, (BT, T), (1, stride_A), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1)) 
+            p_dAqjki = tl.make_block_ptr(dAqk, (BT, T), (1, stride_A), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
             p_dAajbi = tl.make_block_ptr(dAab, (BT, T), (1, stride_A), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
-            p_dAqjbi = tl.make_block_ptr(dAqb, (BT, T), (1, stride_A), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))  
+            p_dAqjbi = tl.make_block_ptr(dAqb, (BT, T), (1, stride_A), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
             p_dAajki = tl.make_block_ptr(dAak, (BT, T), (1, stride_A), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
             b_qj = tl.load(p_qj, boundary_check=(0, 1))
             b_aj = tl.load(p_aj, boundary_check=(0, 1))
@@ -179,12 +179,12 @@ def chunk_dplr_bwd_kernel_intra(
             b_gej = tl.load(p_gej, boundary_check=(0, 1))
             b_gij = tl.where(m_j[:, None] & m_k, b_gij, float('-inf'))
             b_gej = tl.where(m_j[:, None] & m_k, b_gej, float('-inf'))
-            b_qjg = b_qj * tl.exp(b_gij - b_gn[None, :])  
+            b_qjg = b_qj * tl.exp(b_gij - b_gn[None, :])
             b_ajg = b_aj * tl.exp(b_gej - b_gn[None, :])
             # [BC, BC]
-            b_dAqjki = tl.load(p_dAqjki, boundary_check=(0, 1)) 
+            b_dAqjki = tl.load(p_dAqjki, boundary_check=(0, 1))
             b_dAajbi = tl.load(p_dAajbi, boundary_check=(0, 1))
-            b_dAqjbi = tl.load(p_dAqjbi, boundary_check=(0, 1)) 
+            b_dAqjbi = tl.load(p_dAqjbi, boundary_check=(0, 1))
             b_dAajki = tl.load(p_dAajki, boundary_check=(0, 1))
             b_dk += tl.dot(b_dAqjki, b_qjg)
             b_dk += tl.dot(b_dAajki, b_ajg)
@@ -193,7 +193,6 @@ def chunk_dplr_bwd_kernel_intra(
         tmp = tl.exp(b_gn[None, :] - b_gi)
         b_dk *= tmp
         b_db *= tmp
-
 
     # intra chunk gradient calculation
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
@@ -251,7 +250,7 @@ def chunk_dplr_bwd_kernel_intra(
     tl.store(p_dq, (b_dq).to(p_dq.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_da, b_da.to(p_da.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0, 1))    
+    tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0, 1))
     b_dgk = b_dq * b_q + b_da * b_a - b_dk * b_k - b_db * b_b
     b_dgk_offset = b_da * b_a
     tl.store(p_dgk, b_dgk.to(p_dgk.dtype.element_ty), boundary_check=(0, 1))
@@ -393,15 +392,8 @@ def chunk_dplr_bwd_dqk_intra(
         NC=NC,
         HEAD_FIRST=head_first
     )
-    if dq.isnan().any() or dk.isnan().any() or da.isnan().any() or db.isnan().any():
-        print("nan detected")
-        breakpoint()
 
-    grid2 = lambda meta: (
-        NT,
-        triton.cdiv(K, meta['BK']),
-        B * H
-    )
+    def grid2(meta): return (NT, triton.cdiv(K, meta['BK']), B * H)
     dgk_output = torch.empty_like(dgk)
 
     chunk_dplr_bwd_dgk_kernel[grid2](
