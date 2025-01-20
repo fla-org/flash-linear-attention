@@ -83,7 +83,13 @@ class RWKV7Attention(nn.Module):
         self.a_lora = LoRA(hidden_size, self.key_dim, low_rank_dim=a_low_rank_dim, activation=None)
         self.g_lora = LoRA(hidden_size, self.value_dim, low_rank_dim=gate_low_rank_dim, activation='sigmoid', bias=False)
 
-        self.g_norm = GroupNorm(self.num_heads, self.value_dim, elementwise_affine=elementwise_affine, bias=True, eps=head_dim*norm_eps)
+        self.g_norm = GroupNorm(
+            num_groups=self.num_heads,
+            num_channels=self.value_dim,
+            elementwise_affine=elementwise_affine,
+            bias=True,
+            eps=self.head_dim*norm_eps
+        )
 
         self.apply(self._initialize_weights)
 
@@ -185,7 +191,7 @@ class RWKV7Attention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=hidden_states[:, -1],
                 layer_idx=self.layer_idx,
-                offset=r.shape[2]
+                offset=r.shape[1]
             )
 
         o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))
