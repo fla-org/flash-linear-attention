@@ -4,6 +4,9 @@ from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
 from fla.models.delta_net import (DeltaNetConfig, DeltaNetForCausalLM,
                                   DeltaNetModel)
+from fla.models.gated_deltanet import (GatedDeltaNetConfig,
+                                       GatedDeltaNetForCausalLM,
+                                       GatedDeltaNetModel)
 from fla.models.gla import GLAConfig, GLAForCausalLM, GLAModel
 from fla.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
 from fla.models.hgrn import HGRNConfig, HGRNForCausalLM, HGRNModel
@@ -19,7 +22,6 @@ from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM, RWKV7Model
 from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
 from fla.models.transformer import (TransformerConfig, TransformerForCausalLM,
                                     TransformerModel)
-from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
 
 from fla.models.abc import ABCVisionConfig, ABCForImageClassification, ABCForMaskedImageModeling, ABCVisionModel
 from fla.models.bitnet import BitNetVisionConfig, BitNetForImageClassification, BitNetForMaskedImageModeling, BitNetVisionModel
@@ -38,6 +40,7 @@ __all__ = [
     'ABCConfig', 'ABCForCausalLM', 'ABCModel',
     'BitNetConfig', 'BitNetForCausalLM', 'BitNetModel',
     'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
+    'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
     'GLAConfig', 'GLAForCausalLM', 'GLAModel',
     'GSAConfig', 'GSAForCausalLM', 'GSAModel',
     'HGRNConfig', 'HGRNForCausalLM', 'HGRNModel',
@@ -50,7 +53,6 @@ __all__ = [
     'RWKV7Config', 'RWKV7ForCausalLM', 'RWKV7Model',
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
-    'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
     'ABCVisionConfig', 'ABCForImageClassification', 'ABCForMaskedImageModeling', 'ABCVisionModel',
     'BitNetVisionConfig', 'BitNetForImageClassification', 'BitNetForMaskedImageModeling', 'BitNetVisionModel',
     'DeltaNetVisionConfig', 'DeltaNetForImageClassification', 'DeltaNetForMaskedImageModeling', 'DeltaNetVisionModel',
