@@ -640,7 +640,7 @@ def fused_recurrent_rwkv6(
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
         cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
@@ -671,7 +671,7 @@ def fused_recurrent_rwkv6(
                                           head_first=False)
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, g))
-        # for a batch with 4 sequences, cu_seqlens with 5 start/end positions are expected
+        # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
         >>> o_var, ht_var = fused_recurrent_rwkv6(q, k, v, g, u,
                                                   initial_state=h0,

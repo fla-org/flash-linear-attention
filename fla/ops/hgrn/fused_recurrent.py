@@ -254,7 +254,7 @@ def fused_recurrent_hgrn(
     g: torch.Tensor,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -268,12 +268,9 @@ def fused_recurrent_hgrn(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, D]`. Default: `False`.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
 
     Returns:
         o (torch.Tensor):
@@ -292,11 +289,11 @@ def fused_recurrent_hgrn(
         >>> g = F.logsigmoid(torch.randn(B, T, D, device='cuda'))
         >>> h0 = torch.randn(B, D, device='cuda')
         >>> o, ht = fused_recurrent_hgrn(x, g, initial_state=h0, output_final_state=True)
-        # for variable-length inputs, the batch size `B` is expected to be 1 and `offsets` is required
+        # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> x, g = map(lambda x: rearrange(x, 'b t d -> 1 (b t) d'), (x, g))
-        # for a batch with 4 sequences, offsets with 5 start/end positions are expected
-        >>> offsets = x.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = fused_recurrent_hgrn(x, g, initial_state=h0, output_final_state=True, offsets=offsets)
+        # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
+        >>> cu_seqlens = x.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
+        >>> o_var, ht_var = fused_recurrent_hgrn(x, g, initial_state=h0, output_final_state=True, cu_seqlens=cu_seqlens)
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
@@ -305,5 +302,5 @@ def fused_recurrent_hgrn(
         g,
         initial_state,
         output_final_state,
-        offsets
+        cu_seqlens
     )

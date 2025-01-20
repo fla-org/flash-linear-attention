@@ -8,8 +8,8 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 from fla.ops.utils.exp import safe_exp
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 
 
 @triton.heuristics({
@@ -49,13 +49,13 @@ def parallel_simple_gla_fwd_kernel(
     HEAD_FIRST: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     USE_G: tl.constexpr
-):    
+):
     tl.static_assert(not (USE_OFFSETS and HEAD_FIRST), "USE_OFFSETS and HEAD_FIRST cannot be True at the same time")
     i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H
     o += i_k * B * T * H * V
-    
+
     if USE_OFFSETS:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -82,7 +82,7 @@ def parallel_simple_gla_fwd_kernel(
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
-    
+
     # [BT]
     o_q = i_t * BT + tl.arange(0, BT)
     # [BS]
@@ -121,7 +121,6 @@ def parallel_simple_gla_fwd_kernel(
             p_a = tl.make_block_ptr(attn, (T, T), (T, 1), (i_t * BT, i_s), (BT, BS), (1, 0))
             tl.store(p_a, b_s.to(p_a.dtype.element_ty), boundary_check=(0, 1))
         o_k += BS
-
 
     for i_s in range(i_t * BT - BS, -BS, -BS):
         p_k = tl.make_block_ptr(k, (K, T), (1, stride_qk), (i_k * BK, i_s), (BK, BS), (0, 1))
@@ -178,7 +177,7 @@ def parallel_simple_gla_bwd_kernel_dq(
     b_do = tl.load(p_do, boundary_check=(0, 1))
     # [BT, BK]
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
-    
+
     for i_s in range(0, i_t * BT, BS):
         p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_s, i_k * BK), (BS, BK), (1, 0))
         p_v = tl.make_block_ptr(v, (V, T), (1, stride_vo), (i_v * BV, i_s), (BV, BS), (0, 1))
@@ -320,7 +319,7 @@ def parallel_simple_gla_bwd_kernel_dkv(
         # [BS, BV]
         b_do = tl.load(p_do, boundary_check=(0, 1))
         # [BS]
-        b_ds = tl.dot(b_v, tl.trans(b_do)) 
+        b_ds = tl.dot(b_v, tl.trans(b_do))
         b_s = tl.dot(b_k, tl.trans(b_q))
         if USE_G:
             p_gq = tl.make_block_ptr(g, (T,), (stride_g,), (i_s,), (BS,), (0,))
@@ -414,7 +413,7 @@ def parallel_simple_gla_bwd_kernel(
     dv += (i_bh * T * V) if HEAD_FIRST else (bos * H + i_h) * V
     if USE_G:
         g += (i_bh * T) if HEAD_FIRST else (bos * H + i_h)
-        dg += (i_bh * T) if HEAD_FIRST else (bos * H + i_h) 
+        dg += (i_bh * T) if HEAD_FIRST else (bos * H + i_h)
     stride_qk = K if HEAD_FIRST else H * K
     stride_vo = V if HEAD_FIRST else H * V
     stride_g = 1 if HEAD_FIRST else H
@@ -510,7 +509,7 @@ def parallel_simple_gla_fwd(
     if g is not None:
         g = chunk_local_cumsum(g, chunk_size, offsets=offsets, head_first=head_first)
     grid = (NK * NV, NT, B * H)
-    o = torch.empty(NK, *v.shape, dtype=v.dtype if NK==1 else torch.float, device=q.device)
+    o = torch.empty(NK, *v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     attn = q.new_zeros(NK, B, H, T, T) if output_attentions else None
 
     parallel_simple_gla_fwd_kernel[grid](
@@ -564,9 +563,9 @@ def parallel_simple_gla_bwd(
     NV = triton.cdiv(V, BV)
     assert BT % BS == 0
 
-    dq = torch.empty(NV, * q.shape, dtype=q.dtype if NV==1 else torch.float, device=q.device)
-    dk = torch.empty(NV, * k.shape, dtype=k.dtype if NV==1 else torch.float, device=q.device)
-    dv = torch.empty(NK, * v.shape, dtype=v.dtype if NK==1 else torch.float, device=q.device)
+    dq = torch.empty(NV, * q.shape, dtype=q.dtype if NV == 1 else torch.float, device=q.device)
+    dk = torch.empty(NV, * k.shape, dtype=k.dtype if NV == 1 else torch.float, device=q.device)
+    dv = torch.empty(NK, * v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     dg = torch.empty(NK*NV, *g.shape, dtype=torch.float, device=q.device) if g is not None else None
 
     if offsets is None:
@@ -628,15 +627,15 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
 
         o, g, attn = parallel_simple_gla_fwd(
-            q=q, 
-            k=k, 
-            v=v, 
-            g=g, 
-            scale=scale, 
-            output_attentions=output_attentions, 
-            head_first=head_first, 
-            offsets=offsets, 
-            indices=indices, 
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            scale=scale,
+            output_attentions=output_attentions,
+            head_first=head_first,
+            offsets=offsets,
+            indices=indices,
             chunk_size=chunk_size)
         ctx.save_for_backward(q, k, v, g, offsets, indices)
         ctx.scale = scale
@@ -650,14 +649,14 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
     def backward(ctx, do, da=None):
         q, k, v, g, offsets, indices = ctx.saved_tensors
         dq, dk, dv, dg = parallel_simple_gla_bwd(
-            q=q, 
-            k=k, 
-            v=v, 
-            g=g, 
-            do=do, 
-            scale=ctx.scale, 
-            chunk_size=ctx.chunk_size, 
-            offsets=offsets, 
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            do=do,
+            scale=ctx.scale,
+            chunk_size=ctx.chunk_size,
+            offsets=offsets,
             indices=indices,
             head_first=ctx.head_first)
         return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.dtype) if dg is not None else None, None, None, None, None
@@ -670,8 +669,8 @@ def parallel_simple_gla(
     g: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
     output_attentions: bool = False,
-    head_first: bool = True,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -691,12 +690,9 @@ def parallel_simple_gla(
             Whether to output the materialized attention scores of shape [B, H, T, T]. Default: `False`.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `True`.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
 
     Returns:
         o (torch.Tensor):
@@ -706,12 +702,12 @@ def parallel_simple_gla(
     """
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    if offsets is not None:
-        assert q.shape[0] == 1, "batch size must be 1 when offsets are provided"
-        assert not head_first, "head_first must be False when offsets are provided"
+    if cu_seqlens is not None:
+        assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
+        assert not head_first, "head_first must be False when cu_seqlens are provided"
     if g is not None:
         g = g.float()
     if output_attentions:
-        assert offsets is None, "output_attentions=True is not supported with variable-length sequences"
-    o, attn = ParallelSimpleGLAFunction.apply(q, k, v, g, scale, output_attentions, head_first, offsets)
+        assert cu_seqlens is None, "output_attentions=True is not supported with variable-length sequences"
+    o, attn = ParallelSimpleGLAFunction.apply(q, k, v, g, scale, output_attentions, head_first, cu_seqlens)
     return o, attn

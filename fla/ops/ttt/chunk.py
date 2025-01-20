@@ -68,10 +68,10 @@ def chunk_ttt_linear_fwd_kernel_h(
     if USE_INITIAL_STATE:
         p_h0 = tl.make_block_ptr(h0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
         b_h = tl.load(p_h0, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-    
+
     offs = tl.arange(0, BV)
-    b_w = tl.load(w + i_h * V + offs, mask=offs<V, other=0.).to(tl.float32)
-    b_b = tl.load(b + i_h * V + offs, mask=offs<V, other=0.).to(tl.float32)
+    b_w = tl.load(w + i_h * V + offs, mask=offs < V, other=0.).to(tl.float32)
+    b_b = tl.load(b + i_h * V + offs, mask=offs < V, other=0.).to(tl.float32)
 
     for i_t in range(NT):
         if HEAD_FIRST:
@@ -87,13 +87,11 @@ def chunk_ttt_linear_fwd_kernel_h(
                 p_k = tl.make_block_ptr(k+i_nh*T*K, (K, T), (1, K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
                 p_v = tl.make_block_ptr(v+i_nh*T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
                 p_v_new = tl.make_block_ptr(v_new+i_nh*T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-                p_eta = tl.make_block_ptr(eta+i_nh*T, (T,), (1,), (i_t * BT + i_c * BC,), (BC,), (0,))
                 p_eta_last = eta+i_nh*T + T - 1 if is_last_c else eta+i_nh*T + i_t*BT + i_c*BC + BC - 1
             else:
                 p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
                 p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
                 p_v_new = tl.make_block_ptr(v_new+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC, i_v * BV), (BC, BV), (1, 0))
-                p_eta = tl.make_block_ptr(eta+bos*H+i_h, (T,), (H,), (i_t*BT+i_c*BC, ), (BC,), (0,))
                 p_eta_last = eta+bos*H+i_h + (T-1)*H if is_last_c else eta+bos*H+i_h+(i_t*BT+i_c*BC+BC-1)*H
             b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
             b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
@@ -109,8 +107,9 @@ def chunk_ttt_linear_fwd_kernel_h(
 
             b_v = b_kh_hat * b_w[None, :].to(b_k.dtype) + b_b[None, :].to(b_k.dtype) - b_v + tl.trans(b_k)
             b_v = tl.where((offs < V)[None, :], b_v * b_w[None, :].to(b_k.dtype), 0.)
-            b_v2 = rstd * (V * b_v - tl.sum(b_v, axis=1, keep_dims=True) - b_kh_hat * tl.sum(b_v * b_kh_hat, axis=1, keep_dims=True)) / V
-            tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))            
+            b_v2 = rstd * (V * b_v - tl.sum(b_v, axis=1, keep_dims=True) - b_kh_hat *
+                           tl.sum(b_v * b_kh_hat, axis=1, keep_dims=True)) / V
+            tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
             b_eta_last = tl.load(p_eta_last)
             b_hc = b_hc - 2 * tl.dot(b_eta_last * b_k, b_v2.to(b_k.dtype), allow_tf32=False)
         b_h += b_hc
@@ -157,7 +156,7 @@ def chunk_ttt_linear_fwd_kernel_o(
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    
+
     if USE_OFFSETS:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
@@ -168,11 +167,11 @@ def chunk_ttt_linear_fwd_kernel_o(
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
-    
+
     offs = tl.arange(0, BV)
-    b_w = tl.load(w + i_h * V + offs, mask=offs<V, other=0.).to(tl.float32)
-    b_b = tl.load(b + i_h * V + offs, mask=offs<V, other=0.).to(tl.float32)
-    
+    b_w = tl.load(w + i_h * V + offs, mask=offs < V, other=0.).to(tl.float32)
+    b_b = tl.load(b + i_h * V + offs, mask=offs < V, other=0.).to(tl.float32)
+
     # offset calculation
     q += (i_bh * T * K) if HEAD_FIRST else ((bos * H + i_h) * K)
     k += (i_bh * T * K) if HEAD_FIRST else ((bos * H + i_h) * K)
@@ -183,9 +182,9 @@ def chunk_ttt_linear_fwd_kernel_o(
     stride_qk = K if HEAD_FIRST else H*K
     stride_vo = V if HEAD_FIRST else H*V
     stride_eta = 1 if HEAD_FIRST else H
-    
+
     p_q = tl.make_block_ptr(q, (T, K), (stride_qk, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (K, T), (1, stride_qk), (0, i_t * BT), (BK, BT), (0, 1)) 
+    p_k = tl.make_block_ptr(k, (K, T), (1, stride_qk), (0, i_t * BT), (BK, BT), (0, 1))
     p_eta = tl.make_block_ptr(eta, (T,), (stride_eta,), (i_t * BT,), (BT,), (0,))
     p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
     # [BT, BK]
@@ -345,7 +344,7 @@ def chunk_ttt_linear_fwd_o(
     assert NV == 1, 'NV > 1 is not supported by TTT update rule.'
 
     o = torch.empty_like(v)
-    
+
     grid = (NV, NT, B * H)
     chunk_ttt_linear_fwd_kernel_o[grid](
         q,
@@ -481,7 +480,7 @@ def chunk_ttt_linear(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = True,
 ):
     r"""
@@ -507,12 +506,9 @@ def chunk_ttt_linear(
             Initial state of shape `(B, H, K, V)`. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `(B, H, K, V)`. Default: `False`.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `True`.
@@ -528,15 +524,15 @@ def chunk_ttt_linear(
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."
     if isinstance(eta, float):
         eta = torch.full_like(q[:, :, :, :1], eta)
-    if offsets is not None:
+    if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
+            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                              f"Please flatten variable-length inputs before processing.")
         if head_first:
             raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
-        if initial_state is not None and initial_state.shape[0] != len(offsets) - 1:
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(offsets) - 1} rather than {initial_state.shape[0]}.")
+                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     else:
@@ -553,7 +549,7 @@ def chunk_ttt_linear(
         eps,
         initial_state,
         output_final_state,
-        offsets,
+        cu_seqlens,
         head_first,
     )
     return o, final_state

@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024, Songlin Yang, Yu Zhang
-import torch
+
 from typing import Optional, Tuple
+
+import torch
+
 from fla.ops.simple_gla.parallel import parallel_simple_gla
+
 
 def parallel_retention(
     q: torch.Tensor,
@@ -10,8 +14,8 @@ def parallel_retention(
     v: torch.Tensor,
     scale: Optional[float] = None,
     output_attentions: bool = False,
-    head_first: bool = True,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -26,14 +30,11 @@ def parallel_retention(
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         output_attentions (bool):
             Whether to output the materialized attention scores of shape [B, H, T, T]. Default: `False`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `True`.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
 
     Returns:
         o (torch.Tensor):
@@ -45,7 +46,8 @@ def parallel_retention(
         n_heads = q.shape[1]
     else:
         n_heads = q.shape[2]
-    s = (1 - q.new_tensor(2., dtype=torch.float, device=q.device).pow(-5. - q.new_tensor(range(n_heads), dtype=torch.float, device=q.device))).log()
+    s = (1 - q.new_tensor(2., dtype=torch.float, device=q.device).pow(-5. -
+         q.new_tensor(range(n_heads), dtype=torch.float, device=q.device))).log()
     if head_first:
         g = s[None, :, None].expand(q.shape[0], q.shape[1], q.shape[2]).contiguous()
     else:
@@ -59,5 +61,5 @@ def parallel_retention(
         g=g,
         output_attentions=output_attentions,
         head_first=head_first,
-        offsets=offsets
+        cu_seqlens=cu_seqlens
     )

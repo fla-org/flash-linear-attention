@@ -6,6 +6,7 @@ from typing import Optional
 import torch
 import triton
 
+from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import (chunk_gated_delta_rule_bwd_dhu,
                                           chunk_gated_delta_rule_fwd_h)
 from fla.ops.common.chunk_o import (chunk_bwd_dqkwg, chunk_bwd_dv_local,
@@ -15,7 +16,6 @@ from fla.ops.gated_delta_rule.wy_fast import (bwd_prepare_wy_repr,
                                               fwd_recompute_w_u)
 from fla.ops.utils import chunk_local_cumsum
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
-from fla.modules.l2norm import l2norm_fwd, l2norm_bwd
 
 
 def chunk_gated_delta_rule_fwd(
@@ -264,7 +264,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             head_first=ctx.head_first,
             chunk_size=ctx.chunk_size
         )
-        if ctx.use_qk_l2norm_in_kernel: 
+        if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q_orig, dq)
             dk = l2norm_bwd(k_orig, dk)
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
@@ -279,7 +279,7 @@ def chunk_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     use_qk_l2norm_in_kernel: bool = False
 ):
@@ -304,12 +304,9 @@ def chunk_gated_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `True`.
@@ -337,29 +334,29 @@ def chunk_gated_delta_rule(
                                            initial_state=h0,
                                            output_final_state=True,
                                            head_first=False)
-        # for variable-length inputs, the batch size `B` is expected to be 1 and `offsets` is required
+        # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
-        # for a batch with 4 sequences, offsets with 5 start/end positions are expected
-        >>> offsets = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
+        # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
+        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
         >>> o_var, ht_var = chunk_gated_delta_rule(q, k, v, g, beta,
                                                    initial_state=h0,
                                                    output_final_state=True,
-                                                   offsets=offsets,
+                                                   cu_seqlens=cu_seqlens,
                                                    head_first=False)
     """
     assert q.dtype == k.dtype == v.dtype
     assert q.dtype != torch.float32, "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
     assert len(beta.shape) == 3, "beta must be of shape [B, H, T] if head_first=True, or [B, T, H] if head_first=False."
 
-    if offsets is not None:
+    if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
+            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                              f"Please flatten variable-length inputs before processing.")
         if head_first:
             raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
-        if initial_state is not None and initial_state.shape[0] != len(offsets) - 1:
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(offsets) - 1} rather than {initial_state.shape[0]}.")
+                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     else:
@@ -373,7 +370,7 @@ def chunk_gated_delta_rule(
         scale,
         initial_state,
         output_final_state,
-        offsets,
+        cu_seqlens,
         head_first,
         use_qk_l2norm_in_kernel
     )

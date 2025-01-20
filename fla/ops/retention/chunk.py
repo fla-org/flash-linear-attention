@@ -2,8 +2,11 @@
 # Copyright (c) 2024, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
+
 import torch
+
 from fla.ops.simple_gla.chunk import chunk_simple_gla
+
 
 def chunk_retention(
     q: torch.Tensor,
@@ -12,7 +15,7 @@ def chunk_retention(
     scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -32,12 +35,9 @@ def chunk_retention(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `True`.
@@ -53,7 +53,8 @@ def chunk_retention(
         n_heads = q.shape[1]
     else:
         n_heads = q.shape[2]
-    s = (1 - q.new_tensor(2., dtype=torch.float, device=q.device).pow(-5. - q.new_tensor(range(n_heads), dtype=torch.float, device=q.device))).log()
+    s = (1 - q.new_tensor(2., dtype=torch.float, device=q.device).pow(-5. -
+         q.new_tensor(range(n_heads), dtype=torch.float, device=q.device))).log()
     if head_first:
         g = s[None, :, None].expand(q.shape[0], q.shape[1], q.shape[2]).contiguous()
     else:
@@ -67,5 +68,5 @@ def chunk_retention(
         initial_state=initial_state,
         output_final_state=output_final_state,
         head_first=head_first,
-        offsets=offsets
+        cu_seqlens=cu_seqlens
     )

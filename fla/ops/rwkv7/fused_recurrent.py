@@ -42,7 +42,7 @@ def fused_recurrent_rwkv7(
         output_final_state (bool):
             whether to output the final state.
         cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (bool):
             whether to use head first. Recommended to be False to avoid extra transposes.
@@ -57,6 +57,6 @@ def fused_recurrent_rwkv7(
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        head_first=head_first,
-        offsets=cu_seqlens
+        cu_seqlens=cu_seqlens,
+        head_first=head_first
     )
