@@ -49,7 +49,7 @@ class RWKV7FeedForward(nn.Module):
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
-        self.x_k = nn.Parameter(torch.empty(hidden_size))
+        self.x_k = nn.Parameter(torch.empty(1, 1, hidden_size))
 
         self.key = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.value = nn.Linear(intermediate_size, hidden_size, bias=False)
@@ -57,8 +57,14 @@ class RWKV7FeedForward(nn.Module):
 
         self.layer_idx = layer_idx
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.value(self.act_fn(self.key(x + (self.time_shift(x) - x) * self.x_k)))
+    def forward(
+        self,
+        x: torch.Tensor,
+        **kwargs
+    ) -> torch.Tensor:
+        delta = self.time_shift(x) - x
+        key = self.act_fn(self.key(x + delta * self.x_k))
+        return self.value(key)
 
 
 class RWKV7Block(nn.Module):
@@ -259,6 +265,8 @@ class RWKV7Model(RWKV7PreTrainedModel):
                     **kwargs
                 )
             else:
+                import pdb
+                breakpoint()
                 hidden_states, attentions, past_key_values = layer(
                     hidden_states,
                     attention_mask=attention_mask,

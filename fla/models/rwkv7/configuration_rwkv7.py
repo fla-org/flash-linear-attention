@@ -31,13 +31,13 @@ class RWKV7Config(PretrainedConfig):
         attn: Optional[Dict] = None,
         use_cache: bool = True,
         pad_token_id: int = None,
-        bos_token_id: int = 1,
-        eos_token_id: int = 2,
+        bos_token_id: int = 0,
+        eos_token_id: int = 0,
         tie_word_embeddings: bool = False,
         initializer_range: float = 0.02,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
-        vocab_size: int = 32000,
+        vocab_size: int = 65536,
         **kwargs
     ):
         self.attn_mode = attn_mode
