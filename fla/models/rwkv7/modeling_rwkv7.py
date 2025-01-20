@@ -265,8 +265,6 @@ class RWKV7Model(RWKV7PreTrainedModel):
                     **kwargs
                 )
             else:
-                import pdb
-                breakpoint()
                 hidden_states, attentions, past_key_values = layer(
                     hidden_states,
                     attention_mask=attention_mask,
