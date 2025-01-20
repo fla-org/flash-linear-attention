@@ -37,7 +37,7 @@ from fla.models.hgrn2 import HGRN2VisionConfig, HGRN2ForImageClassification, HGR
 from fla.models.linear_attn import LinearAttentionVisionConfig, LinearAttentionForImageClassification, LinearAttentionForMaskedImageModeling, LinearAttentionVisionModel
 from fla.models.retnet import RetNetVisionConfig, RetNetForImageClassification, RetNetForMaskedImageModeling, RetNetVisionModel
 from fla.models.rwkv6 import RWKV6VisionConfig, RWKV6ForImageClassification, RWKV6ForMaskedImageModeling, RWKV6VisionModel
-from fla.models.rwkv7 import RWKV7VisionConfig, RWKV7ForImageClassification, RWKV7ForMaskedImageModeling, RWKV7VisionModel
+# from fla.models.rwkv7 import RWKV7VisionConfig, RWKV7ForImageClassification, RWKV7ForMaskedImageModeling, RWKV7VisionModel
 from fla.models.transformer import TransformerVisionConfig, TransformerForImageClassification, TransformerForMaskedImageModeling, TransformerVisionModel
 
 __all__ = [
@@ -68,6 +68,6 @@ __all__ = [
     'LinearAttentionVisionConfig', 'LinearAttentionForImageClassification', 'LinearAttentionForMaskedImageModeling', 'LinearAttentionVisionModel',
     'RetNetVisionConfig', 'RetNetForImageClassification', 'RetNetForMaskedImageModeling', 'RetNetVisionModel',
     'RWKV6VisionConfig', 'RWKV6ForImageClassification', 'RWKV6ForMaskedImageModeling', 'RWKV6VisionModel',
-    'RWKV7VisionConfig', 'RWKV7ForImageClassification', 'RWKV7ForMaskedImageModeling', 'RWKV7VisionModel',
+    # 'RWKV7VisionConfig', 'RWKV7ForImageClassification', 'RWKV7ForMaskedImageModeling', 'RWKV7VisionModel',
     'TransformerVisionConfig', 'TransformerForImageClassification', 'TransformerForMaskedImageModeling', 'TransformerVisionModel'
 ]
