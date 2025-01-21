@@ -43,6 +43,10 @@ def chunk_linear_attn(
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`
     """
+
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+
     o, final_state = chunk_simple_gla(
         q=q,
         k=k,
