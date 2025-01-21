@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Dict, Optional, Tuple, Union, Unpack
+from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,9 @@ from fla.models.utils import Cache
 from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
                          LayerNorm)
 from fla.modules.activations import ACT2FN
+
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
 
 logger = logging.get_logger(__name__)
 
@@ -116,6 +119,7 @@ class RWKV7Block(nn.Module):
         past_key_values: Optional[Cache] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        v_first: torch.Tensor = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = self.pre_norm(hidden_states) if hasattr(self, 'pre_norm') else hidden_states
@@ -126,6 +130,7 @@ class RWKV7Block(nn.Module):
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            v_first=v_first,
             **kwargs
         )
         hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
@@ -245,7 +250,7 @@ class RWKV7Model(RWKV7PreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
 
-        kwargs['v_state'] = torch.empty_like(hidden_states)
+        v_first = torch.empty_like(hidden_states)
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -258,6 +263,7 @@ class RWKV7Model(RWKV7PreTrainedModel):
                     past_key_values,
                     use_cache,
                     output_attentions,
+                    v_first,
                     **kwargs
                 )
             else:
@@ -267,6 +273,7 @@ class RWKV7Model(RWKV7PreTrainedModel):
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    v_first=v_first,
                     **kwargs
                 )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Dict, Optional, Tuple, Union, Unpack, List, Unpack, Dict
+from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union, List, Unpack, Dict
 
 import torch
 import torch.nn as nn
@@ -27,6 +27,9 @@ from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
                          LayerNorm)
 from fla.modules.activations import ACT2FN
 from ..utils import ImageEmbeddings, Pooler, prepare_hidden_states_for_cross_scan, prepare_hidden_states_for_cross_merge
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
+
 logger = logging.get_logger(__name__)
 
 

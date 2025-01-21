@@ -1,12 +1,14 @@
-
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from typing import Optional, Tuple
+
 from fla.utils import tensor_cache
+
 
 @tensor_cache
 def prepare_varlen_inputs(
@@ -23,8 +25,9 @@ def prepare_varlen_inputs(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [2, 4, 8, 16]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV', "V"],
 )

@@ -60,7 +60,8 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 | 2024 | ICML    | Mamba2         | Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality |      [link](https://arxiv.org/abs/2405.21060)      |                        [official](https://github.com/state-spaces/mamba)                        |         [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba2)          |
 | 2024 | NeurIPS | GSA            | Gated Slot Attention for Efficient Linear-Time Sequence Modeling                                          |      [link](https://arxiv.org/abs/2409.07146)      |     [official](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)      |           [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)           |
 | 2024 |         | Gated DeltaNet | Gated Delta Networks: Improving Mamba2 with Delta Rule                                                    |      [link](https://arxiv.org/abs/2412.06464)      |                       [official](https://github.com/NVlabs/GatedDeltaNet)                       |     [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gated_deltanet)      |
-
+| 2024 |  | RWKV7 |  |  | [official](https://github.com/BlinkDL/RWKV-LM/tree/main/RWKV-v7)| [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/rwkv7) |
+ 
 ## Installation
 
 The following requirements should be satisfied 

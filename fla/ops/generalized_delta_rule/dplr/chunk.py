@@ -1,8 +1,8 @@
 
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import triton
@@ -19,7 +19,8 @@ from fla.ops.generalized_delta_rule.dplr.chunk_o_fwd import chunk_dplr_fwd_o
 from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
 from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import fwd_prepare_wy_repr
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd, contiguous,
+                       tensor_cache)
 
 
 def chunk_dplr_fwd(
@@ -39,7 +40,7 @@ def chunk_dplr_fwd(
 ):
     T = q.shape[2] if head_first else q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, head_first=head_first)
+    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, indices=indices, head_first=head_first)
 
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
         q=q,
@@ -93,6 +94,16 @@ def chunk_dplr_fwd(
     return o, final_state
 
 
+@tensor_cache
+def prepare_varlen_inputs(
+    offsets: torch.LongTensor,
+    chunk_size: int
+) -> Tuple[torch.LongTensor, torch.LongTensor]:
+    indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], chunk_size).tolist()])
+    indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
+    return indices
+
+
 class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
@@ -118,10 +129,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
         # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = None
-        if offsets is not None:
-            indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], chunk_size).tolist()])
-            indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
+        indices = prepare_varlen_inputs(offsets, chunk_size) if offsets is not None else None
 
         o, final_state = chunk_dplr_fwd(
             q=q,
@@ -162,7 +170,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         scale = ctx.scale
 
         # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
-        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, head_first=head_first)
+        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, indices=indices, head_first=head_first)
 
         A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
             q=q,

@@ -36,20 +36,20 @@ def prepare_inputs(
 ):
     if varlen:
         tokens = torch.randint(high=vocab_size, size=(1, batch_size * seq_len), device=device)
-        offsets = torch.cat([
+        cu_seqlens = torch.cat([
             torch.tensor([0]),
             torch.randperm(batch_size * seq_len - 16)[:torch.randint(8, 64, size=(1,))] + 16,
             torch.tensor([batch_size * seq_len])
         ], 0).sort()[0].to(dtype=torch.int32, device=device)
         if context_len is not None:
-            offsets = torch.cat(
-                [torch.arange(i, j, context_len) for i, j in zip(offsets[:-1].tolist(), offsets[1:].tolist())] +
+            cu_seqlens = torch.cat(
+                [torch.arange(i, j, context_len) for i, j in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())] +
                 [torch.tensor([len(tokens[0])])]
             ).to(dtype=torch.int32, device=device)
     else:
         tokens = torch.randint(high=vocab_size, size=(batch_size, seq_len), device=device)
-        offsets = None
-    return tokens, offsets
+        cu_seqlens = None
+    return tokens, cu_seqlens
 
 
 def profile(
@@ -91,7 +91,7 @@ def profile(
     torch.cuda.synchronize(device)
     for _ in bar:
         # forward pass
-        tokens, offsets = prepare_inputs(
+        tokens, cu_seqlens = prepare_inputs(
             batch_size=batch_size,
             seq_len=seq_len,
             context_len=context_len,
@@ -99,7 +99,7 @@ def profile(
             vocab_size=config.vocab_size,
             device=device
         )
-        outputs = model(tokens, labels=tokens, offsets=offsets)
+        outputs = model(tokens, labels=tokens, cu_seqlens=cu_seqlens)
         # backward pass
         accelerator.backward(outputs.loss)
         optimizer.step()
@@ -112,7 +112,7 @@ def profile(
     torch.cuda.synchronize(device)
     for _ in bar:
         # forward pass
-        tokens, offsets = prepare_inputs(
+        tokens, cu_seqlens = prepare_inputs(
             batch_size=batch_size,
             seq_len=seq_len,
             context_len=context_len,
@@ -120,7 +120,7 @@ def profile(
             vocab_size=config.vocab_size,
             device=device
         )
-        outputs = model(tokens, labels=tokens, offsets=offsets)
+        outputs = model(tokens, labels=tokens, cu_seqlens=cu_seqlens)
         # backward pass
         accelerator.backward(outputs.loss)
         optimizer.step()

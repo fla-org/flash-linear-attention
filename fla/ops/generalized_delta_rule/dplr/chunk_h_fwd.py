@@ -1,11 +1,11 @@
-
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from typing import Optional, Tuple
 
 
 @triton.heuristics({
@@ -15,10 +15,11 @@ from typing import Optional, Tuple
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [2, 4, 8]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'BK', 'BV'],
+    key=['BT', 'BK', 'BV']
 )
 @triton.jit
 def chunk_dplr_fwd_kernel_h(
@@ -73,7 +74,7 @@ def chunk_dplr_fwd_kernel_h(
             p_h = tl.make_block_ptr(h + ((boh + i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
         b_hc = tl.zeros([BK, BV], dtype=tl.float32)
-        
+
         # since we need to make all DK in the SRAM. we face serve SRAM memory burden. By subchunking we allievate such burden
         for i_c in range(tl.cdiv(min(BT, T - i_t * BT), BC)):
             if HEAD_FIRST:
@@ -99,7 +100,7 @@ def chunk_dplr_fwd_kernel_h(
             b_hc += tl.dot(b_kg, b_v)
             b_hc += tl.dot(b_bg, b_v2.to(b_bg.dtype))
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
-        
+
         last_idx = min((i_t + 1) * BT, T) - 1
         if HEAD_FIRST:
             b_g_last = tl.load(gk + i_nh * T * K + last_idx * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K)
@@ -163,7 +164,7 @@ def chunk_dplr_fwd_h(
     grid = (NK, NV, N * H)
     chunk_dplr_fwd_kernel_h[grid](
         kg=kg,
-        v=v, 
+        v=v,
         w=w,
         bg=bg,
         u=u,

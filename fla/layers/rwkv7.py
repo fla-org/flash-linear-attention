@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -81,7 +82,7 @@ class RWKV7Attention(nn.Module):
 
         self.g_norm = GroupNorm(
             num_groups=self.num_heads,
-            num_channels=self.value_dim,
+            hidden_size=self.value_dim,
             elementwise_affine=elementwise_affine,
             bias=True,
             eps=self.head_dim*norm_eps
@@ -107,6 +108,7 @@ class RWKV7Attention(nn.Module):
         past_key_values: Optional[Cache] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        v_first: torch.Tensor = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
         if attention_mask is not None:
@@ -138,7 +140,7 @@ class RWKV7Attention(nn.Module):
         xr, xw, xk, xv, xa, xg = (hidden_states + einsum(delta, self.x_x, 'b t d, n d -> n b t d')).unbind(0)
 
         r = self.r_proj(xr)
-        w = -F.softplus(-self.w_lora(xw)) - 0.5
+        w = -math.exp(-0.5) * self.w_lora(xw).sigmoid()
         k = self.k_proj(xk)
         v = self.v_proj(xv)
 
@@ -147,9 +149,9 @@ class RWKV7Attention(nn.Module):
             v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
 
         if self.layer_idx == 0:
-            kwargs['v_state'].copy_(v)
+            v_first.copy_(v)
         else:
-            v = torch.lerp(v, kwargs['v_state'], self.v_lora(xv).sigmoid())
+            v = torch.lerp(v, v_first, self.v_lora(xv).sigmoid())
         a = self.a_lora(xa).sigmoid()
         g = self.g_lora(xg)
 
