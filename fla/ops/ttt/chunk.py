@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -7,8 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd, contiguous,
-                       tensor_cache)
+from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 
 
 @triton.heuristics({
@@ -219,14 +219,6 @@ def chunk_ttt_linear_fwd_kernel_o(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
-@tensor_cache
-def prepare_varlen_inputs_fwd_h(
-    offsets: torch.Tensor,
-    chunk_size: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], chunk_size)]).cumsum(-1)
-
-
 def chunk_ttt_linear_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -250,7 +242,7 @@ def chunk_ttt_linear_fwd_h(
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N = len(offsets) - 1
-        chunk_offsets = prepare_varlen_inputs_fwd_h(offsets, BT)
+        chunk_offsets = prepare_chunk_offsets(offsets, BT)
         NT = chunk_offsets[-1]
     BK = triton.next_power_of_2(K)
     assert BK <= 128, "current kernel does not support head dimension larger than 128."
@@ -418,16 +410,6 @@ def chunk_ttt_linear_fwd(
     return o, final_state
 
 
-@tensor_cache
-def prepare_varlen_inputs(
-    offsets: torch.LongTensor,
-    chunk_size: int
-) -> Tuple[torch.LongTensor, torch.LongTensor]:
-    indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], chunk_size).tolist()])
-    indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
-    return indices
-
-
 class ChunkTTTLinearFunction(torch.autograd.Function):
 
     @staticmethod
@@ -438,7 +420,7 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
         # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = prepare_varlen_inputs(offsets, BT) if offsets is not None else None
+        indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
         o, final_state = chunk_ttt_linear_fwd(
             q=q,
             k=k,

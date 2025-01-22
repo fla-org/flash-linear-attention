@@ -7,15 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import tensor_cache
-
-
-@tensor_cache
-def prepare_varlen_inputs(
-    offsets: torch.Tensor,
-    chunk_size: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], chunk_size)]).cumsum(-1)
+from fla.ops.common.utils import prepare_chunk_offsets
 
 
 @triton.heuristics({
@@ -148,7 +140,7 @@ def chunk_dplr_bwd_dhu(
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N = len(offsets) - 1
-        chunk_offsets = prepare_varlen_inputs(offsets, BT)
+        chunk_offsets = prepare_chunk_offsets(offsets, BT)
         NT = chunk_offsets[-1]
 
     BK = triton.next_power_of_2(K)

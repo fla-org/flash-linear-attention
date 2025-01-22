@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import tensor_cache
+from fla.ops.common.utils import prepare_chunk_offsets
 
 
 @triton.heuristics({
@@ -271,14 +271,6 @@ def chunk_bwd_kernel_dh(
         tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
 
 
-@tensor_cache
-def prepare_varlen_inputs(
-    offsets: torch.Tensor,
-    chunk_size: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], chunk_size)]).cumsum(-1)
-
-
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
@@ -303,7 +295,7 @@ def chunk_fwd_h(
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT = len(offsets) - 1, len(indices)
-        chunk_offsets = prepare_varlen_inputs(offsets, BT)
+        chunk_offsets = prepare_chunk_offsets(offsets, BT)
 
     if head_first:
         h = k.new_empty(B, H, NT, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
@@ -365,7 +357,7 @@ def chunk_bwd_dh(
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT = len(offsets) - 1, len(indices)
-        chunk_offsets = prepare_varlen_inputs(offsets, BT)
+        chunk_offsets = prepare_chunk_offsets(offsets, BT)
     NG = HQ // H
 
     if head_first:

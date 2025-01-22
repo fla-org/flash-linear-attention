@@ -7,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.utils import prepare_chunk_offsets
+
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
@@ -34,7 +36,7 @@ def chunk_dplr_fwd_kernel_h(
     h0,
     ht,
     offsets,
-    c_offsets,
+    chunk_offsets,
     T: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -55,7 +57,7 @@ def chunk_dplr_fwd_kernel_h(
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(c_offsets + i_n).to(tl.int32)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -124,7 +126,6 @@ def chunk_dplr_fwd_h(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    c_offsets: Optional[torch.Tensor] = None,
     head_first: bool = True,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -135,12 +136,11 @@ def chunk_dplr_fwd_h(
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if offsets is None:
-        N, NT, c_offsets = B, triton.cdiv(T, BT), None
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N = len(offsets) - 1
-        if c_offsets is None:
-            c_offsets = torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], BT)]).cumsum(-1)
-        NT = c_offsets[-1]
+        chunk_offsets = prepare_chunk_offsets(offsets, BT)
+        NT = chunk_offsets[-1]
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
@@ -174,7 +174,7 @@ def chunk_dplr_fwd_h(
         h0=initial_state,
         ht=final_state,
         offsets=offsets,
-        c_offsets=c_offsets,
+        chunk_offsets=chunk_offsets,
         T=T,
         H=H,
         K=K,

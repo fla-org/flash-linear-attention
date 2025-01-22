@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import triton
@@ -11,10 +11,10 @@ from fla.ops.common.chunk_delta_h import (chunk_gated_delta_rule_bwd_dhu,
                                           chunk_gated_delta_rule_fwd_h)
 from fla.ops.common.chunk_o import (chunk_bwd_dqkwg, chunk_bwd_dv_local,
                                     chunk_fwd_o)
+from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.delta_rule.wy_fast import (bwd_prepare_wy_repr,
                                         fwd_prepare_wy_repr, fwd_recompute_w_u)
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd, contiguous,
-                       tensor_cache)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 
 
 def chunk_delta_rule_fwd(
@@ -165,16 +165,6 @@ def chunk_delta_rule_bwd(
     return dq, dk, dv, db, dh0
 
 
-@tensor_cache
-def prepare_varlen_inputs(
-    offsets: torch.LongTensor,
-    chunk_size: int
-) -> Tuple[torch.LongTensor, torch.LongTensor]:
-    indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], chunk_size).tolist()])
-    indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
-    return indices
-
-
 class ChunkDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
@@ -207,7 +197,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
         # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = prepare_varlen_inputs(offsets, chunk_size) if offsets is not None else None
+        indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
 
         o, A, final_state = chunk_delta_rule_fwd(
             q=q,
