@@ -31,7 +31,7 @@ def convert(
     config.a_low_rank_dim = blink_weights['blocks.0.att.a1'].shape[1]  # 64
     try:
         config.v_low_rank_dim = blink_weights['blocks.1.att.v1'].shape[1]  # 32
-    except Exception:
+    except KeyError:
         config.v_low_rank_dim = 32
     config.torch_dtype = precision
 
