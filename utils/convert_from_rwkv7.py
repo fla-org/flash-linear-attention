@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 
+# scripts for converting pretrained hf model weights to fla style
+
+import argparse
 import os
 import re
 
@@ -7,30 +10,29 @@ import torch
 
 import fla  # noqa
 from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM
-import argparse
 
 
 def convert(
-    rwkv7_pth: str,
-    output_dir: str,
+    rwkv7: str,
+    output: str,
     precision: str = 'float32',
 ):
-    blink_weights = torch.load(rwkv7_pth, weights_only=True)
+    weights = torch.load(rwkv7, weights_only=True)
     config = RWKV7Config()
-    config.vocab_size = blink_weights['emb.weight'].shape[0]  # 50304
-    config.hidden_size = blink_weights['blocks.0.ffn.key.weight'].shape[1]  # 768
-    config.hidden_ratio = blink_weights['blocks.0.ffn.key.weight'].shape[0] / \
-        blink_weights['blocks.0.ffn.key.weight'].shape[1]  # 4.0
-    config.intermediate_size = blink_weights['blocks.0.ffn.key.weight'].shape[0]
+    config.vocab_size = weights['emb.weight'].shape[0]  # 50304
+    config.hidden_size = weights['blocks.0.ffn.key.weight'].shape[1]  # 768
+    config.hidden_ratio = weights['blocks.0.ffn.key.weight'].shape[0] / \
+        weights['blocks.0.ffn.key.weight'].shape[1]  # 4.0
+    config.intermediate_size = weights['blocks.0.ffn.key.weight'].shape[0]
     config.num_hidden_layers = 0
-    while f'blocks.{config.num_hidden_layers}.ffn.key.weight' in blink_weights:
+    while f'blocks.{config.num_hidden_layers}.ffn.key.weight' in weights:
         config.num_hidden_layers += 1
     # 12
-    config.decay_low_rank_dim = blink_weights['blocks.0.att.w1'].shape[1]  # 64
-    config.gate_low_rank_dim = blink_weights['blocks.0.att.g1'].shape[1]  # 128
-    config.a_low_rank_dim = blink_weights['blocks.0.att.a1'].shape[1]  # 64
+    config.decay_low_rank_dim = weights['blocks.0.att.w1'].shape[1]  # 64
+    config.gate_low_rank_dim = weights['blocks.0.att.g1'].shape[1]  # 128
+    config.a_low_rank_dim = weights['blocks.0.att.a1'].shape[1]  # 64
     try:
-        config.v_low_rank_dim = blink_weights['blocks.1.att.v1'].shape[1]  # 32
+        config.v_low_rank_dim = weights['blocks.1.att.v1'].shape[1]  # 32
     except KeyError:
         config.v_low_rank_dim = 32
     config.torch_dtype = precision
@@ -48,7 +50,7 @@ def convert(
     ]
     # other parameters may raise a KeyError
 
-    def translate_into_fla(blink_name):
+    def translate_into_fla(name):
         transposed = False
         emb_head = {
             'emb.weight': 'model.embeddings.weight',
@@ -63,11 +65,11 @@ def convert(
             'ln_x': 'g_norm',
             'output': 'o_proj',
         }
-        if blink_name in unused_names:
+        if name in unused_names:
             return '', False
-        if blink_name in emb_head:
-            return emb_head[blink_name], False
-        name_compo = blink_name.split('.')
+        if name in emb_head:
+            return emb_head[name], False
+        name_compo = name.split('.')
         assert name_compo[0] == 'blocks'
         name_compo[0] = 'model.layers'
         assert int(name_compo[1]) in range(config.num_hidden_layers)
@@ -92,13 +94,13 @@ def convert(
             name_compo[3] = proj[name_compo[3]]
         return '.'.join(name_compo), transposed
 
-    for blink_name in blink_weights:
-        fla_name, transposed = translate_into_fla(blink_name)
-        print(f'{blink_name:32} -> {fla_name:42}, {transposed}')
+    for name in weights:
+        fla_name, transposed = translate_into_fla(name)
+        print(f'{name:32} -> {fla_name:42}, {transposed}')
         if not fla_name:
-            print('redundant parameters in source weight: ', blink_name, '\n')
+            print('redundant parameters in source weight: ', name, '\n')
             continue
-        weight = blink_weights[blink_name]
+        weight = weights[name]
         # print shape information
         shape1 = list(weight.shape)
         shape2 = list(model_dict[fla_name].shape)
@@ -111,7 +113,7 @@ def convert(
 
         # fix: fusing x_[rwkvag] to x_x
         if fla_name.endswith('attn.x_x'):
-            model_dict[fla_name].data['rwkvag'.find(blink_name[-1])].copy_(weight)
+            model_dict[fla_name].data['rwkvag'.find(name[-1])].copy_(weight)
             if fla_name in model_names:
                 model_names.remove(fla_name)
         else:
@@ -124,17 +126,17 @@ def convert(
         if n not in possible_absent_weights:
             raise KeyError(n)
 
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(output, exist_ok=True)
 
     from safetensors.torch import save_file
-    save_file(model.state_dict(), os.path.join(output_dir, 'model.safetensors'))
-    model.config.save_pretrained(output_dir)
+    save_file(model.state_dict(), os.path.join(output, 'model.safetensors'))
+    model.config.save_pretrained(output)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Convert RWKV7')
-    parser.add_argument('rwkv7_pth', type=str, help='Path to the input model')
-    parser.add_argument('output_dir', type=str, help='Directory to save model')
+    parser.add_argument('--rwkv7', type=str, help='Path to the input model')
+    parser.add_argument('--output', type=str, help='Directory to save model')
     parser.add_argument('--precision', type=str, default='float32')
     args = parser.parse_args()
-    convert(args.rwkv7_pth, args.output_dir, precision=args.precision)
+    convert(args.rwkv7, args.output, precision=args.precision)
