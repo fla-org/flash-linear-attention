@@ -1,10 +1,14 @@
-from fla.models.rwkv7 import RWKV7ForCausalLM
+# -*- coding: utf-8 -*-
+
+import argparse
+import json
+
+from lm_eval import evaluator
+from lm_eval.models.huggingface import HFLM
 from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerFast
-from lm_eval.models.huggingface import HFLM
-from lm_eval import evaluator
-import json
-import argparse
+
+from fla.models.rwkv7 import RWKV7ForCausalLM
 
 
 def test_rwkv7_lm_eval(model, tokenizer, task_names=["lambada_openai"]):
@@ -19,7 +23,6 @@ def test_rwkv7_lm_eval(model, tokenizer, task_names=["lambada_openai"]):
         tasks=task_names,
         batch_size=1,
     )
-    print(json.dumps(results['results'], indent=2))
     # {
     # "lambada_openai": {
     #     "perplexity,none": 14.457888475382047,
@@ -29,6 +32,7 @@ def test_rwkv7_lm_eval(model, tokenizer, task_names=["lambada_openai"]):
     #     "alias": "lambada_openai"
     # }
     # }
+    print(json.dumps(results['results'], indent=2))
 
 # official results:
 # pile 168M: lambada_openai ppl 14.2 acc 45.6%
