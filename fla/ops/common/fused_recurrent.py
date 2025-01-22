@@ -553,7 +553,7 @@ def fused_recurrent(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = True
 ):
     if scale is None:
@@ -569,6 +569,6 @@ def fused_recurrent(
         initial_state,
         output_final_state,
         reverse,
-        offsets,
+        cu_seqlens,
         head_first
     )
