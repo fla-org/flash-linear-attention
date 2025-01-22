@@ -7,22 +7,22 @@ import os
 import re
 
 import torch
+from transformers import AutoModelForCausalLM
 
 import fla  # noqa
-from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM
+from fla.models.rwkv7 import RWKV7Config
 
 
 def convert(
     rwkv7: str,
     output: str,
-    precision: str = 'float32',
+    precision: str = 'float32'
 ):
     weights = torch.load(rwkv7, weights_only=True)
     config = RWKV7Config()
     config.vocab_size = weights['emb.weight'].shape[0]  # 50304
     config.hidden_size = weights['blocks.0.ffn.key.weight'].shape[1]  # 768
-    config.hidden_ratio = weights['blocks.0.ffn.key.weight'].shape[0] / \
-        weights['blocks.0.ffn.key.weight'].shape[1]  # 4.0
+    config.hidden_ratio = weights['blocks.0.ffn.key.weight'].shape[0] / weights['blocks.0.ffn.key.weight'].shape[1]  # 4.0
     config.intermediate_size = weights['blocks.0.ffn.key.weight'].shape[0]
     config.num_hidden_layers = 0
     while f'blocks.{config.num_hidden_layers}.ffn.key.weight' in weights:
@@ -37,7 +37,8 @@ def convert(
         config.v_low_rank_dim = 32
     config.torch_dtype = precision
 
-    model = RWKV7ForCausalLM._from_config(config)
+    print(f"Creating model with config:\n{config}")
+    model = AutoModelForCausalLM.from_config(config)
     print(model)
     model_dict = model.state_dict()
     model_names = [n for n in model_dict]
