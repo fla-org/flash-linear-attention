@@ -35,6 +35,6 @@ def fused_recurrent_retention(
         initial_state=initial_state,
         output_final_state=output_final_state,
         reverse=reverse,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=head_first
     )
