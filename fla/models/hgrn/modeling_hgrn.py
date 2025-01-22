@@ -483,7 +483,10 @@ class HGRNVisionBlock(nn.Module):
             
         self.mlp = HGRNVisionMLP(config)
 
-        self.scan_type = config.scan_type
+        if config.attn is not None and layer_idx in config.attn['layers']:
+            self.scan_type = 'uni-scan'
+        else:
+            self.scan_type = config.scan_type
 
     def forward(
         self,

@@ -487,7 +487,7 @@ class TransformerVisionBlock(nn.Module):
             
         self.mlp = TransformerVisionMLP(config)
 
-        self.scan_type = config.scan_type
+        self.scan_type = "uni-scan"
 
     def forward(
         self,

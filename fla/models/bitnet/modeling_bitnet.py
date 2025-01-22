@@ -481,7 +481,10 @@ class BitNetVisionBlock(nn.Module):
             
         self.mlp = BitNetVisionMLP(config)
 
-        self.scan_type = config.scan_type
+        if config.attn is not None and layer_idx in config.attn['layers']:
+            self.scan_type = 'uni-scan'
+        else:
+            self.scan_type = config.scan_type
 
     def forward(
         self,
