@@ -683,7 +683,7 @@ class Mamba2Block(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ):
         residual = hidden_states
-        hidden_states = self.norm(hidden_states.to(dtype=self.norm.weight.dtype))
+        hidden_states = self.norm(hidden_states)
         if self.residual_in_fp32:
             residual = residual.to(torch.float32)
 
@@ -693,6 +693,8 @@ class Mamba2Block(nn.Module):
             cache_position=cache_position,
             attention_mask=attention_mask,
         )
+        if self.residual_in_fp32:
+            hidden_states = hidden_states.to(dtype=self.norm.weight.dtype)
         hidden_states = residual + hidden_states
         return hidden_states
 

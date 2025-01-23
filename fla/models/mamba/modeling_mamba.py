@@ -453,6 +453,8 @@ class MambaBlock(nn.Module):
             hidden_states, cache_params=cache_params, cache_position=cache_position, attention_mask=attention_mask
         )
         hidden_states = residual + hidden_states
+        if self.residual_in_fp32:
+            hidden_states = hidden_states.to(dtype=self.norm.weight.dtype)
         return hidden_states
 
 
