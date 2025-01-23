@@ -336,7 +336,7 @@ def test_chunk_varlen(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)

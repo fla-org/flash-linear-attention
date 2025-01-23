@@ -172,7 +172,7 @@ def test_fused_recurrent_varlen(
         g=g,
         initial_state=(hk0, hv0),
         output_final_state=True,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     tri, _ = fused_recurrent_gsa(
@@ -183,7 +183,7 @@ def test_fused_recurrent_varlen(
         g=g,
         initial_state=(hk0, hv0),
         output_final_state=False,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     tri.backward(do)
@@ -300,16 +300,20 @@ def test_chunk_varlen(
     hv0 = torch.randn(N, H, M, D, device='cuda').requires_grad_()
     do = torch.randn_like(v)
 
-    ref, (ref_hkt, ref_hvt) = fused_recurrent_gsa(q, k, v, s, g,
-                                                  initial_state=(hk0, hv0),
-                                                  output_final_state=True,
-                                                  offsets=offsets,
-                                                  head_first=False)
-    ref, _ = fused_recurrent_gsa(q, k, v, s, g,
-                                 initial_state=(hk0, hv0),
-                                 output_final_state=False,
-                                 offsets=offsets,
-                                 head_first=False)
+    ref, (ref_hkt, ref_hvt) = fused_recurrent_gsa(
+        q, k, v, s, g,
+        initial_state=(hk0, hv0),
+        output_final_state=True,
+        cu_seqlens=offsets,
+        head_first=False
+    )
+    ref, _ = fused_recurrent_gsa(
+        q, k, v, s, g,
+        initial_state=(hk0, hv0),
+        output_final_state=False,
+        cu_seqlens=offsets,
+        head_first=False
+    )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -319,11 +323,13 @@ def test_chunk_varlen(
     ref_dhk0, hk0.grad = hk0.grad.clone(), None
     ref_dhv0, hv0.grad = hv0.grad.clone(), None
 
-    tri, (tri_hkt, tri_hvt) = chunk_gsa(q, k, v, s, g,
-                                        initial_state=(hk0, hv0),
-                                        output_final_state=True,
-                                        offsets=offsets,
-                                        head_first=False)
+    tri, (tri_hkt, tri_hvt) = chunk_gsa(
+        q, k, v, s, g,
+        initial_state=(hk0, hv0),
+        output_final_state=True,
+        cu_seqlens=offsets,
+        head_first=False
+    )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None

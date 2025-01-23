@@ -6,11 +6,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+from utils import assert_close
+
 from fla.ops.simple_gla import chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.ops.simple_gla.parallel import parallel_simple_gla
-from utils import assert_close
-
 
 
 def chunk_simple_gla_ref(q, k, v, g, initial_state=None, output_final_state=False, BT=64, scale=None, head_first=True):
@@ -60,6 +60,7 @@ def chunk_simple_gla_ref(q, k, v, g, initial_state=None, output_final_state=Fals
         o = o.transpose(1, 2)
     return o, S
 
+
 def parallel_simple_gla_ref(q, k, v, g, scale=None, head_first=True):
     if not head_first:
         q = q.transpose(1, 2)
@@ -74,7 +75,7 @@ def parallel_simple_gla_ref(q, k, v, g, scale=None, head_first=True):
     if g is not None:
         g = g.cumsum(-1)
         D = (g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().tril()
-        A = A * D 
+        A = A * D
     else:
         A = A.tril()
     o = A @ v
@@ -188,7 +189,7 @@ def test_chunk_varlen(
         g=g,
         initial_state=h0,
         output_final_state=True,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((ref * do).sum()).backward()
@@ -205,7 +206,7 @@ def test_chunk_varlen(
         g=g,
         initial_state=h0,
         output_final_state=True,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((tri * do).sum()).backward()
@@ -258,7 +259,7 @@ def test_parallel_varlen(
         v=v,
         g=g,
         output_final_state=False,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((ref * do).sum()).backward()
@@ -272,7 +273,7 @@ def test_parallel_varlen(
         k=k,
         v=v,
         g=g,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((tri * do).sum()).backward()
@@ -288,10 +289,9 @@ def test_parallel_varlen(
     assert_close(" dg", ref_dg, tri_dg, 0.005)
 
 
-
 @pytest.mark.parametrize("B", [1])
 @pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("T", [47,256,1000])
+@pytest.mark.parametrize("T", [47, 256, 1000])
 @pytest.mark.parametrize("D", [100, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])

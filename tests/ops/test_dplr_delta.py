@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 
 import os
+
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-
-from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
 from utils import assert_close
+
+from fla.ops.generalized_delta_rule.dplr import (
+    chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule)
+
 
 def recurrent_dplr_delta_rule_ref(
     q: torch.Tensor,
@@ -44,7 +47,7 @@ def recurrent_dplr_delta_rule_ref(
         _v = v[:, :, i].clone()
         a_i = a[:, :, i]
         b_i = b[:, :, i]
-        # first matmul then decay in DPLR. 
+        # first matmul then decay in DPLR.
         _v2 = (S.clone() * a_i[..., None]).sum(-2)
         S = S.clone() * gk[:, :, i].exp()[..., None]
         S = S.clone() + _k.unsqueeze(-1) * _v.unsqueeze(-2) + b_i.unsqueeze(-1) * _v2.unsqueeze(-2)
@@ -54,7 +57,6 @@ def recurrent_dplr_delta_rule_ref(
     if not head_first:
         o = o.transpose(1, 2)
     return o, S
-
 
 
 def chunk_dplr_delta_rule_ref(
@@ -111,7 +113,7 @@ def chunk_dplr_delta_rule_ref(
         A_qb[:, :, :, i, :] = (q_i * b * attn_i).sum(-1).clone()
         mask = (torch.arange(chunk_size) < i).to(q.device)
         # shift by one.
-        attn_i = (gk_i - gk[:,:,:,i,None] - gk_cumsum).masked_fill(~mask.unsqueeze(-1), float('-inf')).exp()
+        attn_i = (gk_i - gk[:, :, :, i, None] - gk_cumsum).masked_fill(~mask.unsqueeze(-1), float('-inf')).exp()
         A_ab[:, :, :, i, :] = (a_i * b * attn_i).sum(-1).clone()
         A_ak[:, :, :, i, :] = (a_i * k * attn_i).sum(-1).clone()
 
@@ -133,7 +135,8 @@ def chunk_dplr_delta_rule_ref(
         o_3 = (q_i * gk_cumsum[:, :, i].exp()) @ S
         o[:, :, i] = o_1 + o_2 + o_3
         decay = (gk_cumsum[:, :, i, -1, None] - gk_cumsum[:, :, i]).exp()
-        S = S*gk_cumsum[:, :, i, -1, :, None].exp() + (k_i * decay).transpose(-1, -2) @ v_i + (b_i * decay).transpose(-1, -2) @ v2_i
+        S = S*gk_cumsum[:, :, i, -1, :, None].exp() + (k_i * decay).transpose(-1, -2) @ v_i + \
+            (b_i * decay).transpose(-1, -2) @ v2_i
 
     S = None if output_final_state is False else S
     o = rearrange(o, 'b h n c d -> b h (n c) d')
@@ -165,7 +168,7 @@ def test_ref_equivalence(
         k = torch.randn(B, H, T, D, dtype=dtype)
         v = torch.randn(B, H, T, D, dtype=dtype)
         a = torch.rand(B, H, T, D, dtype=dtype)
-        gk = (torch.randn(B, H, T, D, dtype=torch.float)) 
+        gk = (torch.randn(B, H, T, D, dtype=torch.float))
     else:
         q = torch.randn(B, T, H, D, dtype=dtype)
         k = torch.randn(B, T, H, D, dtype=dtype)
@@ -207,7 +210,6 @@ def test_ref_equivalence(
     assert_close(" ht", ref_ht, tri_ht, 0.001)
 
 
-
 @pytest.mark.parametrize("B", [1])
 @pytest.mark.parametrize("T", [300])
 @pytest.mark.parametrize("H", [2])
@@ -229,7 +231,7 @@ def test_fused_recurrent_fwd(
         k = torch.randn(B, H, T, D, dtype=dtype)
         v = torch.randn(B, H, T, D, dtype=dtype)
         a = torch.rand(B, H, T, D, dtype=dtype)
-        gk = (torch.randn(B, H, T, D, dtype=torch.float)) 
+        gk = (torch.randn(B, H, T, D, dtype=torch.float))
     else:
         q = torch.randn(B, T, H, D, dtype=dtype)
         k = torch.randn(B, T, H, D, dtype=dtype)
@@ -240,7 +242,7 @@ def test_fused_recurrent_fwd(
     a = torch.nn.functional.normalize(a, p=2, dim=-1)
     b = -a
     gk = torch.nn.functional.logsigmoid(gk) / 4
- 
+
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, a, b, gk, h0 = map(lambda x: x.cuda().requires_grad_(False), (q, k, v, a, b, gk, h0))
     ref, ref_ht = recurrent_dplr_delta_rule_ref(
@@ -295,7 +297,7 @@ def test_chunk(
         k = torch.randn(B, H, T, D, dtype=dtype)
         v = torch.randn(B, H, T, D, dtype=dtype)
         a = torch.rand(B, H, T, D, dtype=dtype)
-        gk = (torch.randn(B, H, T, D, dtype=torch.float)) 
+        gk = (torch.randn(B, H, T, D, dtype=torch.float))
     else:
         q = torch.randn(B, T, H, D, dtype=dtype)
         k = torch.randn(B, T, H, D, dtype=dtype)
@@ -306,7 +308,7 @@ def test_chunk(
     a = torch.nn.functional.normalize(a, p=2, dim=-1)
     b = -a
     gk = torch.nn.functional.logsigmoid(gk) / gate_logit_normalizer
- 
+
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, a, b, gk, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, a, b, gk, h0))
     ref, ref_ht = chunk_dplr_delta_rule_ref(
@@ -325,7 +327,7 @@ def test_chunk(
     dht = torch.randn_like(h0)
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_da, ref_db, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, a.grad, b.grad, gk.grad, h0.grad
-    q.grad = k.grad = v.grad = a.grad = b.grad = gk.grad = h0.grad = None   
+    q.grad = k.grad = v.grad = a.grad = b.grad = gk.grad = h0.grad = None
 
     tri, tri_ht = chunk_dplr_delta_rule(
         q=q.clone(),
@@ -350,7 +352,7 @@ def test_chunk(
     assert_close(" dv", ref_dv, tri_dv, 0.008)
     assert_close(" da", ref_da, tri_da, 0.008)
     assert_close(" db", ref_db, tri_db, 0.008)
-    if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01: # otherwise it is meaningless
+    if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:  # otherwise it is meaningless
         assert_close(" dg", ref_dg, tri_dg, 0.008)
     assert_close(" dh0", ref_dh0, tri_dh0, 0.008)
 
@@ -399,7 +401,7 @@ def test_chunk_varlen(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     do = torch.randn_like(v)

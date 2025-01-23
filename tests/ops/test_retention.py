@@ -115,7 +115,7 @@ def test_chunk_varlen(
         v=v,
         initial_state=h0,
         output_final_state=True,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward()
@@ -130,7 +130,7 @@ def test_chunk_varlen(
         v=v,
         initial_state=h0,
         output_final_state=True,
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()

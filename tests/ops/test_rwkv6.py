@@ -55,7 +55,7 @@ def test_chunk(
         k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
         v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
         w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device='cuda')) / gate_logit_normalizer
-    
+
     u = torch.randn(H, D, dtype=dtype, device='cuda').requires_grad_(True)
     h0 = torch.randn(B, H, D, D, dtype=dtype, device='cuda').requires_grad_()
     w = w.requires_grad_()
@@ -142,24 +142,28 @@ def test_chunk_varlen(
     h0 = torch.randn((N, H, D, D), dtype=dtype, device='cuda').requires_grad_()
     do = torch.randn_like(v)
 
-    ref, ref_ht = fused_recurrent_rwkv6(q.clone(),
-                                        k.clone(),
-                                        v.clone(),
-                                        w.clone(),
-                                        u.clone(),
-                                        initial_state=h0.clone(),
-                                        output_final_state=True,
-                                        offsets=offsets,
-                                        head_first=False)
-    ref, _ = fused_recurrent_rwkv6(q.clone(),
-                                   k.clone(),
-                                   v.clone(),
-                                   w.clone(),
-                                   u.clone(),
-                                   initial_state=h0.clone(),
-                                   output_final_state=False,
-                                   offsets=offsets,
-                                   head_first=False)
+    ref, ref_ht = fused_recurrent_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=offsets,
+        head_first=False
+    )
+    ref, _ = fused_recurrent_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=False,
+        cu_seqlens=offsets,
+        head_first=False
+    )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -168,15 +172,17 @@ def test_chunk_varlen(
     ref_du, u.grad = u.grad.clone(), None
     ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, tri_ht = chunk_rwkv6(q.clone(),
-                              k.clone(),
-                              v.clone(),
-                              w.clone(),
-                              u.clone(),
-                              initial_state=h0.clone(),
-                              output_final_state=True,
-                              offsets=offsets,
-                              head_first=False)
+    tri, tri_ht = chunk_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=offsets,
+        head_first=False
+    )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None

@@ -199,7 +199,7 @@ def test_chunk_varlen_fwd(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
 

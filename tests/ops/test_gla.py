@@ -174,8 +174,20 @@ def test_chunk_varlen(
     h0 = torch.randn((N, H, D, D), dtype=dtype, device='cuda').requires_grad_()
     do = torch.randn_like(v)
 
-    ref, ref_ht = fused_recurrent_gla(q, k, v, g, initial_state=h0, output_final_state=True, offsets=offsets, head_first=False)
-    ref, _ = fused_recurrent_gla(q, k, v, g, initial_state=h0, output_final_state=False, offsets=offsets, head_first=False)
+    ref, ref_ht = fused_recurrent_gla(
+        q, k, v, g,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=offsets,
+        head_first=False
+    )
+    ref, _ = fused_recurrent_gla(
+        q, k, v, g,
+        initial_state=h0,
+        output_final_state=False,
+        cu_seqlens=offsets,
+        head_first=False
+    )
 
     (ref * do).sum().backward()
     ref_dq, q.grad = q.grad.clone(), None
@@ -184,7 +196,16 @@ def test_chunk_varlen(
     ref_dg, g.grad = g.grad.clone(), None
     ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, tri_ht = chunk_gla(q, k, v, g, initial_state=h0, output_final_state=True, offsets=offsets, head_first=False)
+    tri, tri_ht = chunk_gla(
+        q,
+        k,
+        v,
+        g,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=offsets,
+        head_first=False
+    )
     ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
