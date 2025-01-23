@@ -1,8 +1,17 @@
-name: 🐛 Bug Report
+name: 🐞 Bug Report
 description: Create a report to help reproduce and resolve the bug.
 title: "[Bug] "
 labels: ["bug"]
 body:
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      description: Please confirm these steps before submitting
+      options:
+        - label: "I have checked [FAQs](https://github.com/fla-org/flash-linear-attention/blob/main/FAQs.md) and existing issues for similar problems"
+        - label: "Please report this bug in English to ensure wider understanding and support"
+
   - type: textarea
     id: description
     attributes:

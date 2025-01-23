@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -55,7 +55,7 @@ def fused_chunk_retention_fwd_kernel(
     p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (0, i_k * BK), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (i_k * BK, 0), (BK, BT), (0, 1))
     p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o + (i_bh+i_k*B*H) * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
+    p_o = tl.make_block_ptr(o + (i_k*B*H+i_bh).to(tl.int64) * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
 
     if USE_INITIAL_STATE:
         p_h = tl.make_block_ptr(h0 + i_bh * K * V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
@@ -63,13 +63,13 @@ def fused_chunk_retention_fwd_kernel(
 
     NT = tl.cdiv(T, BT)
     for i in range(0, NT):
+        # [BT, BK]
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = (b_q * scale).to(b_q.dtype)
         # [BK, BT]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BT, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
-        # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_q = (b_q * scale).to(b_k.dtype)
 
         # [BT, BT]
         b_s = tl.dot(b_q, b_k, allow_tf32=False) * d_s
@@ -138,7 +138,7 @@ def fused_chunk_retention_bwd_kernel(
         p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i * BT, i_k * BK), (BT, BK), (1, 0))
         p_v = tl.make_block_ptr(v + i_bh * T*V, (V, T), (1, V), (i_v * BV, i * BT), (BV, BT), (0, 1))
         p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dq = tl.make_block_ptr(dq + (i_bh + i_v*B*H) * T*K, (T, K), (K, 1), (i*BT, i_k*BK), (BT, BK), (1, 0))
+        p_dq = tl.make_block_ptr(dq + (i_bh + i_v*B*H).to(tl.int64) * T*K, (T, K), (K, 1), (i*BT, i_k*BK), (BT, BK), (1, 0))
 
         # [BT, K]
         b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -174,8 +174,8 @@ def fused_chunk_retention_bwd_kernel(
         p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (T - i * BT, i_k * BK), (BT, BK), (1, 0))
         p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
         p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dk = tl.make_block_ptr(dk + (i_bh+i_v*B*H) * T*K, (T, K), (K, 1), (T - i*BT, i_k*BK), (BT, BK), (1, 0))
-        p_dv = tl.make_block_ptr(dv + (i_bh+i_k*B*H) * T*V, (T, V), (V, 1), (T - i*BT, i_v*BV), (BT, BV), (1, 0))
+        p_dk = tl.make_block_ptr(dk + (i_bh+i_v*B*H).to(tl.int64) * T*K, (T, K), (K, 1), (T - i*BT, i_k*BK), (BT, BK), (1, 0))
+        p_dv = tl.make_block_ptr(dv + (i_bh+i_k*B*H).to(tl.int64) * T*V, (T, V), (V, 1), (T - i*BT, i_v*BV), (BT, BV), (1, 0))
         # [K, BT]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         # [BT, BK]
@@ -244,9 +244,21 @@ class FusedChunkRetentionFunction(torch.autograd.Function):
 
         grid = (NV, NK, B * H)
         fused_chunk_retention_fwd_kernel[grid](
-            q, k, v, o, initial_state, final_state,
+            q,
+            k,
+            v,
+            o,
+            initial_state,
+            final_state,
             scale,
-            B=B, H=H, T=T, K=K, V=V, BT=BT, BK=BK, BV=BV,
+            B=B,
+            H=H,
+            T=T,
+            K=K,
+            V=V,
+            BT=BT,
+            BK=BK,
+            BV=BV,
             USE_INITIAL_STATE=initial_state is not None,
             STORE_FINAL_STATE=output_final_state,
             CHECK=CHECK,
@@ -279,9 +291,23 @@ class FusedChunkRetentionFunction(torch.autograd.Function):
         grid = (NV, NK, B * H)
 
         fused_chunk_retention_bwd_kernel[grid](
-            q, k, v, do, dq, dk, dv, initial_state,
+            q,
+            k,
+            v,
+            do,
+            dq,
+            dk,
+            dv,
+            initial_state,
             scale,
-            B=B, H=H, T=T, K=K, V=V, BT=BT, BK=BK, BV=BV,
+            B=B,
+            T=T,
+            H=H,
+            K=K,
+            V=V,
+            BT=BT,
+            BK=BK,
+            BV=BV,
             USE_INITIAL_STATE=initial_state is not None,
             CHECK=ctx.CHECK,
             num_warps=num_warps,

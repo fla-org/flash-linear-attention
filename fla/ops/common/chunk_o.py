@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -68,7 +68,7 @@ def chunk_fwd_kernel_o(
     k += (i_bh * T*K) if HEAD_FIRST else ((bos * H + i_h) * K)
     v += (i_bh * T*V) if HEAD_FIRST else ((bos * H + i_h) * V)
     o += (i_bh * T*V) if HEAD_FIRST else ((bos * H + i_h) * V)
-    h += ((i_bh * NT + i_t) * K*V) if HEAD_FIRST else ((i_tg * H + i_h) * K*V)
+    h += ((i_bh * NT + i_t).to(tl.int64) * K*V) if HEAD_FIRST else ((i_tg * H + i_h).to(tl.int64) * K*V)
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
@@ -170,23 +170,23 @@ def chunk_bwd_kernel_dqkwg(
         bos, eos = i_b * T, i_b * T + T
 
     # offset calculation
-    v += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
-    do += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
-    h += (i_bh * NT + i_t) * K*V if HEAD_FIRST else (i_tg * H + i_h) * K*V
-    dh += (i_bh * NT + i_t) * K*V if HEAD_FIRST else (i_tg * H + i_h) * K*V
-    q += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    k += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    dq += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    dk += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
+    v += i_bh * T*V if HEAD_FIRST else (bos * H + i_h) * V
+    do += i_bh * T*V if HEAD_FIRST else (bos * H + i_h) * V
+    h += (i_bh * NT + i_t).to(tl.int64) * K*V if HEAD_FIRST else (i_tg * H + i_h).to(tl.int64) * K*V
+    dh += (i_bh * NT + i_t).to(tl.int64) * K*V if HEAD_FIRST else (i_tg * H + i_h).to(tl.int64) * K*V
+    q += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
+    k += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
+    dq += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
+    dk += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
     s_qk = K if HEAD_FIRST else H*K
     s_vo = V if HEAD_FIRST else H*V
     s_g = 1 if HEAD_FIRST else H
 
     # for delta rule only
     if USE_DW:
-        dw += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-        dv += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
-        w += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
+        dw += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
+        dv += i_bh * T*V if HEAD_FIRST else (bos * H + i_h) * V
+        w += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
 
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
@@ -331,14 +331,14 @@ def chunk_bwd_kernel_dv(
     b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
     # offset calculation
-    q += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    k += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    do += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
-    dv += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
+    q += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
+    k += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
+    do += i_bh * T*V if HEAD_FIRST else (bos * H + i_h) * V
+    dv += i_bh * T*V if HEAD_FIRST else (bos * H + i_h) * V
     s_qk = K if HEAD_FIRST else H*K
     s_vo = V if HEAD_FIRST else H*V
     s_g = 1 if HEAD_FIRST else H
-    dh += (i_bh * NT + i_t) * K*V if HEAD_FIRST else (i_tg * H + i_h) * K*V
+    dh += (i_bh * NT + i_t).to(tl.int64) * K*V if HEAD_FIRST else (i_tg * H + i_h).to(tl.int64) * K*V
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
@@ -414,10 +414,10 @@ def chunk_bwd_kernel_dv_local(
         bos, eos = i_b * T, i_b * T + T
 
     # offset calculation
-    q += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    k += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    do += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
-    dv += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
+    q += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
+    k += i_bh * T*K if HEAD_FIRST else (bos * H + i_h) * K
+    do += i_bh * T*V if HEAD_FIRST else (bos * H + i_h) * V
+    dv += i_bh * T*V if HEAD_FIRST else (bos * H + i_h) * V
     s_qk = K if HEAD_FIRST else H*K
     s_vo = V if HEAD_FIRST else H*V
     s_g = 1 if HEAD_FIRST else H
