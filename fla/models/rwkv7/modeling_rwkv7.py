@@ -60,8 +60,24 @@ class RWKV7FeedForward(nn.Module):
 
         self.layer_idx = layer_idx
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.value(self.act_fn(self.key(x + (self.time_shift(x) - x) * self.x_k)))
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        state: Optional[Cache] = None
+    ) -> torch.Tensor:
+        if attention_mask is not None:
+            x = x.mul(attention_mask[:, -x.shape[-2]:, None])
+        if x.shape[1] == 1 and state is not None:
+            shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
+        else:
+            shifted = self.time_shift(x)
+            if state is not None and state[self.layer_idx]['ffn_state'] is not None:
+                shifted[:, 0] = state[self.layer_idx]['ffn_state'][-1]
+        if state is not None:
+            # no need to update the offset twice
+            state.update(ffn_state=x[:, -1], layer_idx=self.layer_idx, offset=0)
+        return self.value(self.act_fn(self.key(x + (shifted - x) * self.x_k))), state
 
 
 class RWKV7Block(nn.Module):
@@ -134,7 +150,7 @@ class RWKV7Block(nn.Module):
             **kwargs
         )
         hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
-        hidden_states = self.ffn(hidden_states)
+        hidden_states, past_key_values = self.ffn(hidden_states, attention_mask, past_key_values)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states, attentions, past_key_values)
@@ -410,9 +426,10 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
 
         hidden_states = outputs[0]
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -num_logits_to_keep:])
 
-        loss = None
+        loss, logits = None, None
+        if not fuse_linear_and_cross_entropy or labels is None:
+            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:])
         if labels is not None:
             if self.config.fuse_cross_entropy:
                 if fuse_linear_and_cross_entropy:
