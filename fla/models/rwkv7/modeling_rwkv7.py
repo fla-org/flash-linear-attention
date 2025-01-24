@@ -134,6 +134,12 @@ class RWKV7Block(nn.Module):
             **kwargs
         )
         hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
+
+        # mask channel mixing module
+        if attention_mask is not None:
+            hidden_states = hidden_states.mul(attention_mask[:, -hidden_states.shape[-2]:, None])
+            residual = residual.mul(attention_mask[:, -residual.shape[-2]:, None])
+
         hidden_states = self.ffn(hidden_states)
         hidden_states = residual + hidden_states
 
@@ -431,6 +437,9 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
                                 self.lm_head.bias)
             else:
                 loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+        else:
+            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:])
+
 
         if not return_dict:
             output = (logits,) + outputs[1:]
