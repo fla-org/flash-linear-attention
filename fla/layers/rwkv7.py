@@ -123,7 +123,6 @@ class RWKV7Attention(nn.Module):
         if self.training:
             # if training, use chunk mode no matter how short the sequence is
             mode = 'chunk'
-            self.mode = 'chunk'
         else:
             # launching the triton kernel for just one token will actually be slower
             mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
@@ -150,10 +149,6 @@ class RWKV7Attention(nn.Module):
         k = self.k_proj(xk)
         v = self.v_proj(xv)
 
-        # dealing with left-padding
-        if attention_mask is not None:
-            v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
-
         if self.layer_idx == 0:
             v_first.copy_(v)
         else:
@@ -165,6 +160,9 @@ class RWKV7Attention(nn.Module):
         kk = F.normalize(kk.view(batch_size, seq_len, self.num_heads, -1), dim=-1, p=2.0).view(batch_size, seq_len, -1)
         k = k * (1 + (a - 1) * self.k_a)
 
+        # dealing with left-padding
+        if attention_mask is not None:
+            v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
         r, w, k, v, kk, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=self.num_heads), (r, w, k, v, kk, a))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
