@@ -163,6 +163,7 @@ class RWKV7PreTrainedModel(PreTrainedModel):
     config_class = RWKV7Config
     supports_gradient_checkpointing = True
     _no_split_modules = ['RWKV7Block']
+    base_model_prefix = 'model'
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
