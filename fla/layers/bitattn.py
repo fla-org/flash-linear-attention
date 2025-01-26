@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
-# -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
@@ -196,4 +194,3 @@ class BitAttention(nn.Module):
             q, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, attention_mask)
 
         return q, k, v, indices_q, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k)
-        
