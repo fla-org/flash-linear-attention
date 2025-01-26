@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024, Songlin Yang, Yu Zhang
+# -*- coding: utf-8 -*-
+# Copyright (c) 2024, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ except ImportError:
 logger = logging.get_logger(__name__)
 
 
-class BitAttention(nn.Module):
+class Attention(nn.Module):
 
     def __init__(
         self,
@@ -99,6 +101,9 @@ class BitAttention(nn.Module):
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
 
+        # equivalent to cu_seqlens in `flash_attn`
+        cu_seqlens = kwargs.get('cu_seqlens', None)
+
         seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
@@ -111,7 +116,7 @@ class BitAttention(nn.Module):
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen)
+        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
             k, v = past_key_values.update(
@@ -141,6 +146,16 @@ class BitAttention(nn.Module):
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
             o = pad_input(o, indices_q, batch_size, q_len)
+        elif cu_seqlens is not None:
+            o = flash_attn_varlen_func(
+                q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=True,
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+            ).unsqueeze(0)
         else:
             o = flash_attn_func(
                 q, k, v,
@@ -181,3 +196,4 @@ class BitAttention(nn.Module):
             q, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, attention_mask)
 
         return q, k, v, indices_q, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k)
+        
