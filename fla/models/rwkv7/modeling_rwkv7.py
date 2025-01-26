@@ -141,7 +141,7 @@ class RWKV7Block(nn.Module):
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = self.pre_norm(hidden_states) if hasattr(self, 'pre_norm') else hidden_states
         hidden_states = self.attn_norm(residual)
-        hidden_states, attentions, past_key_values = self.attn(
+        hidden_states, attentions, past_key_values, v_first = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -154,7 +154,7 @@ class RWKV7Block(nn.Module):
         hidden_states, past_key_values = self.ffn(hidden_states, attention_mask, past_key_values)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, attentions, past_key_values)
+        outputs = (hidden_states, attentions, past_key_values, v_first)
 
         return outputs
 
@@ -274,7 +274,7 @@ class RWKV7Model(RWKV7PreTrainedModel):
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
+                hidden_states, attentions, past_key_values, v_first = self._gradient_checkpointing_func(
                     layer.__call__,
                     hidden_states,
                     attention_mask,
@@ -285,7 +285,7 @@ class RWKV7Model(RWKV7PreTrainedModel):
                     **kwargs
                 )
             else:
-                hidden_states, attentions, past_key_values = layer(
+                hidden_states, attentions, past_key_values, v_first = layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
