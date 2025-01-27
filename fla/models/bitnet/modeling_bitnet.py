@@ -21,8 +21,10 @@ from fla.models.bitnet.configuration_bitnet import BitNetConfig
 from fla.models.utils import Cache
 from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
                          RMSNorm)
-from fla.modules.activations import swiglu_bitlinear
-from fla.modules.fused_bitlinear import BitLinear, rms_norm_linear_quant
+from fla.modules.activations import swiglu
+
+from fla.modules.fused_bitlinear import FusedBitLinear
+from fla.modules.fused_bitlinear_a_2 import FusedBitLinearA2
 
 logger = logging.get_logger(__name__)
 
@@ -55,18 +57,19 @@ class BitNetMLP(nn.Module):
         if norm_first:
             self.norm = RMSNorm(hidden_size=hidden_size, eps=norm_eps)
 
-        self.gate_proj = BitLinear(self.hidden_size, self.intermediate_size * 2, bias=False)
-        self.down_proj = BitLinear(self.intermediate_size, self.hidden_size, bias=False)
+        self.gate_proj = FusedBitLinear(self.hidden_size, self.intermediate_size * 2, bias=False)
+        self.down_proj = FusedBitLinear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[hidden_act]
 
-    def forward(self, x):
-        if self.norm_first:
-            x = rms_norm_linear_quant(x, self.norm.weight, self.norm.bias, self.gate_proj.weight, self.gate_proj.bias)
-        else:
-            x = self.gate_proj(x)
-        gate, y = x.chunk(2, -1)
-        return swiglu_bitlinear(gate, y, self.down_proj.weight, self.down_proj.bias)
-
+    def forward(
+        self,
+        x: torch.Tensor,
+        **kwargs: Unpack[Any],
+    ) -> torch.Tensor:
+        y = self.gate_proj(x)
+        gate, y = y.chunk(2, -1)
+        z = self.down_proj(swiglu(gate, y))
+        return z
 
 class BitNetBlock(nn.Module):
 
@@ -106,7 +109,7 @@ class BitNetBlock(nn.Module):
         past_key_values: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        **kwargs,
+        **kwargs: Unpack[Any]
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
 
         residual = hidden_states
@@ -117,14 +120,15 @@ class BitNetBlock(nn.Module):
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            output_attentions=output_attentions
+            output_attentions=output_attentions,
+            **kwargs
         )
         if hasattr(self, 'mlp_norm'):
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
             hidden_states = residual + hidden_states
             residual = hidden_states
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, **kwargs)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -154,7 +158,7 @@ class BitNetPreTrainedModel(PreTrainedModel):
         rescale_prenorm_residual: bool = False,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, (BitLinear, nn.Conv1d)):
+        if isinstance(module, (nn.Linear, nn.Conv1d, FusedBitLinear, FusedBitLinearA2)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
@@ -186,7 +190,10 @@ class BitNetPreTrainedModel(PreTrainedModel):
 
 class BitNetModel(BitNetPreTrainedModel):
 
-    def __init__(self, config: BitNetConfig):
+    def __init__(
+        self,
+        config: BitNetConfig
+    ) -> BitNetModel:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -214,7 +221,8 @@ class BitNetModel(BitNetPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None
+        return_dict: Optional[bool] = None,
+        **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if output_attentions:
             warnings.warn(
@@ -263,7 +271,8 @@ class BitNetModel(BitNetPreTrainedModel):
                     attention_mask,
                     past_key_values,
                     output_attentions,
-                    use_cache
+                    use_cache,
+                    **kwargs
                 )
             else:
                 layer_outputs = layer(
@@ -271,7 +280,8 @@ class BitNetModel(BitNetPreTrainedModel):
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     output_attentions=output_attentions,
-                    use_cache=use_cache
+                    use_cache=use_cache,
+                    **kwargs
                 )
 
             hidden_states = layer_outputs[0]
@@ -307,7 +317,7 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.model = BitNetModel(config)
         self.vocab_size = config.vocab_size
-        self.lm_head = BitLinear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -375,7 +385,8 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        num_logits_to_keep: Optional[int] = 0
+        num_logits_to_keep: Optional[int] = 0,
+        **kwargs: Unpack[Any]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -391,7 +402,8 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            return_dict=return_dict,
+            **kwargs
         )
 
         hidden_states = outputs[0]
@@ -429,3 +441,4 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
