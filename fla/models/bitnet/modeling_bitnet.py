@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -22,8 +22,10 @@ from fla.models.utils import Cache
 from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
                          RMSNorm)
 from fla.modules.activations import swiglu
-
 from fla.modules.fused_bitlinear import FusedBitLinear
+
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
 
 logger = logging.get_logger(__name__)
 
@@ -69,6 +71,7 @@ class BitNetMLP(nn.Module):
         gate, y = y.chunk(2, -1)
         z = self.down_proj(swiglu(gate, y))
         return z
+
 
 class BitNetBlock(nn.Module):
 
@@ -440,4 +443,3 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
