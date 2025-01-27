@@ -24,7 +24,6 @@ from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
 from fla.modules.activations import swiglu
 
 from fla.modules.fused_bitlinear import FusedBitLinear
-from fla.modules.fused_bitlinear_a_2 import FusedBitLinearA2
 
 logger = logging.get_logger(__name__)
 
@@ -158,7 +157,7 @@ class BitNetPreTrainedModel(PreTrainedModel):
         rescale_prenorm_residual: bool = False,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, (nn.Linear, nn.Conv1d, FusedBitLinear, FusedBitLinearA2)):
+        if isinstance(module, (nn.Linear, nn.Conv1d, FusedBitLinear)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
