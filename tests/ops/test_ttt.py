@@ -94,7 +94,7 @@ def test_chunk_fwd(
         head_first=head_first
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
-    ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, ref_dh0 =  q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad
+    ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, ref_dh0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad
 
     assert_close("  o", ref, tri, 0.005)
     assert_close(" ht", ref_ht, tri_ht, 0.005)
