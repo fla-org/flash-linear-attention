@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang, Yuqi Pan
 
 from typing import Optional, Tuple
 

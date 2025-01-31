@@ -30,7 +30,7 @@ def ttt_linear(q, k, v, w, b, eta, scale, eps, mini_batch_size, initial_state, o
         reconstruction_target = v - k
 
         mean = kh.mean(dim=-1, keepdim=True)
-        var = kh.var(dim=-1, keepdim=True).to(torch.float32)
+        var = kh.var(dim=-1, unbiased=False, keepdim=True).to(torch.float32)
         rstd = torch.sqrt(var + eps).to(torch.float32)
         kh_hat = (kh - mean) / rstd
 
@@ -43,10 +43,11 @@ def ttt_linear(q, k, v, w, b, eta, scale, eps, mini_batch_size, initial_state, o
         h = h - 2 * (eta[:, :, -1, :, None] * k).transpose(-1, -2) @ v_new
 
         mean = o.mean(dim=-1, keepdim=True)
-        var = o.var(dim=-1, keepdim=True).to(torch.float32)
-        o += (o - mean) / torch.sqrt(var + eps) * w + b
+        var = o.var(dim=-1, unbiased=False, keepdim=True).to(torch.float32)
+        rstd = torch.sqrt(var + eps).to(torch.float32)
+        o_hat = (o - mean) / rstd * w + b
 
-        out[i] = o
+        out[i] = o + o_hat
 
     # [B, num_mini_batch, mini_batch_size, num_heads, head_dim]
     out = out.permute(1, 2, 0, 3, 4).reshape(B, num_heads, seq_len, head_dim)
