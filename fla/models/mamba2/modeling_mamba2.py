@@ -740,12 +740,21 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
                 module.dt_bias.copy_(inv_dt)
             module.dt_bias._no_reinit = True
 
-        if isinstance(module, nn.Linear):
+        if isinstance(module, (nn.Linear, nn.Conv1d)):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
-                if not getattr(module.bias, "_no_reinit", False):
-                    nn.init.zeros_(module.bias)
+                nn.init.zeros_(module.bias)
+                # guard against deprecated behavior
+                if hasattr(module.bias, "_no_reinit"):
+                    raise ValueError("This is not supposed to happen")
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, std=self.config.initializer_range)
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif hasattr(module, 'reset_parameters'):
+            module.reset_parameters()
 
         if self.config.rescale_prenorm_residual:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
