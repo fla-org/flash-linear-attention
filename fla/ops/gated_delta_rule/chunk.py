@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional
 
@@ -270,6 +270,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
 
 
+@torch.compiler.disable
 def chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,

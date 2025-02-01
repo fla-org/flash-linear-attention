@@ -1140,6 +1140,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         return dq, dk, dv, ds, dg, None, dhk0, dhv0, None, None, None, None
 
 
+@torch.compiler.disable
 def chunk_gsa(
     q: torch.Tensor,
     k: torch.Tensor,

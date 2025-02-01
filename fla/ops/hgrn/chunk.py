@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # this function implements the chunkwise form of HGRN, inspired by
 # [Volodymyr Kyrylov in his blog post](https://proger.github.io/posts/scan/chunk.html)
@@ -280,6 +280,7 @@ class ChunkHGRNFunction(torch.autograd.Function):
         return dx.to(o.dtype), dg, None, None
 
 
+@torch.compiler.disable
 def chunk_hgrn(
     x: torch.Tensor,
     g: torch.Tensor,

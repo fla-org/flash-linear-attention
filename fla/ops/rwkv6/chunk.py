@@ -1350,6 +1350,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), du.to(u), None, dh0, None, None, None
 
 
+@torch.compiler.disable
 def chunk_rwkv6(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -294,6 +294,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None, None
 
 
+@torch.compiler.disable
 def chunk_dplr_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,

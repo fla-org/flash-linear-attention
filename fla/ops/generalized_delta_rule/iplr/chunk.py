@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
 from typing import Optional, Tuple
 
 import torch
@@ -447,6 +450,7 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
         )
 
 
+@torch.compiler.disable
 def chunk_iplr_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,

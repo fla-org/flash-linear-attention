@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -249,6 +249,7 @@ class FusedRecurrentHGRNFunction(torch.autograd.Function):
         return dx, dg, dh0, None, None
 
 
+@torch.compiler.disable
 def fused_recurrent_hgrn(
     x: torch.Tensor,
     g: torch.Tensor,

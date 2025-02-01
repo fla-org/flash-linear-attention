@@ -478,6 +478,7 @@ class FusedLinearCrossEntropyLoss(nn.Module):
         self.num_chunks = num_chunks
         self.reduction = reduction
 
+    @torch.compiler.disable
     def forward(
         self,
         x: torch.Tensor,
