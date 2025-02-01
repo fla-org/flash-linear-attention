@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # "HGRN2: Gated Linear RNNs with State Expansion"[https://arxiv.org/abs/2404.07904]
 
@@ -91,6 +91,7 @@ class HGRN2Attention(nn.Module):
                 nn.init.zeros_(module.bias)
         module._is_hf_initialized = True
 
+    @torch.compile
     def forward(
         self,
         hidden_states: torch.Tensor,

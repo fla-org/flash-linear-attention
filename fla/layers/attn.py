@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
@@ -73,6 +73,7 @@ class Attention(nn.Module):
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
+    @torch.compile
     def forward(
         self,
         hidden_states: torch.Tensor,

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 """
 Linear attention in Based.
@@ -58,6 +58,7 @@ class BasedLinearAttention(nn.Module):
                 nn.init.zeros_(module.bias)
         module._is_hf_initialized = True
 
+    @torch.compile
     def forward(self, hidden_states: torch.Tensor, **kwargs):
         mode = self.mode
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)

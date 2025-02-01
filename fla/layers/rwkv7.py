@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import einsum, rearrange
 
 from fla.layers.rwkv6 import LoRA
@@ -102,6 +101,7 @@ class RWKV7Attention(nn.Module):
             nn.init.xavier_uniform_(module, gain=2 ** -2.5)
         module._is_hf_initialized = True
 
+    @torch.compile
     def forward(
         self,
         hidden_states: torch.Tensor,
