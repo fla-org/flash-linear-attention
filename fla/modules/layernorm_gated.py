@@ -444,7 +444,7 @@ class LayerNormFn(torch.autograd.Function):
             ctx.is_rms_norm
         )
         dx = dx.reshape(ctx.x_shape_og)
-        dx = dz.reshape(ctx.x_shape_og) if dz is not None else None
+        dz = dz.reshape(ctx.x_shape_og) if dz is not None else None
         return dx, dw, db, dz, None, None, None, None
 
 
