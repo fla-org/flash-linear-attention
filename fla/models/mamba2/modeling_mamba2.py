@@ -720,7 +720,10 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
             # --- A_log ---
             A = torch.arange(1, module.num_heads + 1)
             with torch.no_grad():
-                module.A_log.copy_(torch.log(A))
+                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                    module.A_log.copy_(torch.log(A))
+                else:
+                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
             module.A_log._no_weight_decay = True
 
             # --- D ---
@@ -737,7 +740,10 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
             # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
-                module.dt_bias.copy_(inv_dt)
+                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                    module.dt_bias.copy_(inv_dt)
+                else:
+                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
             module.dt_bias._no_reinit = True
 
         if isinstance(module, (nn.Linear, nn.Conv1d)):
