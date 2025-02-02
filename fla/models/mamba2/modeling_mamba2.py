@@ -713,7 +713,11 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
     supports_gradient_checkpointing = True
     _is_stateful = True
 
-    def _init_weights(self, module):
+    def _init_weights(
+        self,
+        module: nn.Module,
+        num_residuals_per_layer: int = 1,
+    ):
         """Initialize the weights."""
         if isinstance(module, Mamba2Mixer):
 
@@ -775,9 +779,8 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
                     # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                     # We need to reinit p since this code could be called multiple times
                     # Having just p *= scale would repeatedly scale it down
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
                     with torch.no_grad():
-                        p /= math.sqrt(self.config.num_hidden_layers)
+                        p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
 @dataclass
