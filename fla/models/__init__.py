@@ -4,6 +4,7 @@ from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
 from fla.models.delta_net import (DeltaNetConfig, DeltaNetForCausalLM,
                                   DeltaNetModel)
+from fla.models.fumba import FumbaConfig, FumbaForCausalLM, FumbaModel
 from fla.models.gated_deltanet import (GatedDeltaNetConfig,
                                        GatedDeltaNetForCausalLM,
                                        GatedDeltaNetModel)
@@ -27,6 +28,7 @@ __all__ = [
     'ABCConfig', 'ABCForCausalLM', 'ABCModel',
     'BitNetConfig', 'BitNetForCausalLM', 'BitNetModel',
     'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
+    'FumbaConfig', 'FumbaForCausalLM', 'FumbaModel',
     'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
     'GLAConfig', 'GLAForCausalLM', 'GLAModel',
     'GSAConfig', 'GSAForCausalLM', 'GSAModel',
