@@ -12,7 +12,7 @@ from torch import nn
 from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import ModelOutput, logging, Cache
+from transformers.utils import ModelOutput, logging
 
 from fla.layers.dswattn import DualSlidingWindowAttention
 from fla.models.mamba.modeling_mamba import MambaCache, MambaMixer

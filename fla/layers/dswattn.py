@@ -18,8 +18,6 @@ from fla.modules import RMSNorm, RotaryEmbedding
 if TYPE_CHECKING:
     from fla.models.utils import Cache
 
-from fla.models.fumba.modeling_fumba import FumbaCache
-
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 logger = logging.get_logger(__name__)
@@ -103,7 +101,7 @@ class DualSlidingWindowAttention(nn.Module):
         hidden_states: torch.Tensor,
         ssm_states: torch.Tensor = None,
         attention_mask: Optional[torch.LongTensor] = None,
-        cache_params: Optional[FumbaCache] = None,
+        cache_params = None,
         use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
