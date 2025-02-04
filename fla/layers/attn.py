@@ -94,9 +94,9 @@ class Attention(nn.Module):
         if self.norm_first:
             hidden_states = self.norm(hidden_states)
 
-        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', h=self.num_heads)
-        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
-        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
+        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
 
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens', None)
@@ -122,8 +122,8 @@ class Attention(nn.Module):
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
             )['attn_state']
-            k = rearrange(k, '... (h d) -> ... h d', h=self.num_kv_heads)
-            v = rearrange(v, '... (h d) -> ... h d', h=self.num_kv_heads)
+            k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
+            v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -159,7 +159,7 @@ class Attention(nn.Module):
                 causal=True,
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
-        o = o.reshape(batch_size, q_len, self.hidden_size)
+        o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
         if not output_attentions:

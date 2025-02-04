@@ -35,6 +35,7 @@ class TransformerConfig(PretrainedConfig):
         attention_bias: bool = False,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_swiglu: bool = True,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -58,7 +59,7 @@ class TransformerConfig(PretrainedConfig):
         self.attention_bias = attention_bias
         self.fuse_cross_entropy = fuse_cross_entropy
         self.fuse_norm = fuse_norm
-
+        self.fuse_swiglu = fuse_swiglu
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
