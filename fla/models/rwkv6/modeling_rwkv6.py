@@ -67,7 +67,7 @@ class RWKV6FeedForward(nn.Module):
     ) -> torch.Tensor:
         if attention_mask is not None:
             x = x.mul_(attention_mask[:, -x.shape[-2]:, None])
-        if x.shape[1] == 1 and state is not None:
+        if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
         else:
             shifted = self.time_shift(x)
