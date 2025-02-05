@@ -77,23 +77,23 @@ class DualSlidingWindowAttention(nn.Module):
         self.ssm_v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=False)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
-        self.alibi_slopes = generate_alibi_slopes(self, num_heads)
+        self.register_buffer("alibi_slopes", generate_alibi_slopes(head_num=num_heads))
         # block_mask for FlexAttention
         def sliding_window_causal(b, h, q_idx, kv_idx):
-            is_states = kv_idx < self.seq_len
+            is_states = kv_idx < max_position_embeddings
             causal_mask_s = q_idx >= kv_idx
             window_mask_s = q_idx - kv_idx < window_size
-            causal_mask_a = q_idx >= (kv_idx - self.seq_len)
-            window_mask_a = q_idx - (kv_idx - self.seq_len) < window_size
+            causal_mask_a = q_idx >= (kv_idx - max_position_embeddings)
+            window_mask_a = q_idx - (kv_idx - max_position_embeddings) < window_size
             return (is_states & causal_mask_s & window_mask_s) | (~is_states & causal_mask_a & window_mask_a)
         self.swa_mask = create_block_mask(sliding_window_causal, B=None, H=None, Q_LEN=max_position_embeddings, KV_LEN=max_position_embeddings*2)
-        self.alibi_tensor = build_alibi_tensor(num_heads, max_position_embeddings) # this one is for inference
-        self.mask_tensor = build_swa_mask(window_size, max_position_embeddings)
+        self.register_buffer("alibi_tensor", build_alibi_tensor(num_heads, max_position_embeddings))
+        self.register_buffer("mask_tensor", build_swa_mask(window_size, max_position_embeddings))
         self.k_len = max_position_embeddings
 
     # score_mod for FlexAttention
     def _alibi(self, score, b, h, q_idx, kv_idx):
-        bias = self.alibi_bias[h] * ((kv_idx - self.k_len - q_idx) * (kv_idx >= self.k_len) + (kv_idx - q_idx) * (kv_idx < self.k_len))
+        bias = self.alibi_slopes[h] * ((kv_idx - self.k_len - q_idx) * (kv_idx >= self.k_len) + (kv_idx - q_idx) * (kv_idx < self.k_len))
         return score + bias
 
     def forward(

@@ -20,6 +20,7 @@ class FumbaConfig(PretrainedConfig):
         num_heads: int = 18,
         num_kv_heads: int = 18,
         layer_norm_epsilon=1e-5,
+        norm_eps=1e-5,
         pad_token_id: int = 0,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
@@ -53,6 +54,7 @@ class FumbaConfig(PretrainedConfig):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.layer_norm_epsilon = layer_norm_epsilon
+        self.norm_eps = norm_eps
         self.conv_kernel = conv_kernel
         self.expand = expand
         self.intermediate_size = int(expand * self.hidden_size)
