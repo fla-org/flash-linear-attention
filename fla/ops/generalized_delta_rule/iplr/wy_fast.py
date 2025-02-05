@@ -8,6 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
@@ -30,7 +31,7 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
-    BC: tl.constexpr, # dummy placeholder
+    BC: tl.constexpr,  # dummy placeholder
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
@@ -206,7 +207,7 @@ def fwd_wu_kernel(
         p_A = tl.make_block_ptr(A + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     else:
         p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    
+
     b_A = tl.load(p_A, boundary_check=(0, 1))
     b_Aak = tl.zeros([BT, BT], dtype=tl.float32)
 
@@ -342,4 +343,3 @@ def fwd_wu(
         HEAD_FIRST=head_first
     )
     return w, u
-

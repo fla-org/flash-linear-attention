@@ -5,16 +5,16 @@ import torch.nn.functional as F
 
 
 def combine_params(theta, alpha, eta, seq_len):
-    beta = torch.cumprod(1 - alpha, dim = 2)  # β_t = ∏(1 - α_t) in titans paper
+    beta = torch.cumprod(1 - alpha, dim=2)  # β_t = ∏(1 - α_t) in titans paper
 
-    m = torch.cumprod(eta, dim = 2)  # [batch_size, head_dim, sequence_length, 1]
+    m = torch.cumprod(eta, dim=2)  # [batch_size, head_dim, sequence_length, 1]
     m[:, :, 0:1, :] = 1
 
     n = m * theta  # n_i=m_i*theta_i
     beta_T = beta[:, :, -1:, :].clone()  # [batch_size, head_dim, 1, 1]
     # calculate beta_T/beta_j
     beta_ratio = beta_T / beta  # [batch_size, head_dim, sequence_length, 1]
-    mask = torch.triu(torch.ones(seq_len, seq_len, dtype = beta.dtype)).to(
+    mask = torch.triu(torch.ones(seq_len, seq_len, dtype=beta.dtype)).to(
         beta.device)  # [sequence_length, sequence_length]
     mask = mask.view(1, 1, seq_len, seq_len)  # [1, 1, sequence_length, sequence_length]
     beta_ratio = beta_ratio.view(*beta_ratio.shape[:-1], 1)  # [batch_size, head_dim, sequence_length, 1]
@@ -41,7 +41,7 @@ def titans_linear(q, k, v, w, b, theta, alpha, eta, eps, BT, initial_state, outp
     # [num_heads, 1, head_dim]
     h = initial_state
     if initial_state is None:
-        h = torch.zeros((B, H, D, D), device = v.device, dtype = v.dtype).to(torch.float32)
+        h = torch.zeros((B, H, D, D), device=v.device, dtype=v.dtype).to(torch.float32)
     # [num_batch, B, num_heads, mini_batch_size, head_dim]
     o = torch.empty_like(_v)
 
@@ -54,7 +54,7 @@ def titans_linear(q, k, v, w, b, theta, alpha, eta, eps, BT, initial_state, outp
         reconstruction_target = v_i - k_i
 
         mean = kh.mean(-1, True)
-        var = kh.var(-1, unbiased = False, keepdim = True).to(torch.float32)
+        var = kh.var(-1, unbiased=False, keepdim=True).to(torch.float32)
         rstd = torch.sqrt(var + eps).to(torch.float32)
         kh_hat = (kh - mean) / rstd
 
@@ -67,8 +67,8 @@ def titans_linear(q, k, v, w, b, theta, alpha, eta, eps, BT, initial_state, outp
         h = beta_T * h - 2 * (f_i @ k_i).transpose(-1, -2) @ v_new
         # layer norm with residuals
 
-        mean = o_i.mean(dim = -1, keepdim = True)
-        var = o_i.var(dim = -1, unbiased = False, keepdim = True).to(torch.float32)
+        mean = o_i.mean(dim=-1, keepdim=True)
+        var = o_i.var(dim=-1, unbiased=False, keepdim=True).to(torch.float32)
         rstd = torch.sqrt(var + eps).to(torch.float32)
         o[i] = o_i + (o_i - mean) / rstd * w + b
 
