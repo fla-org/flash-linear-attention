@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import einsum, rearrange
 
 from fla.layers.rwkv6 import LoRA
 from fla.modules import GroupNorm
+from fla.modules.l2norm import l2_norm
 from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 
 if TYPE_CHECKING:
@@ -63,11 +63,11 @@ class RWKV7Attention(nn.Module):
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
-        self.x_x = nn.Parameter(torch.empty(6, hidden_size))
+        self.x_x = nn.Parameter(torch.zeros(6, hidden_size))
 
-        self.k_k = nn.Parameter(torch.empty(self.key_dim))
-        self.k_a = nn.Parameter(torch.empty(self.key_dim))
-        self.r_k = nn.Parameter(torch.empty(self.num_heads, self.head_dim))
+        self.k_k = nn.Parameter(torch.zeros(self.key_dim))
+        self.k_a = nn.Parameter(torch.zeros(self.key_dim))
+        self.r_k = nn.Parameter(torch.zeros(self.num_heads, self.head_dim))
 
         self.r_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
@@ -157,7 +157,7 @@ class RWKV7Attention(nn.Module):
         g = self.g_lora(xg)
 
         kk = k * self.k_k
-        kk = F.normalize(kk.view(batch_size, seq_len, self.num_heads, -1), dim=-1, p=2.0).view(batch_size, seq_len, -1)
+        kk = l2_norm(kk.view(batch_size, seq_len, self.num_heads, -1)).view(batch_size, seq_len, -1)
         k = k * (1 + (a - 1) * self.k_a)
 
         # dealing with left-padding

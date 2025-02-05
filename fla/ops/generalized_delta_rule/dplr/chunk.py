@@ -52,7 +52,7 @@ def chunk_dplr_fwd(
         scale=scale,
         offsets=offsets,
         indices=indices,
-        BT=BT,
+        chunk_size=BT,
         head_first=head_first
     )
 
@@ -172,7 +172,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             scale=scale,
             offsets=offsets,
             indices=indices,
-            BT=BT,
+            chunk_size=BT,
             head_first=head_first
         )
         w, u, A_ab_inv = fwd_prepare_wy_repr(
@@ -294,6 +294,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None, None
 
 
+@torch.compiler.disable
 def chunk_dplr_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,

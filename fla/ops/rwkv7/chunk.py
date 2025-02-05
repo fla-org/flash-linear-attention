@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional
 
@@ -8,6 +8,7 @@ import torch
 from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
 
 
+@torch.compiler.disable
 def chunk_rwkv7(
     r: torch.Tensor,
     log_w: torch.Tensor,

@@ -1,8 +1,8 @@
 
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import triton
@@ -27,8 +27,8 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
     k,
     a,
     b,
-    gi, # cumsum
-    ge, #before cumsum
+    gi,  # cumsum
+    ge,  # before cumsum
     Aqk,
     Aqb,
     Aab,
@@ -86,7 +86,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
             p_k = tl.make_block_ptr(k + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
             p_b = tl.make_block_ptr(b + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
             p_gk = tl.make_block_ptr(gi + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
-            p_gn = tl.max_contiguous(tl.multiple_of(gi + (bos + i_t * BT + i_i * BC - 1) * H*K + i_h * K + o_k, BK), BK)
+            p_gn = gi + (bos + i_t * BT + i_i * BC - 1) * H*K + i_h * K + o_k
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         # [BC, BK]
@@ -125,16 +125,13 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
     tl.store(p_Aak, b_Aak.to(Aak.dtype.element_ty), boundary_check=(0, 1))
 
 
-
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [1, 2, 4, 8]
     ],
     key=["BK", "BT"]
 )
@@ -223,7 +220,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     b_gi = tl.load(p_gi, boundary_check=(0, 1))
     b_ge = tl.load(p_ge, boundary_check=(0, 1))
 
-    ## deal with decay term.
+    # deal with decay term.
     g_exp = tl.exp(b_gi)
     g_exp_inv = tl.exp(-b_gi + b_g_last[None, :])
     b_qg = b_q * g_exp
@@ -261,25 +258,24 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
         tl.store(Aak + o_A + j, b_A_ak, mask=m_A)
 
 
-
 def chunk_fwd_intra_dplr_fn(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        gi: torch.Tensor,
-        ge: torch.Tensor,
-        scale: float,
-        BT: int,
-        offsets: Optional[torch.LongTensor] = None,
-        indices: Optional[torch.LongTensor] = None,
-        head_first: bool = True,
-    ):
+    q: torch.Tensor,
+    k: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    gi: torch.Tensor,
+    ge: torch.Tensor,
+    scale: float,
+    chunk_size: int,
+    offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = True,
+):
     if head_first:
         B, H, T, K = k.shape
     else:
         B, T, H, K = k.shape
-    BT = min(BT, max(16, triton.next_power_of_2(T)))
+    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     BC = min(16, BT)
     NC = triton.cdiv(BT, BC)

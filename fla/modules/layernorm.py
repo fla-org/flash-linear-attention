@@ -86,10 +86,6 @@ def layer_norm_fwd_kernel(
     RESIDUAL_OUT,  # pointer to the residual
     Mean,  # pointer to the mean
     Rstd,  # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
-    stride_y_row,
-    stride_res_row,
-    stride_res_out_row,
     N,  # number of columns in X
     G,  # number of groups
     eps,  # epsilon to avoid division by zero
@@ -103,12 +99,12 @@ def layer_norm_fwd_kernel(
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
     group = row % G
-    X += row * stride_x_row
-    Y += row * stride_y_row
+    X += row * N
+    Y += row * N
     if HAS_RESIDUAL:
-        RESIDUAL += row * stride_res_row
+        RESIDUAL += row * N
     if STORE_RESIDUAL_OUT:
-        RESIDUAL_OUT += row * stride_res_out_row
+        RESIDUAL_OUT += row * N
     # Compute mean and variance
     cols = tl.arange(0, BLOCK_N)
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
@@ -130,9 +126,9 @@ def layer_norm_fwd_kernel(
     # Normalize and apply linear transformation
     mask = cols < N
     if HAS_WEIGHT:
-        w = tl.load(W + group * stride_x_row + cols, mask=mask).to(tl.float32)
+        w = tl.load(W + group * N + cols, mask=mask).to(tl.float32)
     if HAS_BIAS:
-        b = tl.load(B + group * stride_x_row + cols, mask=mask).to(tl.float32)
+        b = tl.load(B + group * N + cols, mask=mask).to(tl.float32)
     x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
 
     y = x_hat * w if HAS_WEIGHT else x_hat
@@ -176,6 +172,7 @@ def layer_norm_fwd(
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
+
     with torch.cuda.device(x.device.index):
         layer_norm_fwd_kernel[(M,)](
             x,
@@ -186,10 +183,6 @@ def layer_norm_fwd(
             residual_out,
             mean,
             rstd,
-            x.stride(0),
-            y.stride(0),
-            residual.stride(0) if residual is not None else 0,
-            residual_out.stride(0) if residual_out is not None else 0,
             N,
             G,
             eps,
@@ -229,12 +222,6 @@ def layer_norm_bwd_kernel(
     DRESIDUAL_IN,
     Mean,  # pointer to the mean
     Rstd,  # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
-    stride_y_row,
-    stride_dy_row,
-    stride_dx_row,
-    stride_dres_row,
-    stride_dres_in_row,
     M,  # number of rows in X
     N,  # number of columns in X
     G,  # number of groups
@@ -258,17 +245,17 @@ def layer_norm_bwd_kernel(
     mask = cols < N
 
     if HAS_WEIGHT:
-        w = tl.load(W + group_id * stride_x_row + cols, mask=mask).to(tl.float32)
+        w = tl.load(W + group_id * N + cols, mask=mask).to(tl.float32)
         dw = tl.zeros((BLOCK_N,), dtype=tl.float32)
     if RECOMPUTE_OUTPUT and HAS_BIAS:
-        b = tl.load(B + group_id * stride_x_row + cols, mask=mask, other=0.0).to(tl.float32)
+        b = tl.load(B + group_id * N + cols, mask=mask, other=0.0).to(tl.float32)
     if HAS_BIAS:
         db = tl.zeros((BLOCK_N,), dtype=tl.float32)
 
     for row in range(row_start, row_end, G):
         # Load data to SRAM
-        x = tl.load(X + row * stride_x_row + cols, mask=mask, other=0).to(tl.float32)
-        dy = tl.load(DY + row * stride_dy_row + cols, mask=mask, other=0).to(tl.float32)
+        x = tl.load(X + row * N + cols, mask=mask, other=0).to(tl.float32)
+        dy = tl.load(DY + row * N + cols, mask=mask, other=0).to(tl.float32)
         if not IS_RMS_NORM:
             mean = tl.load(Mean + row)
         rstd = tl.load(Rstd + row)
@@ -279,7 +266,7 @@ def layer_norm_bwd_kernel(
             y = xhat * w if HAS_WEIGHT else xhat
             if HAS_BIAS:
                 y = y + b
-            tl.store(Y + row * stride_y_row + cols, y, mask=mask)
+            tl.store(Y + row * N + cols, y, mask=mask)
         wdy = dy
         if HAS_WEIGHT:
             wdy = dy * w
@@ -294,12 +281,12 @@ def layer_norm_bwd_kernel(
             c1 = tl.sum(xhat * wdy, axis=0) / N
             dx = (wdy - xhat * c1) * rstd
         if HAS_DRESIDUAL:
-            dres = tl.load(DRESIDUAL + row * stride_dres_row + cols, mask=mask, other=0).to(tl.float32)
+            dres = tl.load(DRESIDUAL + row * N + cols, mask=mask, other=0).to(tl.float32)
             dx += dres
         # Write dx
         if STORE_DRESIDUAL:
-            tl.store(DRESIDUAL_IN + row * stride_dres_in_row + cols, dx, mask=mask)
-        tl.store(DX + row * stride_dx_row + cols, dx, mask=mask)
+            tl.store(DRESIDUAL_IN + row * N + cols, dx, mask=mask)
+        tl.store(DX + row * N + cols, dx, mask=mask)
 
     if HAS_WEIGHT:
         tl.store(DW + row_block_id * N + cols, dw, mask=mask)
@@ -361,12 +348,6 @@ def layer_norm_bwd(
             dresidual_in,
             mean,
             rstd,
-            x.stride(0),
-            0 if not recompute_output else y.stride(0),
-            dy.stride(0),
-            dx.stride(0),
-            dresidual.stride(0) if dresidual is not None else 0,
-            dresidual_in.stride(0) if dresidual_in is not None else 0,
             M,
             N,
             G,

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -18,15 +18,9 @@ from fla.utils import contiguous
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BS': 16}, num_warps=2),
-        triton.Config({'BS': 16}, num_warps=4),
-        triton.Config({'BS': 16}, num_warps=8),
-        triton.Config({'BS': 32}, num_warps=2),
-        triton.Config({'BS': 32}, num_warps=4),
-        triton.Config({'BS': 32}, num_warps=8),
-        triton.Config({'BS': 64}, num_warps=2),
-        triton.Config({'BS': 64}, num_warps=4),
-        triton.Config({'BS': 64}, num_warps=8),
+        triton.Config({'BS': BS}, num_warps=num_warps)
+        for BS in [16, 32, 64]
+        for num_warps in [2, 4, 8]
     ],
     key=['S', 'BT']
 )
@@ -171,7 +165,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
             p_gq = tl.make_block_ptr(ge + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
             p_k = tl.make_block_ptr(k + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
             p_gk = tl.make_block_ptr(gi + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
-            p_gn = tl.max_contiguous(tl.multiple_of(gi + (bos + i_t * BT + i_i * BC - 1) * H*K + i_h * K + o_k, BK), BK)
+            p_gn = gi + (bos + i_t * BT + i_i * BC - 1) * H*K + i_h * K + o_k
 
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
@@ -253,9 +247,9 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
         o_A = (bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * H*BT + i_h * BT + i_j * BC
         p_q = tl.make_block_ptr(q + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
         p_g = tl.make_block_ptr(ge + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
-        p_qj = tl.max_contiguous(tl.multiple_of(q + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k, BK), BK)
-        p_kj = tl.max_contiguous(tl.multiple_of(k + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k, BK), BK)
-        p_gk = tl.max_contiguous(tl.multiple_of(gi + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k, BK), BK)
+        p_qj = q + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
+        p_kj = k + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
+        p_gk = gi + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
 
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_g = tl.load(p_g, boundary_check=(0, 1))
@@ -341,9 +335,9 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
         o_A = (i_k * all + bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * H*BC + i_h * BC
         p_q = tl.make_block_ptr(q + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
         p_g = tl.make_block_ptr(ge + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-        p_qj = tl.max_contiguous(tl.multiple_of(q + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k, BK), BK)
-        p_kj = tl.max_contiguous(tl.multiple_of(k + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k, BK), BK)
-        p_gk = tl.max_contiguous(tl.multiple_of(gi + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k, BK), BK)
+        p_qj = q + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
+        p_kj = k + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
+        p_gk = gi + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
 
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_g = tl.load(p_g, boundary_check=(0, 1))
@@ -500,10 +494,10 @@ def chunk_rwkv6_bwd_kernel_dh(
         if HEAD_FIRST:
             p_gk = tl.make_block_ptr(ge + i_bg * T*K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
             p_gk_last = gi + (i_bg * T + last_idx) * K + i_k * BK + tl.arange(0, BK)
+            p_gk_last = tl.max_contiguous(tl.multiple_of(p_gk_last, BK), BK)
         else:
             p_gk = tl.make_block_ptr(ge + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
             p_gk_last = gi + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
-        p_gk_last = tl.max_contiguous(tl.multiple_of(p_gk_last, BK), BK)
 
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
         b_q = (b_q * tl.exp(b_gk) * scale).to(b_q.dtype)
@@ -573,7 +567,7 @@ def chunk_rwkv6_bwd_kernel_intra(
         if HEAD_FIRST:
             p_gn = tl.max_contiguous(tl.multiple_of(gi + (i_bh * T + i_t * BT + i_i * BC - 1) * K + o_k, BK), BK)
         else:
-            p_gn = tl.max_contiguous(tl.multiple_of(gi + (bos + i_t * BT + i_i * BC - 1) * H*K + i_h*K + o_k, BK), BK)
+            p_gn = gi + (bos + i_t * BT + i_i * BC - 1) * H*K + i_h*K + o_k
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(0, i_i):
@@ -604,8 +598,8 @@ def chunk_rwkv6_bwd_kernel_intra(
         p_dq = tl.make_block_ptr(dq + i_bh * T*K, (T, K), (K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
     else:
         o_dA = bos*H*BT + (i_t * BT + i_i * BC + tl.arange(0, BC)) * H*BT + i_h * BT + i_i * BC
-        p_kj = tl.max_contiguous(tl.multiple_of(k + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k, BK), BK)
-        p_gkj = tl.max_contiguous(tl.multiple_of(gi + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k, BK), BK)
+        p_kj = k + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
+        p_gkj = gi + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
         p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
 
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
@@ -640,9 +634,10 @@ def chunk_rwkv6_bwd_kernel_intra(
     if i_i < NC - 1:
         if HEAD_FIRST:
             p_gn = gi + i_bh * T*K + (min(i_t * BT + i_i * BC + BC, T) - 1)*K + o_k
+            p_gn = tl.max_contiguous(tl.multiple_of(p_gn, BK), BK)
         else:
             p_gn = gi + (bos + min(i_t * BT + i_i * BC + BC, T) - 1) * H*K + i_h*K + o_k
-        p_gn = tl.max_contiguous(tl.multiple_of(p_gn, BK), BK)
+
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(i_i + 1, NC):
@@ -672,8 +667,8 @@ def chunk_rwkv6_bwd_kernel_intra(
         p_dk = tl.make_block_ptr(dk + i_bh*T*K, (T, K), (K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
     else:
         o_dA = bos*H*BT + (i_t * BT + i_i * BC) * H*BT + i_h * BT + i_i * BC + tl.arange(0, BC)
-        p_qj = tl.max_contiguous(tl.multiple_of(q + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k, BK), BK)
-        p_gqj = tl.max_contiguous(tl.multiple_of(ge + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k, BK), BK)
+        p_qj = q + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
+        p_gqj = ge + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
         p_dk = tl.make_block_ptr(dk + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # [BC,]
@@ -755,7 +750,7 @@ def chunk_rwkv6_bwd_kernel_inter(
     else:
         p_gk = tl.make_block_ptr(ge + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_gi = tl.make_block_ptr(gi + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_gn = tl.max_contiguous(tl.multiple_of(gi + (bos + min(T, i_t * BT + BT)-1) * H*K + i_h * K + o_k, BK), BK)
+        p_gn = gi + (bos + min(T, i_t * BT + BT)-1) * H*K + i_h * K + o_k
     b_gn = tl.load(p_gn, mask=m_k, other=0)
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
@@ -1355,6 +1350,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), du.to(u), None, dh0, None, None, None
 
 
+@torch.compiler.disable
 def chunk_rwkv6(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 """
 https://github.com/corl-team/rebased/blob/main/flash_linear_attention/fla/layers/rebased_fast.py

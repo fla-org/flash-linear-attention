@@ -17,8 +17,8 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 from fla.layers.attn import Attention
-from fla.layers.multiscale_retention import MultiScaleRetention
-from fla.models.retnet.configuration_retnet import RetNetConfig
+from fla.layers.lightnet import LightNetAttention
+from fla.models.lightnet.configuration_lightnet import LightNetConfig
 from fla.models.utils import Cache
 from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
                          RMSNorm)
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-class RetNetMLP(nn.Module):
+class LightNetMLP(nn.Module):
 
     def __init__(
         self,
@@ -38,7 +38,7 @@ class RetNetMLP(nn.Module):
         hidden_ratio: Optional[int] = None,
         intermediate_size: Optional[int] = None,
         hidden_act: str = 'swish'
-    ) -> RetNetMLP:
+    ) -> LightNetMLP:
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -66,8 +66,8 @@ class RetNetMLP(nn.Module):
         return swiglu_linear(gate, y, self.down_proj.weight, self.down_proj.bias)
 
 
-class RetNetBlock(nn.Module):
-    def __init__(self, config: RetNetConfig, layer_idx: int):
+class LightNetBlock(nn.Module):
+    def __init__(self, config: LightNetConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -78,28 +78,24 @@ class RetNetBlock(nn.Module):
                 num_heads=config.attn['num_heads'],
                 num_kv_heads=config.attn['num_kv_heads'],
                 window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx
             )
         else:
-            self.attn = MultiScaleRetention(
+            self.attn = LightNetAttention(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
-                expand_k=config.expand_k,
-                expand_v=config.expand_v,
                 num_heads=config.num_heads,
-                num_kv_heads=config.num_kv_heads,
-                feature_map=config.feature_map,
-                use_output_gate=config.use_output_gate,
-                gate_fn=config.hidden_act,
+                expand_ratio=config.expand_ratio,
+                use_short_conv=config.use_short_conv,
+                conv_size=config.conv_size,
+                gate_low_rank_dim=config.gate_low_rank_dim,
                 elementwise_affine=config.elementwise_affine,
                 norm_eps=config.norm_eps,
-                fuse_norm=config.fuse_norm,
                 layer_idx=layer_idx
             )
         self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
-        self.mlp = RetNetMLP(
+        self.mlp = LightNetMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -110,14 +106,12 @@ class RetNetBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
         **kwargs: Unpack[Dict]
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-
         residual = hidden_states
-
         hidden_states = self.attn_norm(hidden_states)
         hidden_states, attentions, past_key_values = self.attn(
             hidden_states=hidden_states,
@@ -136,12 +130,11 @@ class RetNetBlock(nn.Module):
         return outputs
 
 
-class RetNetPreTrainedModel(PreTrainedModel):
+class LightNetPreTrainedModel(PreTrainedModel):
 
-    config_class = RetNetConfig
-    base_model_prefix = 'model'
+    config_class = LightNetConfig
     supports_gradient_checkpointing = True
-    _no_split_modules = ['RetNetBlock']
+    _no_split_modules = ['LightNetBlock']
     _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
@@ -183,17 +176,15 @@ class RetNetPreTrainedModel(PreTrainedModel):
                         p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class RetNetModel(RetNetPreTrainedModel):
+class LightNetModel(LightNetPreTrainedModel):
 
-    def __init__(self, config: RetNetConfig):
+    def __init__(self, config: LightNetConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList(
-            [RetNetBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([LightNetBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -211,7 +202,7 @@ class RetNetModel(RetNetPreTrainedModel):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,  # noqa
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -219,14 +210,10 @@ class RetNetModel(RetNetPreTrainedModel):
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
-            warnings.warn(
-                "`RetNetModel` does not support output attention weights now, so `output_attentions` is set to `False`."
-            )
+            warnings.warn("`LightNetModel` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -249,7 +236,8 @@ class RetNetModel(RetNetPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
-        for layer in self.layers:
+
+        for i, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -292,13 +280,13 @@ class RetNetModel(RetNetPreTrainedModel):
         )
 
 
-class RetNetForCausalLM(RetNetPreTrainedModel, GenerationMixin):
+class LightNetForCausalLM(LightNetPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = RetNetModel(config)
+        self.model = LightNetModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
@@ -327,7 +315,6 @@ class RetNetForCausalLM(RetNetPreTrainedModel, GenerationMixin):
         try:
             return super().generate(*args, **kwargs)
         except AttributeError as exception:
-            # Expected exception: "AttributeError: '(object name)' object has no attribute 'past_key_values'"
             if 'past_key_values' in str(exception):
                 raise AttributeError(
                     f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
@@ -342,17 +329,16 @@ class RetNetForCausalLM(RetNetPreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor = None,
-        past_key_values: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = True,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        use_cache: bool = True,
         num_logits_to_keep: Optional[int] = None,
         **kwargs: Unpack[Dict]
     ):
         # only last token for `inputs_ids` if the `past_key_values` is passed along.
         if past_key_values is not None:
             input_ids = input_ids[:, -1:]
-
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {'inputs_embeds': inputs_embeds}
@@ -378,8 +364,8 @@ class RetNetForCausalLM(RetNetPreTrainedModel, GenerationMixin):
         self,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -394,7 +380,6 @@ class RetNetForCausalLM(RetNetPreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,

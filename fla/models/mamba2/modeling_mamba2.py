@@ -713,30 +713,58 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
     supports_gradient_checkpointing = True
     _is_stateful = True
 
-    def _init_weights(self, module):
+    def _init_weights(
+        self,
+        module: nn.Module,
+        num_residuals_per_layer: int = 1,
+    ):
         """Initialize the weights."""
         if isinstance(module, Mamba2Mixer):
+
+            # --- A_log ---
+            A = torch.arange(1, module.num_heads + 1)
+            with torch.no_grad():
+                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                    module.A_log.copy_(torch.log(A))
+                else:
+                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
             module.A_log._no_weight_decay = True
+
+            # --- D ---
+            nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
+            # --- dt_bias ---
             dt = torch.exp(
                 torch.rand(self.config.num_heads)
                 * (math.log(self.config.time_step_max) - math.log(self.config.time_step_min))
                 + math.log(self.config.time_step_min)
             ).clamp(min=self.config.time_step_floor)
 
-            # # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
-                module.dt_bias.copy_(inv_dt)
+                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                    module.dt_bias.copy_(inv_dt)
+                else:
+                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
             module.dt_bias._no_reinit = True
 
-        if isinstance(module, nn.Linear):
+        if isinstance(module, (nn.Linear, nn.Conv1d)):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
-                if not getattr(module.bias, "_no_reinit", False):
-                    nn.init.zeros_(module.bias)
+                nn.init.zeros_(module.bias)
+                # guard against deprecated behavior
+                if hasattr(module.bias, "_no_reinit"):
+                    raise ValueError("This is not supposed to happen")
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, std=self.config.initializer_range)
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif hasattr(module, 'reset_parameters'):
+            module.reset_parameters()
 
         if self.config.rescale_prenorm_residual:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
@@ -751,9 +779,8 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
                     # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                     # We need to reinit p since this code could be called multiple times
                     # Having just p *= scale would repeatedly scale it down
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
                     with torch.no_grad():
-                        p /= math.sqrt(self.config.num_hidden_layers)
+                        p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
 @dataclass

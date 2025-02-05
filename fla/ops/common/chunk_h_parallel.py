@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 """
 Fully parallelized state passing.
@@ -116,10 +116,11 @@ def chunk_fwd_kernel_h_parallel(
         if HEAD_FIRST:
             p_gk = tl.make_block_ptr(gk + i_bh * T*K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
             p_gk_last = gk + i_bh * T*K + last_idx * K + i_k * BK + tl.arange(0, BK)
+            p_gk_last = tl.max_contiguous(tl.multiple_of(p_gk_last, BK), BK)
         else:
             p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
             p_gk_last = gk + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
-        p_gk_last = tl.max_contiguous(tl.multiple_of(p_gk_last, BK), BK)
+
         b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
 
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
@@ -130,10 +131,11 @@ def chunk_fwd_kernel_h_parallel(
         if HEAD_FIRST:
             p_gv = tl.make_block_ptr(gv + i_bh * T*V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_gv_last = gv + i_bh * T*V + last_idx * V + i_v * BV + tl.arange(0, BV)
+            p_gv_last = tl.max_contiguous(tl.multiple_of(p_gv_last, BV), BV)
         else:
             p_gv = tl.make_block_ptr(gv + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
-        p_gv_last = tl.max_contiguous(tl.multiple_of(p_gv_last, BV), BV)
+
         b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
 
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
@@ -225,9 +227,10 @@ def chunk_fwd_kernel_h_reduction(
         if USE_GK:
             if HEAD_FIRST:
                 p_gk_last = gk + i_nh * T*K + last_idx * K + i_k * BK + tl.arange(0, BK)
+                p_gk_last = tl.max_contiguous(tl.multiple_of(p_gk_last, BK), BK)
             else:
                 p_gk_last = gk + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
-            p_gk_last = tl.max_contiguous(tl.multiple_of(p_gk_last, BK), BK)
+
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
             b_h *= tl.exp(b_gk_last)[:, None]
 
@@ -235,9 +238,10 @@ def chunk_fwd_kernel_h_reduction(
         if USE_GV:
             if HEAD_FIRST:
                 p_gv_last = gv + i_nh * T*V + last_idx * V + i_v * BV + tl.arange(0, BV)
+                p_gv_last = tl.max_contiguous(tl.multiple_of(p_gv_last, BV), BV)
             else:
                 p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
-            p_gv_last = tl.max_contiguous(tl.multiple_of(p_gv_last, BV), BV)
+
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
             b_h *= tl.exp(b_gv_last)[None, :]
 
@@ -447,18 +451,20 @@ def chunk_bwd_kernel_dh_reduction(
         if USE_GK:
             if HEAD_FIRST:
                 p_gk_last = gk + (i_bg * T + last_idx) * K + i_k * BK + tl.arange(0, BK)
+                p_gk_last = tl.max_contiguous(tl.multiple_of(p_gk_last, BK), BK)
             else:
                 p_gk_last = gk + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
-            p_gk_last = tl.max_contiguous(tl.multiple_of(p_gk_last, BK), BK)
+
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
             b_dh *= tl.exp(b_gk_last)[:, None]
 
         if USE_GV:
             if HEAD_FIRST:
                 p_gv_last = gv + (i_bg * T + last_idx) * V + i_v * BV + tl.arange(0, BV)
+                p_gv_last = tl.max_contiguous(tl.multiple_of(p_gv_last, BV), BV)
             else:
                 p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
-            p_gv_last = tl.max_contiguous(tl.multiple_of(p_gv_last, BV), BV)
+
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
             b_dh *= tl.exp(b_gv_last)[None, :]
 

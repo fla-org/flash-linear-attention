@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.modules import RMSNorm, RotaryEmbedding
+from fla.modules import RotaryEmbedding
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -42,7 +42,6 @@ class Attention(nn.Module):
         window_size: Optional[int] = None,
         rope_theta: Optional[float] = 10000.,
         max_position_embeddings: Optional[int] = None,
-        norm_first: bool = False,
         norm_eps: float = 1e-5,
         layer_idx: int = None
     ):
@@ -61,11 +60,8 @@ class Attention(nn.Module):
         self.window_size = window_size
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        self.norm_first = norm_first
         self.layer_idx = layer_idx
 
-        if norm_first:
-            self.norm = RMSNorm(self.hidden_size, eps=norm_eps)
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=False)
@@ -91,12 +87,9 @@ class Attention(nn.Module):
 
         batch_size, q_len, _ = hidden_states.size()
 
-        if self.norm_first:
-            hidden_states = self.norm(hidden_states)
-
-        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', h=self.num_heads)
-        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
-        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
+        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
 
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens', None)
@@ -122,8 +115,8 @@ class Attention(nn.Module):
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
             )['attn_state']
-            k = rearrange(k, '... (h d) -> ... h d', h=self.num_kv_heads)
-            v = rearrange(v, '... (h d) -> ... h d', h=self.num_kv_heads)
+            k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
+            v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -159,7 +152,7 @@ class Attention(nn.Module):
                 causal=True,
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
-        o = o.reshape(batch_size, q_len, self.hidden_size)
+        o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
         if not output_attentions:

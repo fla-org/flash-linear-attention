@@ -12,6 +12,8 @@ from fla.models.gla import GLAConfig, GLAForCausalLM, GLAModel
 from fla.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
 from fla.models.hgrn import HGRNConfig, HGRNForCausalLM, HGRNModel
 from fla.models.hgrn2 import HGRN2Config, HGRN2ForCausalLM, HGRN2Model
+from fla.models.lightnet import (LightNetConfig, LightNetForCausalLM,
+                                 LightNetModel)
 from fla.models.linear_attn import (LinearAttentionConfig,
                                     LinearAttentionForCausalLM,
                                     LinearAttentionModel)
@@ -34,6 +36,7 @@ __all__ = [
     'GSAConfig', 'GSAForCausalLM', 'GSAModel',
     'HGRNConfig', 'HGRNForCausalLM', 'HGRNModel',
     'HGRN2Config', 'HGRN2ForCausalLM', 'HGRN2Model',
+    'LightNetConfig', 'LightNetForCausalLM', 'LightNetModel',
     'LinearAttentionConfig', 'LinearAttentionForCausalLM', 'LinearAttentionModel',
     'MambaConfig', 'MambaForCausalLM', 'MambaModel',
     'Mamba2Config', 'Mamba2ForCausalLM', 'Mamba2Model',

@@ -65,11 +65,15 @@ def profile(
     betas: Tuple[float] = (0.9, 0.95),
     weight_decay: float = 0.1,
     dtype: Optional[torch.dtype] = torch.bfloat16,
-    mixed_precision: str = 'bf16'
+    mixed_precision: str = 'bf16',
+    compile: bool = False
 ):
     device = torch.device('cuda')
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
     model = AutoModelForCausalLM.from_config(config).cuda().to(dtype)
+    if compile:
+        print("Compiling the model")
+        model = torch.compile(model)
     num_parameters = model.num_parameters()
     print(f"Initializing {name} model from the config:\n{config}\n{model}")
     print(f"Number of parameters in total: {num_parameters} ({sizeof_fmt(num_parameters)})")
@@ -141,6 +145,7 @@ if __name__ == "__main__":
     parser.add_argument("--varlen", action='store_true')
     parser.add_argument("--warmup_steps", default=16, type=int)
     parser.add_argument("--steps", default=32, type=int)
+    parser.add_argument("--compile", action='store_true')
     args = parser.parse_args()
     profile(
         name=args.name,
@@ -149,5 +154,6 @@ if __name__ == "__main__":
         context_len=args.context_len,
         varlen=args.varlen,
         warmup_steps=args.warmup_steps,
-        steps=args.steps
+        steps=args.steps,
+        compile=args.compile
     )

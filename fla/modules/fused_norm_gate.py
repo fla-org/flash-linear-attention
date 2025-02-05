@@ -41,10 +41,6 @@ def layer_norm_fwd_kernel(
     RESIDUAL_OUT,  # pointer to the residual
     Mean,  # pointer to the mean
     Rstd,  # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
-    stride_y_row,
-    stride_res_row,
-    stride_res_out_row,
     N,  # number of columns in X
     eps,  # epsilon to avoid division by zero
     IS_RMS_NORM: tl.constexpr,
@@ -56,13 +52,13 @@ def layer_norm_fwd_kernel(
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
-    X += row * stride_x_row
-    Y += row * stride_y_row
-    O += row * stride_x_row
+    X += row * N
+    Y += row * N
+    O += row * N
     if HAS_RESIDUAL:
-        RESIDUAL += row * stride_res_row
+        RESIDUAL += row * N
     if STORE_RESIDUAL_OUT:
-        RESIDUAL_OUT += row * stride_res_out_row
+        RESIDUAL_OUT += row * N
     # Compute mean and variance
     cols = tl.arange(0, BLOCK_N)
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
@@ -151,10 +147,6 @@ def layer_norm_fwd(
             residual_out,
             mean,
             rstd,
-            x.stride(0),
-            y.stride(0),
-            residual.stride(0) if residual is not None else 0,
-            residual_out.stride(0) if residual_out is not None else 0,
             N,
             eps,
             is_rms_norm,
@@ -195,12 +187,6 @@ def layer_norm_bwd_kernel(
     DRESIDUAL_IN,
     Mean,  # pointer to the mean
     Rstd,  # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
-    stride_y_row,
-    stride_dy_row,
-    stride_dx_row,
-    stride_dres_row,
-    stride_dres_in_row,
     M,  # number of rows in X
     N,  # number of columns in X
     eps,  # epsilon to avoid division by zero
@@ -218,17 +204,17 @@ def layer_norm_bwd_kernel(
     row_start = row_block_id * rows_per_program
     cols = tl.arange(0, BLOCK_N)
     mask = cols < N
-    X += row_start * stride_x_row
-    O += row_start * stride_x_row
+    X += row_start * N
+    O += row_start * N
     if HAS_DRESIDUAL:
-        DRESIDUAL += row_start * stride_dres_row
+        DRESIDUAL += row_start * N
     if STORE_DRESIDUAL:
-        DRESIDUAL_IN += row_start * stride_dres_in_row
-    DY += row_start * stride_dy_row
-    DX += row_start * stride_dx_row
-    DO += row_start * stride_dx_row
+        DRESIDUAL_IN += row_start * N
+    DY += row_start * N
+    DX += row_start * N
+    DO += row_start * N
     if RECOMPUTE_OUTPUT:
-        Y += row_start * stride_y_row
+        Y += row_start * N
     if HAS_WEIGHT:
         w = tl.load(W + cols, mask=mask).to(tl.float32)
         dw = tl.zeros((BLOCK_N,), dtype=tl.float32)
@@ -281,17 +267,17 @@ def layer_norm_bwd_kernel(
         tl.store(DX + cols, dx, mask=mask)
         tl.store(DO + cols, do, mask=mask)
 
-        X += stride_x_row
-        O += stride_x_row
+        X += N
+        O += N
         if HAS_DRESIDUAL:
-            DRESIDUAL += stride_dres_row
+            DRESIDUAL += N
         if STORE_DRESIDUAL:
-            DRESIDUAL_IN += stride_dres_in_row
+            DRESIDUAL_IN += N
         if RECOMPUTE_OUTPUT:
-            Y += stride_y_row
-        DY += stride_dy_row
-        DX += stride_dx_row
-        DO += stride_dx_row
+            Y += N
+        DY += N
+        DX += N
+        DO += N
     if HAS_WEIGHT:
         tl.store(DW + row_block_id * N + cols, dw, mask=mask)
     if HAS_BIAS:
@@ -346,16 +332,8 @@ def layer_norm_bwd(
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
-    _dw = (
-        torch.empty((sm_count, N), dtype=torch.float, device=weight.device)
-        if weight is not None
-        else None
-    )
-    _db = (
-        torch.empty((sm_count, N), dtype=torch.float, device=bias.device)
-        if bias is not None
-        else None
-    )
+    dw = torch.empty((sm_count, N), dtype=torch.float, device=weight.device) if weight is not None else None
+    db = torch.empty((sm_count, N), dtype=torch.float, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / sm_count)
     grid = (sm_count,)
     with torch.cuda.device(x.device.index):
@@ -368,18 +346,12 @@ def layer_norm_bwd(
             dy,
             dx,
             do,
-            _dw,
-            _db,
+            dw,
+            db,
             dresidual,
             dresidual_in,
             mean,
             rstd,
-            x.stride(0),
-            0 if not recompute_output else y.stride(0),
-            dy.stride(0),
-            dx.stride(0),
-            dresidual.stride(0) if dresidual is not None else 0,
-            dresidual_in.stride(0) if dresidual_in is not None else 0,
             M,
             N,
             eps,
@@ -391,8 +363,8 @@ def layer_norm_bwd(
             weight is not None,
             bias is not None,
         )
-    dw = _dw.sum(0).to(weight.dtype) if weight is not None else None
-    db = _db.sum(0).to(bias.dtype) if bias is not None else None
+    dw = dw.sum(0).to(weight.dtype) if weight is not None else None
+    db = db.sum(0).to(bias.dtype) if bias is not None else None
     # Don't need to compute dresidual_in separately in this case
     if has_residual and dx.dtype == x.dtype:
         dresidual_in = dx

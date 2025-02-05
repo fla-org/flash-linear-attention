@@ -1,14 +1,12 @@
 
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from typing import Optional, Tuple
-from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import fwd_prepare_wy_repr 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous, tensor_cache
-from fla.ops.generalized_delta_rule.dplr.chunk_A_fwd import chunk_fwd_intra_dplr_fn 
 
 
 @triton.heuristics({
@@ -54,7 +52,7 @@ def chunk_dplr_bwd_kernel_dAu(
 
     b_dA_qk = tl.zeros([BT, BT], dtype=tl.float32)
     b_dA_qb = tl.zeros([BT, BT], dtype=tl.float32)
-    
+
     if HEAD_FIRST:
         p_A_qb = tl.make_block_ptr(A_qb + i_bh * T*BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     else:
@@ -63,7 +61,7 @@ def chunk_dplr_bwd_kernel_dAu(
     b_A_qb = tl.load(p_A_qb, boundary_check=(0, 1))
     # causal mask
     b_A_qb = tl.where(tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :], b_A_qb, 0.).to(b_A_qb.dtype)
-    
+
     for i_v in range(tl.cdiv(V, BV)):
         if HEAD_FIRST:
             p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -81,7 +79,7 @@ def chunk_dplr_bwd_kernel_dAu(
         b_dA_qk += tl.dot(b_do, b_v)
         b_dA_qb += tl.dot(b_do, b_v_new)
         b_dv_new = tl.dot(tl.trans(b_A_qb), b_do)
-        # for recurrent 
+        # for recurrent
         tl.store(p_dv_new, b_dv_new.to(p_dv_new.dtype.element_ty), boundary_check=(0, 1))
 
     if HEAD_FIRST:
@@ -95,7 +93,6 @@ def chunk_dplr_bwd_kernel_dAu(
     tl.store(p_dA_qk, b_dA_qk.to(p_dA_qk.dtype.element_ty), boundary_check=(0, 1))
     b_dA_qb = tl.where(m_s, b_dA_qb * scale, 0.)
     tl.store(p_dA_qb, b_dA_qb.to(p_dA_qb.dtype.element_ty), boundary_check=(0, 1))
-
 
 
 @triton.heuristics({
@@ -118,7 +115,7 @@ def chunk_dplr_bwd_o_kernel(
     dh,
     dk,
     db,
-    dA_qk, 
+    dA_qk,
     dA_qb,
     w,
     dq,
@@ -211,7 +208,7 @@ def chunk_dplr_bwd_o_kernel(
         p_dv = tl.make_block_ptr(dv, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_dv = tl.load(p_dv, boundary_check=(0, 1))
         b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
-    
+
     m_k = (i_k*BK+tl.arange(0, BK)) < K
     last_idx = min(i_t * BT + BT, T) - 1
     b_gk_last = tl.load(gk + last_idx * stride_qk + i_k*BK + tl.arange(0, BK), mask=m_k, other=float('-inf'))
@@ -239,7 +236,6 @@ def chunk_dplr_bwd_o_kernel(
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dA_qk, b_dA_qk.to(p_dA_qk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dA_qb, b_dA_qb.to(p_dA_qb.dtype.element_ty), boundary_check=(0, 1))
-
 
 
 @triton.heuristics({
@@ -293,7 +289,7 @@ def chunk_dplr_bwd_kernel_dv(
     do += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
     dv += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
     kg += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    dh += (i_bh * NT + i_t) * K*V if HEAD_FIRST else (i_tg * H + i_h) * K*V 
+    dh += (i_bh * NT + i_t) * K*V if HEAD_FIRST else (i_tg * H + i_h) * K*V
 
     stride_qk = K if HEAD_FIRST else H*K
     stride_vo = V if HEAD_FIRST else H*V
@@ -339,7 +335,8 @@ def chunk_dplr_bwd_dv(
         NT = len(indices)
 
     dv = torch.empty_like(do)
-    grid = lambda meta: (
+
+    def grid(meta): return (
         triton.cdiv(V, meta['BV']),
         NT,
         B * H
@@ -379,7 +376,7 @@ def chunk_dplr_bwd_o(
     scale: float = 1.0,
     head_first: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    
+
     if head_first:
         B, H, T, K, V = *w.shape, v.shape[-1]
     else:
@@ -439,7 +436,6 @@ def chunk_dplr_bwd_o(
         HEAD_FIRST=head_first,
     )
     return dq, dk, dw, db, dgk_last
-
 
 
 def chunk_dplr_bwd_dAu(

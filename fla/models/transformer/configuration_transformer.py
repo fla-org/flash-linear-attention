@@ -25,7 +25,6 @@ class TransformerConfig(PretrainedConfig):
         hidden_act: str = "swish",
         initializer_range: float = 0.02,
         elementwise_affine: Optional[bool] = True,
-        norm_first: bool = False,
         norm_eps: float = 1e-6,
         use_cache: bool = True,
         pad_token_id: int = None,
@@ -35,6 +34,7 @@ class TransformerConfig(PretrainedConfig):
         attention_bias: bool = False,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_swiglu: bool = True,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -52,13 +52,12 @@ class TransformerConfig(PretrainedConfig):
 
         self.initializer_range = initializer_range
         self.elementwise_affine = elementwise_affine
-        self.norm_first = norm_first
         self.norm_eps = norm_eps
         self.use_cache = use_cache
         self.attention_bias = attention_bias
         self.fuse_cross_entropy = fuse_cross_entropy
         self.fuse_norm = fuse_norm
-
+        self.fuse_swiglu = fuse_swiglu
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,

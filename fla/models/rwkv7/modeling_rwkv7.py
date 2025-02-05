@@ -52,7 +52,7 @@ class RWKV7FeedForward(nn.Module):
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
-        self.x_k = nn.Parameter(torch.empty(hidden_size))
+        self.x_k = nn.Parameter(torch.zeros(hidden_size))
 
         self.key = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.value = nn.Linear(intermediate_size, hidden_size, bias=False)
@@ -165,6 +165,7 @@ class RWKV7PreTrainedModel(PreTrainedModel):
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['RWKV7Block']
+    _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
@@ -268,7 +269,7 @@ class RWKV7Model(RWKV7PreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
 
-        v_first = torch.empty_like(hidden_states)
+        v_first = torch.zeros_like(hidden_states)
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)

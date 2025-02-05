@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -157,7 +157,7 @@ def chunk_gsa_fwd_k_kernel_intra(
         p_gn = tl.max_contiguous(tl.multiple_of(g + i_bg * T*V + min(i_t * BT + i_i * BC, T) * V + o_v, BV), BV)
     else:
         p_g = tl.make_block_ptr(g + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))
-        p_gn = tl.max_contiguous(tl.multiple_of(g + (bos + min(i_t * BT + i_i * BC, T)) * H*V + i_h * V + o_v, BV), BV)
+        p_gn = g + (bos + min(i_t * BT + i_i * BC, T)) * H*V + i_h * V + o_v
     # [BV,]
     b_gn = tl.load(p_gn, mask=m_v, other=0)
     # [BC, BV]
@@ -193,8 +193,8 @@ def chunk_gsa_fwd_k_kernel_intra(
             p_v = tl.max_contiguous(tl.multiple_of(v + i_bg * T*V + (i_t * BT + i_i * BC + j) * V + o_v, BV), BV)
             p_gv = tl.max_contiguous(tl.multiple_of(g + i_bg * T*V + (i_t * BT + i_i * BC + j) * V + o_v, BV), BV)
         else:
-            p_v = tl.max_contiguous(tl.multiple_of(v + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v, BV), BV)
-            p_gv = tl.max_contiguous(tl.multiple_of(g + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v, BV), BV)
+            p_v = v + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v
+            p_gv = g + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v
         # [BC,]
         b_A = tl.load(A + o_A + j, mask=m_A, other=0)
         # [BV,]
@@ -281,7 +281,7 @@ def chunk_gsa_bwd_k_kernel_dA(
         else:
             p_v = tl.make_block_ptr(v + (bos*H+i_h) * V, (V, T), (1, H*V), (i_v * BV, i_t*BT + i_j*BC), (BV, BC), (0, 1))
             p_gv = tl.make_block_ptr(g + (bos*H+i_h) * V, (V, T), (1, H*V), (i_v * BV, i_t*BT + i_j*BC), (BV, BC), (0, 1))
-            p_gn = tl.max_contiguous(tl.multiple_of(g + (bos + i_t*BT + i_i*BC) * H*V + i_h * V + o_v, BV), BV)
+            p_gn = g + (bos + i_t*BT + i_i*BC) * H*V + i_h * V + o_v
             p_g = tl.make_block_ptr(g + (bos*H+i_h) * V, (T, V), (H*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
             p_do = tl.make_block_ptr(do + (bos*HQ+i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
         # [BV,]
@@ -305,8 +305,8 @@ def chunk_gsa_bwd_k_kernel_dA(
         else:
             p_g = tl.make_block_ptr(g + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
             p_do = tl.make_block_ptr(do + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
-            p_v = tl.max_contiguous(tl.multiple_of(v + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v, BV), BV)
-            p_gv = tl.max_contiguous(tl.multiple_of(g + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v, BV), BV)
+            p_v = v + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v
+            p_gv = g + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1)) * scale
@@ -427,7 +427,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         else:
             p_v = tl.make_block_ptr(v + (bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_g = tl.make_block_ptr(g + (bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_gn = tl.max_contiguous(tl.multiple_of(g + (bos + o_t - 1) * H*V + i_h * V + o_v, BV), BV)
+            p_gn = g + (bos + o_t - 1) * H*V + i_h * V + o_v
             p_do = tl.make_block_ptr(do + (bos*HQ+i_hq)*V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_dv = tl.make_block_ptr(dv + ((i_k*all+bos)*HQ+i_hq)*V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_dg = tl.make_block_ptr(dg + (bos*HQ+i_hq)*V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -535,7 +535,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         p_gn = tl.max_contiguous(tl.multiple_of(g + i_bg * T*V + (min(i_t * BT + i_i * BC + BC, T) - 1) * V + o_v, BV), BV)
     else:
         p_gv = tl.make_block_ptr(g + (bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))
-        p_gn = tl.max_contiguous(tl.multiple_of(g + (bos + min(i_t * BT + i_i * BC + BC, T)-1)*H*V + i_h*V + o_v, BV), BV)
+        p_gn = g + (bos + min(i_t * BT + i_i * BC + BC, T)-1)*H*V + i_h*V + o_v
     # [BV,]
     b_gn = tl.load(p_gn, mask=m_v, other=0)
     # [BC, BV]
@@ -567,9 +567,9 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         p_A = tl.max_contiguous(tl.multiple_of(A + i_bh * T*BT + (i_t * BT + i_i * BC) * BT + o_c, BC), BC)
         p_do = tl.max_contiguous(tl.multiple_of(do + i_bh * T*V + (i_t * BT + i_i * BC) * V + o_v, BV), BV)
     else:
-        p_g = tl.max_contiguous(tl.multiple_of(g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v, BV), BV)
-        p_A = tl.max_contiguous(tl.multiple_of(A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + o_c, BC), BC)
-        p_do = tl.max_contiguous(tl.multiple_of(do + (bos + i_t*BT + i_i*BC) * HQ*V + i_hq * V + o_v, BV), BV)
+        p_g = g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v
+        p_A = A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + o_c
+        p_do = do + (bos + i_t*BT + i_i*BC) * HQ*V + i_hq * V + o_v
 
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # [BC,]
@@ -1140,6 +1140,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         return dq, dk, dv, ds, dg, None, dhk0, dhv0, None, None, None, None
 
 
+@torch.compiler.disable
 def chunk_gsa(
     q: torch.Tensor,
     k: torch.Tensor,

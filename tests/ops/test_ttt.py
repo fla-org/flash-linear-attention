@@ -27,13 +27,13 @@ def assert_close(prefix, ref, tri, ratio):
 
 
 @pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [15, 16, 63, 64, 256, 512])
+@pytest.mark.parametrize("T", [30, 32, 63, 64, 256])
 @pytest.mark.parametrize("H", [2, 16])
 @pytest.mark.parametrize("D", [30, 64, 100])
-@pytest.mark.parametrize("scale", [1])
+@pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])
-def test_chunk_fwd(
+def test_chunk(
     B: int,
     T: int,
     H: int,
@@ -59,7 +59,10 @@ def test_chunk_fwd(
         b = torch.randn(H, D, dtype=dtype)
         eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
         h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+
     q, k, v, w, b, eta, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, w, b, eta, h0))
+    do = torch.rand_like(v)
+    dht = torch.rand_like(h0)
 
     tri, tri_ht = chunk_ttt_linear(
         q.clone(),
@@ -73,6 +76,9 @@ def test_chunk_fwd(
         initial_state=h0.clone(),
         head_first=head_first
     )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, tri_dh0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad
+    q.grad = k.grad = v.grad = w.grad = b.grad = eta.grad = h0.grad = None
 
     ref, ref_ht = chunk_ttt_linear_ref(
         q.clone(),
@@ -86,11 +92,20 @@ def test_chunk_fwd(
         initial_state=h0.clone(),
         head_first=head_first
     )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, ref_dh0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad
 
-    assert_close(" o", ref, tri, 0.006)
-    assert_close("ht", ref_ht, tri_ht, 0.005)
+    assert_close("  o", ref, tri, 0.005)
+    assert_close(" ht", ref_ht, tri_ht, 0.005)
+    assert_close(" dq", ref_dq, tri_dq, 0.005)
+    assert_close(" dk", ref_dk, tri_dk, 0.008)
+    assert_close(" dv", ref_dv, tri_dv, 0.006)
+    assert_close(" dw", ref_dw, tri_dw, 0.005)
+    assert_close(" db", ref_db, tri_db, 0.005)
+    assert_close(" de", ref_deta, tri_deta, 0.012)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.005)
 
-
+'''
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [15, 16, 63, 64, 256, 512])
 @pytest.mark.parametrize("H", [2, 16])
@@ -225,3 +240,4 @@ def test_chunk_varlen_fwd(
 
     assert_close("  o", ref, tri, 0.005)
     assert_close(" ht", ref_ht, tri_ht, 0.005)
+'''

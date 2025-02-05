@@ -256,6 +256,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None, None, None
 
 
+@torch.compiler.disable
 def chunk_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,

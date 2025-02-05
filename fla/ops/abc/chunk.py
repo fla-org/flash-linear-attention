@@ -1179,6 +1179,7 @@ class ChunkABCFunction(torch.autograd.Function):
         return dq, dk, dv, ds, None, None
 
 
+@torch.compiler.disable
 def chunk_abc(
     q: torch.Tensor,
     k: torch.Tensor,

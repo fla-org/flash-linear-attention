@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Yu Zhang, Songlin Yang
+# Copyright (c) 2023-2025, Yu Zhang, Songlin Yang
 
 from typing import Optional, Tuple
+
 import torch
-from fla.ops.simple_gla import chunk_simple_gla
+
 from fla.ops.linear_attn.utils import normalize_output
+from fla.ops.simple_gla import chunk_simple_gla
 
 
+@torch.compiler.disable
 def chunk_linear_attn(
     q: torch.Tensor,
     k: torch.Tensor,

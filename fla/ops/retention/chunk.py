@@ -8,6 +8,7 @@ import torch
 from fla.ops.simple_gla.chunk import chunk_simple_gla
 
 
+@torch.compiler.disable
 def chunk_retention(
     q: torch.Tensor,
     k: torch.Tensor,

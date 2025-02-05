@@ -159,6 +159,7 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['GatedDeltaNetBlock']
+    _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
