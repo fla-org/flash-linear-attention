@@ -122,7 +122,7 @@ class RWKV6Attention(nn.Module):
         else:
             shifted = self.time_shift(hidden_states)
             if last_state is not None:
-                shifted[:, 0] = last_state['conv_state'][0]
+                shifted[:, 0] = last_state['conv_state']
 
         delta = shifted - hidden_states
         x = self.x_proj[0](hidden_states, delta).view(batch_size, seq_len, -1, self.proj_low_rank_dim)
