@@ -138,7 +138,7 @@ class RWKV7Attention(nn.Module):
         else:
             shifted = self.time_shift(hidden_states)
             if last_state is not None:
-                shifted[:, 0] = last_state['conv_state'][0]
+                shifted[:, 0] = last_state['conv_state']
 
         # [batch_size, seq_len, hidden_size]
         delta = shifted - hidden_states
