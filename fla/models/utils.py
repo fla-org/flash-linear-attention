@@ -141,7 +141,7 @@ class Cache(transformers.cache_utils.Cache):
         """Converts a cache in the legacy cache format into an equivalent `Cache`."""
 
         cache = cls(seen_tokens)
-        if past_key_values is not None:
+        if isinstance(past_key_values, list):
             for layer_idx in range(len(past_key_values)):
                 cache.states.append(past_key_values[layer_idx])
         return cache
