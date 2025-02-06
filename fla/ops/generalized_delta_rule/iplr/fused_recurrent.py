@@ -9,6 +9,7 @@ import triton.language as tl
 
 from fla.utils import contiguous
 
+
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
@@ -34,7 +35,7 @@ def fused_recurrent_fwd_kernel(
     ha,  # tmp variable [B, H, L, V] for storing intermediate results of (h * a[None, :]).sum(0)
     h0,  # initial hidden state [B, H, K, V]
     ht,  # final hidden state [B, H, K, V]
-    offsets, # varlen offsets
+    offsets,  # varlen offsets
     scale,  # K ** -0.5
     H,  # n_heads
     T,  # seq_len
@@ -56,7 +57,7 @@ def fused_recurrent_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-    
+
     if HEAD_FIRST:
         p_q = q + i_nh * T*K + tl.arange(0, BK)
         p_k = k + i_nh * T*K + tl.arange(0, BK)
@@ -145,7 +146,7 @@ def fused_recurrent_bwd_kernel(
     dha,  # gradient of ha [NK, B, H, L, V]
     h0,  # initial state [B, H, K, V]
     scale,  # K ** -0.5
-    offsets, # offsets
+    offsets,  # offsets
     B,  # batch_size
     H,  # n_heads
     T,  # seq_len
@@ -251,7 +252,7 @@ def fused_recurrent_bwd_kernel(
         mask_kv = mask_k[:, None] & mask_v[None, :]
         p_h0 = h0 + i_nh * K * V + (tl.arange(0, BK)[:, None]) * V + ((i_v * BV + tl.arange(0, BV))[None, :])
         b_h += tl.load(p_h0, mask=mask_kv, other=0).to(tl.float32)
-    
+
     p_k = k + tl.arange(0, BK)
     p_v = v + tl.arange(0, BV)
     p_ha = ha + tl.arange(0, BV)
@@ -303,7 +304,8 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
             final_state = None
 
         ha = torch.empty_like(v, dtype=torch.float32)
-        grid = lambda meta: (
+
+        def grid(meta): return (
             triton.cdiv(V, meta['BV']),
             N * H
         )
@@ -341,7 +343,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
             B, H, T, K, V = *q.shape, v.shape[-1]
         else:
             B, T, H, K, V = *q.shape, v.shape[-1]
-        
+
         N = B if ctx.offsets is None else len(ctx.offsets) - 1
         scale = ctx.scale
         BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 64)
@@ -429,7 +431,7 @@ def fused_recurrent_iplr_delta_rule(
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
         offsets (Optional[torch.Tensor]):
-            
+
     """
     if offsets is not None:
         if q.shape[0] != 1:
@@ -444,5 +446,6 @@ def fused_recurrent_iplr_delta_rule(
         scale = q.shape[-1] ** -0.5
     else:
         assert scale > 0, "scale must be positive"
-    o, final_state = FusedRecurrentIPLRDeltaRuleFunction.apply(q, k, v, a, b, scale, initial_state, output_final_state, offsets, head_first)
+    o, final_state = FusedRecurrentIPLRDeltaRuleFunction.apply(
+        q, k, v, a, b, scale, initial_state, output_final_state, offsets, head_first)
     return o, final_state

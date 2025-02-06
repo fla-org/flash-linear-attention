@@ -94,7 +94,7 @@ def chunk_ttt_linear_fwd_kernel_h(
                 p_v = tl.make_block_ptr(v+i_nh*T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
                 p_v_new = tl.make_block_ptr(v_new+i_nh*T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
                 p_x = tl.make_block_ptr(x+i_nh*T*V, (T, V), (V, 1), (i_t * BT + i_c * BC,
-                                         i_v * BV), (BC, BV), (1, 0)) if STORE_ALL else None
+                                                                     i_v * BV), (BC, BV), (1, 0)) if STORE_ALL else None
                 p_y = tl.make_block_ptr(y+i_nh*T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV),
                                         (BC, BV), (1, 0)) if STORE_ALL else None
                 p_r = tl.make_block_ptr(r+i_nh*T, (T, 1), (1, 1), (i_t * BT + i_c * BC, 0),
@@ -105,7 +105,7 @@ def chunk_ttt_linear_fwd_kernel_h(
                 p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
                 p_v_new = tl.make_block_ptr(v_new+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC, i_v * BV), (BC, BV), (1, 0))
                 p_x = tl.make_block_ptr(x+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC,
-                                         i_v * BV), (BC, BV), (1, 0)) if STORE_ALL else None
+                                                                            i_v * BV), (BC, BV), (1, 0)) if STORE_ALL else None
                 p_y = tl.make_block_ptr(y+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC,
                                         i_v * BV), (BC, BV), (1, 0)) if STORE_ALL else None
                 p_r = tl.make_block_ptr(r+bos*H+i_h, (T, 1), (H, 1), (i_t*BT+i_c*BC, 0),
@@ -128,7 +128,7 @@ def chunk_ttt_linear_fwd_kernel_h(
             b_v2 = rstd * (V * b_v - tl.sum(b_v, axis=1, keep_dims=True) - b_kh_hat.to(b_k.dtype)
                            * tl.sum(b_v * b_kh_hat.to(b_k.dtype), axis=1, keep_dims=True)) / V
             if STORE_ALL:
-                tl.store(p_x, b_kh_hat.to(p_x.dtype.element_ty), boundary_check=(0, 1)) 
+                tl.store(p_x, b_kh_hat.to(p_x.dtype.element_ty), boundary_check=(0, 1))
                 tl.store(p_y, b_v.to(p_y.dtype.element_ty), boundary_check=(0, 1))
                 tl.store(p_r, rstd.to(p_r.dtype.element_ty), boundary_check=(0, 1))
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
@@ -362,12 +362,12 @@ def chunk_ttt_linear_bwd_kernel_norm(
     if USE_FINAL_STATE_GRADIENT:
         p_dht = tl.make_block_ptr(dht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
         b_dh += tl.load(p_dht, boundary_check=(0, 1), padding_option="zero")
-    
+
     # [BV]
     offs_v = tl.arange(0, BV)
     offs_t = tl.arange(0, BT)
-    b_w = tl.load(w + i_h * V + offs_v, mask=offs_v<V, other=0.)
-    b_b = tl.load(b + i_h * V + offs_v, mask=offs_v<V, other=0.)
+    b_w = tl.load(w + i_h * V + offs_v, mask=offs_v < V, other=0.)
+    b_b = tl.load(b + i_h * V + offs_v, mask=offs_v < V, other=0.)
     b_dw = tl.zeros([BV,], dtype=b_w.dtype)
     b_db = tl.zeros([BV,], dtype=b_b.dtype)
     p_dw = tl.make_block_ptr(dw + i_nh * V, (V,), (1,), (i_v * BV,), (BV,), (0,))
@@ -406,7 +406,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
             p_dk = tl.make_block_ptr(dk+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, i_k * BK), (BT, BK), (1, 0))
             p_do = tl.make_block_ptr(do+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, i_v * BV), (BT, BV), (1, 0))
             p_r = tl.make_block_ptr(r+bos*H+i_h, (T, 1), (H, 1), (i_t*BT, 0), (BT, 1), (1, 0))
-            p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H      
+            p_eta_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
         b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
         b_dv_new = tl.load(p_dv_new, boundary_check=(0, 1), padding_option="zero").to(b_k.dtype)
         b_eta_last = tl.load(p_eta_last)
@@ -416,9 +416,9 @@ def chunk_ttt_linear_bwd_kernel_norm(
         b_x = tl.load(p_x, boundary_check=(0, 1), padding_option="zero").to(b_k.dtype)
         b_y = tl.load(p_y, boundary_check=(0, 1), padding_option="zero").to(b_k.dtype)
         b_rstd = tl.load(p_r, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-        b_dy = b_rstd * (b_dv_new * V - tl.sum(b_dv_new, axis=1, keep_dims=True) - \
+        b_dy = b_rstd * (b_dv_new * V - tl.sum(b_dv_new, axis=1, keep_dims=True) -
                          b_x * tl.sum(b_dv_new * b_x, axis=1, keep_dims=True)) / V
-        b_dx = -b_rstd * (b_dv_new * tl.sum(b_x * b_y, axis=1, keep_dims=True) + \
+        b_dx = -b_rstd * (b_dv_new * tl.sum(b_x * b_y, axis=1, keep_dims=True) +
                           b_y * tl.sum(b_dv_new * b_x, axis=1, keep_dims=True)) / V
         b_drstd = tl.sum(b_dv_new.to(b_rstd.dtype) * b_v_new.to(b_rstd.dtype) / b_rstd, axis=1, keep_dims=True)
 
@@ -427,7 +427,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
         b_b = b_b.to(b_k.dtype)
         b_dv = -b_w * b_dy.to(b_k.dtype)
         b_dk = b_w * b_dy.to(b_k.dtype)
-        b_dw += tl.sum(2 * b_w * b_x * b_dy.to(b_k.dtype) + \
+        b_dw += tl.sum(2 * b_w * b_x * b_dy.to(b_k.dtype) +
                        (b_b - b_v.to(b_k.dtype) + b_k) * b_dy.to(b_k.dtype), axis=0).to(b_dw.dtype)
         b_db += tl.sum(b_w * b_dy.to(b_k.dtype), axis=0).to(b_db.dtype)
         b_dx = b_dx.to(b_k.dtype) + b_w * b_w * b_dy.to(b_k.dtype)
@@ -435,15 +435,15 @@ def chunk_ttt_linear_bwd_kernel_norm(
         # d_rstd, dx --> dkh --> dk, dh
         b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
         b_h = tl.load(p_h, boundary_check=(0, 1), padding_option="zero")
-        b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")  
+        b_do = tl.load(p_do, boundary_check=(0, 1), padding_option="zero")
         b_q = (b_q * scale).to(b_q.dtype)
-        b_dkh = b_rstd * (V * b_dx - tl.sum(b_dx, axis=1, keep_dims=True) - \
-                        b_x * tl.sum(b_x * b_dx, axis=1, keep_dims=True)) / V
+        b_dkh = b_rstd * (V * b_dx - tl.sum(b_dx, axis=1, keep_dims=True) -
+                          b_x * tl.sum(b_x * b_dx, axis=1, keep_dims=True)) / V
         b_dkh -= b_rstd * b_rstd * b_drstd * b_x / V
         b_dkh = tl.where((offs_v < V)[None, :] * (offs_t < T-i_t*BT)[:, None], b_dkh, 0.)
         b_dk += tl.dot(b_dkh, b_h.to(b_dkh.dtype)).to(b_k.dtype)
         b_dh += tl.dot(b_q, b_do.to(b_q.dtype)) + tl.dot(tl.trans(b_k).to(b_dkh.dtype), b_dkh)
-        
+
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dw, b_dw.to(p_dw.dtype.element_ty), boundary_check=(0,))
@@ -622,7 +622,7 @@ def chunk_ttt_linear_fwd_h(
     else:
         h = k.new_empty(B, NT, H, K, V)
         rstd = v.new_empty(B, T, H, 1, dtype=torch.float32) if is_backward else None
-    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None 
+    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     x = torch.empty_like(v) if is_backward else None
     y = torch.empty_like(v) if is_backward else None
 

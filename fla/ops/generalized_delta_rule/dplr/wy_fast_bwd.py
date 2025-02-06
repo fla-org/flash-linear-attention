@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })

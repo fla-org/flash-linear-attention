@@ -3,8 +3,10 @@
 import torch
 from einops import rearrange
 
+
 def get_abs_err(x, y):
     return (x-y).flatten().abs().max().item()
+
 
 def get_err_ratio(x, y):
     err = (x-y).flatten().square().mean().sqrt().item()
@@ -20,6 +22,8 @@ def assert_close(prefix, ref, tri, ratio):
 # S_t = S_t @ (I + alpha_t beta_t^T) + v_t k_t^T
 # q, k, alpha, beta [B, H, L, D_K]
 # v [B, H, L, D_V]
+
+
 def dplr_recurrence(q, k, v, alpha, beta, gk, initial_state=None, output_final_state=True):
     orig_dtype = q.dtype
     b, h, l, d_k = q.shape
@@ -58,7 +62,8 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
 
     # note that diagonal is masked.
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
-    q, k, v, alpha, beta, gk = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size).float(), [q, k, v, alpha, beta, gk])
+    q, k, v, alpha, beta, gk = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d',
+                                   c=chunk_size).float(), [q, k, v, alpha, beta, gk])
 
     gk_cumsum = gk.cumsum(-2)
 
@@ -78,7 +83,7 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
         A_qb[:, :, :, i, :] = (q_i * beta * attn_i).sum(-1).clone()
         mask = (torch.arange(chunk_size) < i).to(q.device)
         # shift by one.
-        attn_i = (gk_i - gk[:,:,:,i,None] - gk_cumsum).masked_fill(~mask.unsqueeze(-1), float('-inf')).exp()
+        attn_i = (gk_i - gk[:, :, :, i, None] - gk_cumsum).masked_fill(~mask.unsqueeze(-1), float('-inf')).exp()
         A_ab[:, :, :, i, :] = (alpha_i * beta * attn_i).sum(-1).clone()
         A_ak[:, :, :, i, :] = (alpha_i * k * attn_i).sum(-1).clone()
 
@@ -95,13 +100,14 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
     for i in range(0, l // chunk_size):
         q_i, k_i, v_i, u_i, w_i, beta_i = q[:, :, i], k[:, :, i], v[:, :, i], u[:, :, i], w[:, :, i], beta[:, :, i]
         v2_i = u_i + w_i @ S
-        
+
         o_1 = A_qk[:, :, i] @ v_i
         o_2 = A_qb[:, :, i] @ v2_i
         o_3 = (q_i * gk_cumsum[:, :, i].exp()) @ S
         o[:, :, i] = o_1 + o_2 + o_3
         decay = (gk_cumsum[:, :, i, -1, None] - gk_cumsum[:, :, i]).exp()
-        S = S*gk_cumsum[:, :, i, -1, :, None].exp() + (k_i * decay).transpose(-1, -2) @ v_i + (beta_i * decay).transpose(-1, -2) @ v2_i
+        S = S*gk_cumsum[:, :, i, -1, :, None].exp() + (k_i * decay).transpose(-1, -2) @ v_i + \
+            (beta_i * decay).transpose(-1, -2) @ v2_i
     S = None if output_final_state is False else S
     return rearrange(o, 'b h n c d -> b h (n c) d'), S
 
@@ -125,7 +131,7 @@ if __name__ == '__main__':
     beta = beta.clone().detach().requires_grad_(True)
     gate_logit_normalizer = 16
     w = torch.nn.functional.logsigmoid(torch.randn(B, H, L, DK)) / gate_logit_normalizer
-                                   
+
     w = w.cuda().requires_grad_(True)
     o, s = dplr_recurrence(q.clone(), k.clone(), v.clone(), -alpha.clone(), beta.clone(), w.clone())
     do = torch.randn_like(o).cuda()
@@ -135,7 +141,6 @@ if __name__ == '__main__':
     v_grad, v.grad = v.grad, None
     alpha_grad, alpha.grad = alpha.grad, None
     beta_grad, beta.grad = beta.grad, None
-
 
     o2, s2 = dplr_chunkwise(q.clone(), k.clone(), v.clone(), -alpha.clone(), beta.clone(), w.clone(), chunk_size=16)
     o2.backward(do)
@@ -147,4 +152,3 @@ if __name__ == '__main__':
     assert_close("alpha.grad", alpha.grad, alpha_grad, 0.002)
     assert_close("beta.grad", beta.grad, beta_grad, 0.002)
     print("All passed!")
-
