@@ -495,7 +495,7 @@ class MambaPreTrainedModel(PreTrainedModel):
             # # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
-                module.dt_proj.bias.copy_(inv_dt)
+                module.dt_proj.bias.data = nn.Parameter(inv_dt.to(module.dt_proj.bias.device))
             module.dt_proj.bias._no_reinit = True
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, std=self.config.initializer_range)
