@@ -19,6 +19,7 @@ import triton.language as tl
 
 from fla.modules.layernorm import RMSNorm
 from fla.utils import contiguous, require_version
+from fla.utils import device_torch_lib
 
 
 def activation_quant(x):
@@ -156,15 +157,15 @@ def layer_norm_fwd_quant(
         residual_out = torch.empty(M, N, device=x.device, dtype=residual_dtype)
     else:
         residual_out = None
-    mean = torch.empty((M,), dtype=torch.float32, device="cuda") if not is_rms_norm else None
-    rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+    mean = torch.empty((M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    with torch.cuda.device(x.device.index):
+    with device_torch_lib.device(x.device.index):
         layer_norm_fwd_kernel_quant[(M,)](
             x,
             y,
@@ -342,12 +343,12 @@ def layer_norm_bwd(
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+    sm_count = device_torch_lib.get_device_properties(x.device).multi_processor_count
     _dw = torch.empty((sm_count, N), dtype=torch.float32, device=weight.device) if weight is not None else None
     _db = torch.empty((sm_count, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / sm_count)
     grid = (sm_count,)
-    with torch.cuda.device(x.device.index):
+    with device_torch_lib.device(x.device.index):
         layer_norm_bwd_kernel[grid](
             x,
             weight,

@@ -18,6 +18,7 @@ import triton
 import triton.language as tl
 
 from fla.utils import contiguous
+from fla.utils import device_torch_lib
 
 
 def layer_norm_ref(
@@ -164,8 +165,8 @@ def layer_norm_fwd(
         residual_out = torch.empty(M, N, device=x.device, dtype=residual_dtype)
     else:
         residual_out = None
-    mean = torch.empty((M,), dtype=torch.float32, device="cuda") if not is_rms_norm else None
-    rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+    mean = torch.empty((M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
@@ -173,7 +174,7 @@ def layer_norm_fwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
 
-    with torch.cuda.device(x.device.index):
+    with device_torch_lib.device(x.device.index):
         layer_norm_fwd_kernel[(M,)](
             x,
             y,
@@ -328,13 +329,13 @@ def layer_norm_bwd(
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # each program handles one group only
-    S = triton.cdiv(torch.cuda.get_device_properties(x.device).multi_processor_count, G) * G
+    S = triton.cdiv(device_torch_lib.get_device_properties(x.device).multi_processor_count, G) * G
     dw = torch.empty((S, N), dtype=torch.float32, device=weight.device) if weight is not None else None
     db = torch.empty((S, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = triton.cdiv(M, S)
     programs_per_group = S // G
     grid = (S,)
-    with torch.cuda.device(x.device.index):
+    with device_torch_lib.device(x.device.index):
         layer_norm_bwd_kernel[grid](
             x,
             weight,

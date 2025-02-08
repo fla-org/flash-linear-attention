@@ -15,7 +15,8 @@ from fla.ops.gated_delta_rule.wy_fast import (bwd_prepare_wy_repr,
                                               fwd_prepare_wy_repr,
                                               fwd_recompute_w_u)
 from fla.ops.utils import chunk_local_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contiguous)
 
 
 def chunk_gated_delta_rule_fwd(

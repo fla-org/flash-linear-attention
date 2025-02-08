@@ -10,7 +10,11 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import (chunk_gla_bwd_dA, chunk_gla_bwd_dv,
                                chunk_gla_fwd_o_gk)
-from fla.utils import contiguous
+from fla.utils import (contiguous, device_capacity, set_torch_device,
+                       autocast_custom_bwd, autocast_custom_fwd)
+
+BK_LIST = [32, 64] if device_capacity else [16, 32]
+BV_LIST = [32, 64] if device_capacity else [16, 32]
 
 
 @triton.heuristics({
@@ -420,8 +424,8 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64]
-        for BV in [32, 64]
+        for BK in BK_LIST
+        for BV in BV_LIST
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
@@ -690,8 +694,8 @@ def chunk_rwkv6_bwd_kernel_intra(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
-        for BK in [32, 64]
-        for BV in [64, 128]
+        for BK in BK_LIST
+        for BV in BV_LIST
         for num_warps in [2, 4, 8]
     ],
     key=['BT']
@@ -1138,7 +1142,7 @@ def chunk_rwkv6_fwd(
         indices=indices,
         head_first=head_first,
         chunk_size=chunk_size,
-        states_in_fp32=False
+        states_in_fp32=True
     )
     # the intra A is kept in fp32
     # the computation has very marginal effect on the entire throughput
@@ -1277,6 +1281,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
 
     @staticmethod
     @contiguous
+    @autocast_custom_fwd
     def forward(
         ctx,
         q,
@@ -1291,7 +1296,8 @@ class ChunkRWKV6Function(torch.autograd.Function):
         head_first
     ):
         T = q.shape[2] if head_first else q.shape[1]
-        chunk_size = min(64, max(16, triton.next_power_of_2(T)))
+        chunk_size = min(32, max(32, triton.next_power_of_2(T))) if device_capacity \
+            else min(64, max(32, triton.next_power_of_2(T)))
 
         # 2-d indices denoting the offsets of chunks in each sequence
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
@@ -1328,6 +1334,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
 
     @staticmethod
     @contiguous
+    @autocast_custom_bwd
     def backward(ctx, do, dht):
         q, k, v, g, initial_state, A, u = ctx.saved_tensors
         chunk_size, scale, offsets, indices, head_first = ctx.chunk_size, ctx.scale, ctx.offsets, ctx.indices, ctx.head_first
@@ -1426,6 +1433,7 @@ def chunk_rwkv6(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
+    set_torch_device(q)
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."

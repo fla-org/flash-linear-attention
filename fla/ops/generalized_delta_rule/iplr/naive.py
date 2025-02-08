@@ -70,19 +70,20 @@ def iplr_chunkwise(q, k, v, alpha, beta, initial_state=None, output_final_state=
 
 
 if __name__ == '__main__':
+    from fla.utils import device
     B = 2
     H = 4
     L = 128
     DK = 128
     DV = 128
-    q = (torch.randn(B, H, L, DK)).cuda().requires_grad_(True)
-    k = (torch.randn(B, H, L, DK)).cuda().requires_grad_(True)
-    v = (torch.randn(B, H, L, DV)).cuda().requires_grad_(True)
-    alpha = torch.randn(B, H, L, DK).cuda().softmax(-1).requires_grad_(True)
-    beta = torch.randn(B, H, L, DK).cuda().softmax(-1).requires_grad_(True)
+    q = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
+    k = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
+    v = (torch.randn(B, H, L, DV)).to(device).requires_grad_(True)
+    alpha = torch.randn(B, H, L, DK).to(device).softmax(-1).requires_grad_(True)
+    beta = torch.randn(B, H, L, DK).to(device).softmax(-1).requires_grad_(True)
 
     o, s = iplr_recurrence(q, k, v, -alpha, beta)
-    do = torch.randn_like(o).cuda()
+    do = torch.randn_like(o).to(device)
     o.backward(do, retain_graph=True)
     q_grad, q.grad = q.grad, None
     k_grad, k.grad = k.grad, None

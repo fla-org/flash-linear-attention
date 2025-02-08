@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+from fla.utils import device_torch_lib
 
 
 @triton.autotune(
@@ -106,7 +107,7 @@ def l2norm_fwd(
     assert y.stride(-1) == 1
     N = x.shape[-1]
     M = x.shape[0]
-    # rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+    # rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
@@ -114,7 +115,7 @@ def l2norm_fwd(
         raise RuntimeError(
             "This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    with torch.cuda.device(x.device.index):
+    with device_torch_lib.device(x.device.index):
         l2norm_fwd_kernel[(M,)](
             x,
             y,
@@ -147,7 +148,7 @@ def l2norm_bwd(
     M = x.shape[0]
     assert x.stride(-1) == 1
     assert dy.stride(-1) == 1
-    # rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+    # rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
@@ -155,7 +156,7 @@ def l2norm_bwd(
         raise RuntimeError(
             "This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    with torch.cuda.device(x.device.index):
+    with device_torch_lib.device(x.device.index):
         l2norm_bwd_kernel[(M,)](
             x,
             dy,

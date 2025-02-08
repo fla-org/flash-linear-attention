@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import device_capacity
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
@@ -346,7 +348,7 @@ def chunk_dplr_bwd_dqk_intra(
         B, T, H, K = q.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BC = min(16, BT)
-    BK = min(64, triton.next_power_of_2(K))
+    BK = min(64, triton.next_power_of_2(K)) if device_capacity else min(32, triton.next_power_of_2(K))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)

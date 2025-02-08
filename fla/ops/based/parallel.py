@@ -7,7 +7,6 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 
 # Based: An Educational and Effective Sequence Mixer

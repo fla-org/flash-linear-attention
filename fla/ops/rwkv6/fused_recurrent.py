@@ -7,7 +7,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contiguous, set_torch_device,
+                       device_capacity)
 
 
 @triton.heuristics({
@@ -310,14 +312,18 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=mask_h)
 
 
+BT_LIST = [16, 32, 64] if device_capacity else [16, 32]
+BK_LIST = [16, 32, 64] if device_capacity else [16, 32]
+
+
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT, 'BK': BK}, num_warps=num_warps)
-        for BT in [16, 32, 64]
-        for BK in [32, 64]
+        for BT in BT_LIST
+        for BK in BK_LIST
         for num_warps in [1, 2, 4, 8]
     ],
     key=['K']
@@ -452,7 +458,8 @@ def fused_recurrent_rwkv6_bwd(
         B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if offsets is None else len(offsets) - 1
 
-    BK, BV = min(triton.next_power_of_2(K), 16), min(triton.next_power_of_2(V), 64)
+    BK, BV = min(triton.next_power_of_2(K), 16),  \
+        min(triton.next_power_of_2(V), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
     dq = q.new_empty(NV, *q.shape, dtype=torch.float)
@@ -681,6 +688,7 @@ def fused_recurrent_rwkv6(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
+    set_torch_device(r)
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."

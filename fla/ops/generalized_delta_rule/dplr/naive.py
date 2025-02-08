@@ -64,6 +64,8 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
     q, k, v, alpha, beta, gk = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d',
                                    c=chunk_size).float(), [q, k, v, alpha, beta, gk])
+    q, k, v, alpha, beta, gk = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d',
+                                   c=chunk_size).float(), [q, k, v, alpha, beta, gk])
 
     gk_cumsum = gk.cumsum(-2)
 
@@ -83,6 +85,7 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
         A_qb[:, :, :, i, :] = (q_i * beta * attn_i).sum(-1).clone()
         mask = (torch.arange(chunk_size) < i).to(q.device)
         # shift by one.
+        attn_i = (gk_i - gk[:, :, :, i, None] - gk_cumsum).masked_fill(~mask.unsqueeze(-1), float('-inf')).exp()
         attn_i = (gk_i - gk[:, :, :, i, None] - gk_cumsum).masked_fill(~mask.unsqueeze(-1), float('-inf')).exp()
         A_ab[:, :, :, i, :] = (alpha_i * beta * attn_i).sum(-1).clone()
         A_ak[:, :, :, i, :] = (alpha_i * k * attn_i).sum(-1).clone()
@@ -108,11 +111,14 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
         decay = (gk_cumsum[:, :, i, -1, None] - gk_cumsum[:, :, i]).exp()
         S = S*gk_cumsum[:, :, i, -1, :, None].exp() + (k_i * decay).transpose(-1, -2) @ v_i + \
             (beta_i * decay).transpose(-1, -2) @ v2_i
+        S = S*gk_cumsum[:, :, i, -1, :, None].exp() + (k_i * decay).transpose(-1, -2) @ v_i + \
+            (beta_i * decay).transpose(-1, -2) @ v2_i
     S = None if output_final_state is False else S
     return rearrange(o, 'b h n c d -> b h (n c) d'), S
 
 
 if __name__ == '__main__':
+    from fla.utils import device
     # disallow tf32
     torch.set_float32_matmul_precision('high')
     torch.set_default_dtype(torch.float32)
@@ -121,20 +127,20 @@ if __name__ == '__main__':
     L = 2048
     DK = 128
     DV = 128
-    q = (torch.randn(B, H, L, DK)).cuda().requires_grad_(True)
-    k = (torch.randn(B, H, L, DK)).cuda().requires_grad_(True)
-    v = (torch.randn(B, H, L, DV)).cuda().requires_grad_(True)
+    q = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
+    k = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
+    v = (torch.randn(B, H, L, DV)).to(device).requires_grad_(True)
 
-    alpha = -torch.nn.functional.normalize(torch.randn(B, H, L, DK).cuda(), dim=-1, p=2)
+    alpha = -torch.nn.functional.normalize(torch.randn(B, H, L, DK).to(device), dim=-1, p=2)
     beta = -alpha
     alpha = alpha.clone().detach().requires_grad_(True)
     beta = beta.clone().detach().requires_grad_(True)
     gate_logit_normalizer = 16
     w = torch.nn.functional.logsigmoid(torch.randn(B, H, L, DK)) / gate_logit_normalizer
 
-    w = w.cuda().requires_grad_(True)
+    w = w.to(device).requires_grad_(True)
     o, s = dplr_recurrence(q.clone(), k.clone(), v.clone(), -alpha.clone(), beta.clone(), w.clone())
-    do = torch.randn_like(o).cuda()
+    do = torch.randn_like(o).to(device)
     o.backward(do, retain_graph=True)
     q_grad, q.grad = q.grad, None
     k_grad, k.grad = k.grad, None

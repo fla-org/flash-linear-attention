@@ -121,19 +121,20 @@ def delta_rule_parallel(q, k, v, beta, BM=128, BN=32):
 
 
 if __name__ == '__main__':
+    from fla.utils import device
     B = 2
     H = 4
     L = 512
     DK = 128
     DV = 128
-    q = (torch.randn(B, H, L, DK)).cuda().requires_grad_(True)
-    k = (torch.randn(B, H, L, DK)).cuda()
+    q = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
+    k = (torch.randn(B, H, L, DK)).to(device)
     k = torch.nn.functional.normalize(k, dim=-1, p=2).requires_grad_(True)
-    v = (torch.randn(B, H, L, DV)).cuda().requires_grad_(True)
-    beta = torch.randn(B, H, L).cuda().sigmoid().requires_grad_(True)
+    v = (torch.randn(B, H, L, DV)).to(device).requires_grad_(True)
+    beta = torch.randn(B, H, L).to(device).sigmoid().requires_grad_(True)
 
     o, _ = delta_rule_recurrence(q, k, v, beta)
-    do = torch.randn(B, H, L, DV).cuda()
+    do = torch.randn(B, H, L, DV).to(device)
     o.backward(do, retain_graph=True)
     q_grad, q.grad = q.grad, None
     k_grad, k.grad = k.grad, None
