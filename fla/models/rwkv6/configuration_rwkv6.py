@@ -7,7 +7,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 class RWKV6Config(PretrainedConfig):
 
-    model_type = 'rwkv6'
+    model_type = 'rwkv6_fla'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(

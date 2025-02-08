@@ -610,7 +610,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
 
 def fused_recurrent_rwkv6(
-    r: torch.Tensor,
+    q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     w: torch.Tensor,
@@ -624,7 +624,7 @@ def fused_recurrent_rwkv6(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
-        r (torch.Tensor):
+        q (torch.Tensor):
             reception of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
             Alias: q, query in linear attention.
         k (torch.Tensor):
@@ -688,10 +688,10 @@ def fused_recurrent_rwkv6(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
-    set_torch_device(r)
+    set_torch_device(q)
     if cu_seqlens is not None:
-        if r.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
+        if q.shape[0] != 1:
+            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                              f"Please flatten variable-length inputs before processing.")
         if head_first:
             raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
@@ -701,7 +701,7 @@ def fused_recurrent_rwkv6(
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = FusedRecurrentRWKV6Function.apply(
-        r,
+        q,
         k,
         v,
         w,
