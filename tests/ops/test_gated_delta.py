@@ -9,6 +9,7 @@ from einops import rearrange
 
 from fla.ops.gated_delta_rule import (chunk_gated_delta_rule,
                                       fused_recurrent_gated_delta_rule)
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -190,7 +191,7 @@ def test_recurrent_forward(
         g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
     g = g / gate_logit_normalizer
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-    q, k, v, beta, g, h0 = map(lambda x: x.cuda().requires_grad_(), (q, k, v, beta, g, h0))
+    q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
     ref, ref_ht = recurrent_gated_delta_rule_ref(
         q=q.clone(),
         k=k.clone(),
@@ -250,7 +251,7 @@ def test_chunk(
         g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
         h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     g = g / gate_logit_normalizer
-    q, k, v, beta, g, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, beta, g, h0))
+    q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
 
     tri, tri_ht = chunk_gated_delta_rule(
         q.clone(),
@@ -315,7 +316,7 @@ def test_chunk_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
@@ -323,7 +324,7 @@ def test_chunk_varlen(
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=dtype)
     g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
-    q, k, v, beta, g, h0 = map(lambda x: x.cuda().requires_grad_(), (q, k, v, beta, g, h0))
+    q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 

@@ -8,6 +8,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import (GroupNorm, GroupNormLinear, LayerNorm,
                          LayerNormLinear, RMSNorm, RMSNormLinear)
+from fla.utils import device
 
 
 @pytest.mark.parametrize("B", [1, 4, 8])
@@ -17,9 +18,9 @@ from fla.modules import (GroupNorm, GroupNormLinear, LayerNorm,
 @pytest.mark.parametrize("elementwise_affine", [False, True])
 @pytest.mark.parametrize("bias", [False, True])
 def test_layernorm(B: int, H: int, T: int, D: int, elementwise_affine: bool, bias: bool):
-    x = torch.randn(B, H, T, D).cuda().requires_grad_(True)
-    ref = nn.LayerNorm(D, elementwise_affine=elementwise_affine, bias=bias).cuda()
-    tri = LayerNorm(D, elementwise_affine=elementwise_affine, bias=bias).cuda()
+    x = torch.randn(B, H, T, D).to(device).requires_grad_(True)
+    ref = nn.LayerNorm(D, elementwise_affine=elementwise_affine, bias=bias).to(device)
+    tri = LayerNorm(D, elementwise_affine=elementwise_affine, bias=bias).to(device)
     if ref.weight is not None:
         nn.init.normal_(ref.weight)
         tri.weight.data.copy_(ref.weight.data)
@@ -52,9 +53,9 @@ def test_layernorm(B: int, H: int, T: int, D: int, elementwise_affine: bool, bia
 @pytest.mark.parametrize("D", [64, 128, 512, 1024, 2048])
 @pytest.mark.parametrize("G", [1, 4])
 def test_groupnorm(B: int, T: int, D: int, G: int):
-    x = torch.randn(B, T, D).cuda().requires_grad_(True)
-    ref = nn.GroupNorm(G, D).cuda()
-    tri = GroupNorm(G, D, bias=True).cuda()
+    x = torch.randn(B, T, D).to(device).requires_grad_(True)
+    ref = nn.GroupNorm(G, D).to(device)
+    tri = GroupNorm(G, D, bias=True).to(device)
     nn.init.normal_(ref.weight)
     nn.init.normal_(ref.bias)
     tri.weight.data.copy_(ref.weight.data)
@@ -81,9 +82,9 @@ def test_groupnorm(B: int, T: int, D: int, G: int):
 @pytest.mark.parametrize("T", [1, 50, 2048])
 @pytest.mark.parametrize("D", [50, 64, 128])
 def test_rmsnorm(B: int, H: int, T: int, D: int):
-    x = torch.randn(B, H, T, D).cuda().requires_grad_(True)
-    ref = LlamaRMSNorm(D, eps=0).cuda()
-    tri = RMSNorm(D, eps=0).cuda()
+    x = torch.randn(B, H, T, D).to(device).requires_grad_(True)
+    ref = LlamaRMSNorm(D, eps=0).to(device)
+    tri = RMSNorm(D, eps=0).to(device)
     nn.init.normal_(ref.weight)
     tri.weight.data.copy_(ref.weight.data)
 
@@ -104,9 +105,9 @@ def test_rmsnorm(B: int, H: int, T: int, D: int):
 @pytest.mark.parametrize("D", [50, 64, 128])
 def test_layernorm_linear(N: int, D: int):
     torch.manual_seed(1)
-    x = torch.randn(N, D).cuda().requires_grad_(True)
-    ref = nn.Sequential(nn.LayerNorm(D, elementwise_affine=True, bias=True), nn.Linear(D, D)).cuda()
-    tri = LayerNormLinear(D, elementwise_affine=True, bias=True).cuda()
+    x = torch.randn(N, D).to(device).requires_grad_(True)
+    ref = nn.Sequential(nn.LayerNorm(D, elementwise_affine=True, bias=True), nn.Linear(D, D)).to(device)
+    tri = LayerNormLinear(D, elementwise_affine=True, bias=True).to(device)
     nn.init.normal_(ref[0].weight)
     nn.init.normal_(ref[0].bias)
     nn.init.normal_(ref[1].weight, mean=0.0, std=0.01)
@@ -141,9 +142,9 @@ def test_layernorm_linear(N: int, D: int):
 @pytest.mark.parametrize("G", [1, 4])
 def test_groupnorm_linear(N: int, D: int, G: int):
     torch.manual_seed(1)
-    x = torch.randn(N, D).cuda().requires_grad_(True)
-    ref = nn.Sequential(nn.GroupNorm(G, D), nn.Linear(D, D)).cuda()
-    tri = GroupNormLinear(G, D, bias=True).cuda()
+    x = torch.randn(N, D).to(device).requires_grad_(True)
+    ref = nn.Sequential(nn.GroupNorm(G, D), nn.Linear(D, D)).to(device)
+    tri = GroupNormLinear(G, D, bias=True).to(device)
     nn.init.normal_(ref[0].weight)
     nn.init.normal_(ref[0].bias)
     nn.init.normal_(ref[1].weight, mean=0.0, std=0.01)
@@ -177,9 +178,9 @@ def test_groupnorm_linear(N: int, D: int, G: int):
 @pytest.mark.parametrize("D", [50, 64, 128])
 def test_rmsnorm_linear(N: int, D: int):
     torch.manual_seed(1)
-    x = torch.randn(N, D).cuda().requires_grad_(True)
-    ref = nn.Sequential(LlamaRMSNorm(D, eps=0), nn.Linear(D, D)).cuda()
-    tri = RMSNormLinear(D, eps=0).cuda()
+    x = torch.randn(N, D).to(device).requires_grad_(True)
+    ref = nn.Sequential(LlamaRMSNorm(D, eps=0), nn.Linear(D, D)).to(device)
+    tri = RMSNormLinear(D, eps=0).to(device)
     nn.init.normal_(ref[0].weight)
     nn.init.normal_(ref[1].weight, mean=0.0, std=0.01)
     nn.init.normal_(ref[1].bias, mean=0.0, std=0.01)
