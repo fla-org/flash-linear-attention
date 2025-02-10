@@ -42,7 +42,6 @@ def fused_rwkv7_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    DTYPE: tl.constexpr = tl.float32
 ):
     # indices
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
@@ -75,19 +74,19 @@ def fused_rwkv7_kernel(
     mask_v = (i_v * BV + tl.arange(0, BV)) < V
     mask_h = mask_k[None, :] & mask_v[:, None]
 
-    b_h = tl.zeros([BV, BK], dtype=DTYPE)
+    b_h = tl.zeros([BV, BK], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
         p_h0 = state_ptr + i_nh * K * V + (tl.arange(0, BK)[None, :]) * V + ((i_v * BV + tl.arange(0, BV))[:, None])
-        b_h += tl.load(p_h0, mask=mask_h, other=0).to(DTYPE)
+        b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for _ in range(0, L):
-        b_k = tl.load(p_k, mask=mask_k, other=0).to(DTYPE)
-        b_w = tl.load(p_w, mask=mask_k, other=0).to(DTYPE)
-        b_v = tl.load(p_v, mask=mask_v, other=0).to(DTYPE)
-        b_q = tl.load(p_q, mask=mask_k, other=0).to(DTYPE) * scale
-        b_a = tl.load(p_a, mask=mask_k, other=0).to(DTYPE)
-        b_b = tl.load(p_b, mask=mask_k, other=0).to(DTYPE)
+        b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
+        b_w = tl.load(p_w, mask=mask_k, other=0).to(tl.float32)
+        b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+        b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32) * scale
+        b_a = tl.load(p_a, mask=mask_k, other=0).to(tl.float32)
+        b_b = tl.load(p_b, mask=mask_k, other=0).to(tl.float32)
         # to store
         tmp = tl.sum(b_h * b_a[None, :], axis=1)
         b_h = tl.exp(-tl.exp(b_w))[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
