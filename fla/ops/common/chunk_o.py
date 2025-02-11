@@ -356,10 +356,10 @@ def chunk_bwd_kernel_dv(
         p_g = tl.make_block_ptr(g, (T,), (s_g,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * s_g)
+        b_dv *= safe_exp(-b_g + b_g_last)[:, None]
     else:
         b_g, b_g_last = None, None
 
-    b_dv *= safe_exp(-b_g + b_g_last)[:, None]
     mask = (tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :])
     if USE_G:
         b_A = tl.where(mask, b_A * safe_exp(b_g[None, :] - b_g[:, None]) * scale, 0).to(do.dtype.element_ty)

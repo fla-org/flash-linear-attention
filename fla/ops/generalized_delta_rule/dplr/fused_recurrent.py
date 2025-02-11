@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 
 
 @triton.heuristics({
@@ -18,39 +18,39 @@ from fla.utils import contiguous
 @triton.autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BV in [32, 64]
+        for BV in [16, 32, 64]
         for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
-    key=["BK"],
+    key=['BK'],
 )
-@triton.jit
-def fused_recurrent_fwd_kernel(
-    q,  # query [B, H, L, K]
-    k,  # key [B, H, L, V]
-    v,  # value [B, H, L, V].
-    a,  # a [B, H, L, K]
-    b,  # b [B, H, L, K]
-    gk,  # gk [B, H, L, K]
-    o,  # output [B, H, L, V]
-    ha,  # tmp variable [B, H, L, V] for storing intermediate results of (h * a[None, :]).sum(0)
-    h0,  # initial hidden state [B, H, K, V]
-    ht,  # final hidden state [B, H, K, V]
-    offsets,  # varlen offsets
-    scale,  # K ** -0.5
-    H,  # n_heads
-    T,  # seq_len
-    K: tl.constexpr,  # K
-    V: tl.constexpr,  # V
-    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
+@triton.jit(do_not_specialize=['T'])
+def fused_recurrent_dplr_delta_rule_fwd_kernel(
+    q,
+    k,
+    v,
+    a,
+    b,
+    gk,
+    o,
+    h0,
+    ht,
+    offsets,
+    scale,
+    T,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    REVERSE: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
-    # indices
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
     if USE_OFFSETS:
@@ -59,121 +59,153 @@ def fused_recurrent_fwd_kernel(
     else:
         bos, eos = i_n * T, i_n * T + T
 
+    o_k = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
     if HEAD_FIRST:
-        p_q = q + i_nh * T*K + tl.arange(0, BK)
-        p_k = k + i_nh * T*K + tl.arange(0, BK)
-        p_gk = gk + i_nh * T*K + tl.arange(0, BK)
-        p_a = a + i_nh * T*K + tl.arange(0, BK)
-        p_b = b + i_nh * T*K + tl.arange(0, BK)
-        p_o = o + i_nh * T*V + i_v * BV + tl.arange(0, BV)
-        p_v = v + i_nh * T*V + i_v * BV + tl.arange(0, BV)
-        p_ha = ha + i_nh * T*V + i_v * BV + tl.arange(0, BV)
+        p_q = q + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
+        p_k = k + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
+        p_a = a + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
+        p_b = b + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
+        p_gk = gk + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
+        p_v = v + i_nh * T*V + ((T-1) * V if REVERSE else 0) + o_v
+        p_o = o + i_nh * T*V + ((T-1) * V if REVERSE else 0) + o_v
+
     else:
-        p_q = q + (bos * H + i_h) * K + tl.arange(0, BK)
-        p_k = k + (bos * H + i_h) * K + tl.arange(0, BK)
-        p_gk = gk + (bos * H + i_h) * K + tl.arange(0, BK)
-        p_a = a + (bos * H + i_h) * K + tl.arange(0, BK)
-        p_b = b + (bos * H + i_h) * K + tl.arange(0, BK)
-        p_ha = ha + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
-        p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
-        p_o = o + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
+        p_q = q + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+        p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+        p_a = a + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+        p_b = b + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+        p_gk = gk + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+        p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+        p_o = o + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
 
-    mask_k = tl.arange(0, BK) < K
-    mask_v = (i_v * BV + tl.arange(0, BV)) < V
+    mask_k = o_k < K
+    mask_v = o_v < V
     mask_h = mask_k[None, :] & mask_v[:, None]
-
     b_h = tl.zeros([BV, BK], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
-        p_h0 = h0 + i_nh * K * V + (tl.arange(0, BK)[None, :]) * V + ((i_v * BV + tl.arange(0, BV))[:, None])
+        p_h0 = h0 + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for _ in range(0, T):
-        b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
-        b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
-        b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32) * scale
+        b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_a = tl.load(p_a, mask=mask_k, other=0).to(tl.float32)
         b_b = tl.load(p_b, mask=mask_k, other=0).to(tl.float32)
-        # to store
+        b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
+        b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+
         tmp = tl.sum(b_h * b_a[None, :], axis=1)
         b_h = tl.exp(b_gk)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
-        _o = b_h * b_q[None, :]
-        _o = tl.sum(_o, axis=1)
-        tl.store(p_o, _o.to(p_o.dtype.element_ty), mask=mask_v)
-        tl.store(p_ha, tmp.to(p_ha.dtype.element_ty), mask=mask_v)
-        p_q += K if HEAD_FIRST else K*H
-        p_k += K if HEAD_FIRST else K*H
-        p_gk += K if HEAD_FIRST else K*H
-        p_o += V if HEAD_FIRST else V*H
-        p_v += V if HEAD_FIRST else V*H
-        p_ha += V if HEAD_FIRST else V*H
-        p_a += K if HEAD_FIRST else K*H
-        p_b += K if HEAD_FIRST else K*H
+        b_o = tl.sum(b_h * b_q[None, :], axis=1)
+
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
+        p_q += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
+        p_k += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
+        p_a += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
+        p_b += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
+        p_gk += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
+        p_v += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
+        p_o += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
 
     if STORE_FINAL_STATE:
-        p_ht = ht + i_nh * K * V + (tl.arange(0, BK)[None, :]) * V + ((i_v * BV + tl.arange(0, BV))[:, None])
+        p_ht = ht + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
+def fused_recurrent_dplr_delta_rule_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    gk: torch.Tensor,
+    scale: Optional[float] = 1.0,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
+    reverse: bool = False,
+    offsets: Optional[torch.LongTensor] = None,
+    head_first: bool = True
+):
+    if head_first:
+        B, H, T, K, V = *k.shape, v.shape[-1]
+    else:
+        B, T, H, K, V = *k.shape, v.shape[-1]
+    N = B if offsets is None else len(offsets) - 1
+    BK = triton.next_power_of_2(K)
 
-    @staticmethod
-    @contiguous
-    def forward(
-        ctx,
+    h0 = initial_state
+    if output_final_state:
+        ht = q.new_empty(N, H, K, V, dtype=torch.float32)
+    else:
+        ht = None
+    o = torch.empty_like(v)
+
+    def grid(meta): return (triton.cdiv(V, meta['BV']), N * H)
+    fused_recurrent_dplr_delta_rule_fwd_kernel[grid](
         q,
         k,
         v,
         a,
         b,
         gk,
-        scale=None,
-        initial_state=None,
-        output_final_state=False,
-        offsets=None,
-        head_first=False
+        o,
+        h0,
+        ht,
+        offsets,
+        scale,
+        T=T,
+        B=B,
+        H=H,
+        K=K,
+        V=V,
+        BK=BK,
+        REVERSE=reverse,
+        HEAD_FIRST=head_first
+    )
+    return o, ht
+
+
+class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
+
+    @staticmethod
+    @contiguous
+    @autocast_custom_fwd
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        gk: torch.Tensor,
+        scale: Optional[float] = 1.0,
+        initial_state: Optional[torch.Tensor] = None,
+        output_final_state: bool = False,
+        reverse: bool = False,
+        offsets: Optional[torch.LongTensor] = None,
+        head_first: bool = False
     ):
-        if head_first:
-            B, H, T, K, V = *k.shape, v.shape[-1]
-        else:
-            B, T, H, K, V = *k.shape, v.shape[-1]
-        N = B if offsets is None else len(offsets) - 1
-
-        BK = triton.next_power_of_2(K)
-        if output_final_state:
-            final_state = q.new_empty(B, H, K, V, dtype=torch.float32)
-        else:
-            final_state = None
-
-        ha = torch.empty_like(v, dtype=torch.float32)
-
-        def grid(meta): return (triton.cdiv(V, meta['BV']), N * H)
-        o = torch.empty_like(v)
-        fused_recurrent_fwd_kernel[grid](
+        o, ht = fused_recurrent_dplr_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
             a=a,
             b=b,
             gk=gk,
-            o=o,
-            ha=ha,
-            h0=initial_state,
-            ht=final_state,
             scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            reverse=reverse,
             offsets=offsets,
-            H=H,
-            T=T,
-            K=K,
-            V=V,
-            BK=BK,
-            HEAD_FIRST=head_first
+            head_first=head_first
         )
-        return o, final_state
+        return o, ht
 
     @staticmethod
     @contiguous
+    @autocast_custom_bwd
     def backward(ctx, do, dht):
         raise NotImplementedError(
             "Backward pass for fused_recurrent_dplr_delta_rule is not implemented and will not be supported. "
@@ -192,6 +224,7 @@ def fused_recurrent_dplr_delta_rule(
     scale: Optional[float] = 1.0,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
+    reverse: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -218,12 +251,14 @@ def fused_recurrent_dplr_delta_rule(
             Initial state of shape `[B, H, K, V]`. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
+        reverse (Optional[bool]):
+            If `True`, process the state passing in reverse order. Default: `False`.
         cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -248,6 +283,7 @@ def fused_recurrent_dplr_delta_rule(
         scale,
         initial_state,
         output_final_state,
+        reverse,
         cu_seqlens,
         head_first
     )

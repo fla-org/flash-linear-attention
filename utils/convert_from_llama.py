@@ -142,9 +142,12 @@ def convert(
                                            llama.model.layers[i].post_attention_layernorm.bias)
             model.model.layers[i].mlp.norm.eps = llama.model.layers[i].post_attention_layernorm.variance_epsilon
 
-        print(f"llama.model.layers.{i}.mlp.gate/up_proj.weight -> model.model.layers.{i}.mlp.gate_proj.weight")
-        model.model.layers[i].mlp.gate_proj.weight.data.copy_(torch.cat((llama.model.layers[i].mlp.gate_proj.weight,
-                                                                         llama.model.layers[i].mlp.up_proj.weight), 0))
+        print(f"llama.model.layers.{i}.mlp.gate_proj.weight -> model.model.layers.{i}.mlp.gate_proj.weight")
+        model.model.layers[i].mlp.gate_proj.weight.data.copy_(llama.model.layers[i].mlp.gate_proj.weight)
+        torch.testing.assert_close(model.model.layers[i].mlp.gate_proj.weight, llama.model.layers[i].mlp.gate_proj.weight)
+        print(f"llama.model.layers.{i}.mlp.up_proj.weight -> model.model.layers.{i}.mlp.up_proj.weight")
+        model.model.layers[i].mlp.up_proj.weight.data.copy_(llama.model.layers[i].mlp.up_proj.weight)
+        torch.testing.assert_close(model.model.layers[i].mlp.up_proj.weight, llama.model.layers[i].mlp.up_proj.weight)
 
         print(f"llama.model.layers.{i}.mlp.down_proj.weight -> model.model.layers.{i}.mlp.down_proj.weight")
         model.model.layers[i].mlp.down_proj.weight.data.copy_(llama.model.layers[i].mlp.down_proj.weight)

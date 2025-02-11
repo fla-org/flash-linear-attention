@@ -68,7 +68,7 @@ def chunk_rwkv7(
         v=v,
         a=a,
         b=b,
-        gk=log_w,
+        gk=w,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,

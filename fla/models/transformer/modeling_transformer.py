@@ -55,7 +55,6 @@ class TransformerBlock(nn.Module):
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            norm_eps=config.norm_eps,
             fuse_swiglu=config.fuse_swiglu
         )
 

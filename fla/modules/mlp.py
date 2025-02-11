@@ -38,7 +38,8 @@ class GatedMLP(nn.Module):
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
 
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=False)
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[hidden_act]
 
@@ -47,7 +48,7 @@ class GatedMLP(nn.Module):
         x: torch.Tensor,
         **kwargs: Unpack[Any]
     ) -> torch.Tensor:
-        gate, y = self.gate_proj(x).chunk(2, -1)
+        gate, y = self.gate_proj(x), self.up_proj(x)
         if self.fuse_swiglu:
             return swiglu_linear(gate, y, self.down_proj.weight, self.down_proj.bias)
         else:
