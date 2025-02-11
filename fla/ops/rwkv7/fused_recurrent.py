@@ -20,11 +20,11 @@ from fla.utils import set_torch_device
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BV in [32, 64]
         for num_warps in [2, 4, 8, 16]
-        for num_stages in [2,]
+        for num_stages in [2, 3, 4]
     ],
     key=["BK"],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def fused_rwkv7_kernel(
     q_ptr, k_ptr, v_ptr,
     w_ptr, a_ptr, b_ptr,

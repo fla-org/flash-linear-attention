@@ -30,7 +30,7 @@ torch.backends.cuda.matmul.allow_tf32 = False
 @pytest.mark.parametrize("T", [20])
 @pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.float])
+@pytest.mark.parametrize("dtype", [torch.float32])
 def test_naive_recurrent_rwkv7(
     B: int,
     T: int,
@@ -40,7 +40,7 @@ def test_naive_recurrent_rwkv7(
 ):
 
     require_grad = True
-    torch.manual_seed(44)
+    torch.manual_seed(42)
 
     def get_err_ratio(x, y):
         err = (x-y).flatten().square().mean().sqrt().item()
@@ -48,21 +48,21 @@ def test_naive_recurrent_rwkv7(
         return err / (base + 1e-20)
     q = torch.empty(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
     k = torch.empty(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
-    v = torch.randn(B, H, T, D).to(device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
-    w = (torch.randn(B, H, T, D).uniform_(-8, -6).to(device).to(dtype)).requires_grad_(require_grad)
+    v = torch.randn(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
+    w = (torch.randn(B, H, T, D, device=device).uniform_(-8, -6).to(dtype)).requires_grad_(require_grad)
     a = torch.rand(B, H, T, D, device=device, dtype=dtype).clamp(0, 0.1).requires_grad_(require_grad)
     b = torch.randn(B, H, T, D, device=device, dtype=dtype).clamp(-0.2, 0.2).requires_grad_(require_grad)
 
-    do = torch.rand_like(v).to(device).fill_(torch.rand(1).item())
+    do = torch.rand_like(v, device=device).fill_(torch.rand(1).item())
     h = torch.zeros(B, H, D, D, device=device, dtype=torch.float32).requires_grad_(require_grad)
     with torch.no_grad():
-        ref_o, _, _ = naive_recurrent_rwkv7(q, k, v, w, a, b, scale=1.0, initial_state=h)
-        ref_o1, _, _ = naive_recurrent_rwkv7_2(q, k, v, w, a, b, scale=1.0, initial_state=h)
+        ref_o, _, _ = naive_recurrent_rwkv7(q=q,  k=k, v=v, w=w, a=a, b=b, scale=1.0, initial_state=h)
+        ref_o1, _, _ = naive_recurrent_rwkv7_2(q=q,  k=k, v=v, w=w, a=a, b=b, scale=1.0, initial_state=h)
 
         assert get_err_ratio(ref_o, ref_o1) < 1e-4
         print("Forward pass test passed")
 
-    ref_o, _, _ = naive_recurrent_rwkv7(q, k, v, w, a, b, scale=1.0, initial_state=None)
+    ref_o, _, _ = naive_recurrent_rwkv7(q=q,  k=k, v=v, w=w, a=a, b=b, scale=1.0, initial_state=h)
     ref_o.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -71,7 +71,7 @@ def test_naive_recurrent_rwkv7(
     ref_da, a.grad = a.grad.clone(), None
     ref_db, b.grad = b.grad.clone(), None
 
-    tri_o, _ = native_recurrent_rwkv7(q, k, v, w, a, b, scale=1.0, initial_state=None, dtype=dtype)
+    tri_o, _ = native_recurrent_rwkv7(q=q,  k=k, v=v, w=w, a=a, b=b, scale=1.0, initial_state=h)
     tri_o.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -127,6 +127,7 @@ def test_rwkv_relu_and_square(seq_len, hidden_dim, dtype, inplace):
 
     torch.testing.assert_close(torch_output, triton_output, rtol=1e-5, atol=1e-5)
 
+
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seq_len", [1024])
 @pytest.mark.parametrize("n_embd", [512, 1024])
@@ -175,6 +176,7 @@ def test_channel_mixing_gradients(batch_size, seq_len, n_embd, dim_ffn, dtype):
     torch.testing.assert_close(x_k.grad, x_k2.grad, rtol=rtol, atol=atol)
     torch.testing.assert_close(K_.grad, K_2.grad, rtol=rtol, atol=atol)
     torch.testing.assert_close(V_.grad, V_2.grad, rtol=rtol, atol=atol)
+
 
 @pytest.mark.parametrize("B", [4])
 @pytest.mark.parametrize("T", [4096])
@@ -252,15 +254,15 @@ def test_fused_rwkv7_addcmul(
     T = 4096
     B = 4
     hidden_size = H*D
-    hidden_states = torch.randn(B, T, hidden_size).uniform_(-8,8).to(device).to(dtype).requires_grad_()
-    xx = torch.randn(B, T, hidden_size).uniform_(-8,8).to(device).to(dtype).requires_grad_()
-    x_r = torch.randn(1, 1, hidden_size).uniform_(-8,8).to(device).to(dtype).requires_grad_()
-    x_w = torch.randn(1, 1, hidden_size).uniform_(-8,8).to(device).to(dtype).requires_grad_()
-    x_k = torch.randn(1, 1, hidden_size).uniform_(-8,8).to(device).to(dtype).requires_grad_()
-    x_v = torch.randn(1, 1, hidden_size).uniform_(-8,8).to(device).to(dtype).requires_grad_()
-    x_a = torch.randn(1, 1, hidden_size).uniform_(-8,8).to(device).to(dtype).requires_grad_()
+    hidden_states = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    xx = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    x_r = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    x_w = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    x_k = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    x_v = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    x_a = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     if use_g:
-        x_g = torch.randn(1, 1, hidden_size).uniform_(-8,8).to(device).to(dtype).requires_grad_()
+        x_g = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     else:
         x_g = None
     xr0, xw0, xk0, xv0, xa0, xg0 = fused_addcmul_rwkv7(hidden_states, xx, x_r, x_w, x_k, x_v, x_a, x_g)
@@ -317,5 +319,3 @@ def test_fused_rwkv7_addcmul(
         torch.testing.assert_close(d_ixg, d_ixg1, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(d_hidden, d_hidden1, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(d_xx, d_xx1, rtol=1e-3, atol=1e-3)
-
-
