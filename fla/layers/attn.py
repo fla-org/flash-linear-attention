@@ -109,14 +109,17 @@ class Attention(nn.Module):
         q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
-            k, v = past_key_values.update(
+            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
             )['attn_state']
-            k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
-            v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+            if cache_has_content:
+                k, v = k_cached, v_cached
+                k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
+                v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
