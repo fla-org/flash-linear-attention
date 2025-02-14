@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from fla.modules.convolution import ShortConvolution
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -28,13 +29,13 @@ def assert_close(prefix, ref, tri, ratio):
 @pytest.mark.parametrize("C", [4])
 def test_shortconv(B: int, T: int, H: int, C: int):
     torch.manual_seed(42)
-    conv_slow = ShortConvolution(H, C, activation='silu', use_fast_conv1d=False).cuda()
-    conv_fast = ShortConvolution(H, C, activation='silu', use_fast_conv1d=True).cuda()
+    conv_slow = ShortConvolution(H, C, activation='silu', use_fast_conv1d=False).to(device)
+    conv_fast = ShortConvolution(H, C, activation='silu', use_fast_conv1d=True).to(device)
     conv_fast.weight.data.copy_(conv_slow.weight.data)
     if conv_fast.bias is not None:
         conv_fast.bias.data.copy_(conv_slow.bias.data)
 
-    x = torch.randn(B, T, H).cuda()
+    x = torch.randn(B, T, H).to(device)
     y_slow, _ = conv_slow(x)
     y_fast, _ = conv_fast(x)
     assert y_slow.shape == x.shape
@@ -48,14 +49,14 @@ def test_shortconv(B: int, T: int, H: int, C: int):
 @pytest.mark.parametrize("C", [4])
 def test_shortconv_cache(B: int, T: int, H: int, C: int):
     torch.manual_seed(42)
-    conv_slow = ShortConvolution(H, C, use_fast_conv1d=False).cuda()
-    conv_fast = ShortConvolution(H, C, use_fast_conv1d=True).cuda()
+    conv_slow = ShortConvolution(H, C, use_fast_conv1d=False).to(device)
+    conv_fast = ShortConvolution(H, C, use_fast_conv1d=True).to(device)
     conv_fast.weight.data.copy_(conv_slow.weight.data)
     if conv_fast.bias is not None:
         conv_fast.bias.data.copy_(conv_slow.bias.data)
 
-    x = torch.randn(B, T, H).cuda()
-    mask = torch.randint(T//3, T, (B,)).unsqueeze(-1).gt(torch.arange(T).flip(-1)).bool().cuda()
+    x = torch.randn(B, T, H).to(device)
+    mask = torch.randint(T//3, T, (B,)).unsqueeze(-1).gt(torch.arange(T).flip(-1)).bool().to(device)
     y, _ = conv_slow(x, mask=mask)
     cache_slow, cache_fast = None, None
     for i in range(T):

@@ -31,7 +31,7 @@ from fla.modules import GroupNorm, LayerNorm
     )
 )
 def benchmark(T, provider):
-    device = 'cuda'
+    from fla.utils import device
     dtype = torch.bfloat16
     requires_grad = True
     B, D = 16, 1024

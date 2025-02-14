@@ -36,7 +36,7 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 )
 def benchmark(T, provider):
     # TODO: also add bwd pass benchmark
-    device = 'cuda'
+    from fla.utils import device
     dtype = torch.bfloat16
     B, H, D = 16, 8, 128
     # TODO: test more shapes

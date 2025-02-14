@@ -30,7 +30,7 @@ from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
     )
 )
 def benchmark(T, provider):
-    device = 'cuda'
+    from fla.utils import device
     dtype = torch.bfloat16
     requires_grad = True
     B, H, V = 4, 4096, 120000

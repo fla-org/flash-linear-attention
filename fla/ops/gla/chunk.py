@@ -11,7 +11,10 @@ from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.exp import safe_exp
-from fla.utils import contiguous
+from fla.utils import contiguous, device_capacity
+
+BT_LIST = [16, 32, 64] if device_capacity else [16, 32]
+BK_LIST = [64, 128] if device_capacity else [16, 32]
 
 
 @triton.heuristics({
@@ -311,8 +314,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
-        for BK in [32, 64]
-        for BV in [64, 128]
+        for BK in BT_LIST
+        for BV in BK_LIST
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
@@ -633,8 +636,8 @@ def chunk_gla_bwd_kernel_dA(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
-        for BK in [32, 64]
-        for BV in [64, 128]
+        for BK in BK_LIST
+        for BV in BK_LIST
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
@@ -997,7 +1000,7 @@ def chunk_gla_bwd_dA(
         B, T, H, V = v.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
-    BV = min(64, triton.next_power_of_2(V))
+    BV = min(64, triton.next_power_of_2(V)) if device_capacity else min(32, triton.next_power_of_2(V))
 
     dA = v.new_empty(B, *((H, T) if head_first else (T, H)), BT, dtype=torch.float)
     grid = (NT, B * H)

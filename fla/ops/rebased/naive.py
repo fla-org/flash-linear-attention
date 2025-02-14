@@ -21,16 +21,17 @@ def naive_parallel_rebased(q, k, v, use_scale=True, use_norm=True):
 
 
 if __name__ == "__main__":
+    from fla.utils import device
     B = 4
     H = 4
     L = 128
     # D = 15
     dtype = torch.float32
-    q = (torch.randn(B, H, L, 16).cuda().to(dtype)).requires_grad_(True)
-    k = (torch.randn(B, H, L, 16).cuda().to(dtype)).requires_grad_(True)
-    v = torch.randn(B, H, L, 128).cuda().to(dtype).requires_grad_(True)
+    q = (torch.randn(B, H, L, 16).to(device).to(dtype)).requires_grad_(True)
+    k = (torch.randn(B, H, L, 16).to(device).to(dtype)).requires_grad_(True)
+    v = torch.randn(B, H, L, 128).to(device).to(dtype).requires_grad_(True)
 
-    do = torch.randn_like(v).cuda()
+    do = torch.randn_like(v).to(device)
     ref = naive_parallel_rebased(q, k, v, True, True)
     ref.backward(do, retain_graph=True)
     ref_dq, q.grad = q.grad.clone(), None

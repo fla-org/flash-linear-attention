@@ -4,7 +4,9 @@ import functools
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
+import triton
 from packaging import version
+from functools import lru_cache
 
 
 def contiguous(
@@ -82,9 +84,60 @@ def checkpoint(fn):
     return wrapper
 
 
-if version.parse(torch.__version__) >= version.parse("2.4"):
-    autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="cuda")
-    autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="cuda")
+@lru_cache(maxsize=None)
+def check_pytorch_version(version_s: str = "2.4"):
+    return version.parse(torch.__version__) >= version.parse(version_s)
+
+
+@lru_cache(maxsize=None)
+def check_triton_shared_mem(max_shared_mem: int = 102400, tensor_idx: int = 0):
+    max_shared_memory = triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['max_shared_mem']
+    return max_shared_mem >= max_shared_memory
+
+
+@lru_cache(maxsize=None)
+def get_available_device():
+    if torch.cuda.is_available():
+        return "cuda"
+
+    try:
+        import intel_extension_for_pytorch as ipex  # noqa: F401
+    except ImportError:
+        pass
+    if torch.xpu.is_available():
+        return "xpu"
+
+    try:
+        import torch_musa  # noqa: F401
+
+        if torch.musa.is_available():
+            return "musa"
+    except ImportError:
+        pass
+
+    try:
+        import torch_npu  # noqa: F401
+
+        if torch.npu.is_available():
+            return "npu"
+    except ImportError:
+        pass
+
+    return "cpu"
+
+
+device = "cuda" if get_available_device() == "cpu" else get_available_device()
+device_capacity = check_triton_shared_mem()
+device_torch_lib = getattr(torch, device)
+
+
+def set_torch_device(x: torch.Tensor):
+    device_torch_lib.set_device(x.device.index)
+
+
+if check_pytorch_version("2.4"):
+    autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
+    autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
 else:
-    autocast_custom_fwd = torch.cuda.amp.custom_fwd
-    autocast_custom_bwd = torch.cuda.amp.custom_bwd
+    autocast_custom_fwd = device_torch_lib.amp.custom_fwd
+    autocast_custom_bwd = device_torch_lib.amp.custom_bwd

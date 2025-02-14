@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.modules import FusedKLDivLoss
+from fla.utils import device
 
 
 @pytest.mark.parametrize("B", [1, 4])
@@ -15,17 +16,17 @@ from fla.modules import FusedKLDivLoss
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
-    x = torch.randn(B * T, D).cuda().to(dtype=dtype).requires_grad_()
-    x_weight = torch.randn(V, D).cuda().to(dtype=dtype).requires_grad_()
-    target_x = torch.randn(B * T, D).cuda().to(dtype=dtype)
-    target_weight = torch.randn(V, D).cuda().to(dtype=dtype)
+    x = torch.randn(B * T, D).to(device).to(dtype=dtype).requires_grad_()
+    x_weight = torch.randn(V, D).to(device).to(dtype=dtype).requires_grad_()
+    target_x = torch.randn(B * T, D).to(device).to(dtype=dtype)
+    target_weight = torch.randn(V, D).to(device).to(dtype=dtype)
 
     ref = F.kl_div(
         F.linear(x, x_weight).log_softmax(-1),
         F.linear(target_x, target_weight).softmax(-1),
         reduction=reduction
     ).to(dtype)
-    do = torch.randn_like(ref).cuda()
+    do = torch.randn_like(ref).to(device)
     ref.backward(do)
     ref_dx, x.grad = x.grad.clone(), None
     ref_dw, x_weight.grad = x_weight.grad.clone(), None

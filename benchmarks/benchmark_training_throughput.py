@@ -6,11 +6,13 @@ from typing import Optional, Tuple
 
 import torch
 from accelerate import Accelerator
-from torch.cuda import max_memory_allocated, memory_allocated
 from torch.optim import AdamW
 from tqdm import trange
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.optimization import get_cosine_schedule_with_warmup
+from fla.utils import device_torch_lib
+max_memory_allocated = device_torch_lib.max_memory_allocated
+memory_allocated = device_torch_lib.memory_allocated
 
 import fla
 
@@ -68,9 +70,10 @@ def profile(
     mixed_precision: str = 'bf16',
     compile: bool = False
 ):
-    device = torch.device('cuda')
+    from fla.utils import device
+    device = torch.device(device)
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
-    model = AutoModelForCausalLM.from_config(config).cuda().to(dtype)
+    model = AutoModelForCausalLM.from_config(config).to(device).to(dtype)
     if compile:
         print("Compiling the model")
         model = torch.compile(model)

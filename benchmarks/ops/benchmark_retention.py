@@ -40,7 +40,7 @@ except BaseException:
     )
 )
 def benchmark(T, provider):
-    device = 'cuda'
+    from fla.utils import device
     dtype = torch.bfloat16
     requires_grad = True
     B, H, D = 4, 8, 256

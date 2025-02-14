@@ -25,7 +25,7 @@ def time_bwd(func, *args, **kwargs):
 
 
 repeats = 256
-device = 'cuda'
+from fla.utils import device
 dtype = torch.bfloat16
 
 

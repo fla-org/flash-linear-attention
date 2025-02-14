@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.gsa import chunk_gsa, fused_recurrent_gsa
 from fla.ops.gsa.naive import naive_recurrent_gsa
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -44,13 +45,13 @@ def test_fused_recurrent(
 ):
     torch.manual_seed(42)
 
-    q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    s = torch.randn((B, H, T, M), dtype=dtype, device='cuda').requires_grad_()
-    g = F.logsigmoid(torch.randn((B, H, T, M), dtype=dtype, device='cuda')).requires_grad_()
-    hk0 = torch.randn(B, H, D, M, device='cuda').requires_grad_()
-    hv0 = torch.randn(B, H, M, D, device='cuda').requires_grad_()
+    q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    s = torch.randn((B, H, T, M), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((B, H, T, M), dtype=dtype, device=device)).requires_grad_()
+    hk0 = torch.randn(B, H, D, M, device=device).requires_grad_()
+    hv0 = torch.randn(B, H, M, D, device=device).requires_grad_()
 
     do = torch.randn_like(v)
     ref, (ref_hkt, ref_hvt) = naive_recurrent_gsa(q, k, v, s, g, initial_state=(hk0, hv0), output_final_state=True)
@@ -127,15 +128,15 @@ def test_fused_recurrent_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
 
-    q = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    s = torch.randn((1, T, H, M), dtype=dtype, device='cuda').requires_grad_()
-    g = F.logsigmoid(torch.randn((1, T, H, M), dtype=dtype, device='cuda')).requires_grad_()
-    hk0 = torch.randn(N, H, D, M, device='cuda').requires_grad_()
-    hv0 = torch.randn(N, H, M, D, device='cuda').requires_grad_()
+    q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    s = torch.randn((1, T, H, M), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((1, T, H, M), dtype=dtype, device=device)).requires_grad_()
+    hk0 = torch.randn(N, H, D, M, device=device).requires_grad_()
+    hv0 = torch.randn(N, H, M, D, device=device).requires_grad_()
 
     do = torch.randn_like(v)
     refs, ref_hkts, ref_hfts = [], [], []
@@ -229,19 +230,19 @@ def test_chunk(
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-        k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-        v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-        s = torch.randn((B, H, T, M), dtype=dtype, device='cuda').requires_grad_()
-        g = (F.logsigmoid(torch.randn((B, H, T, M), dtype=dtype, device='cuda')) / gate_logit_normalizer).requires_grad_()
+        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+        s = torch.randn((B, H, T, M), dtype=dtype, device=device).requires_grad_()
+        g = (F.logsigmoid(torch.randn((B, H, T, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
     else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-        k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-        v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-        s = torch.randn((B, T, H, M), dtype=dtype, device='cuda').requires_grad_()
-        g = (F.logsigmoid(torch.randn((B, T, H, M), dtype=dtype, device='cuda')) / gate_logit_normalizer).requires_grad_()
-    hk0 = torch.randn(B, H, D, M, device='cuda').requires_grad_()
-    hv0 = torch.randn(B, H, M, D, device='cuda').requires_grad_()
+        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+        s = torch.randn((B, T, H, M), dtype=dtype, device=device).requires_grad_()
+        g = (F.logsigmoid(torch.randn((B, T, H, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
+    hk0 = torch.randn(B, H, D, M, device=device).requires_grad_()
+    hv0 = torch.randn(B, H, M, D, device=device).requires_grad_()
 
     do = torch.randn_like(v)
     ref, _ = fused_recurrent_gsa(q, k, v, s, g, initial_state=(hk0, hv0), head_first=head_first)
@@ -289,15 +290,15 @@ def test_chunk_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    s = torch.randn((1, T, H, M), dtype=dtype, device='cuda').requires_grad_()
-    g = F.logsigmoid(torch.randn((1, T, H, M), dtype=dtype, device='cuda')).requires_grad_()
-    hk0 = torch.randn(N, H, D, M, device='cuda').requires_grad_()
-    hv0 = torch.randn(N, H, M, D, device='cuda').requires_grad_()
+    q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    s = torch.randn((1, T, H, M), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((1, T, H, M), dtype=dtype, device=device)).requires_grad_()
+    hk0 = torch.randn(N, H, D, M, device=device).requires_grad_()
+    hv0 = torch.randn(N, H, M, D, device=device).requires_grad_()
     do = torch.randn_like(v)
 
     ref, (ref_hkt, ref_hvt) = fused_recurrent_gsa(
@@ -369,13 +370,13 @@ def test_inference(
 ):
     torch.manual_seed(42)
 
-    q = torch.randn((B, HQ, T, D), dtype=dtype, device='cuda')
-    k = torch.randn((B, H, T, D), dtype=dtype, device='cuda')
-    v = torch.randn((B, H, T, D), dtype=dtype, device='cuda')
-    s = torch.randn((B, H, T, M), dtype=dtype, device='cuda')
-    g = F.logsigmoid(torch.randn((B, H, T, M), dtype=dtype, device='cuda'))
-    h0 = (torch.zeros(B, H, D, M, dtype=dtype, device='cuda'),
-          torch.zeros(B, H, M, D, dtype=dtype, device='cuda'))
+    q = torch.randn((B, HQ, T, D), dtype=dtype, device=device)
+    k = torch.randn((B, H, T, D), dtype=dtype, device=device)
+    v = torch.randn((B, H, T, D), dtype=dtype, device=device)
+    s = torch.randn((B, H, T, M), dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn((B, H, T, M), dtype=dtype, device=device))
+    h0 = (torch.zeros(B, H, D, M, dtype=dtype, device=device),
+          torch.zeros(B, H, M, D, dtype=dtype, device=device))
 
     ref, _ = naive_recurrent_gsa(q, k, v, s, g, initial_state=h0)
     tri = torch.empty_like(ref)

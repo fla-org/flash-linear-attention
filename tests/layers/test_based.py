@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from fla.layers.based import BasedLinearAttention
+from fla.utils import device
 
 
 @pytest.mark.parametrize("B", [4, 8])
@@ -16,9 +17,9 @@ def test_based(
     H: int,
     dtype: torch.dtype
 ):
-    x = torch.randn(B, T, H).to(dtype).cuda().requires_grad_(True)
-    dy = torch.randn(B, T, H).to(dtype).cuda()
-    model = BasedLinearAttention(H, mode='chunk').to(dtype).cuda()
+    x = torch.randn(B, T, H).to(dtype).to(device).requires_grad_(True)
+    dy = torch.randn(B, T, H).to(dtype).to(device)
+    model = BasedLinearAttention(H, mode='chunk').to(dtype).to(device)
     y = model(x)
     y.backward(dy, retain_graph=True)
     x_grad, x.grad = x.grad, None
