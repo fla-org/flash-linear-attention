@@ -6,8 +6,12 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
+from fla.utils import device_capacity
 
 from fla.ops.common.utils import prepare_chunk_offsets
+
+BV_LIST = [16, 32, 64] if device_capacity else [16, 32]
+BK_LIST = [16, 32, 64] if device_capacity else [16, 32]
 
 
 @triton.heuristics({
@@ -18,8 +22,8 @@ from fla.ops.common.utils import prepare_chunk_offsets
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64]
-        for BV in [32, 64]
+        for BK in BK_LIST
+        for BV in BV_LIST
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
