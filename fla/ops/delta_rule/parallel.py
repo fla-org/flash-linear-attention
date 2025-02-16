@@ -384,13 +384,14 @@ def naive_delta_rule_parallel(q, k, v, beta, BM=128, BN=32):
 
 
 if __name__ == "__main__":
+    from fla.utils import device
     B, H, T, K, V = 2, 4, 512, 64, 64
     torch.set_default_dtype(torch.bfloat16)
 
-    q = torch.randn[B, H, T, K].cuda()
-    k = torch.nn.functional.normalize(torch.randn[B, H, T, K].cuda(), p=2, dim=-1)
-    v = torch.randn[B, H, T, V].cuda()
-    beta = torch.ones(B, H, T).cuda()
+    q = torch.randn[B, H, T, K].to(device)
+    k = torch.nn.functional.normalize(torch.randn[B, H, T, K].to(device), p=2, dim=-1)
+    v = torch.randn[B, H, T, V].to(device)
+    beta = torch.ones(B, H, T).to(device)
 
     output_attentions = True
     ref_o, ref_attn = naive_delta_rule_parallel(q.clone(), k.clone(), v.clone(), beta.clone())
