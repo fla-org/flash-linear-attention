@@ -85,18 +85,23 @@ def checkpoint(fn):
 
 
 @lru_cache(maxsize=None)
-def check_pytorch_version(version_s: str = "2.4"):
+def check_pytorch_version(version_s: str = "2.4") -> bool:
     return version.parse(torch.__version__) >= version.parse(version_s)
 
 
 @lru_cache(maxsize=None)
-def check_triton_shared_mem(max_shared_mem: int = 102400, tensor_idx: int = 0):
+def check_triton_shared_mem(max_shared_mem: int = 102400, tensor_idx: int = 0) -> bool:
     max_shared_memory = triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['max_shared_mem']
     return max_shared_mem >= max_shared_memory
 
 
 @lru_cache(maxsize=None)
-def get_available_device():
+def get_multiprocessor_count(tensor_idx: int = 0) -> int:
+    return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
+
+
+@lru_cache(maxsize=None)
+def get_available_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
 

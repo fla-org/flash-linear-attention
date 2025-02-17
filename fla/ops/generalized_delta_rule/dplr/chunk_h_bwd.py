@@ -163,9 +163,17 @@ def chunk_dplr_bwd_dhu(
     elif check_triton_shared_mem(131072, qg.device.index):  # A100
         BV = 32
         BC = 32
-    else:
+    else:  # Etc: 4090
         BV = 16
         BC = 16
+
+    # N: the actual number of sequences in the batch with either equal or variable lengths
+    if offsets is None:
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+    else:
+        N = len(offsets) - 1
+        chunk_offsets = prepare_chunk_offsets(offsets, BT)
+        NT = chunk_offsets[-1]
 
     BC = min(BT, BC)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)

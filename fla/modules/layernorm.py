@@ -18,7 +18,7 @@ import triton
 import triton.language as tl
 
 from fla.utils import contiguous
-from fla.utils import device_torch_lib
+from fla.utils import device_torch_lib, get_multiprocessor_count
 
 
 def layer_norm_ref(
@@ -329,7 +329,7 @@ def layer_norm_bwd(
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # each program handles one group only
-    S = triton.cdiv(device_torch_lib.get_device_properties(x.device).multi_processor_count, G) * G
+    S = triton.cdiv(get_multiprocessor_count(x.device.index), G) * G
     dw = torch.empty((S, N), dtype=torch.float32, device=weight.device) if weight is not None else None
     db = torch.empty((S, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = triton.cdiv(M, S)
