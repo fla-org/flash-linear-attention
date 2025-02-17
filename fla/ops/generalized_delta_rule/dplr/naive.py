@@ -64,8 +64,6 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
     q, k, v, alpha, beta, gk = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d',
                                    c=chunk_size).float(), [q, k, v, alpha, beta, gk])
-    q, k, v, alpha, beta, gk = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d',
-                                   c=chunk_size).float(), [q, k, v, alpha, beta, gk])
 
     gk_cumsum = gk.cumsum(-2)
 
@@ -85,7 +83,6 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
         A_qb[:, :, :, i, :] = (q_i * beta * attn_i).sum(-1).clone()
         mask = (torch.arange(chunk_size) < i).to(q.device)
         # shift by one.
-        attn_i = (gk_i - gk[:, :, :, i, None] - gk_cumsum).masked_fill(~mask.unsqueeze(-1), float('-inf')).exp()
         attn_i = (gk_i - gk[:, :, :, i, None] - gk_cumsum).masked_fill(~mask.unsqueeze(-1), float('-inf')).exp()
         A_ab[:, :, :, i, :] = (alpha_i * beta * attn_i).sum(-1).clone()
         A_ak[:, :, :, i, :] = (alpha_i * k * attn_i).sum(-1).clone()
@@ -109,8 +106,6 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
         o_3 = (q_i * gk_cumsum[:, :, i].exp()) @ S
         o[:, :, i] = o_1 + o_2 + o_3
         decay = (gk_cumsum[:, :, i, -1, None] - gk_cumsum[:, :, i]).exp()
-        S = S*gk_cumsum[:, :, i, -1, :, None].exp() + (k_i * decay).transpose(-1, -2) @ v_i + \
-            (beta_i * decay).transpose(-1, -2) @ v2_i
         S = S*gk_cumsum[:, :, i, -1, :, None].exp() + (k_i * decay).transpose(-1, -2) @ v_i + \
             (beta_i * decay).transpose(-1, -2) @ v2_i
     S = None if output_final_state is False else S

@@ -8,6 +8,9 @@ import torch
 from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
 from fla.utils import set_torch_device
 
+@torch.compile(fullgraph=True)
+def cal_log_w(w: torch.Tensor) -> torch.Tensor:
+    return -torch.exp(w)
 
 @torch.compiler.disable
 def chunk_rwkv7(
@@ -58,7 +61,7 @@ def chunk_rwkv7(
     set_torch_device(r)
 
     if w is not None:
-        log_w = -torch.exp(w)
+        log_w = cal_log_w(w)
     else:
         assert log_w is not None, "Either w or log_w must be provided!"
 
@@ -68,7 +71,7 @@ def chunk_rwkv7(
         v=v,
         a=a,
         b=b,
-        gk=w,
+        gk=log_w,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,

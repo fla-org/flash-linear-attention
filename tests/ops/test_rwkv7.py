@@ -19,8 +19,8 @@ from fla.ops.rwkv7.channel_mixing import (
     channel_mixing_rwkv7,
 )
 from fla.ops.rwkv7.fused_recurrent import fused_recurrent_rwkv7
+from fla.ops.rwkv7.chunk import chunk_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
-import torch.test
 from utils import assert_close
 torch.backends.cudnn.allow_tf32 = False
 torch.backends.cuda.matmul.allow_tf32 = False
@@ -229,9 +229,9 @@ def test_fused_recurrent_rwkv7(
         tol = 1e-3 if dtype == torch.float32 else 2e-2
         torch.testing.assert_close(result, ref_o, atol=tol, rtol=tol)
         diff = torch.abs(result - ref_o)
-        diff_state = torch.abs(state - ref_state.transpose(-1, -2))
-        print("Max error:", diff.max().item(), diff_state.max().item())
-        print("Mean error:", diff.mean().item(), diff_state.mean().item())
+        ht_diff = torch.abs(state - ref_state.transpose(-1, -2))
+        print("Max error:", diff.max().item(), ht_diff.max().item())
+        print("Mean error:", diff.mean().item(), ht_diff.mean().item())
         print("Forward pass test passed", (ref_o - result).abs().max().item())
         assert get_err_ratio(ref_o, result) < 5e-4
     print('test passed')
@@ -251,8 +251,6 @@ def test_fused_rwkv7_addcmul(
     dtype: torch.dtype,
     use_g: bool
 ):
-    T = 4096
-    B = 4
     hidden_size = H*D
     hidden_states = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     xx = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
@@ -319,3 +317,68 @@ def test_fused_rwkv7_addcmul(
         torch.testing.assert_close(d_ixg, d_ixg1, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(d_hidden, d_hidden1, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(d_xx, d_xx1, rtol=1e-3, atol=1e-3)
+
+
+
+@pytest.mark.parametrize("B", [4])
+@pytest.mark.parametrize("T", [4096])
+@pytest.mark.parametrize("H", [64])
+@pytest.mark.parametrize("D", [64])
+@pytest.mark.parametrize("use_log_w", [True, False])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_rwkv7_chunk_forward(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    use_log_w: bool,
+    dtype: torch.dtype,
+):
+    require_grad = True
+    torch.manual_seed(44)
+
+    def get_err_ratio(x, y):
+        err = (x-y).flatten().square().mean().sqrt().item()
+        base = (x).flatten().square().mean().sqrt().item()
+        return err / (base + 1e-20)
+    q = torch.empty(B, T, H, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
+    k = torch.empty(B, T, H, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
+    v = torch.empty(B, T, H, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
+    w = torch.empty(B, T, H, D, device=device).uniform_(-8, -6).to(dtype=dtype).requires_grad_(True)
+
+    kk = torch.empty(B, T, H, D, device=device).uniform_(-1, 1)
+    kk = torch.nn.functional.normalize(kk, dim=-1).to(dtype=dtype)
+
+    a = -kk.clone().requires_grad_(True)  # -kk
+    a_scale = torch.empty(B, T, H, D, device=device).uniform_(0, 0.1).to(dtype=dtype)
+    b = (kk * a_scale).requires_grad_(True)  # kk*a
+
+    h = torch.rand(B, H, D, D, device=device, dtype=torch.float32).requires_grad_(require_grad)
+
+    with torch.no_grad():
+        if use_log_w:
+            ref_o, ref_state = fused_recurrent_rwkv7(q, k, v, a, b, initial_state=None,
+                                                log_w=-w.exp(), scale=1.0,  head_first=False)
+            result, state = chunk_rwkv7(q, k, v, a, b, initial_state=None,
+                                                log_w=-w.exp(), scale=1.0, head_first=False)
+        else:
+            ref_o, ref_state = fused_recurrent_rwkv7(q, k, v, a, b, initial_state=None,
+                                                w=w, scale=1.0,  head_first=False)
+            result, state = chunk_rwkv7(q, k, v, a, b, initial_state=None,
+                                                w=w, scale=1.0, head_first=False)
+        if torch.isnan(result).any():
+            raise ValueError("NaN detected in output")
+        if torch.isnan(ref_o).any():
+            raise ValueError("NaN detected in reference output")
+        ref_o = ref_o.to(dtype=torch.float32).to(device)
+        result = result.to(dtype=torch.float32).to(device)
+        ref_state = ref_state.to(dtype=torch.float32).to(device)
+        state = state.to(dtype=torch.float32).to(device)
+        o_diff = torch.abs(result - ref_o)
+        ht_diff = torch.abs(state - ref_state)
+        assert o_diff.mean().item() < 1e-1, o_diff.mean().item()
+        assert ht_diff.mean().item() < 1e-2, ht_diff.mean().item()
+        assert o_diff.max().item() < 0.6, o_diff.max().item()
+        assert ht_diff.max().item() < 1e-1, ht_diff.max().item()
+
+    print('test passed')
