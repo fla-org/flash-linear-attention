@@ -13,7 +13,7 @@ from fla.utils import device_capacity, check_triton_shared_mem
 triton_config = triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4]
+        for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV']
@@ -21,7 +21,7 @@ triton_config = triton.autotune(
     triton.autotune(
         configs=[
             triton.Config({}, num_warps=num_warps)
-            for num_warps in [2, 4, 8]
+            for num_warps in [1, 2, 4, 8]
         ],
         key=['BT', 'BK', 'BV'],
 )

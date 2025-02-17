@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
+from fla.utils import device_capacity
 
 
 @triton.heuristics({
@@ -146,7 +147,7 @@ def chunk_dplr_bwd_wy(
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
     BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    BV = min(triton.next_power_of_2(V), 64) if device_capacity else  min(triton.next_power_of_2(V), 32)
 
     dA_ab = torch.empty_like(A_ab_inv, dtype=torch.float)
     dA_ak = torch.empty_like(A_ak, dtype=torch.float)

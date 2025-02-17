@@ -92,7 +92,7 @@ def check_pytorch_version(version_s: str = "2.4"):
 @lru_cache(maxsize=None)
 def check_triton_shared_mem(max_shared_mem: int = 102400, tensor_idx: int = 0):
     max_shared_memory = triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['max_shared_mem']
-    return max_shared_mem >= max_shared_memory
+    return max_shared_memory >= max_shared_mem
 
 
 @lru_cache(maxsize=None)

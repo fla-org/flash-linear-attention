@@ -14,7 +14,7 @@ from fla.utils import device_capacity, check_triton_shared_mem
 triton_config = triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4, 8]
+        for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV', "V"],
@@ -22,7 +22,7 @@ triton_config = triton.autotune(
     triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [2, 4, 8, 16]
+        for num_warps in [1, 2, 4, 8]
     ],
     key=['BT', 'BK', 'BV', "V"],
 )
@@ -146,14 +146,6 @@ def chunk_dplr_bwd_dhu(
     else:
         B, T, H, K, V = *qg.shape, do.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
-        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
-    else:
-        N = len(offsets) - 1
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
-
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension being larger than 256."
     # H100
@@ -163,9 +155,17 @@ def chunk_dplr_bwd_dhu(
     elif check_triton_shared_mem(131072, qg.device.index):  # A100
         BV = 32
         BC = 32
-    else:
+    elif check_triton_shared_mem(101376, qg.device.index):  # 4090
         BV = 16
         BC = 16
+    
+    # N: the actual number of sequences in the batch with either equal or variable lengths
+    if offsets is None:
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+    else:
+        N = len(offsets) - 1
+        chunk_offsets = prepare_chunk_offsets(offsets, BT)
+        NT = chunk_offsets[-1]
 
     BC = min(BT, BC)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
