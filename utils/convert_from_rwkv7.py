@@ -39,6 +39,14 @@ def convert(
 
     print(f"Creating model with config:\n{config}")
     model = AutoModelForCausalLM.from_config(config)
+
+    if precision in ['bf16', 'bfloat16']:
+        model = model.to(torch.bfloat16)
+    if precision in ['fp16', 'float16']:
+        model = model.to(torch.float16)
+    if precision in ['fp64', 'double', 'float64']:
+        model = model.to(torch.double)
+
     print(model)
     model_dict = model.state_dict()
     model_names = [n for n in model_dict]
@@ -129,9 +137,7 @@ def convert(
 
     os.makedirs(output, exist_ok=True)
 
-    from safetensors.torch import save_file
-    save_file(model.state_dict(), os.path.join(output, 'model.safetensors'))
-    model.config.save_pretrained(output)
+    model.save_pretrained(output, max_shard_size="1000GB")
 
 
 if __name__ == '__main__':
