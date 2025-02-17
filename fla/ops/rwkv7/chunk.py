@@ -8,9 +8,11 @@ import torch
 from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
 from fla.utils import set_torch_device
 
+
 @torch.compile(fullgraph=True)
 def cal_log_w(w: torch.Tensor) -> torch.Tensor:
     return -torch.exp(w)
+
 
 @torch.compiler.disable
 def chunk_rwkv7(
