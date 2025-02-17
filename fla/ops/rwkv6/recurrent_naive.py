@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 
-from typing import Optional
+from typing import Tuple, Optional
 
 import torch
+from fla.utils import autocast_custom_fwd, autocast_custom_bwd
 
 
 def naive_recurrent_rwkv6(
@@ -101,3 +102,67 @@ def naive_recurrent_rwkv6_bwd(
         dw[:, :, i] = dw[:, :, i+1] + dq_aux[:, :, i+1] * q[:, :, i+1] - dk_aux[:, :, i] * k[:, :, i]
 
     return dq, dk, dv, dw, du, dh
+
+
+class NativeRecurrentRWKV6Function(torch.autograd.Function):
+    @staticmethod
+    @autocast_custom_fwd
+    def forward(ctx, q, k, v, w, u, scale, initial_state, output_final_state: bool = False):
+        o, ht = naive_recurrent_rwkv6(q, k, v, w, u, scale, initial_state, output_final_state)
+        if initial_state is not None:
+            initial_state = initial_state.clone()
+
+        ctx.save_for_backward(q, k, v, w, u, o, initial_state)
+        ctx.scale = scale
+        return o, ht
+
+    @staticmethod
+    @autocast_custom_bwd
+    def backward(ctx, do, dht):
+        q, k, v, w, u, o, initial_state = ctx.saved_tensors
+        dq, dk, dv, dw, du, dh = naive_recurrent_rwkv6_bwd(q, k, v, w, u, o, do, dht, initial_state, ctx.scale)
+        dh = dh if initial_state is not None else None
+        return dq, dk, dv, dw, du, None, dh, None
+
+
+def native_recurrent_rwkv6(
+    r: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    scale: float = 1.0,
+    initial_state: torch.Tensor = None,
+    output_final_state: bool = False,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = True
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    r"""
+    Args:
+        r (torch.Tensor):
+            reception of shape `(B, H, T, K)`. Alias: q, query in linear attention.
+        k (torch.Tensor):
+            keys of shape `(B, H, T, K)`
+        v (torch.Tensor):
+            values of shape `(B, H, T, V)`
+        w (torch.Tensor):
+            data-dependent decays of shape `(B, H, T, K)` in log space! Alias: g.
+        u (torch.Tensor):
+            bonus of shape `(H, K)` or `(B, H, K)` for each head.
+        scale (Optional[int]):
+            Scale factor for the RWKV6 attention scores.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        initial_state (Optional[torch.Tensor]):
+            Initial state of shape `(B, H, K, V)`. Default: `None`.
+        output_final_state (Optional[bool]):
+            Whether to output the final state of shape `(B, H, K, V)`. Default: `False`.
+    """
+    if scale == -1.0:
+        scale = r.shape[-1] ** -0.5
+
+    assert cu_seqlens is None, "cu_seqlens is not supported in the native implementation."
+    assert head_first, "head_first=False is not supported in the native implementation."
+
+    o, final_state = NativeRecurrentRWKV6Function.apply(r, k, v, w, u, scale, initial_state, output_final_state)
+
+    return o, final_state

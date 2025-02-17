@@ -146,7 +146,7 @@ class RWKV6Attention(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_rwkv6(
-                r=r,
+                q=r,
                 k=k,
                 v=v,
                 w=w,
