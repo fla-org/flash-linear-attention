@@ -7,6 +7,10 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
+from fla.utils import device_capacity, check_triton_shared_mem
+
+
+BK_LIST = [64, 128] if device_capacity else [16, 32]
 
 
 @triton.heuristics({
@@ -14,10 +18,9 @@ import triton.language as tl
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
     key=['BV', 'BT'],
 )
@@ -245,8 +248,8 @@ def chunk_dplr_bwd_o_kernel(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
         for num_warps in [4, 8]
-        for BK in [64, 128]
-        for BV in [64, 128]
+        for BK in BK_LIST
+        for BV in BK_LIST
     ],
     key=['BT', 'BK', 'BV'],
 )
@@ -391,8 +394,8 @@ def chunk_dplr_bwd_o(
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
 
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    BK = min(triton.next_power_of_2(K), 64) if device_capacity else min(triton.next_power_of_2(K), 32)
+    BV = min(triton.next_power_of_2(V), 64) if device_capacity else min(triton.next_power_of_2(K), 32)
     NK = triton.cdiv(K, BK)
     dq = torch.empty_like(k)
     dk = torch.empty_like(k)
@@ -461,7 +464,14 @@ def chunk_dplr_bwd_dAu(
             indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], BT).tolist()])
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
-    BV = min(triton.next_power_of_2(V), 128)
+
+    if check_triton_shared_mem(131072):  # A100
+        BV = min(triton.next_power_of_2(V), 128)
+    elif check_triton_shared_mem(101376):  # 4090
+        BV = min(triton.next_power_of_2(V), 64)
+    else:
+        BV = min(triton.next_power_of_2(V), 32)
+
     grid = (NT, B * H)
     dA_qk = torch.empty(B, H, T, BT, dtype=torch.float, device=v.device) if head_first \
         else torch.empty(B, T, H, BT, dtype=torch.float, device=v.device)
