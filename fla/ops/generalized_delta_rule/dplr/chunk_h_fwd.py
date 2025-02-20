@@ -7,24 +7,7 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-from fla.utils import device_capacity, check_triton_shared_mem
-
-
-triton_config = triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16]
-        for num_stages in [2, 3, 4]
-    ],
-    key=['BT', 'BK', 'BV']
-) if device_capacity else \
-    triton.autotune(
-        configs=[
-            triton.Config({}, num_warps=num_warps)
-            for num_warps in [1, 2, 4, 8]
-        ],
-        key=['BT', 'BK', 'BV'],
-)
+from fla.utils import check_triton_shared_mem
 
 
 @triton.heuristics({
@@ -32,7 +15,14 @@ triton_config = triton.autotune(
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
     'USE_OFFSETS': lambda args: args['offsets'] is not None,
 })
-@triton_config
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['BT', 'BK', 'BV']
+)
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_fwd_kernel_h(
     kg,

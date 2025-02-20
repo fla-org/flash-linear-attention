@@ -16,8 +16,9 @@ from fla.utils import device_capacity
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16]
+        for num_stages in [2, 3, 4]
     ],
     key=['BK', 'NC', 'BT', 'K'],
 )
@@ -264,8 +265,9 @@ def chunk_dplr_bwd_kernel_intra(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
         for BK in [32, 64]
     ],
     key=['BK', 'BT', 'K'],

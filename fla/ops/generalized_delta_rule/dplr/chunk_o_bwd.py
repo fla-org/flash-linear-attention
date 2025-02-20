@@ -18,10 +18,9 @@ BK_LIST = [64, 128] if device_capacity else [16, 32]
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['BV', 'BT'],
 )
@@ -105,8 +104,8 @@ def chunk_dplr_bwd_kernel_dAu(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV'],
 )
@@ -247,8 +246,9 @@ def chunk_dplr_bwd_o_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
-        for num_warps in [4, 8]
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
         for BK in BK_LIST
         for BV in BK_LIST
     ],

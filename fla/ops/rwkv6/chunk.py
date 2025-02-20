@@ -22,9 +22,10 @@ BV_LIST = [32, 64] if device_capacity else [16, 32]
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BS': BS}, num_warps=num_warps)
+        triton.Config({'BS': BS}, num_warps=num_warps, num_stages=num_stages)
         for BS in [16, 32, 64]
-        for num_warps in [2, 4, 8]
+        for num_warps in [4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['S', 'BT']
 )

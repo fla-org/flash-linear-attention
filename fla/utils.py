@@ -123,12 +123,13 @@ def get_available_device():
     except ImportError:
         pass
 
-    return "cpu"
+    raise ValueError("No available device found.")
 
 
 device = "cuda" if get_available_device() == "cpu" else get_available_device()
 device_capacity = check_triton_shared_mem()
 device_torch_lib = getattr(torch, device)
+is_intel_a770 = (device == "xpu" and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
 
 
 def set_torch_device(x: torch.Tensor):

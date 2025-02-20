@@ -8,24 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
-from fla.utils import device_capacity, check_triton_shared_mem
-
-
-triton_config = triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16]
-        for num_stages in [2, 3, 4]
-    ],
-    key=['BT', 'BK', 'BV', "V"],
-) if device_capacity else \
-    triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
-    ],
-    key=['BT', 'BK', 'BV', "V"],
-)
+from fla.utils import check_triton_shared_mem
 
 
 @triton.heuristics({
@@ -33,7 +16,14 @@ triton_config = triton.autotune(
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_OFFSETS': lambda args: args['offsets'] is not None,
 })
-@triton_config
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['BT', 'BK', 'BV', "V"],
+)
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_kernel_dhu(
     qg,

@@ -20,8 +20,8 @@ BK_LIST = [64, 128] if device_capacity else [16, 32]
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in BK_LIST
         for BV in BK_LIST
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['BT'],
 )
