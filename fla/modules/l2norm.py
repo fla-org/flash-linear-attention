@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-from fla.utils import device_torch_lib
+from fla.utils import set_torch_device
 
 
 @triton.autotune(
@@ -115,19 +115,19 @@ def l2norm_fwd(
         raise RuntimeError(
             "This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    with device_torch_lib.device(x.device.index):
-        l2norm_fwd_kernel[(M,)](
-            x,
-            y,
-            x.stride(0),
-            N,
-            eps,
-            # is_rms_norm,
-            BLOCK_N,
-            # residual is not None,
-            # residual_out is not None,
-            # bias is not None,
-        )
+    set_torch_device(x)
+    l2norm_fwd_kernel[(M,)](
+        x,
+        y,
+        x.stride(0),
+        N,
+        eps,
+        # is_rms_norm,
+        BLOCK_N,
+        # residual is not None,
+        # residual_out is not None,
+        # bias is not None,
+    )
     return y.reshape(x_shape_og)
 
 
@@ -156,16 +156,16 @@ def l2norm_bwd(
         raise RuntimeError(
             "This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    with device_torch_lib.device(x.device.index):
-        l2norm_bwd_kernel[(M,)](
-            x,
-            dy,
-            dx,
-            x.stride(0),
-            N,
-            eps,
-            BLOCK_N,
-        )
+    set_torch_device(x)
+    l2norm_bwd_kernel[(M,)](
+        x,
+        dy,
+        dx,
+        x.stride(0),
+        N,
+        eps,
+        BLOCK_N,
+    )
     return dx.reshape(x_shape_og)
 
 

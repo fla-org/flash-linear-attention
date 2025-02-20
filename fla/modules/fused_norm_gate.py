@@ -19,7 +19,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.utils import contiguous, device_torch_lib
+from fla.utils import contiguous, set_torch_device
 
 
 @triton.autotune(
@@ -130,26 +130,26 @@ def layer_norm_fwd(
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    with device_torch_lib.device(x.device.index):
-        layer_norm_fwd_kernel[(M,)](
-            x,
-            o,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            N,
-            eps,
-            is_rms_norm,
-            BLOCK_N,
-            residual is not None,
-            residual_out is not None,
-            weight is not None,
-            bias is not None,
-        )
+    set_torch_device(x)
+    layer_norm_fwd_kernel[(M,)](
+        x,
+        o,
+        y,
+        weight,
+        bias,
+        residual,
+        residual_out,
+        mean,
+        rstd,
+        N,
+        eps,
+        is_rms_norm,
+        BLOCK_N,
+        residual is not None,
+        residual_out is not None,
+        weight is not None,
+        bias is not None,
+    )
     # residual_out is None if residual is None and residual_dtype == input_dtype
     return y, mean, rstd, residual_out if residual_out is not None else x
 
@@ -317,33 +317,33 @@ def layer_norm_bwd(
     db = torch.empty((sm_count, N), dtype=torch.float, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / sm_count)
     grid = (sm_count,)
-    with device_torch_lib.device(x.device.index):
-        layer_norm_bwd_kernel[grid](
-            x,
-            o,
-            weight,
-            bias,
-            y,
-            dy,
-            dx,
-            do,
-            dw,
-            db,
-            dresidual,
-            dresidual_in,
-            mean,
-            rstd,
-            M,
-            N,
-            eps,
-            rows_per_program,
-            is_rms_norm,
-            BLOCK_N,
-            dresidual is not None,
-            dresidual_in is not None,
-            weight is not None,
-            bias is not None,
-        )
+    set_torch_device(x)
+    layer_norm_bwd_kernel[grid](
+        x,
+        o,
+        weight,
+        bias,
+        y,
+        dy,
+        dx,
+        do,
+        dw,
+        db,
+        dresidual,
+        dresidual_in,
+        mean,
+        rstd,
+        M,
+        N,
+        eps,
+        rows_per_program,
+        is_rms_norm,
+        BLOCK_N,
+        dresidual is not None,
+        dresidual_in is not None,
+        weight is not None,
+        bias is not None,
+    )
     dw = dw.sum(0).to(weight.dtype) if weight is not None else None
     db = db.sum(0).to(bias.dtype) if bias is not None else None
     # Don't need to compute dresidual_in separately in this case

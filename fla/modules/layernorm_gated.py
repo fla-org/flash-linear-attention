@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 from einops import rearrange
-from fla.utils import device_torch_lib
+from fla.utils import set_torch_device, get_multiprocessor_count
 
 
 def rms_norm_ref(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True, upcast=True):
@@ -146,26 +146,26 @@ def layer_norm_fwd(
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
     grid = (M, ngroups)
-    with device_torch_lib.device(x.device.index):
-        layer_norm_fwd_kernel[grid](
-            x,
-            out,
-            weight,
-            bias,
-            z,
-            mean,
-            rstd,
-            x.stride(0),
-            out.stride(0),
-            z.stride(0) if z is not None else 0,
-            M,
-            group_size,
-            eps,
-            BLOCK_N=BLOCK_N,
-            NORM_BEFORE_GATE=norm_before_gate,
-            IS_RMS_NORM=is_rms_norm,
-            num_warps=num_warps
-        )
+    set_torch_device(x)
+    layer_norm_fwd_kernel[grid](
+        x,
+        out,
+        weight,
+        bias,
+        z,
+        mean,
+        rstd,
+        x.stride(0),
+        out.stride(0),
+        z.stride(0) if z is not None else 0,
+        M,
+        group_size,
+        eps,
+        BLOCK_N=BLOCK_N,
+        NORM_BEFORE_GATE=norm_before_gate,
+        IS_RMS_NORM=is_rms_norm,
+        num_warps=num_warps
+    )
     return out, mean, rstd
 
 
@@ -343,7 +343,7 @@ def layer_norm_bwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
-    sm_count = device_torch_lib.get_device_properties(x.device).multi_processor_count
+    sm_count = get_multiprocessor_count(x.device.index)
     # If group size is small (e.g., 64), we're only using 1 warp. So having just 108 programs
     # would limit the occupancy.
     nrow_groups = math.ceil(sm_count * math.ceil(4 / num_warps) / ngroups)
@@ -351,35 +351,35 @@ def layer_norm_bwd(
     _db = torch.empty((nrow_groups, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / nrow_groups)
     grid = (nrow_groups, ngroups)
-    with device_torch_lib.device(x.device.index):
-        layer_norm_bwd_kernel[grid](
-            x,
-            weight,
-            bias,
-            z,
-            out if recompute_output else None,
-            dy,
-            dx,
-            _dw,
-            _db,
-            dz,
-            mean,
-            rstd,
-            x.stride(0),
-            z.stride(0) if z is not None else 0,
-            0 if not recompute_output else out.stride(0),
-            dy.stride(0),
-            dx.stride(0),
-            dz.stride(0) if dz is not None else 0,
-            _dw.stride(0),
-            _db.stride(0) if _db is not None else 0,
-            M, group_size, eps,
-            rows_per_program,
-            BLOCK_N=BLOCK_N,
-            NORM_BEFORE_GATE=norm_before_gate,
-            IS_RMS_NORM=is_rms_norm,
-            num_warps=num_warps
-        )
+    set_torch_device(x)
+    layer_norm_bwd_kernel[grid](
+        x,
+        weight,
+        bias,
+        z,
+        out if recompute_output else None,
+        dy,
+        dx,
+        _dw,
+        _db,
+        dz,
+        mean,
+        rstd,
+        x.stride(0),
+        z.stride(0) if z is not None else 0,
+        0 if not recompute_output else out.stride(0),
+        dy.stride(0),
+        dx.stride(0),
+        dz.stride(0) if dz is not None else 0,
+        _dw.stride(0),
+        _db.stride(0) if _db is not None else 0,
+        M, group_size, eps,
+        rows_per_program,
+        BLOCK_N=BLOCK_N,
+        NORM_BEFORE_GATE=norm_before_gate,
+        IS_RMS_NORM=is_rms_norm,
+        num_warps=num_warps
+    )
     dw = _dw.sum(0).to(weight.dtype)
     db = _db.sum(0).to(bias.dtype) if bias is not None else None
     return (dx, dw, db, dz) if not recompute_output else (dx, dw, db, dz, out)
