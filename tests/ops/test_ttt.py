@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
 from fla.ops.ttt.naive import chunk_ttt_linear_ref
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -60,7 +61,7 @@ def test_chunk(
         eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
         h0 = torch.randn(B, H, D, D, dtype=torch.float32)
 
-    q, k, v, w, b, eta, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, w, b, eta, h0))
+    q, k, v, w, b, eta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, w, b, eta, h0))
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
 
@@ -139,7 +140,7 @@ def test_fused_chunk_fwd(
         b = torch.randn(H, D, dtype=dtype)
         eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
         h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-    q, k, v, w, b, eta, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, w, b, eta, h0))
+    q, k, v, w, b, eta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, w, b, eta, h0))
 
     tri, tri_ht = fused_chunk_ttt_linear(
         q.clone(),
@@ -192,7 +193,7 @@ def test_chunk_varlen_fwd(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     eta_base = 5e-3
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
@@ -202,7 +203,7 @@ def test_chunk_varlen_fwd(
     w = torch.randn(H, D, dtype=dtype)
     b = torch.randn(H, D, dtype=dtype)
     h0 = torch.randn((N, H, D, D), dtype=torch.float32)
-    q, k, v, w, b, eta, h0 = map(lambda x: x.cuda().requires_grad_(), (q, k, v, w, b, eta, h0))
+    q, k, v, w, b, eta, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, w, b, eta, h0))
 
     tri, tri_ht = chunk_ttt_linear(
         q.clone(),

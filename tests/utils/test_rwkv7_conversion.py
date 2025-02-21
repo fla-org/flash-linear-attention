@@ -51,7 +51,7 @@ if __name__ == '__main__':
     model = RWKV7ForCausalLM.from_pretrained(
         args.model,
         torch_dtype="auto",
-        device_map="cuda",
+        device_map="auto",
     ).half().eval()
     tokenizer = Tokenizer.from_file(args.tokenizer)
 

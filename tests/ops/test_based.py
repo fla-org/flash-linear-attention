@@ -5,6 +5,7 @@ import torch
 
 from fla.ops.based import fused_chunk_based, parallel_based
 from fla.ops.based.naive import naive_parallel_based
+from fla.utils import device
 
 
 @pytest.mark.parametrize("B", [4])
@@ -20,9 +21,9 @@ def test_based(
     dtype: torch.dtype
 ):
     torch.manual_seed(42)
-    q = torch.randn((B, H, T, 16), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((B, H, T, 16), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
+    q = torch.randn((B, H, T, 16), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, H, T, 16), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
     do = torch.randn_like(v)
     ref = naive_parallel_based(q, k, v, use_norm=True)
     ref.backward(do)

@@ -33,7 +33,7 @@ from fla.ops.retention.naive import naive_retention
     )
 )
 def benchmark(T, provider):
-    device = 'cuda'
+    from fla.utils import device
     dtype = torch.bfloat16
     requires_grad = True
     B, H, D = 16, 8, 128

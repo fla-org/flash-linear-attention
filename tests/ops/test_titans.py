@@ -6,9 +6,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from ops.titans.chunk import chunk_titans_linear
-from ops.titans.fused_chunk import fused_chunk_titans_linear
-from ops.titans.naive import chunk_titans_linear_ref
+# from fla.ops.titans.chunk import chunk_titans_linear
+# from fla.ops.titans.fused_chunk import fused_chunk_titans_linear
+from fla.ops.titans.naive import chunk_titans_linear_ref
 
 
 def get_abs_err(x, y):
@@ -92,10 +92,10 @@ def test_chunk_fwd(
         theta = theta.permute(0, 2, 1, 3)
         alpha = alpha.permute(0, 2, 1, 3)
         eta = eta.permute(0, 2, 1, 3)
-    q, k, v, w, b, theta, alpha, eta = map(lambda x: x.cuda().requires_grad_(True),
+    q, k, v, w, b, theta, alpha, eta = map(lambda x: x.to(device).requires_grad_(True),
                                            (q, k, v, w, b, theta, alpha, eta))
     # in titans paper, h0 is not learnable
-    h0 = h0.cuda()
+    h0 = h0.to(device)
 
     # tri, tri_ht = chunk_titans_linear(
     #     q.clone(),

@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -53,7 +54,7 @@ def test_chunk(
         v = torch.randn(B, T, H, D, dtype=dtype)
         beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
         h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-    q, k, v, beta, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, beta, h0))
+    q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
 
@@ -114,14 +115,14 @@ def test_chunk_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=dtype)
-    q, k, v, beta, h0 = map(lambda x: x.cuda().requires_grad_(), (q, k, v, beta, h0))
+    q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, h0))
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 
@@ -183,7 +184,7 @@ def test_l2_in_kernel(
     beta = torch.rand(B, H, T, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
 
-    q, k, v, beta, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, beta, h0))
+    q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
 

@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.rwkv6 import chunk_rwkv6
 from fla.ops.rwkv6.fused_recurrent import fused_recurrent_rwkv6
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -46,18 +47,18 @@ def test_chunk(
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-        k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-        v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-        w = F.logsigmoid(torch.randn((B, H, T, D), dtype=dtype, device='cuda')) / gate_logit_normalizer
+        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+        w = F.logsigmoid(torch.randn((B, H, T, D), dtype=dtype, device=device)) / gate_logit_normalizer
     else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-        k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-        v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-        w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device='cuda')) / gate_logit_normalizer
+        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+        w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device=device)) / gate_logit_normalizer
 
-    u = torch.randn(H, D, dtype=dtype, device='cuda').requires_grad_(True)
-    h0 = torch.randn(B, H, D, D, dtype=dtype, device='cuda').requires_grad_()
+    u = torch.randn(H, D, dtype=dtype, device=device).requires_grad_(True)
+    h0 = torch.randn(B, H, D, D, dtype=dtype, device=device).requires_grad_()
     w = w.requires_grad_()
     do = torch.randn_like(v)
 
@@ -132,14 +133,14 @@ def test_chunk_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    w = F.logsigmoid(torch.randn((1, T, H, D), dtype=dtype, device='cuda')).requires_grad_(True)
-    u = torch.randn(H, D, dtype=dtype, device='cuda').requires_grad_(True)
-    h0 = torch.randn((N, H, D, D), dtype=dtype, device='cuda').requires_grad_()
+    q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    w = F.logsigmoid(torch.randn((1, T, H, D), dtype=dtype, device=device)).requires_grad_(True)
+    u = torch.randn(H, D, dtype=dtype, device=device).requires_grad_(True)
+    h0 = torch.randn((N, H, D, D), dtype=dtype, device=device).requires_grad_()
     do = torch.randn_like(v)
 
     ref, ref_ht = fused_recurrent_rwkv6(
