@@ -6,10 +6,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from utils import assert_close
 
 from fla.ops.generalized_delta_rule.dplr import (
     chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule)
+from utils import assert_close
 
 
 def recurrent_dplr_delta_rule_ref(

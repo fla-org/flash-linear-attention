@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 from fla.ops.linear_attn import (chunk_linear_attn, fused_chunk_linear_attn,
                                  fused_recurrent_linear_attn)

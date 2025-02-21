@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 
+from typing import Optional
+
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.generalized_delta_rule.iplr.chunk import chunk_iplr_delta_rule
-from fla.ops.generalized_delta_rule.iplr.fused_recurrent import fused_recurrent_iplr_delta_rule
+from fla.ops.generalized_delta_rule.iplr.fused_recurrent import \
+    fused_recurrent_iplr_delta_rule
 from utils import assert_close
+
 
 def chunk_iplr_delta_rule_ref(
     q: torch.Tensor,
@@ -62,8 +66,13 @@ def chunk_iplr_delta_rule_ref(
     o = torch.zeros_like(v)
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=1)
     for i in range(0, L // chunk_size):
-        current_chunk_size = min(chunk_size, L - i * chunk_size) # to handle the last chunk with possibly padding
-        q_i, k_i, v_i, u_i, w_i, b_i = q[:, :, i, :current_chunk_size], k[:, :, i, :current_chunk_size], v[:, :, i, :current_chunk_size], u[:, :, i, :current_chunk_size], w[:, :, i, :current_chunk_size], b[:, :, i, :current_chunk_size]
+        current_chunk_size = min(chunk_size, L - i * chunk_size)  # to handle the last chunk with possibly padding
+        q_i = q[:, :, i, :current_chunk_size]
+        k_i = k[:, :, i, :current_chunk_size]
+        v_i = v[:, :, i, :current_chunk_size]
+        u_i = u[:, :, i, :current_chunk_size]
+        w_i = w[:, :, i, :current_chunk_size]
+        b_i = b[:, :, i, :current_chunk_size]
         o_1 = (q_i @ k_i.transpose(-1, -2)).masked_fill_(mask, 0) @ v_i
         v2_i = u_i + w_i @ S
         o_2 = (q_i @ b_i.transpose(-1, -2)).masked_fill_(mask, 0) @ v2_i
@@ -78,9 +87,17 @@ def chunk_iplr_delta_rule_ref(
     return o, S
 
 
-def recurrence_iplr_delta_rule_ref(   
-        q, k, v, a, b, initial_state=None, output_final_state=True, head_first=True, scale=None
-    ):
+def recurrence_iplr_delta_rule_ref(
+    q,
+    k,
+    v,
+    a,
+    b,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = True,
+    head_first: bool = True,
+    scale: Optional[float] = None
+):
     orig_dtype = q.dtype
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
@@ -112,7 +129,6 @@ def recurrence_iplr_delta_rule_ref(
     if not head_first:
         o = o.transpose(1, 2)
     return o.to(orig_dtype), S
-
 
 
 @pytest.mark.parametrize("B", [2])

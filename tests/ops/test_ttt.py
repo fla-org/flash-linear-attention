@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 
-import os
-
 import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
+from fla.ops.ttt import chunk_ttt_linear
 from fla.ops.ttt.naive import chunk_ttt_linear_ref
 
 
@@ -104,6 +102,7 @@ def test_chunk(
     assert_close(" db", ref_db, tri_db, 0.005)
     assert_close(" de", ref_deta, tri_deta, 0.012)
     assert_close("dh0", ref_dh0, tri_dh0, 0.005)
+
 
 '''
 @pytest.mark.parametrize("B", [2])

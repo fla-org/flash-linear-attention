@@ -27,6 +27,7 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 
 ## News
 
+- **$\texttt{[2025-02]}$:** :whale: Add NSA implementations to `fla`. See kernels [here](fla/ops/nsa).
 - **$\texttt{[2025-01]}$:** :fire: We are migrating to `torchtitan`-based training framework. Check out the [flame](https://github.com/fla-org/flame) repo for more details.
 - **$\texttt{[2025-01]}$:** :tada: Add RWKV7 implementations (both kernels and models) to `fla`.
 - **$\texttt{[2024-12]}$:** Integrated `flash-bidirectional-attention` to `fla-org` ([repo](https://github.com/fla-org/flash-bidirectional-linear-attention)) 
@@ -60,17 +61,18 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 | 2025 | ICLR    | Samba          | Samba: Simple Hybrid State Space Models for Efficient Unlimited Context Language Modeling                 |      [link](https://arxiv.org/abs/2406.07522)      |                         [official](https://github.com/microsoft/Samba)                          |          [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/samba)          |
 | 2024 | ICML    | Mamba2         | Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality |      [link](https://arxiv.org/abs/2405.21060)      |                        [official](https://github.com/state-spaces/mamba)                        |         [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba2)          |
 | 2024 | NeurIPS | GSA            | Gated Slot Attention for Efficient Linear-Time Sequence Modeling                                          |      [link](https://arxiv.org/abs/2409.07146)      |     [official](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)      |           [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)           |
-| 2025 | ICLR    | Gated DeltaNet | Gated Delta Networks: Improving Mamba2 with Delta Rule                                                    |      [link](https://arxiv.org/abs/2412.06464)      |                       [official](https://github.com/NVlabs/GatedDeltaNet)                       |     [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gated_deltanet)      |
-| 2025 |         | RWKV7          |                                                                                                           |                                                    |                [official](https://github.com/BlinkDL/RWKV-LM/tree/main/RWKV-v7)                 |          [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/rwkv7)          |
+| 2025 | ICLR    | Gated DeltaNet | Gated Delta Networks: Improving Mamba2 with Delta Rule                                                    |      [link](https://arxiv.org/abs/2412.06464)      |                       [official](https://github.com/NVlabs/GatedDeltaNet)                       |      [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gated_delta_rule)      |
+| 2025 |         | RWKV7          |                                                                                                           |                                                    |                [official](https://github.com/BlinkDL/RWKV-LM/tree/main/RWKV-v7)                 |           [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/rwkv7)            |
+| 2025 |         | NSA            | Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention                         |      [link](https://arxiv.org/abs/2502.11089)      |                                                                                                 |            [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/nsa)             |
  
 ## Installation
 
 The following requirements should be satisfied 
-- [PyTorch](https://pytorch.org/) >= 2.3
+- [PyTorch](https://pytorch.org/) >= 2.5
 - [Triton](https://github.com/openai/triton) >=3.0 (or nightly version, see [FAQs](FAQs.md))
 - [einops](https://einops.rocks/)
 - [transformers](https://github.com/huggingface/transformers) >=4.45.0
-- [datasets](https://github.com/huggingface/datasets) >=2.11.0
+- [datasets](https://github.com/huggingface/datasets) >=3.3.0
 - [causal-conv1d](https://github.com/Dao-AILab/causal-conv1d) >=1.4.0
 
 As `fla` is actively developed now, no released packages are provided at this time.

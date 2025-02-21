@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional
 
@@ -6,7 +7,6 @@ import torch
 from einops import rearrange, repeat
 
 
-@torch.compile
 def naive_nsa(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -23,7 +23,7 @@ def naive_nsa(
             queries of shape `[B, HQ, T, K]` if `head_first=True` else `[B, T, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
-            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=8.
+            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
             values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
         indices (torch.LongTensor):
@@ -53,8 +53,9 @@ def naive_nsa(
         q, k, v, indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, indices))
 
     dtype = q.dtype
-    num_kv_groups = q.shape[2] // k.shape[2]
-    k, v, indices = (repeat(x, 'b t h d -> b t (h g) d', g=num_kv_groups) for x in (k, v, indices))
+    G = q.shape[2] // k.shape[2]
+    BS = block_size
+    k, v, indices = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k, v, indices))
     q, k, v = map(lambda x: x.float(), (q, k, v))
 
     o = torch.zeros_like(v)
@@ -69,26 +70,25 @@ def naive_nsa(
             q_b, k_b, v_b, i_b = q[i], k[i], v[i], indices[i]
         else:
             T = cu_seqlens[i+1] - cu_seqlens[i]
-            q_b, k_b, v_b, i_b = map(lambda x: x[cu_seqlens[i]:cu_seqlens[i+1]], (q, k, v, indices))
+            q_b, k_b, v_b, i_b = map(lambda x: x[0][cu_seqlens[i]:cu_seqlens[i+1]], (q, k, v, indices))
 
-        i_b = i_b.unsqueeze(-1) * block_size + i_b.new_tensor(range(block_size))
-        # [T, S*block_size, HQ]
+        i_b = i_b.unsqueeze(-1) * BS + i_b.new_tensor(range(BS))
+        # [T, S*BS, HQ]
         i_b = i_b.view(T, indices.shape[2], -1).transpose(1, 2)
         for i_q in range(T):
             # [HQ, D]
             q_i = q_b[i_q] * scale
-            # [S*block_size, HQ]
+            # [S*BS, HQ]
             i_i = i_b[i_q]
-            # [S*block_size, HQ, -1]
-            k_i, v_i = map(lambda x: x.gather(0, i_i.unsqueeze(-1)), (k_b, v_b))
-            # [S*block_size, HQ]
+            # [S*BS, HQ, -1]
+            k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, T-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
+            # [S*BS, HQ]
             attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill(i_i > i_q, float('-inf')).softmax(0)
             if not varlen:
                 o[i, i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
             else:
-                o[cu_seqlens[i]+i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
+                o[0][cu_seqlens[i]+i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
 
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
-    o = o.to(dtype)
-    return o
+    return o.to(dtype)

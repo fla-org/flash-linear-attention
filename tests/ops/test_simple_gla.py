@@ -1,19 +1,30 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from utils import assert_close
 
 from fla.ops.simple_gla import chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.ops.simple_gla.parallel import parallel_simple_gla
+from utils import assert_close
 
 
-def chunk_simple_gla_ref(q, k, v, g, initial_state=None, output_final_state=False, BT=64, scale=None, head_first=True):
+def chunk_simple_gla_ref(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
+    BT: int = 64,
+    scale: Optional[float] = None,
+    head_first: bool = True
+):
     if not head_first:
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
