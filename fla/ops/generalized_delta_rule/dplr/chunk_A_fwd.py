@@ -131,7 +131,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        for num_warps in [2, 4, 8, 16, 32]
     ],
     key=['BK', 'BT']
 )

@@ -18,6 +18,7 @@ import triton
 import triton.language as tl
 
 from fla.utils import contiguous
+from fla.utils import set_torch_device, get_multiprocessor_count
 
 
 def layer_norm_ref(
@@ -164,8 +165,8 @@ def layer_norm_fwd(
         residual_out = torch.empty(M, N, device=x.device, dtype=residual_dtype)
     else:
         residual_out = None
-    mean = torch.empty((M,), dtype=torch.float32, device="cuda") if not is_rms_norm else None
-    rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+    mean = torch.empty((M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
@@ -173,26 +174,26 @@ def layer_norm_fwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
 
-    with torch.cuda.device(x.device.index):
-        layer_norm_fwd_kernel[(M,)](
-            x,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            N,
-            G,
-            eps,
-            is_rms_norm,
-            BLOCK_N,
-            residual is not None,
-            residual_out is not None,
-            weight is not None,
-            bias is not None,
-        )
+    set_torch_device(x)
+    layer_norm_fwd_kernel[(M,)](
+        x,
+        y,
+        weight,
+        bias,
+        residual,
+        residual_out,
+        mean,
+        rstd,
+        N,
+        G,
+        eps,
+        is_rms_norm,
+        BLOCK_N,
+        residual is not None,
+        residual_out is not None,
+        weight is not None,
+        bias is not None,
+    )
     # residual_out is None if residual is None and residual_dtype == input_dtype
     return y, mean, rstd, residual_out if residual_out is not None else x
 
@@ -328,38 +329,38 @@ def layer_norm_bwd(
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # each program handles one group only
-    S = triton.cdiv(torch.cuda.get_device_properties(x.device).multi_processor_count, G) * G
+    S = triton.cdiv(get_multiprocessor_count(x.device.index), G) * G
     dw = torch.empty((S, N), dtype=torch.float32, device=weight.device) if weight is not None else None
     db = torch.empty((S, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = triton.cdiv(M, S)
     programs_per_group = S // G
     grid = (S,)
-    with torch.cuda.device(x.device.index):
-        layer_norm_bwd_kernel[grid](
-            x,
-            weight,
-            bias,
-            y,
-            dy,
-            dx,
-            dw,
-            db,
-            dresidual,
-            dresidual_in,
-            mean,
-            rstd,
-            M,
-            N,
-            G,
-            rows_per_program,
-            programs_per_group,
-            is_rms_norm,
-            BLOCK_N,
-            dresidual is not None,
-            dresidual_in is not None,
-            weight is not None,
-            bias is not None,
-        )
+    set_torch_device(x)
+    layer_norm_bwd_kernel[grid](
+        x,
+        weight,
+        bias,
+        y,
+        dy,
+        dx,
+        dw,
+        db,
+        dresidual,
+        dresidual_in,
+        mean,
+        rstd,
+        M,
+        N,
+        G,
+        rows_per_program,
+        programs_per_group,
+        is_rms_norm,
+        BLOCK_N,
+        dresidual is not None,
+        dresidual_in is not None,
+        weight is not None,
+        bias is not None,
+    )
     dw = dw.view(G, -1, N).sum(1).to(weight).view_as(weight) if weight is not None else None
     db = db.view(G, -1, N).sum(1).to(bias).view_as(bias) if bias is not None else None
     # Don't need to compute dresidual_in separately in this case

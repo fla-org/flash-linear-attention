@@ -141,8 +141,9 @@ def fwd_prepare_wy_repr_kernel_chunk64(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [2, 4]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV']
 )
