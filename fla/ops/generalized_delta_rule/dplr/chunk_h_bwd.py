@@ -8,6 +8,24 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
+from fla.utils import device_capacity, check_triton_shared_mem
+
+
+triton_config = triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['BT', 'BK', 'BV', "V"],
+) if device_capacity else \
+    triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [2, 4, 8, 16]
+    ],
+    key=['BT', 'BK', 'BV', "V"],
+)
 
 
 @triton.heuristics({
@@ -15,14 +33,7 @@ from fla.ops.common.utils import prepare_chunk_offsets
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_OFFSETS': lambda args: args['offsets'] is not None,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4, 8]
-        for num_stages in [2, 3, 4]
-    ],
-    key=['BT', 'BK', 'BV', 'V'],
-)
+@triton_config
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_kernel_dhu(
     qg,
@@ -146,13 +157,16 @@ def chunk_dplr_bwd_dhu(
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension being larger than 256."
     # H100
-    if torch.cuda.get_device_capability()[0] >= 9:
+    if check_triton_shared_mem(233472, qg.device.index):
         BV = 64
-        BC = 32
-    # A100
-    else:
+        BC = 64 if K <= 128 else 32
+    elif check_triton_shared_mem(131072, qg.device.index):  # A100
         BV = 32
         BC = 32
+    else:
+        BV = 16
+        BC = 16
+
     BC = min(BT, BC)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, 'NK > 1 is not supported because it involves time-consuming synchronization'
