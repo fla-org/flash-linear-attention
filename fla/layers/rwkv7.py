@@ -151,7 +151,7 @@ class RWKV7Attention(nn.Module):
 
         if self.layer_idx == 0:
             v_first = v
-        else:
+        elif v_first is not None:
             v = torch.lerp(v, v_first, self.v_lora(xv).sigmoid())
         a = self.a_lora(xa).sigmoid()
         g = self.g_lora(xg)
@@ -190,20 +190,9 @@ class RWKV7Attention(nn.Module):
                 offset=r.shape[1]
             )
 
-        # PyTorch expects input to be of shape [N, C, *]
-        out = rearrange(o, 'b t h d -> b (h d) t').float()
-        out = nn.functional.group_norm(
-            out,
-            num_groups=self.num_heads,
-            weight=self.g_norm.weight.float() if self.g_norm.weight is not None else None,
-            bias=self.g_norm.bias.float()   if self.g_norm.bias   is not None else None,
-            eps=self.g_norm.eps
-        )
-
-        # Rearrange back to [B, T, h*d].
-        out = rearrange(out, 'b c t -> b t c')
-        
-        out = out + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
-        out = self.o_proj(out * g)
+        o_reshaped = rearrange(o, '... h d -> ... (h d)')
+        residual = ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
+        o = self.g_norm(o_reshaped, residual=residual, residual_in_fp32=True)
+        o = self.o_proj(o * g)
 
         return o, None, past_key_values, v_first
