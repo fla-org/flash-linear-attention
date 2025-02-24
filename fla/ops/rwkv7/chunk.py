@@ -6,16 +6,23 @@ from typing import Optional
 import torch
 
 from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
+from fla.utils import set_torch_device
+
+
+@torch.compile(fullgraph=True)
+def cal_log_w(w: torch.Tensor) -> torch.Tensor:
+    return -torch.exp(w)
 
 
 @torch.compiler.disable
 def chunk_rwkv7(
     r: torch.Tensor,
-    w: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
+    w: torch.Tensor = None,
+    log_w: torch.Tensor = None,
     scale: float = 1.0,
     initial_state: torch.Tensor = None,
     output_final_state: bool = True,
@@ -26,8 +33,6 @@ def chunk_rwkv7(
     Args:
         r (torch.Tensor):
             r of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
-        w (torch.Tensor):
-            log decay of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
         k (torch.Tensor):
             k of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
         v (torch.Tensor):
@@ -36,6 +41,11 @@ def chunk_rwkv7(
             a of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
         b (torch.Tensor):
             b of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+        w (torch.Tensor):
+            decay of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`, kernel
+            will apply log_w = -torch.exp(w)
+        log_w (torch.Tensor):
+            log decay of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
         scale (float):
             scale of the attention.
         initial_state (Optional[torch.Tensor]):
@@ -50,13 +60,20 @@ def chunk_rwkv7(
         head_first (bool):
             whether to use head first. Recommended to be False to avoid extra transposes.
     """
+    set_torch_device(r)
+
+    if w is not None:
+        log_w = cal_log_w(w)
+    else:
+        assert log_w is not None, "Either w or log_w must be provided!"
+
     return chunk_dplr_delta_rule(
         q=r,
         k=k,
         v=v,
         a=a,
         b=b,
-        gk=w,
+        gk=log_w,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,
