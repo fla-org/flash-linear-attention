@@ -47,7 +47,7 @@ def fused_recurrent_rwkv7(
         head_first (bool):
             whether to use head first. Recommended to be False to avoid extra transposes.
     """
-    # Ensure all inputs are in float32 for maximum precision
+    # Ensure all inputs are in float32
     original_dtype = r.dtype
     use_fp32 = original_dtype != torch.float32
     
