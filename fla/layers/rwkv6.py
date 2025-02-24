@@ -64,14 +64,16 @@ class RWKV6Attention(nn.Module):
             nn.Tanh(),
             nn.Linear(proj_low_rank_dim * 5, hidden_size, bias=False)
         )
-        self.x_bias = nn.Parameter(torch.zeros(5, hidden_size))
+        # Register parameter in float32 for precision
+        self.register_parameter('x_bias', nn.Parameter(torch.zeros(5, hidden_size, dtype=torch.float32)))
 
         self.r_proj = DDLerpLinear(hidden_size, self.key_dim)
         self.w_proj = DDLerpLinear(hidden_size, self.key_dim, low_rank_dim=gate_low_rank_dim)
         self.k_proj = DDLerpLinear(hidden_size, self.key_dim)
         self.v_proj = DDLerpLinear(hidden_size, self.value_dim)
         self.g_proj = DDLerpLinear(hidden_size, self.value_dim)
-        self.bonus = nn.Parameter(torch.zeros(num_heads, self.head_k_dim))
+        # Register parameter in float32 for precision
+        self.register_parameter('bonus', nn.Parameter(torch.zeros(num_heads, self.head_k_dim, dtype=torch.float32)))
 
         # TODO: fuse GroupNorm and output gate
         self.g_norm = GroupNorm(self.num_heads, self.value_dim, elementwise_affine=elementwise_affine, bias=True, eps=norm_eps)
@@ -253,7 +255,8 @@ class LerpLinear(nn.Module):
             self.linear = nn.Linear(input_dim, output_dim, bias=False)
         else:
             self.linear = LoRA(input_dim, output_dim, low_rank_dim)
-        self.mu = nn.Parameter(torch.zeros(input_dim))
+        # Register parameter in float32 for precision
+        self.register_parameter('mu', nn.Parameter(torch.zeros(input_dim, dtype=torch.float32)))
 
     def __repr__(self) -> str:
         s = f"{self.__class__.__name__}({self.input_dim}, {self.output_dim}"
@@ -268,7 +271,9 @@ class LerpLinear(nn.Module):
             if len(shifted.shape) == 2:
                 shifted = shifted.unsqueeze(1)
             delta = shifted - x
-        return self.linear(x + delta * self.mu)
+        # Cast mu to float32 for precision
+        mu_float = self.mu.float()
+        return self.linear(x + delta * mu_float)
 
 
 class DDLerpLinear(nn.Module):

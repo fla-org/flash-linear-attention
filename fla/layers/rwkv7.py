@@ -63,11 +63,11 @@ class RWKV7Attention(nn.Module):
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
-        self.x_x = nn.Parameter(torch.zeros(6, hidden_size))
-
-        self.k_k = nn.Parameter(torch.zeros(self.key_dim))
-        self.k_a = nn.Parameter(torch.zeros(self.key_dim))
-        self.r_k = nn.Parameter(torch.zeros(self.num_heads, self.head_dim))
+        # Always register parameters in float32 for precision
+        self.register_parameter('x_x', nn.Parameter(torch.zeros(6, hidden_size, dtype=torch.float32)))
+        self.register_parameter('k_k', nn.Parameter(torch.zeros(self.key_dim, dtype=torch.float32)))
+        self.register_parameter('k_a', nn.Parameter(torch.zeros(self.key_dim, dtype=torch.float32)))
+        self.register_parameter('r_k', nn.Parameter(torch.zeros(self.num_heads, self.head_dim, dtype=torch.float32)))
 
         self.r_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
@@ -111,12 +111,23 @@ class RWKV7Attention(nn.Module):
         v_first: torch.Tensor = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        # If we're in half-precision mode, temporarily use float32 for all calculations
+        original_dtype = hidden_states.dtype
+        use_fp32 = original_dtype != torch.float32
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
+
+        # Cast to float32 for better precision if needed
+        if use_fp32:
+            hidden_states = hidden_states.float()
+            if attention_mask is not None:
+                attention_mask = attention_mask.float()
+            if v_first is not None:
+                v_first = v_first.float()
 
         batch_size, seq_len, _ = hidden_states.shape
 
@@ -142,7 +153,9 @@ class RWKV7Attention(nn.Module):
 
         # [batch_size, seq_len, hidden_size]
         delta = shifted - hidden_states
-        xr, xw, xk, xv, xa, xg = hidden_states.addcmul(delta, self.x_x.view(6, 1, 1, -1)).unbind(0)
+        # Cast x_x to float32 for better precision in addcmul
+        x_x_float = self.x_x.float()
+        xr, xw, xk, xv, xa, xg = hidden_states.addcmul(delta, x_x_float.view(6, 1, 1, -1)).unbind(0)
 
         r = self.r_proj(xr)
         w = -math.exp(-0.5) * self.w_lora(xw).to(torch.float).sigmoid()
@@ -152,12 +165,16 @@ class RWKV7Attention(nn.Module):
         if self.layer_idx == 0:
             v_first = v
         elif v_first is not None:
-            v = torch.lerp(v, v_first, self.v_lora(xv).sigmoid())
-        a = self.a_lora(xa).sigmoid()
+            # Cast to float for higher precision in sigmoid and lerp operations
+            v = torch.lerp(v, v_first, self.v_lora(xv).to(torch.float).sigmoid())
+        # Cast to float for higher precision in sigmoid operation
+        a = self.a_lora(xa).to(torch.float).sigmoid()
         g = self.g_lora(xg)
 
-        kk = l2_norm((k * self.k_k).view(batch_size, seq_len, self.num_heads, -1)).view(batch_size, seq_len, -1)
-        k = k.addcmul(k * (a - 1), self.k_a)
+        # Use float32 for L2 normalization and parameter operations
+        k_k_float = self.k_k.float()
+        kk = l2_norm((k * k_k_float).view(batch_size, seq_len, self.num_heads, -1)).view(batch_size, seq_len, -1)
+        k = k.addcmul(k * (a - 1), self.k_a.float())
 
         # dealing with left-padding
         if attention_mask is not None:
@@ -168,13 +185,22 @@ class RWKV7Attention(nn.Module):
 
         rwkv7_fn = chunk_rwkv7 if mode == 'chunk' else fused_recurrent_rwkv7
         cu_seqlens = kwargs.get('cu_seqlens', None)
+        
+        # Convert tensors used in the core algorithm to float32 for better precision
+        r_float = r.float() if r.dtype != torch.float32 else r
+        w_float = w.float() if w.dtype != torch.float32 else w
+        k_float = k.float() if k.dtype != torch.float32 else k
+        v_float = v.float() if v.dtype != torch.float32 else v
+        kk_float = kk.float() if kk.dtype != torch.float32 else kk
+        a_float = a.float() if a.dtype != torch.float32 else a
+        
         o, recurrent_state = rwkv7_fn(
-            r=r,
-            w=w,
-            k=k,
-            v=v,
-            a=-kk,
-            b=kk * a,
+            r=r_float,
+            w=w_float,
+            k=k_float,
+            v=v_float,
+            a=-kk_float,
+            b=kk_float * a_float,
             scale=1.,
             initial_state=recurrent_state,
             output_final_state=use_cache,
@@ -189,10 +215,18 @@ class RWKV7Attention(nn.Module):
                 layer_idx=self.layer_idx,
                 offset=r.shape[1]
             )
-
         o_reshaped = rearrange(o, '... h d -> ... (h d)')
-        residual = ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
-        o = self.g_norm(o_reshaped, residual=residual, residual_in_fp32=True)
+
+        o = self.g_norm(o_reshaped.float())
+
+        # Use float32 for residual calculation for better precision
+        r_k_float = self.r_k.float()
+        residual = ((r * k * r_k_float).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
+        o = o + residual
         o = self.o_proj(o * g)
 
+        # Cast back to original dtype if needed
+        if use_fp32:
+            o = o.to(original_dtype)
+            
         return o, None, past_key_values, v_first

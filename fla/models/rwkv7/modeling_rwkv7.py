@@ -52,7 +52,8 @@ class RWKV7FeedForward(nn.Module):
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
 
-        self.x_k = nn.Parameter(torch.zeros(hidden_size))
+        # Register parameter in float32 for precision
+        self.register_parameter('x_k', nn.Parameter(torch.zeros(hidden_size, dtype=torch.float32)))
 
         self.key = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.value = nn.Linear(intermediate_size, hidden_size, bias=False)
@@ -66,6 +67,17 @@ class RWKV7FeedForward(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         state: Optional[Cache] = None
     ) -> torch.Tensor:
+        # Capture original dtype and use float32 for all calculations
+        original_dtype = x.dtype
+        use_fp32 = original_dtype != torch.float32
+        
+        if use_fp32:
+            x = x.float()
+            if attention_mask is not None:
+                attention_mask = attention_mask.float()
+            if state is not None and state[self.layer_idx]['ffn_state'] is not None:
+                state[self.layer_idx]['ffn_state'] = state[self.layer_idx]['ffn_state'].float()
+                
         if attention_mask is not None:
             x = x.mul(attention_mask[:, -x.shape[-2]:, None])
         if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
@@ -77,7 +89,17 @@ class RWKV7FeedForward(nn.Module):
         if state is not None:
             # no need to update the offset twice
             state.update(ffn_state=x[:, -1], layer_idx=self.layer_idx, offset=0)
-        return self.value(self.act_fn(self.key(x.addcmul(shifted - x, self.x_k)))), state
+        
+        # Cast self.x_k to float32 for precision
+        x_k_float = self.x_k.float()
+        result = x.addcmul(shifted - x, x_k_float)
+        output = self.value(self.act_fn(self.key(result)))
+        
+        # Cast back to original dtype if needed
+        if use_fp32:
+            output = output.to(original_dtype)
+            
+        return output, state
 
 
 class RWKV7Block(nn.Module):
