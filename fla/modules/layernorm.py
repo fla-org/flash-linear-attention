@@ -564,10 +564,14 @@ class LayerNorm(nn.Module):
         return s
 
     def forward(self, x, residual=None, prenorm=False, residual_in_fp32=False):
+        # Cast weights to float32 for better precision (required for RWKV7)
+        weight = self.weight.float() if self.weight is not None else None
+        bias = self.bias.float() if self.bias is not None else None
+        
         return layer_norm(
             x,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             residual=residual,
             eps=self.eps,
             prenorm=prenorm,
@@ -619,10 +623,14 @@ class GroupNorm(nn.Module):
         return s
 
     def forward(self, x, residual=None, prenorm=False, residual_in_fp32=False):
+        # Cast weights to float32 for better precision (required for RWKV7)
+        weight = self.weight.float() if self.weight is not None else None
+        bias = self.bias.float() if self.bias is not None else None
+        
         return group_norm(
             x,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             residual=residual,
             eps=self.eps,
             prenorm=prenorm,
@@ -670,10 +678,14 @@ class RMSNorm(nn.Module):
         return s
 
     def forward(self, x, residual=None, prenorm=False, residual_in_fp32=False):
+        # Cast weights to float32 for better precision (required for RWKV7)
+        weight = self.weight.float() if self.weight is not None else None
+        bias = self.bias.float() if self.bias is not None else None
+        
         return rms_norm(
             x,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             residual=residual,
             eps=self.eps,
             prenorm=prenorm,
@@ -826,10 +838,14 @@ class LayerNormLinear(nn.Module):
         return s
 
     def forward(self, x, weight, bias, residual=None, prenorm=False, residual_in_fp32=False):
+        # Cast norm weights to float32 for better precision (required for RWKV7)
+        norm_weight = self.weight.float() if self.weight is not None else None
+        norm_bias = self.bias.float() if self.bias is not None else None
+        
         return layer_norm_linear(
             x=x,
-            norm_weight=self.weight,
-            norm_bias=self.bias,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
             linear_weight=weight,
             linear_bias=bias,
             residual=residual,
@@ -884,10 +900,14 @@ class GroupNormLinear(nn.Module):
         return s
 
     def forward(self, x, weight, bias, residual=None, prenorm=False, residual_in_fp32=False):
+        # Cast norm weights to float32 for better precision (required for RWKV7)
+        norm_weight = self.weight.float() if self.weight is not None else None
+        norm_bias = self.bias.float() if self.bias is not None else None
+        
         return layer_norm_linear(
             x=x,
-            norm_weight=self.weight,
-            norm_bias=self.bias,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
             linear_weight=weight,
             linear_bias=bias,
             residual=residual,
@@ -938,10 +958,14 @@ class RMSNormLinear(nn.Module):
         return s
 
     def forward(self, x, weight, bias, residual=None, prenorm=False, residual_in_fp32=False):
+        # Cast norm weights to float32 for better precision (required for RWKV7)
+        norm_weight = self.weight.float() if self.weight is not None else None
+        norm_bias = self.bias.float() if self.bias is not None else None
+        
         return layer_norm_linear(
             x=x,
-            norm_weight=self.weight,
-            norm_bias=self.bias,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
             linear_weight=weight,
             linear_bias=bias,
             residual=residual,
