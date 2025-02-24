@@ -103,7 +103,12 @@ def get_multiprocessor_count(tensor_idx: int = 0) -> int:
 
 @lru_cache(maxsize=None)
 def get_available_device() -> str:
-    return triton.runtime.driver.active.get_current_target().backend
+    try:
+        return triton.runtime.driver.active.get_current_target().backend
+    except BaseException:
+        import warnings
+        warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=1)
+        return 'cpu'
 
 
 @lru_cache(maxsize=None)
@@ -134,6 +139,7 @@ def set_torch_device(x: torch.Tensor):
 
 
 if check_pytorch_version('2.4'):
+    device = 'cuda' if device == 'cpu' else device
     autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
     autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
 else:
