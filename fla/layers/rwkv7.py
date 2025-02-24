@@ -190,8 +190,20 @@ class RWKV7Attention(nn.Module):
                 offset=r.shape[1]
             )
 
-        o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))
-        o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
-        o = self.o_proj(o * g)
+        # PyTorch expects input to be of shape [N, C, *]
+        out = rearrange(o, 'b t h d -> b (h d) t').float()
+        out = nn.functional.group_norm(
+            out,
+            num_groups=self.num_heads,
+            weight=self.g_norm.weight.float() if self.g_norm.weight is not None else None,
+            bias=self.g_norm.bias.float()   if self.g_norm.bias   is not None else None,
+            eps=self.g_norm.eps
+        )
+
+        # Rearrange back to [B, T, h*d].
+        out = rearrange(out, 'b c t -> b t c')
+        
+        out = out + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
+        out = self.o_proj(out * g)
 
         return o, None, past_key_values, v_first
