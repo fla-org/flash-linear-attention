@@ -10,7 +10,8 @@ import triton.language as tl
 
 from fla.modules.layernorm import group_norm
 from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contiguous, check_triton_shared_mem)
 
 
 @triton.heuristics({
@@ -599,17 +600,19 @@ def chunk_ttt_linear_fwd_h(
         NT = chunk_offsets[-1]
     BK = triton.next_power_of_2(K)
     assert BK <= 128, "current kernel does not support head dimension larger than 128."
+
     # H100 can have larger block size
-    if torch.cuda.get_device_capability()[0] >= 9:
+    if check_triton_shared_mem(233472, k.device.index):
         BV = triton.next_power_of_2(V)
         BC = 64
     # A100
-    elif torch.cuda.get_device_capability() == (8, 0):
+    elif check_triton_shared_mem(131072, k.device.index):
         BV = triton.next_power_of_2(V)
         BC = 64
     else:
         BV = triton.next_power_of_2(V)
         BC = 64 if K <= 128 else 32
+
     BC = min(BT, BC)
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
