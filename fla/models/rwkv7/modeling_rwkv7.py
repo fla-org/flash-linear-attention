@@ -93,7 +93,12 @@ class RWKV7FeedForward(nn.Module):
         # Cast self.x_k to float32 for precision
         x_k_float = self.x_k.float()
         result = x.addcmul(shifted - x, x_k_float)
-        output = self.value(self.act_fn(self.key(result)))
+        
+        # Ensure all operations in the activation and linear layers are in float32
+        key_result = self.key(result)
+        # Use explicit float cast for activation function
+        act_result = self.act_fn(key_result.float() if key_result.dtype != torch.float32 else key_result)
+        output = self.value(act_result)
         
         # Cast back to original dtype if needed
         if use_fp32:

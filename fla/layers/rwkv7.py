@@ -182,25 +182,21 @@ class RWKV7Attention(nn.Module):
         r, w, k, v, kk, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, v, kk, a))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
+        # Ensure recurrent_state is float32 for consistent precision
+        if recurrent_state is not None and recurrent_state.dtype != torch.float32:
+            recurrent_state = recurrent_state.float()
 
         rwkv7_fn = chunk_rwkv7 if mode == 'chunk' else fused_recurrent_rwkv7
         cu_seqlens = kwargs.get('cu_seqlens', None)
         
-        # Convert tensors used in the core algorithm to float32 for better precision
-        r_float = r.float() if r.dtype != torch.float32 else r
-        w_float = w.float() if w.dtype != torch.float32 else w
-        k_float = k.float() if k.dtype != torch.float32 else k
-        v_float = v.float() if v.dtype != torch.float32 else v
-        kk_float = kk.float() if kk.dtype != torch.float32 else kk
-        a_float = a.float() if a.dtype != torch.float32 else a
-        
+        # The explicit conversion to float32 is now handled inside rwkv7_fn
         o, recurrent_state = rwkv7_fn(
-            r=r_float,
-            w=w_float,
-            k=k_float,
-            v=v_float,
-            a=-kk_float,
-            b=kk_float * a_float,
+            r=r,
+            w=w,
+            k=k,
+            v=v,
+            a=-kk,
+            b=kk * a,
             scale=1.,
             initial_state=recurrent_state,
             output_final_state=use_cache,
