@@ -32,7 +32,7 @@ class RWKV7Attention(nn.Module):
         a_low_rank_dim: int = 64,
         v_low_rank_dim: int = 16,
         elementwise_affine: Optional[bool] = True,
-        norm_eps: float = 1e-5,
+        norm_eps: float = 64e-5,
         layer_idx: int = None,
         **kwargs
     ) -> RWKV7Attention:
@@ -190,7 +190,22 @@ class RWKV7Attention(nn.Module):
                 offset=r.shape[1]
             )
 
-        o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))
+
+        original_dtype = o.dtype
+        o_reshaped = rearrange(o, 'b t h d -> b (h d) t')
+
+        # Apply group norm directly, letting PyTorch handle dtype conversion internally
+        o = nn.functional.group_norm(
+            o_reshaped,
+            num_groups=self.num_heads,
+            weight=self.g_norm.weight,
+            bias=self.g_norm.bias,
+            eps=self.g_norm.eps
+        )
+
+        # Convert back to original shape and dtype
+        o = rearrange(o, 'b c t -> b t c').to(original_dtype)
+        
         o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
         o = self.o_proj(o * g)
 
