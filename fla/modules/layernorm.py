@@ -94,7 +94,7 @@ def layer_norm_fwd_kernel(
     HAS_RESIDUAL: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
-    HAS_BIAS: tl.constexpr
+    HAS_BIAS: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
@@ -121,7 +121,7 @@ def layer_norm_fwd_kernel(
     else:
         xbar = tl.where(cols < N, x, 0.0)
         var = tl.sum(xbar * xbar, axis=0) / N
-    rstd = 1 / tl.sqrt(var + eps)
+    rstd = tl.fdiv(1.0, tl.sqrt(var + eps))
     tl.store(Rstd + row, rstd)
     # Normalize and apply linear transformation
     mask = cols < N
@@ -131,10 +131,11 @@ def layer_norm_fwd_kernel(
         b = tl.load(B + group * N + cols, mask=mask).to(tl.float32)
     x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
 
-    y = x_hat * w if HAS_WEIGHT else x_hat
-    if HAS_BIAS:
-        y = y + b
+    y = tl.fma(x_hat, w, b) if HAS_WEIGHT and HAS_BIAS else \
+        x_hat * w if HAS_WEIGHT else \
+        x_hat + b if HAS_BIAS else x_hat
     # Write output
+    y = tl.cast(y, dtype=Y.dtype.element_ty, fp_downcast_rounding="rtne")
     tl.store(Y + cols, y, mask=mask)
 
 
@@ -173,26 +174,25 @@ def layer_norm_fwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
 
-    with torch.cuda.device(x.device.index):
-        layer_norm_fwd_kernel[(M,)](
-            x,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            N,
-            G,
-            eps,
-            is_rms_norm,
-            BLOCK_N,
-            residual is not None,
-            residual_out is not None,
-            weight is not None,
-            bias is not None,
-        )
+    layer_norm_fwd_kernel[(M,)](
+        x,
+        y,
+        weight,
+        bias,
+        residual,
+        residual_out,
+        mean,
+        rstd,
+        N,
+        G,
+        eps,
+        is_rms_norm,
+        BLOCK_N,
+        residual is not None,
+        residual_out is not None,
+        weight is not None,
+        bias is not None,
+    )
     # residual_out is None if residual is None and residual_dtype == input_dtype
     return y, mean, rstd, residual_out if residual_out is not None else x
 
@@ -284,6 +284,7 @@ def layer_norm_bwd_kernel(
             dres = tl.load(DRESIDUAL + row * N + cols, mask=mask, other=0).to(tl.float32)
             dx += dres
         # Write dx
+        dx = tl.cast(dx, dtype=DX.dtype.element_ty, fp_downcast_rounding="rtne")
         if STORE_DRESIDUAL:
             tl.store(DRESIDUAL_IN + row * N + cols, dx, mask=mask)
         tl.store(DX + row * N + cols, dx, mask=mask)
@@ -334,32 +335,31 @@ def layer_norm_bwd(
     rows_per_program = triton.cdiv(M, S)
     programs_per_group = S // G
     grid = (S,)
-    with torch.cuda.device(x.device.index):
-        layer_norm_bwd_kernel[grid](
-            x,
-            weight,
-            bias,
-            y,
-            dy,
-            dx,
-            dw,
-            db,
-            dresidual,
-            dresidual_in,
-            mean,
-            rstd,
-            M,
-            N,
-            G,
-            rows_per_program,
-            programs_per_group,
-            is_rms_norm,
-            BLOCK_N,
-            dresidual is not None,
-            dresidual_in is not None,
-            weight is not None,
-            bias is not None,
-        )
+    layer_norm_bwd_kernel[grid](
+        x,
+        weight,
+        bias,
+        y,
+        dy,
+        dx,
+        dw,
+        db,
+        dresidual,
+        dresidual_in,
+        mean,
+        rstd,
+        M,
+        N,
+        G,
+        rows_per_program,
+        programs_per_group,
+        is_rms_norm,
+        BLOCK_N,
+        dresidual is not None,
+        dresidual_in is not None,
+        weight is not None,
+        bias is not None,
+    )
     dw = dw.view(G, -1, N).sum(1).to(weight).view_as(weight) if weight is not None else None
     db = db.view(G, -1, N).sum(1).to(bias).view_as(bias) if bias is not None else None
     # Don't need to compute dresidual_in separately in this case

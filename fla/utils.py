@@ -10,20 +10,6 @@ import triton
 from packaging import version
 
 
-def contiguous(
-    fn: Callable[..., torch.Tensor]
-) -> Callable[..., torch.Tensor]:
-    """
-    A decorator to make sure all input tensors are contiguous.
-    """
-    @functools.wraps(fn)
-    def wrapper(ctx, *args, **kwargs):
-        return fn(ctx,
-                  *(i if not isinstance(i, torch.Tensor) else i.contiguous() for i in args),
-                  **{k: (v if not isinstance(v, torch.Tensor) else v.contiguous()) for k, v in kwargs.items()})
-    return wrapper
-
-
 def tensor_cache(
     fn: Callable[..., torch.Tensor]
 ) -> Callable[..., torch.Tensor]:
@@ -134,8 +120,48 @@ use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1'
 is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
 
 
-def set_torch_device(x: torch.Tensor):
-    device_torch_lib.set_device(x.device.index)
+def set_torch_device(index: int):
+    device_torch_lib.set_device(index)
+
+
+def contiguous(
+    fn: Callable[..., torch.Tensor]
+) -> Callable[..., torch.Tensor]:
+    """
+    A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        contiguous_args = (i if not isinstance(i, torch.Tensor) else i.contiguous() for i in args)
+        contiguous_kwargs = {k: (v if not isinstance(v, torch.Tensor) else v.contiguous()) for k, v in kwargs.items()}
+
+        tensor = None
+        for arg in args:
+            if isinstance(arg, torch.Tensor):
+                tensor = arg
+                break
+        if tensor is None:
+            for value in kwargs.values():
+                if isinstance(value, torch.Tensor):
+                    tensor = value
+                    break
+
+        if tensor is not None:
+            device_index = tensor.device.index
+            if device_index is not None:
+                set_torch_device(device_index)
+        else:
+            device_index = 0
+            set_torch_device(device_index)
+
+        try:
+            result = fn(*contiguous_args, **contiguous_kwargs)
+            return result
+        finally:
+            set_torch_device(0)
+
+    return wrapper
 
 
 if check_pytorch_version('2.4'):
@@ -145,3 +171,31 @@ if check_pytorch_version('2.4'):
 else:
     autocast_custom_fwd = device_torch_lib.amp.custom_fwd
     autocast_custom_bwd = device_torch_lib.amp.custom_bwd
+
+
+def autocast_contiguous_custom_device_fwd(
+    fn: callable
+) -> callable:
+    """
+    A decorator that combines the functionality of contiguous and autocast.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        contiguous_fn = contiguous(fn)
+        autocast_contiguous_fn = autocast_custom_fwd(contiguous_fn)
+        return autocast_contiguous_fn(*args, **kwargs)
+    return wrapper
+
+
+def autocast_contiguous_custom_device_bwd(
+    fn: callable
+) -> callable:
+    """
+    A decorator that combines the functionality of contiguous and autocast.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        contiguous_fn = contiguous(fn)
+        autocast_contiguous_fn = autocast_custom_bwd(contiguous_fn)
+        return autocast_contiguous_fn(*args, **kwargs)
+    return wrapper

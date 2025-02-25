@@ -7,15 +7,17 @@ import torch
 from fla.modules.grop import grpo_loss_torch, fused_grpo_loss
 from fla.utils import device, device_torch_lib
 
+
 @pytest.mark.parametrize("B", [1, 4])
 @pytest.mark.parametrize("T", [2048, 4096])
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype):
     device_torch_lib.manual_seed(42)
+
     def get_random_ref_log_probs(logits, input_ids):
         with torch.inference_mode():
-            logits = logits[:,:-1]
+            logits = logits[:, :-1]
             per_token_logps = []
             for logits_row, input_ids_row in zip(logits, input_ids[:, -logits.size(1):]):
                 log_probs = torch.randn_like(logits_row).log_softmax(dim=-1)
@@ -23,7 +25,7 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype):
                 per_token_logps.append(token_log_prob)
             device_torch_lib.empty_cache()
             return torch.stack(per_token_logps)
-    
+
     logits = torch.randn(B, T + 1, V, device=device, dtype=dtype)
     logits.requires_grad_(True)
     advantages = torch.randn(B, device=device, dtype=torch.float32)
@@ -36,7 +38,7 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype):
 
     gold_logits = logits.detach().clone().float()
     gold_logits.requires_grad_(True)
-    gold_ref_logp= ref_logp.clone().float()
+    gold_ref_logp = ref_logp.clone().float()
     device_torch_lib.empty_cache()
     y1 = fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl=save_kl)
     y2 = grpo_loss_torch(gold_logits, gold_ref_logp, input_ids, advantages, beta, completion_mask, save_kl)
