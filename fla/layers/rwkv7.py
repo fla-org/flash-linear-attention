@@ -198,9 +198,9 @@ class RWKV7Attention(nn.Module):
         o = nn.functional.group_norm(
             o_reshaped,
             num_groups=self.num_heads,
-            weight=self.g_norm.weight,
-            bias=self.g_norm.bias,
-            eps=self.g_norm.eps
+            weight=self.g_norm.weight.float(),
+            bias=self.g_norm.bias.float(),
+            eps=self.g_norm.eps.float()
         )
 
         # Reshape
