@@ -196,7 +196,7 @@ class RWKV7Attention(nn.Module):
 
         # Apply group norm
         o = nn.functional.group_norm(
-            o_reshaped, 
+            o_reshaped,
             num_groups=self.num_heads,
             weight=self.g_norm.weight,
             bias=self.g_norm.bias,
@@ -205,7 +205,7 @@ class RWKV7Attention(nn.Module):
 
         # Reshape
         o = o.to(dtype=original_dtype).reshape(batch_size, seq_len, -1)
-        
+
         o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
         o = self.o_proj(o * g)
 
