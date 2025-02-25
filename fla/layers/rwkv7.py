@@ -190,23 +190,21 @@ class RWKV7Attention(nn.Module):
                 offset=r.shape[1]
             )
 
-        # o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))
-
         original_dtype = o.dtype
-        batch_size, seq_len, _, _ = o.shape
-        o_flat = o.reshape(batch_size * seq_len, self.num_heads * self.head_dim)
+        batch_size, seq_len = o.shape[:2]
+        o_reshaped = o.reshape(batch_size * seq_len, self.num_heads * self.head_dim).float()
 
-        # Apply group norm directly on the flattened tensor
-        o_norm = nn.functional.group_norm(
-            o_flat, 
+        # Apply group norm
+        o = nn.functional.group_norm(
+            o_reshaped, 
             num_groups=self.num_heads,
             weight=self.g_norm.weight,
             bias=self.g_norm.bias,
             eps=self.g_norm.eps
         )
 
-        # Reshape back to original dimensions
-        o = o_norm.reshape(batch_size, seq_len, -1).to(dtype=original_dtype)
+        # Reshape
+        o = o.to(dtype=original_dtype).reshape(batch_size, seq_len, -1)
         
         o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
         o = self.o_proj(o * g)
