@@ -192,11 +192,11 @@ class RWKV7Attention(nn.Module):
 
         original_dtype = o.dtype
         batch_size, seq_len = o.shape[:2]
-        o_reshaped = o.reshape(batch_size * seq_len, self.num_heads * self.head_dim).float()
+        o_flat = o.reshape(batch_size * seq_len, self.num_heads * self.head_dim).float()
 
         # Apply group norm
         o = nn.functional.group_norm(
-            o_reshaped,
+            o_flat,
             num_groups=self.num_heads,
             weight=self.g_norm.weight.float(),
             bias=self.g_norm.bias.float(),
