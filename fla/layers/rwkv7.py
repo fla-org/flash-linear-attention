@@ -200,7 +200,7 @@ class RWKV7Attention(nn.Module):
             num_groups=self.num_heads,
             weight=self.g_norm.weight.float(),
             bias=self.g_norm.bias.float(),
-            eps=self.g_norm.eps.float()
+            eps=self.g_norm.eps
         )
 
         # Reshape
