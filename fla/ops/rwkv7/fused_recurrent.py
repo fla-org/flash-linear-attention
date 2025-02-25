@@ -47,21 +47,7 @@ def fused_recurrent_rwkv7(
         head_first (bool):
             whether to use head first. Recommended to be False to avoid extra transposes.
     """
-    # Ensure all inputs are in float32
-    original_dtype = r.dtype
-    use_fp32 = original_dtype != torch.float32
-    
-    if use_fp32:
-        r = r.float()
-        w = w.float()
-        k = k.float()
-        v = v.float()
-        a = a.float()
-        b = b.float()
-        if initial_state is not None:
-            initial_state = initial_state.float()
-    
-    result, final_state = fused_recurrent_dplr_delta_rule(
+    return fused_recurrent_dplr_delta_rule(
         q=r,
         k=k,
         v=v,
@@ -74,11 +60,3 @@ def fused_recurrent_rwkv7(
         cu_seqlens=cu_seqlens,
         head_first=head_first
     )
-    
-    # Convert back to original dtype
-    if use_fp32:
-        result = result.to(original_dtype)
-        if final_state is not None:
-            final_state = final_state.to(original_dtype)
-    
-    return result, final_state
