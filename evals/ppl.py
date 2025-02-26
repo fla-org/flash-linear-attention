@@ -3,15 +3,16 @@
 import argparse
 import math
 from functools import partial
-from typing import Any, Dict, List, Iterator, Union
+from typing import Any, Dict, Iterator, List
 
 import torch
-from datasets import load_dataset, Dataset
-from torch.nn.utils.rnn import pad_sequence
+from datasets import Dataset, load_dataset
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizer, PreTrainedModel
+from transformers import (AutoModelForCausalLM, AutoTokenizer, PreTrainedModel,
+                          PreTrainedTokenizer)
 
 from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
+
 
 class PerplexityEvaluator:
     def __init__(
@@ -30,7 +31,6 @@ class PerplexityEvaluator:
         self.bucket_size = bucket_size
         self.batch_size = batch_size
         self.loss_fct = FusedCrossEntropyLoss(reduction='sum')
-        
 
     @staticmethod
     def preprocess(
@@ -44,18 +44,18 @@ class PerplexityEvaluator:
             'input_ids': tokenized['input_ids'],
             'length': [len(ids) for ids in tokenized['input_ids']]
         }
-    
+
     def batchify(self, dataset: Dataset, tokens_per_batch: int) -> Iterator[List[torch.Tensor]]:
         """Split dataset into batches of exactly block_size length"""
         current_tokens = []  # Buffer to store all tokens
-        
+
         for sentence in dataset:
             # Convert input_ids to list and add to buffer
             tokens = sentence['input_ids'].tolist() if torch.is_tensor(sentence['input_ids']) else list(sentence['input_ids'])
             if not tokens:
                 continue
             current_tokens.extend(tokens)
-            
+
             # When we have enough tokens, yield batches
             while len(current_tokens) >= self.block_size * self.batch_size:
                 batch = []
@@ -64,7 +64,7 @@ class PerplexityEvaluator:
                     batch.append(torch.tensor(current_tokens[:self.block_size], dtype=torch.long))
                     current_tokens = current_tokens[self.block_size:]
                 yield batch
-        
+
         # Handle remaining tokens if they form complete blocks
         if len(current_tokens) >= self.block_size:
             remaining_batches = len(current_tokens) // self.block_size
@@ -80,28 +80,28 @@ class PerplexityEvaluator:
         """Process a single batch of data"""
         # Stack the tensors - no need for padding since all sequences are block_size
         input_ids = torch.stack(batch).to(self.device)
-        
+
         # Calculate number of blocks for each sequence
         blocks = [
             (self.block_size-1)//self.bucket_size
             for _ in range(input_ids.shape[0])
         ]
-        
+
         # Prepare labels
         labels = input_ids.clone()
-        
+
         # Forward pass
         outputs = self.model(input_ids, labels=labels)
-        
+
         # Calculate next token prediction labels
         next_token_labels = torch.cat((
             input_ids[..., 1:],
             torch.full_like(input_ids[:, :1], self.tokenizer.eos_token_id)
         ), -1)
-        
+
         # Calculate negative log likelihood
         nlls = (-outputs['logits'].log_softmax(-1)).gather(-1, next_token_labels.unsqueeze(-1)).squeeze(-1)
-        
+
         return {
             'input_ids': input_ids,
             'loss': outputs['loss'],
@@ -110,30 +110,29 @@ class PerplexityEvaluator:
             'blocks': blocks
         }
 
-
     def evaluate(self, dataset: Dataset) -> Dict[str, Any]:
         """Evaluate perplexity on the entire dataset"""
         total_loss = 0
         total_tokens = 0
         total_sentences = 0
-        
+
         # Initialize block statistics
         num_blocks = (self.block_size - 1) // self.bucket_size + 1
         block_loss = [torch.tensor(0., dtype=torch.float, device=self.device) for _ in range(num_blocks)]
         block_tokens = [1e-10 for _ in range(num_blocks)]
         bucket_sizes = [0 for _ in range(num_blocks)]
-        
+
         # Create progress bar
         bar = tqdm(self.batchify(dataset, self.block_size))
-        
+
         for batch in bar:
             batch_outputs = self.process_batch(batch)
             input_ids = batch_outputs['input_ids']
-            
+
             nlls = batch_outputs['nlls']
             labels = batch_outputs['labels']
             blocks = batch_outputs['blocks']
-            
+
             # Update statistics
             total_tokens += input_ids.ne(self.loss_fct.ignore_index).sum()
             total_sentences += input_ids.shape[0]
@@ -141,23 +140,23 @@ class PerplexityEvaluator:
 
             for i in blocks:
                 bucket_sizes[i] += 1
-                
+
             # Calculate block-level loss
             for i, j in enumerate(range(0, min(input_ids.shape[-1], self.block_size), self.bucket_size)):
                 block_loss[i] += nlls[:, j:j+self.bucket_size].sum()
                 block_tokens[i] += labels[:, j:j+self.bucket_size].ne(self.loss_fct.ignore_index).sum()
-            
+
             # Update total loss
             total_loss += batch_outputs['loss'].item() * labels.ne(self.loss_fct.ignore_index).sum()
-            
+
             # Update progress bar
             ppls = [f"{math.exp(loss / toks):6.2f}" for loss, toks in zip(block_loss, block_tokens)]
             bar.set_description_str(f"[{total_tokens:10} tokens, {total_sentences:8} sentences] " + ' '.join(ppls))
-        
+
         # Calculate final results
         final_ppl = math.exp(total_loss / total_tokens)
         block_ppls = [math.exp(loss / toks) for loss, toks in zip(block_loss, block_tokens)]
-        
+
         return {
             'perplexity': final_ppl,
             'block_perplexities': block_ppls,
@@ -166,11 +165,10 @@ class PerplexityEvaluator:
         }
 
 
-
 def main():
     parser = argparse.ArgumentParser(description="Evaluate perplexity")
     parser.add_argument('-p', '--path', type=str, default='fla-hub/gla-1.3B-100B')
-    parser.add_argument('-d', '--data', type=str, default='fla-hub/slimpajama-test')
+    parser.add_argument('-d', '--data', type=str, default='fla-hub/pg19')
     parser.add_argument('-s', '--split', type=str, default='train')
     parser.add_argument('-n', '--column_name', type=str, default='text')
     parser.add_argument('--block_size', type=int, default=28672)
@@ -200,7 +198,9 @@ def main():
         num_proc=32
     )
     print(dataset)
-    print("batch_size", args.batch_size, "block_size", args.block_size, "total_tokens_per_batch", args.batch_size * args.block_size)    
+    print("batch_size", args.batch_size,
+          "block_size", args.block_size,
+          "total_tokens_per_batch", args.batch_size * args.block_size)
 
     # Create evaluator and run evaluation
     evaluator = PerplexityEvaluator(
@@ -211,10 +211,10 @@ def main():
         bucket_size=args.bucket_size,
         batch_size=args.batch_size
     )
-    
+
     with torch.no_grad():
         results = evaluator.evaluate(dataset)
-    
+
     # Print results
     print("\nEvaluation Results:")
     print(f"Final Perplexity: {results['perplexity']:.2f}")
@@ -223,6 +223,7 @@ def main():
     print("\nBlock-wise Perplexities:")
     for i, ppl in enumerate(results['block_perplexities']):
         print(f"Block {i}: {ppl:.2f}")
+
 
 if __name__ == "__main__":
     main()

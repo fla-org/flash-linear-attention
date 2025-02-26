@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 
 import functools
-from typing import Any, Callable, Dict, Optional, Tuple
+import os
+from functools import lru_cache
+from typing import Any, Callable, Dict, Literal, Optional, Tuple
 
 import torch
+import triton
 from packaging import version
 
 
@@ -82,9 +85,63 @@ def checkpoint(fn):
     return wrapper
 
 
-if version.parse(torch.__version__) >= version.parse("2.4"):
-    autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type="cuda")
-    autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type="cuda")
+@lru_cache(maxsize=None)
+def check_pytorch_version(version_s: str = '2.4') -> bool:
+    return version.parse(torch.__version__) >= version.parse(version_s)
+
+
+@lru_cache(maxsize=None)
+def is_triton_shared_mem_enough(max_shared_mem: int = 102400, tensor_idx: int = 0) -> bool:
+    max_shared_memory = triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['max_shared_mem']
+    return max_shared_memory >= max_shared_mem
+
+
+@lru_cache(maxsize=None)
+def get_multiprocessor_count(tensor_idx: int = 0) -> int:
+    return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
+
+
+@lru_cache(maxsize=None)
+def get_available_device() -> str:
+    try:
+        return triton.runtime.driver.active.get_current_target().backend
+    except BaseException:
+        import warnings
+        warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=1)
+        return 'cpu'
+
+
+@lru_cache(maxsize=None)
+def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa']:
+    device = get_available_device()
+    if device == 'cuda' and 'NVIDIA' in torch.cuda.get_device_name(0):
+        return 'nvidia'
+    elif device == 'cuda' and 'AMD' in torch.cuda.get_device_name(0):
+        return 'amd'
+    else:
+        return device
+
+
+device = get_available_device()
+device_capacity = is_triton_shared_mem_enough()
+device_torch_lib = getattr(torch, device)
+device_platform = _check_platform()
+is_intel_a770 = (device_platform == 'intel' and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
+is_nvidia = (device_platform == 'nvidia')
+use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
+
+# Nvidia Ampere or newer, haven't check AMD and intel yet.
+is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
+
+
+def set_torch_device(x: torch.Tensor):
+    device_torch_lib.set_device(x.device.index)
+
+
+if check_pytorch_version('2.4'):
+    device = 'cuda' if device == 'cpu' else device
+    autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
+    autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
 else:
-    autocast_custom_fwd = torch.cuda.amp.custom_fwd
-    autocast_custom_bwd = torch.cuda.amp.custom_bwd
+    autocast_custom_fwd = device_torch_lib.amp.custom_fwd
+    autocast_custom_bwd = device_torch_lib.amp.custom_bwd

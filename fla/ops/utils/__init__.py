@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from .asm import fp32_to_tf32_asm
 from .cumsum import (chunk_global_cumsum, chunk_global_cumsum_scalar,
                      chunk_global_cumsum_scalar_kernel,
                      chunk_global_cumsum_vector,
@@ -35,4 +36,5 @@ __all__ = [
     'softmax_bwd_kernel',
     'softmax_fwd',
     'softmax_fwd_kernel',
+    'fp32_to_tf32_asm',
 ]
