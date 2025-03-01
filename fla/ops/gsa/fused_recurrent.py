@@ -103,9 +103,11 @@ def fused_recurrent_gsa_inference(
     BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NG = HQ // H
 
-    hk0, hv0 = None, None
-    if initial_state is not None:
+    if initial_state != (None, None) and initial_state is not None:
         hk0, hv0 = initial_state
+    else:
+        hk0, hv0 = q.new_zeros(B, H, K, M, dtype=torch.float), q.new_zeros(B, H, M, V, dtype=torch.float)
+
     hkt, hvt = None, None
     if output_final_state:
         if NG == 1:
@@ -163,7 +165,7 @@ def fused_recurrent_gsa_fwd(
     NK, NV, NM = triton.cdiv(K, BK), triton.cdiv(V, BV), triton.cdiv(M, BM)
 
     hk0, hv0 = None, None
-    if initial_state is not None:
+    if initial_state != (None, None) and initial_state is not None:
         hk0, hv0 = initial_state
     hkt, hvt = None, None
     if output_final_state:
