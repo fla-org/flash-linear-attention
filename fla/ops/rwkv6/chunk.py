@@ -10,7 +10,12 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import (chunk_gla_bwd_dA, chunk_gla_bwd_dv,
                                chunk_gla_fwd_o_gk)
-from fla.utils import contiguous
+from fla.utils import (contiguous, device_capacity,
+                       autocast_custom_bwd, autocast_custom_fwd,
+                       use_cuda_graph)
+
+BK_LIST = [32, 64] if device_capacity else [16, 32]
+BV_LIST = [32, 64] if device_capacity else [16, 32]
 
 
 @triton.heuristics({
@@ -18,11 +23,13 @@ from fla.utils import contiguous
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BS': BS}, num_warps=num_warps)
+        triton.Config({'BS': BS}, num_warps=num_warps, num_stages=num_stages)
         for BS in [16, 32, 64]
-        for num_warps in [2, 4, 8]
+        for num_warps in [4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
-    key=['S', 'BT']
+    key=['S', 'BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_rwkv6_fwd_cumsum_kernel(
@@ -37,7 +44,7 @@ def chunk_rwkv6_fwd_cumsum_kernel(
     BT: tl.constexpr,
     BS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    USE_OFFSETS: tl.constexpr,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -49,8 +56,8 @@ def chunk_rwkv6_fwd_cumsum_kernel(
         bos, eos = i_b * T, i_b * T + T
 
     o_i = tl.arange(0, BT)
-    m_i = tl.where(o_i[:, None] >= o_i[None, :], 1., 0.)
-    m_e = tl.where(o_i[:, None] > o_i[None, :], 1., 0.)
+    m_i = tl.where(o_i[:, None] >= o_i[None, :], 1., 0.).to(tl.float32)
+    m_e = tl.where(o_i[:, None] > o_i[None, :], 1., 0.).to(tl.float32)
 
     if HEAD_FIRST:
         p_s = tl.make_block_ptr(s + i_bh * T*S, (T, S), (S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
@@ -62,10 +69,10 @@ def chunk_rwkv6_fwd_cumsum_kernel(
         p_oe = tl.make_block_ptr(oe + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
     # [BT, BS]
     b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
-    b_oi = tl.dot(m_i, b_s, allow_tf32=False)
-    b_oe = tl.dot(m_e, b_s, allow_tf32=False)
-    tl.store(p_oi, b_oi.to(p_oi.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_oe, b_oe.to(p_oe.dtype.element_ty), boundary_check=(0, 1))
+    b_oi = tl.dot(m_i, b_s)
+    b_oe = tl.dot(m_e, b_s)
+    tl.store(p_oi, b_oi.to(p_oi.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_oe, b_oe.to(p_oe.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
 
 def chunk_rwkv6_fwd_cumsum(
@@ -110,7 +117,8 @@ def chunk_rwkv6_fwd_cumsum(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BC']
+    key=['BC'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
@@ -197,7 +205,8 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
     ],
-    key=['BK', 'BT']
+    key=['BK', 'BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
@@ -279,7 +288,8 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
     ],
-    key=['BC', 'BK']
+    key=['BC', 'BK'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
@@ -367,7 +377,8 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
     ],
-    key=['BC']
+    key=['BC'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
@@ -420,12 +431,13 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64]
-        for BV in [32, 64]
+        for BK in BK_LIST
+        for BV in BV_LIST
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_rwkv6_bwd_kernel_dh(
@@ -519,6 +531,7 @@ def chunk_rwkv6_bwd_kernel_dh(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BK', 'NC', 'BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_rwkv6_bwd_kernel_intra(
@@ -690,11 +703,12 @@ def chunk_rwkv6_bwd_kernel_intra(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
-        for BK in [32, 64]
-        for BV in [64, 128]
+        for BK in BK_LIST
+        for BV in BV_LIST
         for num_warps in [2, 4, 8]
     ],
-    key=['BT']
+    key=['BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_rwkv6_bwd_kernel_inter(
@@ -1138,7 +1152,7 @@ def chunk_rwkv6_fwd(
         indices=indices,
         head_first=head_first,
         chunk_size=chunk_size,
-        states_in_fp32=False
+        states_in_fp32=True
     )
     # the intra A is kept in fp32
     # the computation has very marginal effect on the entire throughput
@@ -1277,6 +1291,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
 
     @staticmethod
     @contiguous
+    @autocast_custom_fwd
     def forward(
         ctx,
         q,
@@ -1291,7 +1306,8 @@ class ChunkRWKV6Function(torch.autograd.Function):
         head_first
     ):
         T = q.shape[2] if head_first else q.shape[1]
-        chunk_size = min(64, max(16, triton.next_power_of_2(T)))
+        chunk_size = min(32, max(32, triton.next_power_of_2(T))) if device_capacity \
+            else min(64, max(32, triton.next_power_of_2(T)))
 
         # 2-d indices denoting the offsets of chunks in each sequence
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
@@ -1328,6 +1344,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
 
     @staticmethod
     @contiguous
+    @autocast_custom_bwd
     def backward(ctx, do, dht):
         q, k, v, g, initial_state, A, u = ctx.saved_tensors
         chunk_size, scale, offsets, indices, head_first = ctx.chunk_size, ctx.scale, ctx.offsets, ctx.indices, ctx.head_first

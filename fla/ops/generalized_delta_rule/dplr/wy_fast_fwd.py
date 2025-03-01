@@ -8,8 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.asm import fp32_to_tf32_asm
-from fla.utils import is_tf32_supported, use_cuda_graph
+from fla.utils import use_cuda_graph
 
 
 @triton.heuristics({
@@ -34,7 +33,7 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     BT: tl.constexpr,
     BC: tl.constexpr,  # placeholder, do not delete
     USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
+    HEAD_FIRST: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -85,8 +84,6 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     BC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    ALLOW_TF32: tl.constexpr = is_tf32_supported,
-    ASM: tl.constexpr = fp32_to_tf32_asm(),
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -134,18 +131,13 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     # i.e., [A11, 0; A21, A22]^-1 = [A11^-1, 0; -A22^-1 A21 A11^-1, A22^-1]
     b_A += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
     b_A2 += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
-    if ALLOW_TF32:
-        b_A2 = tl.inline_asm_elementwise(ASM, "=r, r", [b_A2], dtype=tl.float32, is_pure=True, pack=1)
-        b_A3 = tl.inline_asm_elementwise(ASM, "=r, r", [b_A3], dtype=tl.float32, is_pure=True, pack=1)
-        b_A = tl.inline_asm_elementwise(ASM, "=r, r", [b_A], dtype=tl.float32, is_pure=True, pack=1)
-    b_A3 = tl.dot(tl.dot(b_A2, b_A3, allow_tf32=ALLOW_TF32), b_A, allow_tf32=ALLOW_TF32)
+    b_A3 = tl.dot(tl.dot(b_A2, b_A3), b_A)
     tl.debug_barrier()
     tl.store(p_A_inv1, b_A.to(p_A_inv1.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_A_inv2, b_A2.to(p_A_inv2.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_A_inv3, b_A3.to(p_A_inv3.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     # causal mask
-    tl.store(p_A_inv4, tl.zeros([BC, BC], dtype=tl.float32).to(
-        p_A_inv4.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_A_inv4, tl.zeros([BC, BC], dtype=tl.float32).to(p_A_inv4.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -179,8 +171,6 @@ def fwd_wu_kernel(
     BV: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    ALLOW_TF32: tl.constexpr = is_tf32_supported,
-    ASM: tl.constexpr = fp32_to_tf32_asm(),
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -202,11 +192,8 @@ def fwd_wu_kernel(
     o_s = tl.arange(0, BT)
     b_Aab_inv = tl.where(o_s[:, None] >= o_s[None, :], b_Aab_inv, 0)
     b_Aak = tl.where(o_s[:, None] > o_s[None, :], b_Aak, 0)
-    # let's use fp32 here
-    if ALLOW_TF32:
-        b_Aab_inv = tl.inline_asm_elementwise(ASM, "=r, r", [b_Aab_inv], dtype=tl.float32, is_pure=True, pack=1)
-        b_Aak = tl.inline_asm_elementwise(ASM,  "=r, r", [b_Aak], dtype=tl.float32, is_pure=True, pack=1)
-    b_Aak = tl.dot(b_Aab_inv, b_Aak, allow_tf32=ALLOW_TF32)
+    # let's use tf32 here
+    b_Aak = tl.dot(b_Aab_inv, b_Aak)
     # (SY 01/04) should be bf16 or tf32? To verify.
     b_Aak = b_Aak.to(v.dtype.element_ty, fp_downcast_rounding="rtne")
     b_Aab_inv = b_Aab_inv.to(ag.dtype.element_ty, fp_downcast_rounding="rtne")

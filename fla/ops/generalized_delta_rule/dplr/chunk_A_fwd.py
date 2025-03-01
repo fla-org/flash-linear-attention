@@ -8,8 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.asm import fp32_to_tf32_asm
-from fla.utils import is_tf32_supported, use_cuda_graph
+from fla.utils import use_cuda_graph
 
 
 @triton.heuristics({
@@ -49,8 +48,6 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
     NC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    ALLOW_TF32: tl.constexpr = is_tf32_supported,
-    ASM: tl.constexpr = fp32_to_tf32_asm(),
 ):
     i_t, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -94,7 +91,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
             p_gk = tl.make_block_ptr(gi + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
             p_gn = gi + (bos + i_t * BT + i_i * BC - 1) * H*K + i_h * K + o_k
         # [BK,]
-        b_gn = tl.load(p_gn, mask=m_k, other=0)
+        b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
         # [BC, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_a = tl.load(p_a, boundary_check=(0, 1))
@@ -105,21 +102,15 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_b = tl.load(p_b, boundary_check=(0, 1))
-        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
         tmp = tl.exp(b_gn[:, None] - b_gk)
         b_kg = b_k * tmp
         b_bg = b_b * tmp
         # [BC, BC] using tf32 to improve precision here.
-        if ALLOW_TF32:
-            b_ag = tl.inline_asm_elementwise(ASM, "=r, r", [b_ag], dtype=tl.float32, is_pure=True, pack=1)
-            b_bg = tl.inline_asm_elementwise(ASM, "=r, r", [b_bg], dtype=tl.float32, is_pure=True, pack=1)
-            b_kg = tl.inline_asm_elementwise(ASM, "=r, r", [b_kg], dtype=tl.float32, is_pure=True, pack=1)
-            b_qg = tl.inline_asm_elementwise(ASM, "=r, r", [b_qg], dtype=tl.float32, is_pure=True, pack=1)
-
-        b_Aab += tl.dot(b_ag, b_bg, allow_tf32=ALLOW_TF32)
-        b_Aak += tl.dot(b_ag, b_kg, allow_tf32=ALLOW_TF32)
-        b_Aqk += tl.dot(b_qg, b_kg, allow_tf32=ALLOW_TF32)
-        b_Aqb += tl.dot(b_qg, b_bg, allow_tf32=ALLOW_TF32)
+        b_Aab += tl.dot(b_ag, b_bg)
+        b_Aak += tl.dot(b_ag, b_kg)
+        b_Aqk += tl.dot(b_qg, b_kg)
+        b_Aqb += tl.dot(b_qg, b_bg)
 
     if HEAD_FIRST:
         p_Aqk = tl.make_block_ptr(Aqk + i_bh*T*BT, (T, BT), (BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
@@ -230,8 +221,8 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     b_k = tl.load(p_k, boundary_check=(0, 1))
     b_a = tl.load(p_a, boundary_check=(0, 1))
     b_b = tl.load(p_b, boundary_check=(0, 1))
-    b_gi = tl.load(p_gi, boundary_check=(0, 1))
-    b_ge = tl.load(p_ge, boundary_check=(0, 1))
+    b_gi = tl.load(p_gi, boundary_check=(0, 1)).to(tl.float32)
+    b_ge = tl.load(p_ge, boundary_check=(0, 1)).to(tl.float32)
 
     # deal with decay term.
     g_exp = tl.exp(b_gi)

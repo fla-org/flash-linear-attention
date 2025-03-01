@@ -8,8 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
-from fla.ops.utils.asm import fp32_to_tf32_asm
-from fla.utils import (is_tf32_supported, is_triton_shared_mem_enough,
+from fla.utils import (is_triton_shared_mem_enough,
                        use_cuda_graph)
 
 
@@ -54,8 +53,6 @@ def chunk_dplr_fwd_kernel_h(
     STORE_FINAL_STATE: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    ALLOW_TF32: tl.constexpr = is_tf32_supported,
-    ASM: tl.constexpr = fp32_to_tf32_asm(),
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
@@ -106,16 +103,15 @@ def chunk_dplr_fwd_kernel_h(
             b_bg = tl.load(p_bg, boundary_check=(0, 1))
             b_v2 = tl.dot(b_w, b_h.to(b_w.dtype)) + tl.load(p_u, boundary_check=(0, 1))
             b_hc += tl.dot(b_kg, b_v)
-            if ALLOW_TF32:
-                b_v2 = tl.inline_asm_elementwise(ASM, "=r, r", [b_v2], dtype=tl.float32, is_pure=True, pack=1)
-            b_hc += tl.dot(b_bg.to(b_hc.dtype), b_v2, allow_tf32=ALLOW_TF32)
+            b_hc += tl.dot(b_bg.to(b_hc.dtype), b_v2)
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
 
         last_idx = min((i_t + 1) * BT, T) - 1
         if HEAD_FIRST:
-            b_g_last = tl.load(gk + i_nh * T * K + last_idx * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K)
+            b_g_last = tl.load(gk + i_nh * T * K + last_idx * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
         else:
-            b_g_last = tl.load(gk + (bos + last_idx) * H * K + i_h * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K)
+            b_g_last = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                               tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
         b_h *= tl.exp(b_g_last[:, None])
         b_h += b_hc
 

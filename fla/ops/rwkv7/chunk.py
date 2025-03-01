@@ -8,7 +8,6 @@ import torch
 from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
 
 
-@torch.compiler.disable
 def chunk_rwkv7(
     r: torch.Tensor,
     w: torch.Tensor,
