@@ -10,9 +10,8 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import (chunk_gla_bwd_dA, chunk_gla_bwd_dv,
                                chunk_gla_fwd_o_gk)
-from fla.utils import (contiguous, device_capacity,
-                       autocast_custom_bwd, autocast_custom_fwd,
-                       use_cuda_graph)
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd, contiguous,
+                       device_capacity, use_cuda_graph)
 
 BK_LIST = [32, 64] if device_capacity else [16, 32]
 BV_LIST = [32, 64] if device_capacity else [16, 32]

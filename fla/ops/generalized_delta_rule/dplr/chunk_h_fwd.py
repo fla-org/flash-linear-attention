@@ -8,8 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
-from fla.utils import (is_triton_shared_mem_enough,
-                       use_cuda_graph)
+from fla.utils import is_triton_shared_mem_enough, use_cuda_graph
 
 
 @triton.heuristics({
