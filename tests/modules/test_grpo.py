@@ -3,8 +3,7 @@
 import pytest
 import torch
 
-
-from fla.modules.grop import grpo_loss_torch, fused_grpo_loss
+from fla.modules.grpo import fused_grpo_loss, grpo_loss_torch
 from fla.utils import device, device_torch_lib
 
 
