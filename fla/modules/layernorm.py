@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.utils import contig_dev_guard
+from fla.utils import input_guard
 
 
 def layer_norm_ref(
@@ -370,7 +370,7 @@ def layer_norm_bwd(
 class LayerNormFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def forward(
         ctx,
         x,
@@ -419,7 +419,7 @@ class LayerNormFunction(torch.autograd.Function):
         return y if not prenorm else (y, residual_out.reshape(x_shape_og))
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def backward(ctx, dy, *args):
         x, weight, bias, mean, rstd = ctx.saved_tensors
         dy = dy.reshape(-1, (dy.shape[-1] // ctx.num_groups))
@@ -683,7 +683,7 @@ class RMSNorm(nn.Module):
 class LayerNormLinearFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def forward(
         ctx,
         x,
@@ -741,7 +741,7 @@ class LayerNormLinearFunction(torch.autograd.Function):
         return out if not prenorm else (out, residual_out.reshape(x_shape_og))
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def backward(ctx, dout, *args):
         x, norm_weight, norm_bias, linear_weight, mean, rstd = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])

@@ -7,8 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
-                       contig_dev_guard, use_cuda_graph)
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd, input_guard,
+                       use_cuda_graph)
 
 
 @triton.heuristics({
@@ -172,7 +172,7 @@ def fused_recurrent_dplr_delta_rule_fwd(
 class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -206,7 +206,7 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
         return o, ht
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         raise NotImplementedError(

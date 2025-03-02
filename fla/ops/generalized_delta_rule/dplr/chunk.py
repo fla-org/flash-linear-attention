@@ -20,8 +20,7 @@ from fla.ops.generalized_delta_rule.dplr.chunk_o_fwd import chunk_dplr_fwd_o
 from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
 from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import fwd_prepare_wy_repr
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
-                       contig_dev_guard)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 def chunk_dplr_fwd(
@@ -106,7 +105,7 @@ def chunk_dplr_fwd(
 class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -154,7 +153,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_bwd
     def backward(
         ctx,

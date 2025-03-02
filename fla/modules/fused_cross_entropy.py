@@ -9,7 +9,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from fla.utils import contig_dev_guard
+from fla.utils import input_guard
 
 # `all_gather_into_tensor` and `reduce_scatter_tensor` are new placeholders for
 # `_all_gather_base` and `_reduce_scatter_base`. They require the most recent
@@ -230,7 +230,7 @@ def fused_cross_entropy_forward(
 class CrossEntropyLossFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def forward(
         ctx,
         logits,
@@ -264,7 +264,7 @@ class CrossEntropyLossFunction(torch.autograd.Function):
         return losses, z_losses
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def backward(ctx, grad_losses, grad_z_losses):
         del grad_z_losses  # z_losses are only for logging.
 

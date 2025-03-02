@@ -11,7 +11,7 @@ import triton
 import triton.language as tl
 from einops import rearrange, repeat
 
-from fla.utils import contig_dev_guard
+from fla.utils import input_guard
 
 
 def rotate_half(x, interleaved=False):
@@ -132,7 +132,7 @@ def rotary_embedding_kernel(
         tl.store(p_y, b_y, mask=mask)
 
 
-@contig_dev_guard
+@input_guard
 def rotary_embedding_fwdbwd(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -212,7 +212,7 @@ def rotary_embedding_fwdbwd(
 class RotaryEmbeddingFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def forward(
         ctx,
         x,
@@ -247,7 +247,7 @@ class RotaryEmbeddingFunction(torch.autograd.Function):
         return y if not inplace else x
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def backward(ctx, do):
         seqlen_offsets = ctx.seqlen_offsets
         if seqlen_offsets is None:

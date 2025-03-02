@@ -18,7 +18,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.layernorm import RMSNorm
-from fla.utils import contig_dev_guard, require_version
+from fla.utils import input_guard, require_version
 
 
 def activation_quant(x):
@@ -387,7 +387,7 @@ def layer_norm_bwd(
 class LayerNormLinearQuantFn(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def forward(
         ctx,
         x,
@@ -435,7 +435,7 @@ class LayerNormLinearQuantFn(torch.autograd.Function):
         return out if not prenorm else (out, residual_out.reshape(x_shape_og))
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def backward(ctx, dout, *args):
         x, norm_weight, norm_bias, linear_weight, mean, rstd = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])

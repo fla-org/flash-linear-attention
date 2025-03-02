@@ -7,8 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
-                       contig_dev_guard)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.heuristics({
@@ -544,7 +543,7 @@ def fused_recurrent_rwkv6_bwd(
 class FusedRecurrentRWKV6Function(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -581,7 +580,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         return o.to(v), ht
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         q, k, v, w, u, initial_state = ctx.saved_tensors

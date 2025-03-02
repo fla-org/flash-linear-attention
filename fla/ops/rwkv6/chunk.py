@@ -11,7 +11,7 @@ from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import (chunk_gla_bwd_dA, chunk_gla_bwd_dv,
                                chunk_gla_fwd_o_gk)
 from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
-                       contig_dev_guard, device_capacity, use_cuda_graph)
+                       device_capacity, input_guard, use_cuda_graph)
 
 BK_LIST = [32, 64] if device_capacity else [16, 32]
 BV_LIST = [32, 64] if device_capacity else [16, 32]
@@ -1289,7 +1289,7 @@ def chunk_rwkv6_bwd(
 class ChunkRWKV6Function(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -1342,7 +1342,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
         return o, ht
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         q, k, v, g, initial_state, A, u = ctx.saved_tensors

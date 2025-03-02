@@ -6,8 +6,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
-                       contig_dev_guard)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 sigmoid_fwd_codestring = """
 template <typename T> T sigmoid_fwd(T x) {
@@ -139,14 +138,14 @@ def logsigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, temperature: float = 1.) -
 class LogSigmoidFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def forward(ctx, x, temperature):
         ctx.save_for_backward(x,)
         ctx.temperature = temperature
         return logsigmoid_fwd(x, temperature)
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def backward(ctx, dy):
         x, = ctx.saved_tensors
         return logsigmoid_bwd(x, dy, ctx.temperature), None

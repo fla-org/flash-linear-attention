@@ -12,8 +12,7 @@ from packaging import version
 
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.exp import safe_exp
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
-                       contig_dev_guard)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -365,7 +364,7 @@ def bwd_inner_chunk(
 class FusedChunkGLAFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, g, scale, initial_state, output_final_state):
         ctx.g_dtype = g.dtype
@@ -467,7 +466,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
         return o.to(v), final_state
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht=None):
         q, k, v, g_org, A, initial_state = ctx.saved_tensors

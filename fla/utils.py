@@ -143,7 +143,7 @@ def is_triton_shared_mem_enough(max_shared_mem: int = 102400, tensor_idx: int = 
 device_capacity = is_triton_shared_mem_enough()
 
 
-def contig_dev_guard(
+def input_guard(
     fn: Callable[..., torch.Tensor]
 ) -> Callable[..., torch.Tensor]:
     """
@@ -195,7 +195,7 @@ def autocast_contiguous_custom_device_fwd(
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        contiguous_fn = contig_dev_guard(fn)
+        contiguous_fn = input_guard(fn)
         autocast_contiguous_fn = autocast_custom_fwd(contiguous_fn)
         return autocast_contiguous_fn(*args, **kwargs)
     return wrapper
@@ -209,7 +209,7 @@ def autocast_contiguous_custom_device_bwd(
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        contiguous_fn = contig_dev_guard(fn)
+        contiguous_fn = input_guard(fn)
         autocast_contiguous_fn = autocast_custom_bwd(contiguous_fn)
         return autocast_contiguous_fn(*args, **kwargs)
     return wrapper

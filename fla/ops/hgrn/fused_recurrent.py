@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import contig_dev_guard
+from fla.utils import input_guard
 
 
 @triton.heuristics({
@@ -212,7 +212,7 @@ def fused_recurrent_hgrn_bwd(
 class FusedRecurrentHGRNFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def forward(
         ctx,
         x: torch.Tensor,
@@ -233,7 +233,7 @@ class FusedRecurrentHGRNFunction(torch.autograd.Function):
         return o, ht
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def backward(ctx, do, dht=None):
         g, o, initial_state = ctx.saved_tensors
         offsets = ctx.offsets

@@ -24,7 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import contig_dev_guard
+from fla.utils import input_guard
 
 
 @triton.autotune(
@@ -213,7 +213,7 @@ def chunk_hgrn_bwd_kernel_o(
 class ChunkHGRNFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def forward(ctx, x, g, initial_state=None, output_final_state=False):
         B, T, D = x.shape
         BT, BD = 128, min(64, triton.next_power_of_2(D))
@@ -242,7 +242,7 @@ class ChunkHGRNFunction(torch.autograd.Function):
         return o, final_state
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     def backward(ctx, do, dht=None):
         g, o, initial_state = ctx.saved_tensors
         B, T, D = do.shape

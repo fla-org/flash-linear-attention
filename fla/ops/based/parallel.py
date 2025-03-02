@@ -8,8 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
-                       contig_dev_guard)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 # Based: An Educational and Effective Sequence Mixer
 # https://hazyresearch.stanford.edu/blog/2023-12-11-zoology2-based
@@ -314,7 +313,7 @@ def parallel_based_bwd_kernel(
 class ParallelBasedFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, scale):
         BTL, BTS = 128, 32
@@ -349,7 +348,7 @@ class ParallelBasedFunction(torch.autograd.Function):
         return o.sum(0).to(q.dtype), z.sum(0).to(q.dtype)
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dz):
         q, k, v = ctx.saved_tensors

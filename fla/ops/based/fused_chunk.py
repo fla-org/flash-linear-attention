@@ -7,8 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
-                       contig_dev_guard)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -303,7 +302,7 @@ def fused_chunk_based_bwd_kernel(
 class FusedChunkBasedFunction(torch.autograd.Function):
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, scale=1):
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -336,7 +335,7 @@ class FusedChunkBasedFunction(torch.autograd.Function):
         return o.to(q.dtype), z.to(z.dtype)
 
     @staticmethod
-    @contig_dev_guard
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dz):
         q, k, v = ctx.saved_tensors
