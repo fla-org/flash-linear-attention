@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import contextlib
 import functools
 import os
 from functools import lru_cache
@@ -121,11 +122,6 @@ use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1'
 is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
 
 
-@torch.compiler.disable
-def set_torch_device(index: int):
-    device_torch_lib.set_device(index)
-
-
 def get_all_max_shared_memory():
     return [triton.runtime.driver.active.utils.get_device_properties(i)['max_shared_mem']
             for i in range(device_torch_lib.device_count())]
@@ -141,6 +137,22 @@ def is_triton_shared_mem_enough(max_shared_mem: int = 102400, tensor_idx: int = 
 
 
 device_capacity = is_triton_shared_mem_enough()
+
+
+if check_pytorch_version('2.4'):
+    device = 'cuda' if device == 'cpu' else device
+    autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
+    autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
+
+    def custom_device_ctx(type: str, index: int):
+        return torch.device(type, index)
+else:
+    assert device == 'cuda', 'Only cuda device is supported for PyTorch version < 2.4.0.'
+    autocast_custom_fwd = device_torch_lib.amp.custom_fwd
+    autocast_custom_bwd = device_torch_lib.amp.custom_bwd
+
+    def custom_device_ctx(type: str, index: int):
+        return torch.cuda.device(index)
 
 
 def input_guard(
@@ -166,25 +178,15 @@ def input_guard(
                     tensor = value
                     break
 
-        try:
-            if tensor is not None:
-                set_torch_device(tensor.device.index)
-            result = fn(*contiguous_args, **contiguous_kwargs)
-            return result
-        finally:
-            set_torch_device(0)
+        if tensor is not None:
+            ctx = custom_device_ctx(tensor.device.type, tensor.device.index)
+        else:
+            ctx = contextlib.nullcontext()
+
+        with ctx:
+            return fn(*contiguous_args, **contiguous_kwargs)
 
     return wrapper
-
-
-if check_pytorch_version('2.4'):
-    device = 'cuda' if device == 'cpu' else device
-    autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
-    autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
-else:
-    assert device == 'cuda', 'Only cuda device is supported for PyTorch version < 2.4.0.'
-    autocast_custom_fwd = device_torch_lib.amp.custom_fwd
-    autocast_custom_bwd = device_torch_lib.amp.custom_bwd
 
 
 def autocast_contiguous_custom_device_fwd(
