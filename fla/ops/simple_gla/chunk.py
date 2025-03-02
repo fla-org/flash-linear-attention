@@ -9,7 +9,8 @@ import triton
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv, chunk_fwd_o
 from fla.ops.utils import chunk_local_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 def chunk_simple_gla_fwd(
@@ -133,7 +134,7 @@ def chunk_simple_gla_bwd(
 class ChunkSimpleGLAFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -181,7 +182,7 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         return o.to(q.dtype), ht
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         chunk_size, scale, offsets, indices, head_first = ctx.chunk_size, ctx.scale, ctx.offsets, ctx.indices, ctx.head_first

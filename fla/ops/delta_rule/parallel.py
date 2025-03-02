@@ -11,7 +11,8 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.delta_rule.wy_fast import fwd_prepare_T
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 @triton.autotune(
@@ -230,7 +231,7 @@ def parallel_delta_rule_fwd_kernel(
 class ParallelDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, beta, scale, output_attentions):
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -281,7 +282,7 @@ class ParallelDeltaRuleFunction(torch.autograd.Function):
         return o_new.to(q.dtype), attn
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_bwd
     def backward(ctx, do, d_attn=None):
         raise NotImplementedError('Backward pass is not implemented. Stay tuned!')

@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.utils import contiguous
+from fla.utils import contig_dev_guard
 
 
 @triton.heuristics({
@@ -426,7 +426,7 @@ def fused_recurrent_delta_rule_bwd(
 class FusedRecurrentFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def forward(
         ctx,
         q: torch.Tensor,
@@ -467,7 +467,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         return o, final_state
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def backward(ctx, do, dht):
         q, k, v, beta, initial_state = ctx.saved_tensors
         if ctx.use_qk_l2norm_in_kernel:

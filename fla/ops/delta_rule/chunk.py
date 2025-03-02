@@ -14,7 +14,8 @@ from fla.ops.common.chunk_o import (chunk_bwd_dqkwg, chunk_bwd_dv_local,
 from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.delta_rule.wy_fast import (bwd_prepare_wy_repr,
                                         fwd_prepare_wy_repr, fwd_recompute_w_u)
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 def chunk_delta_rule_fwd(
@@ -168,7 +169,7 @@ def chunk_delta_rule_bwd(
 class ChunkDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -222,7 +223,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_bwd
     def backward(
         ctx,

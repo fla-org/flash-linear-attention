@@ -5,7 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 @triton.autotune(
@@ -126,7 +127,7 @@ def fused_chunk_ttt_linear_fwd_kernel(
 class FusedChunkTTTLinearFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, ln_w, ln_b, chunk_size, eta, scale, eps, initial_state, output_final_state):
         B, H, T, K, V = *q.shape, v.shape[-1]
@@ -157,7 +158,7 @@ class FusedChunkTTTLinearFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         raise NotImplementedError("TTT-Linear backward is not yet implemented.")

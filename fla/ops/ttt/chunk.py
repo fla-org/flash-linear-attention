@@ -10,7 +10,8 @@ import triton.language as tl
 
 from fla.modules.layernorm import group_norm
 from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 @triton.heuristics({
@@ -1156,7 +1157,7 @@ def chunk_ttt_linear_bwd(
 class ChunkTTTLinearFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, w, b, BT, eta, scale, eps, initial_state, output_final_state, offsets, head_first):
         # 2-d indices denoting the offsets of chunks in each sequence
@@ -1190,7 +1191,7 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         q, k, v, eta, w, b, initial_state = ctx.saved_tensors

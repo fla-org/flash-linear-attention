@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.utils import contiguous
+from fla.utils import contig_dev_guard
 
 
 def layer_norm_ref(
@@ -165,15 +165,14 @@ def layer_norm_fwd(
         residual_out = torch.empty(M, N, device=x.device, dtype=residual_dtype)
     else:
         residual_out = None
-    mean = torch.empty((M,), dtype=torch.float32, device="cuda") if not is_rms_norm else None
-    rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+    mean = torch.empty((M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-
     layer_norm_fwd_kernel[(M,)](
         x,
         y,
@@ -371,7 +370,7 @@ def layer_norm_bwd(
 class LayerNormFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def forward(
         ctx,
         x,
@@ -420,7 +419,7 @@ class LayerNormFunction(torch.autograd.Function):
         return y if not prenorm else (y, residual_out.reshape(x_shape_og))
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def backward(ctx, dy, *args):
         x, weight, bias, mean, rstd = ctx.saved_tensors
         dy = dy.reshape(-1, (dy.shape[-1] // ctx.num_groups))
@@ -684,7 +683,7 @@ class RMSNorm(nn.Module):
 class LayerNormLinearFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def forward(
         ctx,
         x,
@@ -742,7 +741,7 @@ class LayerNormLinearFunction(torch.autograd.Function):
         return out if not prenorm else (out, residual_out.reshape(x_shape_og))
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def backward(ctx, dout, *args):
         x, norm_weight, norm_bias, linear_weight, mean, rstd = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])

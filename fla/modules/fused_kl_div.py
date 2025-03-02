@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.utils import contiguous
+from fla.utils import contig_dev_guard
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19
@@ -220,7 +220,7 @@ def fused_kl_div_backward(
 class FusedKLDivLossFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def forward(
         ctx,
         x: torch.Tensor,
@@ -240,7 +240,7 @@ class FusedKLDivLossFunction(torch.autograd.Function):
         return loss
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def backward(ctx, do):
         dx, dw = ctx.saved_tensors
         dx, dw = fused_kl_div_backward(do, dx, dw)

@@ -9,7 +9,8 @@ import triton.language as tl
 from packaging import version
 
 from fla.ops.linear_attn.utils import normalize_output
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 @triton.jit
@@ -206,7 +207,7 @@ def fused_chunk_linear_attn_bwd_kernel(
 class FusedChunkLinearAttentionFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, scale, initial_state, output_final_state):
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -253,7 +254,7 @@ class FusedChunkLinearAttentionFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht=None):
         q, k, v, initial_state = ctx.saved_tensors

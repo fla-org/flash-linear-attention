@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import logcumsumexp_fwd_kernel, softmax_bwd, softmax_fwd
-from fla.utils import contiguous
+from fla.utils import contig_dev_guard
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -902,7 +902,7 @@ def chunk_abc_bwd_kernel_rcum_intra(
 class ChunkABCFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def forward(ctx, q, k, v, s, initial_state, output_final_state):
         B, H, T, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
         BT, BC = 64, 16
@@ -1022,7 +1022,7 @@ class ChunkABCFunction(torch.autograd.Function):
         return ov, final_state
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def backward(ctx, dov, dht=None):
         q, k, v, s, z, ok, p, hk, hv, Av = ctx.saved_tensors
         B, H, T, K, V, M = *q.shape, v.shape[-1], s.shape[-1]

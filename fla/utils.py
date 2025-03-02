@@ -121,6 +121,7 @@ use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1'
 is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
 
 
+@torch.compiler.disable
 def set_torch_device(index: int):
     device_torch_lib.set_device(index)
 
@@ -142,7 +143,7 @@ def is_triton_shared_mem_enough(max_shared_mem: int = 102400, tensor_idx: int = 
 device_capacity = is_triton_shared_mem_enough()
 
 
-def contiguous(
+def contig_dev_guard(
     fn: Callable[..., torch.Tensor]
 ) -> Callable[..., torch.Tensor]:
     """
@@ -165,15 +166,9 @@ def contiguous(
                     tensor = value
                     break
 
-        if tensor is not None:
-            device_index = tensor.device.index
-            if device_index is not None:
-                set_torch_device(device_index)
-        else:
-            device_index = 0
-            set_torch_device(device_index)
-
         try:
+            if tensor is not None:
+                set_torch_device(tensor.device.index)
             result = fn(*contiguous_args, **contiguous_kwargs)
             return result
         finally:
@@ -187,6 +182,7 @@ if check_pytorch_version('2.4'):
     autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
     autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
 else:
+    assert device == 'cuda', 'Only cuda device is supported for PyTorch version < 2.4.0.'
     autocast_custom_fwd = device_torch_lib.amp.custom_fwd
     autocast_custom_bwd = device_torch_lib.amp.custom_bwd
 
@@ -199,7 +195,7 @@ def autocast_contiguous_custom_device_fwd(
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        contiguous_fn = contiguous(fn)
+        contiguous_fn = contig_dev_guard(fn)
         autocast_contiguous_fn = autocast_custom_fwd(contiguous_fn)
         return autocast_contiguous_fn(*args, **kwargs)
     return wrapper
@@ -213,7 +209,7 @@ def autocast_contiguous_custom_device_bwd(
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        contiguous_fn = contiguous(fn)
+        contiguous_fn = contig_dev_guard(fn)
         autocast_contiguous_fn = autocast_custom_bwd(contiguous_fn)
         return autocast_contiguous_fn(*args, **kwargs)
     return wrapper

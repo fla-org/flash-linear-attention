@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import contiguous
+from fla.utils import contig_dev_guard
 
 
 @triton.heuristics({
@@ -307,7 +307,7 @@ def chunk_local_cumsum_vector(
     return g
 
 
-@contiguous
+@contig_dev_guard
 def chunk_global_cumsum_scalar(
     s: torch.Tensor,
     dtype: Optional[torch.dtype] = None,
@@ -337,7 +337,7 @@ def chunk_global_cumsum_scalar(
     return z
 
 
-@contiguous
+@contig_dev_guard
 def chunk_global_cumsum_vector(
     s: torch.Tensor,
     dtype: Optional[torch.dtype] = None,
@@ -370,7 +370,7 @@ def chunk_global_cumsum_vector(
     return z
 
 
-@contiguous
+@contig_dev_guard
 def chunk_global_cumsum(
     s: torch.Tensor,
     dtype: Optional[torch.dtype] = None,
@@ -391,7 +391,7 @@ def chunk_global_cumsum(
                          f"or [B, T, H]/[B, T, H, D] otherwise")
 
 
-@contiguous
+@contig_dev_guard
 def chunk_local_cumsum(
     g: torch.Tensor,
     chunk_size: int,

@@ -10,7 +10,8 @@ import triton.language as tl
 from fla.ops.common.fused_recurrent import (fused_recurrent_bwd_kernel,
                                             fused_recurrent_fwd_kernel)
 from fla.ops.utils import chunk_global_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 @triton.jit
@@ -369,7 +370,7 @@ def fused_recurrent_gsa_bwd(
 class FusedRecurrentGSAFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -421,7 +422,7 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         return ov.to(q.dtype), hkt, hvt
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     @autocast_custom_bwd
     def backward(ctx, do, dhkt=None, dhvt=None):
         q, k, v, s, g, qv, hk0, hv0, ok = ctx.saved_tensors

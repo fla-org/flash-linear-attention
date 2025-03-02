@@ -145,26 +145,25 @@ def layer_norm_fwd(
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
     grid = (M, ngroups)
-    with torch.cuda.device(x.device.index):
-        layer_norm_fwd_kernel[grid](
-            x,
-            out,
-            weight,
-            bias,
-            z,
-            mean,
-            rstd,
-            x.stride(0),
-            out.stride(0),
-            z.stride(0) if z is not None else 0,
-            M,
-            group_size,
-            eps,
-            BLOCK_N=BLOCK_N,
-            NORM_BEFORE_GATE=norm_before_gate,
-            IS_RMS_NORM=is_rms_norm,
-            num_warps=num_warps
-        )
+    layer_norm_fwd_kernel[grid](
+        x,
+        out,
+        weight,
+        bias,
+        z,
+        mean,
+        rstd,
+        x.stride(0),
+        out.stride(0),
+        z.stride(0) if z is not None else 0,
+        M,
+        group_size,
+        eps,
+        BLOCK_N=BLOCK_N,
+        NORM_BEFORE_GATE=norm_before_gate,
+        IS_RMS_NORM=is_rms_norm,
+        num_warps=num_warps
+    )
     return out, mean, rstd
 
 
@@ -350,35 +349,34 @@ def layer_norm_bwd(
     _db = torch.empty((nrow_groups, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / nrow_groups)
     grid = (nrow_groups, ngroups)
-    with torch.cuda.device(x.device.index):
-        layer_norm_bwd_kernel[grid](
-            x,
-            weight,
-            bias,
-            z,
-            out if recompute_output else None,
-            dy,
-            dx,
-            _dw,
-            _db,
-            dz,
-            mean,
-            rstd,
-            x.stride(0),
-            z.stride(0) if z is not None else 0,
-            0 if not recompute_output else out.stride(0),
-            dy.stride(0),
-            dx.stride(0),
-            dz.stride(0) if dz is not None else 0,
-            _dw.stride(0),
-            _db.stride(0) if _db is not None else 0,
-            M, group_size, eps,
-            rows_per_program,
-            BLOCK_N=BLOCK_N,
-            NORM_BEFORE_GATE=norm_before_gate,
-            IS_RMS_NORM=is_rms_norm,
-            num_warps=num_warps
-        )
+    layer_norm_bwd_kernel[grid](
+        x,
+        weight,
+        bias,
+        z,
+        out if recompute_output else None,
+        dy,
+        dx,
+        _dw,
+        _db,
+        dz,
+        mean,
+        rstd,
+        x.stride(0),
+        z.stride(0) if z is not None else 0,
+        0 if not recompute_output else out.stride(0),
+        dy.stride(0),
+        dx.stride(0),
+        dz.stride(0) if dz is not None else 0,
+        _dw.stride(0),
+        _db.stride(0) if _db is not None else 0,
+        M, group_size, eps,
+        rows_per_program,
+        BLOCK_N=BLOCK_N,
+        NORM_BEFORE_GATE=norm_before_gate,
+        IS_RMS_NORM=is_rms_norm,
+        num_warps=num_warps
+    )
     dw = _dw.sum(0).to(weight.dtype)
     db = _db.sum(0).to(bias.dtype) if bias is not None else None
     return (dx, dw, db, dz) if not recompute_output else (dx, dw, db, dz, out)

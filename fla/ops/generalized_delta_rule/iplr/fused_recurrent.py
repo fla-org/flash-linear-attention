@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import contiguous
+from fla.utils import contig_dev_guard
 
 
 @triton.heuristics({
@@ -289,7 +289,7 @@ def fused_recurrent_bwd_kernel(
 class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def forward(ctx, q, k, v, a, b, scale=None, initial_state=None, output_final_state=False, offsets=None, head_first=False):
         if head_first:
             B, H, T, K, V = *k.shape, v.shape[-1]
@@ -336,7 +336,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
         return o, final_state
 
     @staticmethod
-    @contiguous
+    @contig_dev_guard
     def backward(ctx, do, dht):
         q, k, v, a, b, ha, initial_state = ctx.saved_tensors
         if ctx.head_first:
