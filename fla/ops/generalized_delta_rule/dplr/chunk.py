@@ -20,7 +20,8 @@ from fla.ops.generalized_delta_rule.dplr.chunk_o_fwd import chunk_dplr_fwd_o
 from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
 from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import fwd_prepare_wy_repr
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contig_dev_guard
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 def chunk_dplr_fwd(

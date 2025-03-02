@@ -8,7 +8,8 @@ import triton
 import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contig_dev_guard
+from fla.utils import (autocast_custom_bwd, autocast_custom_fwd,
+                       contig_dev_guard)
 
 
 @triton.heuristics({
