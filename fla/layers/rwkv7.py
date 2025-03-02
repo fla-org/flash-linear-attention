@@ -124,8 +124,8 @@ class RWKV7Attention(nn.Module):
             # if training, use chunk mode no matter how short the sequence is
             mode = 'chunk'
         else:
-            # launching the triton kernel for just one token will actually be slower
-            mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+            # in order to reduce numerical error, use fused_recurrent mode for inference
+            mode = 'fused_recurrent'
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
