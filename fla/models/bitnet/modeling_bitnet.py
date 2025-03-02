@@ -347,7 +347,7 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
         if past_key_values is not None:
             input_ids = input_ids[:, -1:]
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
+        if inputs_embeds is not None and len(past_key_values) == 0:
             model_inputs = {'inputs_embeds': inputs_embeds}
         else:
             # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
