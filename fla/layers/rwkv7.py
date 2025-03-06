@@ -190,7 +190,22 @@ class RWKV7Attention(nn.Module):
                 offset=r.shape[1]
             )
 
-        o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))
+        original_dtype = o.dtype
+        batch_size, seq_len = o.shape[:2]
+        o_flat = o.reshape(batch_size * seq_len, self.num_heads * self.head_dim).float()
+
+        # Apply group norm
+        o = nn.functional.group_norm(
+            o_flat,
+            num_groups=self.num_heads,
+            weight=self.g_norm.weight.float(),
+            bias=self.g_norm.bias.float(),
+            eps=self.g_norm.eps
+        )
+
+        # Reshape
+        o = o.to(dtype=original_dtype).reshape(batch_size, seq_len, -1)
+
         o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
         o = self.o_proj(o * g)
 
