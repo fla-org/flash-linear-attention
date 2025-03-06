@@ -42,8 +42,16 @@ class HGRN2Config(PretrainedConfig):
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.attn_mode = attn_mode
+
+        if expand_ratio is None and num_heads is not None:
+            expand_ratio = hidden_size // num_heads
+        elif expand_ratio is not None and num_heads is None:
+            num_heads = hidden_size // expand_ratio
+        elif expand_ratio is None and num_heads is None:
+            raise RuntimeError("One of `expand_ratio` or `num_heads` should be provided.")
         self.num_heads = num_heads
         self.expand_ratio = expand_ratio
+
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.use_lower_bound = use_lower_bound

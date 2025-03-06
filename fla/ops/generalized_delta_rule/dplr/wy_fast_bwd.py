@@ -8,16 +8,22 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import device_capacity, is_intel_a770, use_cuda_graph
+
+triton_config = {'grf_mode': 'large'} if is_intel_a770 else {}
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        triton.Config(triton_config, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'BK', 'BV']
+    key=['BT', 'BK', 'BV'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def bwd_prepare_wy_repr_kernel(
@@ -28,6 +34,7 @@ def bwd_prepare_wy_repr_kernel(
     dw,
     du,
     dv,
+    dv0,
     dag,
     dAak,
     dAab,
@@ -74,15 +81,18 @@ def bwd_prepare_wy_repr_kernel(
         if HEAD_FIRST:
             p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_dv = tl.make_block_ptr(dv + i_bh * T*V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_dv0 = tl.make_block_ptr(dv0 + i_bh * T*V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_du = tl.make_block_ptr(du + i_bh * T*V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         else:
             p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_dv = tl.make_block_ptr(dv + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_dv0 = tl.make_block_ptr(dv0 + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_du = tl.make_block_ptr(du + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_du = tl.load(p_du, boundary_check=(0, 1))
         b_dA_tmp += tl.dot(b_du.to(b_v.dtype), tl.trans(b_v))
-        b_dv = tl.dot(b_A_tmp_t, b_du)
+        b_dv0 = tl.load(p_dv0, boundary_check=(0, 1))
+        b_dv = b_dv0 + tl.dot(b_A_tmp_t, b_du)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
     b_dA_tmp = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_dA_tmp, 0)
@@ -127,6 +137,7 @@ def chunk_dplr_bwd_wy(
     ag: torch.Tensor,
     dw: torch.Tensor,
     du: torch.Tensor,
+    dv0: torch.Tensor,
     offsets: Optional[torch.LongTensor],
     indices: Optional[torch.LongTensor],
     head_first: bool,
@@ -146,7 +157,7 @@ def chunk_dplr_bwd_wy(
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
     BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    BV = min(triton.next_power_of_2(V), 64) if device_capacity else min(triton.next_power_of_2(V), 32)
 
     dA_ab = torch.empty_like(A_ab_inv, dtype=torch.float)
     dA_ak = torch.empty_like(A_ak, dtype=torch.float)
@@ -161,6 +172,7 @@ def chunk_dplr_bwd_wy(
         dw=dw,
         du=du,
         dv=dv,
+        dv0=dv0,
         dag=dag,
         dAak=dA_ak,
         dAab=dA_ab,

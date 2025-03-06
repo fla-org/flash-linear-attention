@@ -172,16 +172,6 @@ class GatedDeltaNet(nn.Module):
         else:
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
 
     def forward(
         self,

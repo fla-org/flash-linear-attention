@@ -8,16 +8,20 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import device_capacity, use_cuda_graph
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16]
+        for num_stages in [2, 3, 4]
     ],
     key=['BK', 'NC', 'BT', 'K'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_kernel_intra(
@@ -43,7 +47,7 @@ def chunk_dplr_bwd_kernel_intra(
     dgk_offset,
     offsets,
     indices,
-    scale,
+    scale: tl.constexpr,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -262,11 +266,13 @@ def chunk_dplr_bwd_kernel_intra(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
         for BK in [32, 64]
     ],
     key=['BK', 'BT', 'K'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_dgk_kernel(
@@ -346,7 +352,7 @@ def chunk_dplr_bwd_dqk_intra(
         B, T, H, K = q.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BC = min(16, BT)
-    BK = min(64, triton.next_power_of_2(K))
+    BK = min(64, triton.next_power_of_2(K)) if device_capacity else min(32, triton.next_power_of_2(K))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)

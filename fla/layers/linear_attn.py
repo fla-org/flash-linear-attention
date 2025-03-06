@@ -111,17 +111,6 @@ class LinearAttention(nn.Module):
         self.norm_q = norm_q
         self.norm_k = norm_k
 
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
-
     def forward(self, x):
         mode = self.mode
         q = self.q_proj(x)

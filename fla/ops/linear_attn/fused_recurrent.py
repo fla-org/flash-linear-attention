@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.linear_attn.utils import normalize_output
-from fla.utils import contiguous
+from fla.utils import input_guard
 
 
 @triton.jit
@@ -165,7 +165,7 @@ def fused_recurrent_linear_attn_bwd_kernel(
 class FusedRecurrentLinearAttentionFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     def forward(ctx, q, k, v, scale, initial_state=None, output_final_state=False):
         B, H, T, K = q.shape
         V = v.shape[-1]
@@ -196,7 +196,7 @@ class FusedRecurrentLinearAttentionFunction(torch.autograd.Function):
         return o, final_state
 
     @staticmethod
-    @contiguous
+    @input_guard
     def backward(ctx, do, dht=None):
         q, k, v, initial_state = ctx.saved_tensors
         B, H, T, K = q.shape

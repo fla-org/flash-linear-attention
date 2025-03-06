@@ -18,7 +18,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.layernorm import RMSNorm
-from fla.utils import contiguous, require_version
+from fla.utils import input_guard, require_version
 
 
 def activation_quant(x):
@@ -156,37 +156,36 @@ def layer_norm_fwd_quant(
         residual_out = torch.empty(M, N, device=x.device, dtype=residual_dtype)
     else:
         residual_out = None
-    mean = torch.empty((M,), dtype=torch.float32, device="cuda") if not is_rms_norm else None
-    rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+    mean = torch.empty((M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    with torch.cuda.device(x.device.index):
-        layer_norm_fwd_kernel_quant[(M,)](
-            x,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            x.stride(0),
-            y.stride(0),
-            residual.stride(0) if residual is not None else 0,
-            residual_out.stride(0) if residual_out is not None else 0,
-            N,
-            eps,
-            is_rms_norm,
-            BLOCK_N,
-            residual is not None,
-            residual_out is not None,
-            weight is not None,
-            bias is not None,
-        )
+    layer_norm_fwd_kernel_quant[(M,)](
+        x,
+        y,
+        weight,
+        bias,
+        residual,
+        residual_out,
+        mean,
+        rstd,
+        x.stride(0),
+        y.stride(0),
+        residual.stride(0) if residual is not None else 0,
+        residual_out.stride(0) if residual_out is not None else 0,
+        N,
+        eps,
+        is_rms_norm,
+        BLOCK_N,
+        residual is not None,
+        residual_out is not None,
+        weight is not None,
+        bias is not None,
+    )
     # residual_out is None if residual is None and residual_dtype == input_dtype
     return y, mean, rstd, residual_out if residual_out is not None else x
 
@@ -347,37 +346,36 @@ def layer_norm_bwd(
     _db = torch.empty((sm_count, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / sm_count)
     grid = (sm_count,)
-    with torch.cuda.device(x.device.index):
-        layer_norm_bwd_kernel[grid](
-            x,
-            weight,
-            bias,
-            y,
-            dy,
-            dx,
-            _dw,
-            _db,
-            dresidual,
-            dresidual_in,
-            mean,
-            rstd,
-            x.stride(0),
-            0 if not recompute_output else y.stride(0),
-            dy.stride(0),
-            dx.stride(0),
-            dresidual.stride(0) if dresidual is not None else 0,
-            dresidual_in.stride(0) if dresidual_in is not None else 0,
-            M,
-            N,
-            eps,
-            rows_per_program,
-            is_rms_norm,
-            BLOCK_N,
-            dresidual is not None,
-            dresidual_in is not None,
-            weight is not None,
-            bias is not None,
-        )
+    layer_norm_bwd_kernel[grid](
+        x,
+        weight,
+        bias,
+        y,
+        dy,
+        dx,
+        _dw,
+        _db,
+        dresidual,
+        dresidual_in,
+        mean,
+        rstd,
+        x.stride(0),
+        0 if not recompute_output else y.stride(0),
+        dy.stride(0),
+        dx.stride(0),
+        dresidual.stride(0) if dresidual is not None else 0,
+        dresidual_in.stride(0) if dresidual_in is not None else 0,
+        M,
+        N,
+        eps,
+        rows_per_program,
+        is_rms_norm,
+        BLOCK_N,
+        dresidual is not None,
+        dresidual_in is not None,
+        weight is not None,
+        bias is not None,
+    )
     dw = _dw.sum(0).to(weight.dtype) if weight is not None else None
     db = _db.sum(0).to(bias.dtype) if bias is not None else None
     # Don't need to compute dresidual_in separately in this case
@@ -389,7 +387,7 @@ def layer_norm_bwd(
 class LayerNormLinearQuantFn(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     def forward(
         ctx,
         x,
@@ -437,7 +435,7 @@ class LayerNormLinearQuantFn(torch.autograd.Function):
         return out if not prenorm else (out, residual_out.reshape(x_shape_og))
 
     @staticmethod
-    @contiguous
+    @input_guard
     def backward(ctx, dout, *args):
         x, norm_weight, norm_bias, linear_weight, mean, rstd = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])

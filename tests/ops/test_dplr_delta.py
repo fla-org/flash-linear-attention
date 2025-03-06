@@ -217,6 +217,7 @@ def test_ref_equivalence(
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize("compile", [False, True])
 def test_fused_recurrent_fwd(
     B: int,
     T: int,
@@ -225,6 +226,7 @@ def test_fused_recurrent_fwd(
     scale: float,
     dtype: torch.dtype,
     head_first: bool,
+    compile: bool,
 ):
     if head_first:
         q = torch.randn(B, H, T, D, dtype=dtype)
@@ -258,7 +260,9 @@ def test_fused_recurrent_fwd(
         head_first=head_first
     )
 
-    tri, tri_ht = fused_recurrent_dplr_delta_rule(
+    fused_compiled = torch.compile(fused_recurrent_dplr_delta_rule) if compile else fused_recurrent_dplr_delta_rule
+
+    tri, tri_ht = fused_compiled(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -282,6 +286,7 @@ def test_fused_recurrent_fwd(
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [False, True])
+@pytest.mark.parametrize("compile", [False, True])
 def test_chunk(
     B: int,
     T: int,
@@ -291,6 +296,7 @@ def test_chunk(
     gate_logit_normalizer: float,
     dtype: torch.dtype,
     head_first: bool,
+    compile: bool,
 ):
     if head_first:
         q = torch.randn(B, H, T, D, dtype=dtype)
@@ -329,7 +335,9 @@ def test_chunk(
     ref_dq, ref_dk, ref_dv, ref_da, ref_db, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, a.grad, b.grad, gk.grad, h0.grad
     q.grad = k.grad = v.grad = a.grad = b.grad = gk.grad = h0.grad = None
 
-    tri, tri_ht = chunk_dplr_delta_rule(
+    chunk_compiled = torch.compile(chunk_dplr_delta_rule) if compile else chunk_dplr_delta_rule
+
+    tri, tri_ht = chunk_compiled(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),

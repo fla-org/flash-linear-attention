@@ -15,7 +15,7 @@ from fla.ops.gated_delta_rule.wy_fast import (bwd_prepare_wy_repr,
                                               fwd_prepare_wy_repr,
                                               fwd_recompute_w_u)
 from fla.ops.utils import chunk_local_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 def chunk_gated_delta_rule_fwd(
@@ -181,7 +181,7 @@ def chunk_gated_delta_rule_bwd(
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -236,7 +236,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(
         ctx,

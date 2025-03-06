@@ -13,4 +13,5 @@ def fp32_to_tf32_asm() -> str:
     if device_platform in ASM_DICT:
         return ASM_DICT[device_platform]
     else:
-        raise ValueError(f"Unsupported device platform: {device_platform}. Available platforms are: {list(ASM_DICT.keys())}")
+        # return empty string if the device is not supported
+        return ""

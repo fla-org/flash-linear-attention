@@ -12,7 +12,7 @@ from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.utils import chunk_local_cumsum, softmax_bwd, softmax_fwd
 from fla.ops.utils.exp import safe_exp
-from fla.utils import contiguous
+from fla.utils import input_guard
 
 
 @triton.heuristics({
@@ -670,6 +670,7 @@ def chunk_gsa_fwd_k(
         h0=h0,
         output_final_state=output_final_state,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT,
         states_in_fp32=False
@@ -1044,7 +1045,7 @@ def chunk_gsa_bwd(
 class ChunkGSAFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     def forward(
         ctx,
         q: torch.Tensor,
@@ -1107,7 +1108,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         return ov, hkt, hvt
 
     @staticmethod
-    @contiguous
+    @input_guard
     def backward(ctx, dov, dhkt=None, dhvt=None):
         q, k, v, s, g, ok, p, Av, hk0, hv0, hk, hv = ctx.saved_tensors
         scale = ctx.scale

@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import use_cuda_graph
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
@@ -17,7 +19,8 @@ import triton.language as tl
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16]
     ],
-    key=['BT']
+    key=['BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def fwd_prepare_wy_repr_kernel_chunk32(
@@ -30,7 +33,7 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     BT: tl.constexpr,
     BC: tl.constexpr,  # placeholder, do not delete
     USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
+    HEAD_FIRST: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -66,7 +69,8 @@ def fwd_prepare_wy_repr_kernel_chunk32(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BC']
+    key=['BC'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def fwd_prepare_wy_repr_kernel_chunk64(
@@ -79,7 +83,7 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     BT: tl.constexpr,
     BC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -127,11 +131,11 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     # i.e., [A11, 0; A21, A22]^-1 = [A11^-1, 0; -A22^-1 A21 A11^-1, A22^-1]
     b_A += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
     b_A2 += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
-    b_A3 = tl.dot(tl.dot(b_A2, b_A3, allow_tf32=False), b_A, allow_tf32=False)
+    b_A3 = tl.dot(tl.dot(b_A2, b_A3), b_A)
     tl.debug_barrier()
-    tl.store(p_A_inv1, b_A.to(p_A_inv1.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A_inv2, b_A2.to(p_A_inv2.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_A_inv3, b_A3.to(p_A_inv3.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_A_inv1, b_A.to(p_A_inv1.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_A_inv2, b_A2.to(p_A_inv2.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_A_inv3, b_A3.to(p_A_inv3.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     # causal mask
     tl.store(p_A_inv4, tl.zeros([BC, BC], dtype=tl.float32).to(p_A_inv4.dtype.element_ty), boundary_check=(0, 1))
 
@@ -141,10 +145,12 @@ def fwd_prepare_wy_repr_kernel_chunk64(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [2, 4]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'BK', 'BV']
+    key=['BT', 'BK', 'BV'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def fwd_wu_kernel(
@@ -164,7 +170,7 @@ def fwd_wu_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -186,11 +192,11 @@ def fwd_wu_kernel(
     o_s = tl.arange(0, BT)
     b_Aab_inv = tl.where(o_s[:, None] >= o_s[None, :], b_Aab_inv, 0)
     b_Aak = tl.where(o_s[:, None] > o_s[None, :], b_Aak, 0)
-    # let's use fp32 here
-    b_Aak = tl.dot(b_Aab_inv, b_Aak, allow_tf32=True)
+    # let's use tf32 here
+    b_Aak = tl.dot(b_Aab_inv, b_Aak)
     # (SY 01/04) should be bf16 or tf32? To verify.
-    b_Aak = b_Aak.to(u.dtype.element_ty)
-    b_Aab_inv = b_Aab_inv.to(u.dtype.element_ty)
+    b_Aak = b_Aak.to(v.dtype.element_ty, fp_downcast_rounding="rtne")
+    b_Aab_inv = b_Aab_inv.to(ag.dtype.element_ty, fp_downcast_rounding="rtne")
 
     for i_k in range(tl.cdiv(K, BK)):
         if HEAD_FIRST:
@@ -200,8 +206,8 @@ def fwd_wu_kernel(
             p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_ag = tl.load(p_ag, boundary_check=(0, 1))
-        b_w = tl.dot(b_Aab_inv.to(b_ag.dtype), b_ag, allow_tf32=False)
-        tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+        b_w = tl.dot(b_Aab_inv, b_ag)  # both bf16 or fp16
+        tl.store(p_w, b_w.to(p_w.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
     for i_v in range(tl.cdiv(V, BV)):
         if HEAD_FIRST:
@@ -211,8 +217,8 @@ def fwd_wu_kernel(
             p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_u = tl.dot(b_Aak.to(b_v.dtype), b_v, allow_tf32=False)
-        tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+        b_u = tl.dot(b_Aak, b_v)  # both bf16 or fp16
+        tl.store(p_u, b_u.to(p_u.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
 
 def fwd_prepare_wy_repr(

@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
+from fla.utils import is_triton_shared_mem_enough, use_cuda_graph
 
 
 @triton.heuristics({
@@ -18,10 +19,11 @@ from fla.ops.common.utils import prepare_chunk_offsets
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4]
+        for num_warps in [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'BK', 'BV']
+    key=['BT', 'BK', 'BV'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_fwd_kernel_h(
@@ -100,20 +102,21 @@ def chunk_dplr_fwd_kernel_h(
             b_bg = tl.load(p_bg, boundary_check=(0, 1))
             b_v2 = tl.dot(b_w, b_h.to(b_w.dtype)) + tl.load(p_u, boundary_check=(0, 1))
             b_hc += tl.dot(b_kg, b_v)
-            b_hc += tl.dot(b_bg, b_v2.to(b_bg.dtype))
+            b_hc += tl.dot(b_bg.to(b_hc.dtype), b_v2)
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
 
         last_idx = min((i_t + 1) * BT, T) - 1
         if HEAD_FIRST:
-            b_g_last = tl.load(gk + i_nh * T * K + last_idx * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K)
+            b_g_last = tl.load(gk + i_nh * T * K + last_idx * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
         else:
-            b_g_last = tl.load(gk + (bos + last_idx) * H * K + i_h * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K)
+            b_g_last = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                               tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
         b_h *= tl.exp(b_g_last[:, None])
         b_h += b_hc
 
     if STORE_FINAL_STATE:
         p_ht = tl.make_block_ptr(ht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
 
 def chunk_dplr_fwd_h(
@@ -144,12 +147,17 @@ def chunk_dplr_fwd_h(
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
-    if torch.cuda.get_device_capability()[0] >= 9:
+
+    if is_triton_shared_mem_enough(233472, kg.device.index):
         BV = 64
         BC = 64 if K <= 128 else 32
-    else:
+    elif is_triton_shared_mem_enough(131072, kg.device.index):  # A100
         BV = 32
         BC = 32
+    else:
+        BV = 16
+        BC = 16
+
     BC = min(BT, BC)
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)

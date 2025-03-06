@@ -137,17 +137,6 @@ class MultiScaleRetention(nn.Module):
         assert self.head_k_dim <= 256, "head_k_dim must be less than or equal to 256"
         self.rotary = RotaryEmbedding(dim=self.head_k_dim)
 
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
-
     def forward(
         self,
         hidden_states: torch.Tensor,

@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.heuristics({
@@ -394,7 +394,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
 class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -437,7 +437,7 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(
         ctx,

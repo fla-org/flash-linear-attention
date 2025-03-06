@@ -8,18 +8,23 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import (device_capacity, is_triton_shared_mem_enough,
+                       use_cuda_graph)
+
+BK_LIST = [64, 128] if device_capacity else [16, 32]
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['BV', 'BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_kernel_dAu(
@@ -32,7 +37,7 @@ def chunk_dplr_bwd_kernel_dAu(
     dv_new,
     offsets,
     indices,
-    scale,
+    scale: tl.constexpr,
     T,
     H: tl.constexpr,
     V: tl.constexpr,
@@ -101,10 +106,11 @@ def chunk_dplr_bwd_kernel_dAu(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit
 def chunk_dplr_bwd_o_kernel(
@@ -115,8 +121,6 @@ def chunk_dplr_bwd_o_kernel(
     dh,
     dk,
     db,
-    dA_qk,
-    dA_qb,
     w,
     dq,
     dv,
@@ -165,8 +169,6 @@ def chunk_dplr_bwd_o_kernel(
     dv += i_bh * T * V if HEAD_FIRST else (bos * H + i_h) * V
     dq += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
     w += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    dA_qk += i_bh * T * BT if HEAD_FIRST else (bos * H + i_h) * BT
-    dA_qb += i_bh * T * BT if HEAD_FIRST else (bos * H + i_h) * BT
     # CHECK HEAD_FIRST is FALSE
     dgk_last += (i_bh * NT + i_t) * K if HEAD_FIRST else (i_tg * H + i_h) * K
     gk += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
@@ -176,8 +178,6 @@ def chunk_dplr_bwd_o_kernel(
 
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dA_qk = tl.zeros([BT, BT], dtype=tl.float32)
-    b_dA_qb = tl.zeros([BT, BT], dtype=tl.float32)
     b_dw = tl.zeros([BT, BK], dtype=tl.float32)
     b_db = tl.zeros([BT, BK], dtype=tl.float32)
     b_dgk_last = tl.zeros([BK], dtype=tl.float32)
@@ -197,9 +197,6 @@ def chunk_dplr_bwd_o_kernel(
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
         b_dgk_last += tl.sum((b_h * b_dh).to(tl.float32), axis=0)
 
-        # [BT, BV] @ [BV, BT] -> [BT, BT]
-        b_dA_qk += tl.dot(b_do, tl.trans(b_v))
-        b_dA_qb += tl.dot(b_do, tl.trans(b_v_new))
         # [BT, BV] @ [BV, BK] -> [BT, BK]
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         # [BT, BV] @ [BV, BK] -> [BT, BK]
@@ -220,22 +217,15 @@ def chunk_dplr_bwd_o_kernel(
     b_dgk_last += tl.sum(b_k * b_dk, axis=0)
     b_dgk_last += tl.sum(b_b * b_db, axis=0)
     tl.store(dgk_last + tl.arange(0, BK) + i_k * BK, b_dgk_last, mask=m_k)
-    m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
-    b_dA_qk = tl.where(m_s, b_dA_qk, 0.)
-    b_dA_qb = tl.where(m_s, b_dA_qb, 0.)
 
     p_dw = tl.make_block_ptr(dw, (T, K), (stride_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_dk = tl.make_block_ptr(dk, (T, K), (stride_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_db = tl.make_block_ptr(db, (T, K), (stride_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_dq = tl.make_block_ptr(dq, (T, K), (stride_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    p_dA_qk = tl.make_block_ptr(dA_qk, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_dA_qb = tl.make_block_ptr(dA_qb, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     tl.store(p_dw, b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dA_qk, b_dA_qk.to(p_dA_qk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dA_qb, b_dA_qb.to(p_dA_qb.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -243,12 +233,14 @@ def chunk_dplr_bwd_o_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
-        for num_warps in [4, 8]
-        for BK in [64, 128]
-        for BV in [64, 128]
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
+        for BK in BK_LIST
+        for BV in BK_LIST
     ],
     key=['BT', 'BK', 'BV'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit
 def chunk_dplr_bwd_kernel_dv(
@@ -391,18 +383,15 @@ def chunk_dplr_bwd_o(
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
 
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    BK = min(triton.next_power_of_2(K), 64) if device_capacity else min(triton.next_power_of_2(K), 32)
+    BV = min(triton.next_power_of_2(V), 64) if device_capacity else min(triton.next_power_of_2(K), 32)
     NK = triton.cdiv(K, BK)
     dq = torch.empty_like(k)
     dk = torch.empty_like(k)
     dw = torch.empty_like(w)
     db = torch.empty_like(b)
     grid = (NK, NT, B * H)
-    dA_qk = torch.empty(B, H, T, BT, dtype=torch.float, device=w.device) if head_first \
-        else torch.empty(B, T, H, BT, dtype=torch.float, device=w.device)
-    dA_qb = torch.empty(B, H, T, BT, dtype=torch.float, device=w.device) if head_first \
-        else torch.empty(B, T, H, BT, dtype=torch.float, device=w.device)
+
     dgk_last = torch.empty(B, H, NT, K, dtype=torch.float, device=w.device) if head_first \
         else torch.empty(B, NT, H, K, dtype=torch.float, device=w.device)
 
@@ -417,8 +406,6 @@ def chunk_dplr_bwd_o(
         dq=dq,
         dk=dk,
         db=db,
-        dA_qk=dA_qk,
-        dA_qb=dA_qb,
         dgk_last=dgk_last,
         w=w,
         dv=dv,
@@ -461,7 +448,14 @@ def chunk_dplr_bwd_dAu(
             indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], BT).tolist()])
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
-    BV = min(triton.next_power_of_2(V), 128)
+
+    if is_triton_shared_mem_enough(131072):  # A100
+        BV = min(triton.next_power_of_2(V), 128)
+    elif is_triton_shared_mem_enough(101376):  # 4090
+        BV = min(triton.next_power_of_2(V), 64)
+    else:
+        BV = min(triton.next_power_of_2(V), 32)
+
     grid = (NT, B * H)
     dA_qk = torch.empty(B, H, T, BT, dtype=torch.float, device=v.device) if head_first \
         else torch.empty(B, T, H, BT, dtype=torch.float, device=v.device)

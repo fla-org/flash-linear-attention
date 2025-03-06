@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 # Rebased: Linear Transformers with Learnable Kernel Functions are Better In-Context Models
 # https://github.com/corl-team/rebased/blob/main/flash_linear_attention/fla/ops/triton/rebased_fast/parallel.py
@@ -346,7 +346,7 @@ def parallel_rebased_bwd_kernel(
 class ParallelBasedFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, scale):
         BTL, BTS = 128, 32
@@ -390,7 +390,7 @@ class ParallelBasedFunction(torch.autograd.Function):
         return o.sum(0).to(q.dtype), z.sum(0).to(q.dtype)
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dz):
         q, k, v = ctx.saved_tensors

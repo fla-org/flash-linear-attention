@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import use_cuda_graph
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
@@ -19,7 +21,8 @@ import triton.language as tl
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BC', 'K']
+    key=['BC', 'K'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_fwd_A_kernel_intra_sub_inter(
@@ -35,7 +38,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
     Aak,
     offsets,
     indices,
-    scale,
+    scale: tl.constexpr,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -44,7 +47,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
     BK: tl.constexpr,
     NC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
 ):
     i_t, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -88,7 +91,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
             p_gk = tl.make_block_ptr(gi + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
             p_gn = gi + (bos + i_t * BT + i_i * BC - 1) * H*K + i_h * K + o_k
         # [BK,]
-        b_gn = tl.load(p_gn, mask=m_k, other=0)
+        b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
         # [BC, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_a = tl.load(p_a, boundary_check=(0, 1))
@@ -99,7 +102,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_b = tl.load(p_b, boundary_check=(0, 1))
-        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
         tmp = tl.exp(b_gn[:, None] - b_gk)
         b_kg = b_k * tmp
         b_bg = b_b * tmp
@@ -119,10 +122,10 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
         p_Aqb = tl.make_block_ptr(Aqb + (bos*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
         p_Aab = tl.make_block_ptr(Aab + (bos*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
         p_Aak = tl.make_block_ptr(Aak + (bos*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
-    tl.store(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Aqb, b_Aqb.to(Aqb.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Aab, b_Aab.to(Aab.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Aak, b_Aak.to(Aak.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_Aqb, b_Aqb.to(Aqb.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_Aab, b_Aab.to(Aab.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_Aak, b_Aak.to(Aak.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -131,9 +134,10 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        for num_warps in [2, 4, 8, 16, 32]
     ],
-    key=['BK', 'BT']
+    key=['BK', 'BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_fwd_A_kernel_intra_sub_intra(
@@ -153,7 +157,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     Aak,
     offsets,
     indices,
-    scale,
+    scale: tl.constexpr,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -217,8 +221,8 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     b_k = tl.load(p_k, boundary_check=(0, 1))
     b_a = tl.load(p_a, boundary_check=(0, 1))
     b_b = tl.load(p_b, boundary_check=(0, 1))
-    b_gi = tl.load(p_gi, boundary_check=(0, 1))
-    b_ge = tl.load(p_ge, boundary_check=(0, 1))
+    b_gi = tl.load(p_gi, boundary_check=(0, 1)).to(tl.float32)
+    b_ge = tl.load(p_ge, boundary_check=(0, 1)).to(tl.float32)
 
     # deal with decay term.
     g_exp = tl.exp(b_gi)
@@ -227,10 +231,10 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     b_kg = b_k * g_exp_inv
     b_bg = b_b * g_exp_inv
     b_ag = b_a * tl.exp(b_ge)
-    tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_bg, b_bg.to(p_bg.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_ag, b_ag.to(p_ag.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_bg, b_bg.to(p_bg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_ag, b_ag.to(p_ag.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     b_qg, b_kg, b_ag, b_bg = None, None, None, None
     tl.debug_barrier()
 
@@ -252,10 +256,10 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
         b_A_ak = tl.where(o_i > j, b_A_ak, 0.)
         b_A_ab = tl.sum(b_a * b_b_j[None, :] * tmp2, 1)
         b_A_ab = tl.where(o_i > j, b_A_ab, 0.)
-        tl.store(Aqk + o_A + j, b_A_qk, mask=m_A)
-        tl.store(Aqb + o_A + j, b_A_qb, mask=m_A)
-        tl.store(Aab + o_A + j, b_A_ab, mask=m_A)
-        tl.store(Aak + o_A + j, b_A_ak, mask=m_A)
+        tl.store(Aqk + o_A + j, b_A_qk.to(dtype=Aqk.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
+        tl.store(Aqb + o_A + j, b_A_qb.to(dtype=Aqb.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
+        tl.store(Aab + o_A + j, b_A_ab.to(dtype=Aqb.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
+        tl.store(Aak + o_A + j, b_A_ak.to(dtype=Aqk.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
 
 
 def chunk_fwd_intra_dplr_fn(

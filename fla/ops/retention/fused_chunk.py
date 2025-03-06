@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 from packaging import version
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.jit(do_not_specialize=['T'])
@@ -211,7 +211,7 @@ def fused_chunk_retention_bwd_kernel(
 class FusedChunkRetentionFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, scale, initial_state, output_final_state):
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -272,7 +272,7 @@ class FusedChunkRetentionFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht=None):
         q, k, v, initial_state = ctx.saved_tensors

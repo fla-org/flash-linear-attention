@@ -59,17 +59,6 @@ class ReBasedLinearAttention(nn.Module):
         self.dropout = nn.Identity()
         self.eps = eps
 
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
-
     def forward(self, hidden_states: torch.Tensor, **kwargs):
         mode = self.mode
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)

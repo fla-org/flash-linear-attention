@@ -8,6 +8,10 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import device_capacity, use_cuda_graph
+
+BK_LIST = [64, 128] if device_capacity else [16, 32]
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None,
@@ -15,12 +19,13 @@ import triton.language as tl
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [64, 128]
-        for BV in [64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
+        for BK in BK_LIST
+        for BV in BK_LIST
+        for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_fwd_kernel_o(

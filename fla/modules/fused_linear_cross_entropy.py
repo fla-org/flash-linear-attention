@@ -16,7 +16,7 @@ from torch.distributed.tensor import (DeviceMesh, DTensor, Replicate, Shard,
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.ops.utils import logsumexp_fwd
-from fla.utils import contiguous
+from fla.utils import input_guard
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19
@@ -323,7 +323,7 @@ def fused_linear_cross_entropy_backward(
 class FusedLinearCrossEntropyFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     def forward(
         ctx,
         x: torch.Tensor,
@@ -388,7 +388,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
         return loss
 
     @staticmethod
-    @contiguous
+    @input_guard
     def backward(ctx, do):
         dx, dw, db = ctx.saved_tensors
         dx, dw, db = fused_linear_cross_entropy_backward(do, dx, dw, db)

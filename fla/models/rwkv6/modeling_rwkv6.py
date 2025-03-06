@@ -199,8 +199,6 @@ class RWKV6PreTrainedModel(PreTrainedModel):
             nn.init.normal_(module, mean=0.0, std=self.config.initializer_range)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
         elif hasattr(module, 'reset_parameters'):
             module.reset_parameters()
 
@@ -211,14 +209,19 @@ class RWKV6PreTrainedModel(PreTrainedModel):
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
             # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
-            for name, p in module.named_parameters():
-                if name in ["o_proj.weight", "down_proj.weight"]:
-                    # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                    # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                    # We need to reinit p since this code could be called multiple times
-                    # Having just p *= scale would repeatedly scale it down
-                    with torch.no_grad():
-                        p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
+            p = None
+            if hasattr(module, 'o_proj'):
+                p = module.o_proj.weight
+            elif hasattr(module, 'down_proj'):
+                p = module.down_proj.weight
+            if p is not None:
+                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
+                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
+                # We need to reinit p since this code could be called multiple times
+                # Having just p *= scale would repeatedly scale it down
+                nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+                with torch.no_grad():
+                    p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
 class RWKV6Model(RWKV6PreTrainedModel):
@@ -389,7 +392,7 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
         if past_key_values is not None and len(past_key_values) > 0:
             input_ids = input_ids[:, -1:]
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
+        if inputs_embeds is not None and len(past_key_values) == 0:
             model_inputs = {'inputs_embeds': inputs_embeds}
         else:
             # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise

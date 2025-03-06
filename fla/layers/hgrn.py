@@ -63,17 +63,6 @@ class HGRNAttention(nn.Module):
         self.g_norm = FusedRMSNormSwishGate(self.input_dim, elementwise_affine, norm_eps)
         self.o_proj = nn.Linear(self.input_dim, hidden_size, bias=False)
 
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
-
     def forward(
         self,
         hidden_states: torch.Tensor,

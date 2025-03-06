@@ -10,7 +10,7 @@ from einops import rearrange
 
 from fla.ops.common.utils import (prepare_chunk_indices, prepare_lens,
                                   prepare_token_indices)
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.heuristics({
@@ -521,7 +521,7 @@ def parallel_nsa_bwd(
 class ParallelNSAFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, block_indices, block_size, scale, offsets):
         ctx.dtype = q.dtype
@@ -550,7 +550,7 @@ class ParallelNSAFunction(torch.autograd.Function):
         return o.to(q.dtype)
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do):
         q, k, v, o, lse = ctx.saved_tensors

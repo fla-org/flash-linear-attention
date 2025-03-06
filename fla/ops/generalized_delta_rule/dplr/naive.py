@@ -113,6 +113,8 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
 
 
 if __name__ == '__main__':
+    from fla.utils import device
+
     # disallow tf32
     torch.set_float32_matmul_precision('high')
     torch.set_default_dtype(torch.float32)
@@ -121,20 +123,20 @@ if __name__ == '__main__':
     L = 2048
     DK = 128
     DV = 128
-    q = (torch.randn(B, H, L, DK)).cuda().requires_grad_(True)
-    k = (torch.randn(B, H, L, DK)).cuda().requires_grad_(True)
-    v = (torch.randn(B, H, L, DV)).cuda().requires_grad_(True)
+    q = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
+    k = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
+    v = (torch.randn(B, H, L, DV)).to(device).requires_grad_(True)
 
-    alpha = -torch.nn.functional.normalize(torch.randn(B, H, L, DK).cuda(), dim=-1, p=2)
+    alpha = -torch.nn.functional.normalize(torch.randn(B, H, L, DK).to(device), dim=-1, p=2)
     beta = -alpha
     alpha = alpha.clone().detach().requires_grad_(True)
     beta = beta.clone().detach().requires_grad_(True)
     gate_logit_normalizer = 16
     w = torch.nn.functional.logsigmoid(torch.randn(B, H, L, DK)) / gate_logit_normalizer
 
-    w = w.cuda().requires_grad_(True)
+    w = w.to(device).requires_grad_(True)
     o, s = dplr_recurrence(q.clone(), k.clone(), v.clone(), -alpha.clone(), beta.clone(), w.clone())
-    do = torch.randn_like(o).cuda()
+    do = torch.randn_like(o).to(device)
     o.backward(do, retain_graph=True)
     q_grad, q.grad = q.grad, None
     k_grad, k.grad = k.grad, None
