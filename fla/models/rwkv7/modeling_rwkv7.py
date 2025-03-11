@@ -437,7 +437,8 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
         logits_to_keep: Optional[int] = 0,
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        input_ids = torch.cat((torch.zeros((input_ids.size(0), 1), dtype=input_ids.dtype, device=input_ids.device), input_ids), dim=1)
+        input_ids = torch.cat((torch.zeros((input_ids.size(0), 1), dtype=input_ids.dtype,
+                              device=input_ids.device), input_ids), dim=1)
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
