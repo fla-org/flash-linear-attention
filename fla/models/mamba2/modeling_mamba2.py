@@ -774,7 +774,11 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
             # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
             p = None
             if hasattr(module, 'o_proj'):
-                p = module.o_proj.weight
+                # p = module.o_proj.weight
+                # guard against deprecated behavior
+                raise ValueError("This is not supposed to happen")
+            elif hasattr(module, 'out_proj'):
+                p = module.out_proj.weight
             elif hasattr(module, 'down_proj'):
                 p = module.down_proj.weight
             if p is not None:
