@@ -127,16 +127,18 @@ def get_all_max_shared_memory():
             for i in range(device_torch_lib.device_count())]
 
 
-device_shared_mem_list = get_all_max_shared_memory()
-
-
 @lru_cache(maxsize=None)
 def is_triton_shared_mem_enough(max_shared_mem: int = 102400, tensor_idx: int = 0) -> bool:
-    max_shared_memory = device_shared_mem_list[tensor_idx]
-    return max_shared_memory >= max_shared_mem
+    try:
+        device_shared_mem_list = get_all_max_shared_memory()
+        max_shared_memory = device_shared_mem_list[tensor_idx]
+        return max_shared_memory >= max_shared_mem
+    except:
+        return False
 
 
 device_capacity = is_triton_shared_mem_enough()
+
 
 
 if check_pytorch_version('2.4'):
