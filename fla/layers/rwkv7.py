@@ -171,17 +171,16 @@ class RWKV7Attention(nn.Module):
         g = self.g_lora(xg)
 
         if self.fuse_norm:
-            kk = l2_norm((k * self.k_k).view(batch_size, seq_len, self.num_heads, -1)).view(batch_size, seq_len, -1)
+            kk = l2_norm(rearrange(k * self.k_k, 'b t (h d) -> b t h d', d=self.head_dim))
         else:
-            kk = F.normalize((k * self.k_k).view(batch_size, seq_len, self.num_heads, -1),
-                             dim=-1, p=2.0).view(batch_size, seq_len, -1)
+            kk = F.normalize(rearrange(k * self.k_k, 'b t (h d) -> b t h d', d=self.head_dim), dim=-1, p=2.0)
 
         k = k.addcmul(k * (a - 1), self.k_a)
 
         # dealing with left-padding
         if attention_mask is not None:
             v = v * attention_mask[:, -v.shape[-2]:, None]
-        r, w, k, v, kk, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=self.num_heads), (r, w, k, v, kk, a))
+        r, w, k, v, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, v, a))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
 
