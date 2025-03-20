@@ -114,6 +114,7 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
 
 if __name__ == '__main__':
     from fla.utils import device
+    from torch.nn import functional as F
 
     # disallow tf32
     torch.set_float32_matmul_precision('high')
@@ -127,7 +128,7 @@ if __name__ == '__main__':
     k = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
     v = (torch.randn(B, H, L, DV)).to(device).requires_grad_(True)
 
-    alpha = -torch.nn.functional.normalize(torch.randn(B, H, L, DK).to(device), dim=-1, p=2)
+    alpha = -F.normalize(torch.randn(B, H, L, DK).to(device), dim=-1, p=2)
     beta = -alpha
     alpha = alpha.clone().detach().requires_grad_(True)
     beta = beta.clone().detach().requires_grad_(True)

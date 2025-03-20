@@ -2,12 +2,14 @@
 # pip install "git+https://github.com/openai/triton.git#egg=triton&subdirectory=python"
 
 import torch
+from torch.nn import functional as F
 from benchmark import benchmark_backward, benchmark_combined, benchmark_forward
 
 from fla.ops.delta_rule import chunk_delta_rule
 from fla.ops.gla import chunk_gla
 from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
 from fla.ops.ttt.naive import chunk_ttt_linear_ref
+from fla.utils import device
 
 # from flash_attn import flash_attn_func
 
@@ -28,7 +30,7 @@ def time_bwd(func, *args, **kwargs):
 
 
 repeats = 256
-from fla.utils import device
+
 
 dtype = torch.bfloat16
 
@@ -65,8 +67,7 @@ for causal in causal_vals:
             time_f_b[config, "chunk_gla"] = f_b
 
             q = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device,
-                                              dtype=dtype), p=2, dim=-1).requires_grad_(True)
+            k = F.normalize(torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
             v = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             beta = torch.rand(B, H, seqlen, device=device, dtype=dtype).sigmoid().requires_grad_(True)
             o2, _ = chunk_delta_rule(q, k, v, beta)
@@ -77,8 +78,7 @@ for causal in causal_vals:
             time_f_b[config, "chunk_delta_rule"] = f_b
 
             q = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device,
-                                              dtype=dtype), p=2, dim=-1).requires_grad_(True)
+            k = F.normalize(torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
             v = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             w = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)
             b = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)
@@ -91,8 +91,7 @@ for causal in causal_vals:
             time_f_b[config, "chunk_ttt_linear"] = f_b
 
             q = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device,
-                                              dtype=dtype), p=2, dim=-1).requires_grad_(True)
+            k = F.normalize(torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
             v = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             w = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)
             b = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)

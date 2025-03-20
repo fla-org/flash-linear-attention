@@ -3,6 +3,7 @@
 
 import torch
 from benchmark import benchmark_backward, benchmark_combined, benchmark_forward
+from torch.nn import functional as F
 
 from fla.ops.delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from fla.ops.retention import fused_chunk_retention
@@ -49,8 +50,7 @@ for causal in causal_vals:
             config = (causal, headdim, B, seqlen)
             H = dim // headdim
             q = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device,
-                                              dtype=dtype), p=2, dim=-1).requires_grad_(True)
+            k = F.normalize(torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
             v = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             beta = torch.rand(B, H, seqlen, device=device, dtype=dtype).sigmoid().requires_grad_(True)
             o1, _ = chunk_delta_rule(q, k, v, beta)

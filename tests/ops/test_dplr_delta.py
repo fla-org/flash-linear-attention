@@ -176,7 +176,7 @@ def test_ref_equivalence(
         a = torch.rand(B, T, H, D, dtype=dtype)
         gk = torch.randn(B, T, H, D, dtype=torch.float)
 
-    a = torch.nn.functional.normalize(a, p=2, dim=-1)
+    a = F.normalize(a, p=2, dim=-1)
     b = -a
     gk = torch.nn.functional.logsigmoid(gk) / 16
 
@@ -241,7 +241,7 @@ def test_fused_recurrent_fwd(
         a = torch.rand(B, T, H, D, dtype=dtype)
         gk = torch.randn(B, T, H, D, dtype=torch.float)
 
-    a = torch.nn.functional.normalize(a, p=2, dim=-1)
+    a = F.normalize(a, p=2, dim=-1)
     b = -a
     gk = torch.nn.functional.logsigmoid(gk) / 4
 
@@ -311,7 +311,7 @@ def test_chunk(
         a = torch.rand(B, T, H, D, dtype=dtype)
         gk = torch.randn(B, T, H, D, dtype=torch.float)
 
-    a = torch.nn.functional.normalize(a, p=2, dim=-1)
+    a = F.normalize(a, p=2, dim=-1)
     b = -a
     gk = torch.nn.functional.logsigmoid(gk) / gate_logit_normalizer
 
@@ -393,7 +393,7 @@ def test_chunk_varlen(
     v = torch.randn(1, T, H, D, dtype=dtype)
     a = torch.rand(1, T, H, D, dtype=dtype)
     gk = torch.randn(1, T, H, D, dtype=torch.float)
-    a = torch.nn.functional.normalize(a, p=2, dim=-1)
+    a = F.normalize(a, p=2, dim=-1)
     b = -a
     gk = torch.nn.functional.logsigmoid(gk)
     h0 = torch.randn(N, H, D, D, dtype=torch.float32)

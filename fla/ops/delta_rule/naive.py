@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import torch
+from torch.nn import functional as F
 from einops import rearrange
 
 
@@ -129,7 +130,7 @@ if __name__ == '__main__':
     from fla.utils import device
     q = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
     k = (torch.randn(B, H, L, DK)).to(device)
-    k = torch.nn.functional.normalize(k, dim=-1, p=2).requires_grad_(True)
+    k = F.normalize(k, dim=-1, p=2).requires_grad_(True)
     v = (torch.randn(B, H, L, DV)).to(device).requires_grad_(True)
     beta = torch.randn(B, H, L).to(device).sigmoid().requires_grad_(True)
 
