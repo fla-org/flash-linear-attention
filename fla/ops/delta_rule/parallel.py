@@ -385,8 +385,9 @@ def naive_delta_rule_parallel(q, k, v, beta, BM=128, BN=32):
 
 if __name__ == "__main__":
     B, H, T, K, V = 2, 4, 512, 64, 64
-    from fla.utils import device
     from torch.nn import functional as F
+
+    from fla.utils import device
     torch.set_default_dtype(torch.bfloat16)
 
     q = torch.randn[B, H, T, K].to(device)

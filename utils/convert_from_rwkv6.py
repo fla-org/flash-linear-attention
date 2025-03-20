@@ -30,6 +30,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 import fla  # noqa
 from fla.utils import device
 
+
 def sizeof_fmt(num, suffix='B'):
     for unit in ('', 'Ki', 'Mi', 'Gi', 'Ti', 'Pi', 'Ei', 'Zi'):
         if abs(num) < 1024.0:

@@ -2,8 +2,8 @@
 # pip install "git+https://github.com/openai/triton.git#egg=triton&subdirectory=python"
 
 import torch
-from torch.nn import functional as F
 from benchmark import benchmark_backward, benchmark_combined, benchmark_forward
+from torch.nn import functional as F
 
 from fla.ops.titans.naive import chunk_titans_linear_ref
 

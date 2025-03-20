@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
 import torch
-from torch.nn import functional as F
 from einops import rearrange
+from torch.nn import functional as F
 
 
 def delta_rule_recurrence(q, k, v, beta, initial_state=None, output_final_state=True):
