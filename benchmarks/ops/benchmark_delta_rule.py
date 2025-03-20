@@ -2,12 +2,12 @@
 # pip install "git+https://github.com/openai/triton.git#egg=triton&subdirectory=python"
 
 import torch
-from benchmark import benchmark_combined, benchmark_forward, benchmark_backward
+from benchmark import benchmark_backward, benchmark_combined, benchmark_forward
 
-from fla.ops.delta_rule import (chunk_delta_rule,
-                                fused_recurrent_delta_rule, fused_chunk_delta_rule)
+from fla.ops.delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from fla.ops.retention import fused_chunk_retention
 # from flash_attn import flash_attn_func
+from fla.utils import device
 
 
 def time_fwd(func, *args, **kwargs):
@@ -26,7 +26,6 @@ def time_bwd(func, *args, **kwargs):
 
 
 repeats = 256
-device = 'cuda'
 dtype = torch.bfloat16
 
 

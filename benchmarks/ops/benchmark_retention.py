@@ -5,8 +5,7 @@ import os
 import torch
 import triton
 
-from fla.ops.retention import (chunk_retention, fused_recurrent_retention,
-                               parallel_retention)
+from fla.ops.retention import chunk_retention, fused_recurrent_retention, parallel_retention
 from fla.ops.retention.naive import naive_retention
 
 try:
@@ -40,7 +39,7 @@ except BaseException:
     )
 )
 def benchmark(T, provider):
-    device = 'cuda'
+    from fla.utils import device
     dtype = torch.bfloat16
     requires_grad = True
     B, H, D = 4, 8, 256
