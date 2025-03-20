@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # Implementations of BitLinear layer with fused LayerNorm and quantized Linear layer.
 # [The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits](https://arxiv.org/abs/2402.17764)
@@ -17,7 +18,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.layernorm import RMSNorm
-from fla.utils import contiguous
+from fla.utils import get_multiprocessor_count, input_guard, require_version
 
 
 def activation_quant(x):
@@ -65,10 +66,8 @@ def weight_quant(w):
     ],
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
 )
-# @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
-# @triton.heuristics({"HAS_RESIDUAL": lambda args: args["RESIDUAL"] is not None})
 @triton.jit
-def _layer_norm_fwd_quant_kernel(
+def layer_norm_fwd_kernel_quant(
     X,  # pointer to the input
     Y,  # pointer to the output
     W,  # pointer to the weights
@@ -131,15 +130,22 @@ def _layer_norm_fwd_quant_kernel(
     # Aply quantization to the output
     scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
     # Quantize and then de-quantize the tensor
-    y = tl.math.round(y * scale)
+    y = tl.extra.cuda.libdevice.round(y * scale)
     y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
     # Write output
     tl.store(Y + cols, y, mask=mask)
 
 
-def _layer_norm_fwd_quant(
-    x, weight, bias, eps, residual=None, out_dtype=None, residual_dtype=None, is_rms_norm=False
+def layer_norm_fwd_quant(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    residual: torch.Tensor = None,
+    out_dtype: torch.dtype = None,
+    residual_dtype: torch.dtype = None,
+    is_rms_norm: bool = False
 ):
     if residual is not None:
         residual_dtype = residual.dtype
@@ -150,41 +156,43 @@ def _layer_norm_fwd_quant(
         residual_out = torch.empty(M, N, device=x.device, dtype=residual_dtype)
     else:
         residual_out = None
-    mean = torch.empty((M,), dtype=torch.float32, device="cuda") if not is_rms_norm else None
-    rstd = torch.empty((M,), dtype=torch.float32, device="cuda")
+    mean = torch.empty((M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
-    with torch.cuda.device(x.device.index):
-        _layer_norm_fwd_quant_kernel[(M,)](
-            x,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            x.stride(0),
-            y.stride(0),
-            residual.stride(0) if residual is not None else 0,
-            residual_out.stride(0) if residual_out is not None else 0,
-            N,
-            eps,
-            is_rms_norm,
-            BLOCK_N,
-            residual is not None,
-            residual_out is not None,
-            weight is not None,
-            bias is not None,
-        )
+    layer_norm_fwd_kernel_quant[(M,)](
+        x,
+        y,
+        weight,
+        bias,
+        residual,
+        residual_out,
+        mean,
+        rstd,
+        x.stride(0),
+        y.stride(0),
+        residual.stride(0) if residual is not None else 0,
+        residual_out.stride(0) if residual_out is not None else 0,
+        N,
+        eps,
+        is_rms_norm,
+        BLOCK_N,
+        residual is not None,
+        residual_out is not None,
+        weight is not None,
+        bias is not None,
+    )
     # residual_out is None if residual is None and residual_dtype == input_dtype
     return y, mean, rstd, residual_out if residual_out is not None else x
 
 
+@triton.heuristics({
+    "RECOMPUTE_OUTPUT": lambda args: args["Y"] is not None
+})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=1),
@@ -196,12 +204,8 @@ def _layer_norm_fwd_quant(
     ],
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS"],
 )
-# @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
-# @triton.heuristics({"HAS_DRESIDUAL": lambda args: args["DRESIDUAL"] is not None})
-# @triton.heuristics({"STORE_DRESIDUAL": lambda args: args["DRESIDUAL_IN"] is not None})
-@triton.heuristics({"RECOMPUTE_OUTPUT": lambda args: args["Y"] is not None})
 @triton.jit
-def _layer_norm_bwd_kernel(
+def layer_norm_bwd_kernel(
     X,  # pointer to the input
     W,  # pointer to the weights
     B,  # pointer to the biases
@@ -272,7 +276,7 @@ def _layer_norm_bwd_kernel(
             # Aply quantization to the output
             scale = 127.0 / tl.maximum(tl.max(tl.abs(y), 0), 1e-5)
             # Quantize and then de-quantize the tensor
-            y = tl.math.round(y * scale)
+            y = tl.extra.cuda.libdevice.round(y * scale)
             y = tl.maximum(tl.minimum(y, 127), -128) / scale
 
             tl.store(Y + cols, y, mask=mask)
@@ -312,19 +316,19 @@ def _layer_norm_bwd_kernel(
         tl.store(DB + row_block_id * N + cols, db, mask=mask)
 
 
-def _layer_norm_bwd(
-    dy,
-    x,
-    weight,
-    bias,
-    eps,
-    mean,
-    rstd,
-    dresidual=None,
-    has_residual=False,
-    is_rms_norm=False,
-    x_dtype=None,
-    recompute_output=False,
+def layer_norm_bwd(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    eps: float,
+    mean: torch.Tensor,
+    rstd: torch.Tensor,
+    dresidual: torch.Tensor = None,
+    has_residual: bool = False,
+    is_rms_norm: bool = False,
+    x_dtype: torch.dtype = None,
+    recompute_output: bool = False,
 ):
     M, N = x.shape
     # allocate output
@@ -337,42 +341,41 @@ def _layer_norm_bwd(
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+    sm_count = get_multiprocessor_count(x.device.index)
     _dw = torch.empty((sm_count, N), dtype=torch.float32, device=weight.device) if weight is not None else None
     _db = torch.empty((sm_count, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / sm_count)
     grid = (sm_count,)
-    with torch.cuda.device(x.device.index):
-        _layer_norm_bwd_kernel[grid](
-            x,
-            weight,
-            bias,
-            y,
-            dy,
-            dx,
-            _dw,
-            _db,
-            dresidual,
-            dresidual_in,
-            mean,
-            rstd,
-            x.stride(0),
-            0 if not recompute_output else y.stride(0),
-            dy.stride(0),
-            dx.stride(0),
-            dresidual.stride(0) if dresidual is not None else 0,
-            dresidual_in.stride(0) if dresidual_in is not None else 0,
-            M,
-            N,
-            eps,
-            rows_per_program,
-            is_rms_norm,
-            BLOCK_N,
-            dresidual is not None,
-            dresidual_in is not None,
-            weight is not None,
-            bias is not None,
-        )
+    layer_norm_bwd_kernel[grid](
+        x,
+        weight,
+        bias,
+        y,
+        dy,
+        dx,
+        _dw,
+        _db,
+        dresidual,
+        dresidual_in,
+        mean,
+        rstd,
+        x.stride(0),
+        0 if not recompute_output else y.stride(0),
+        dy.stride(0),
+        dx.stride(0),
+        dresidual.stride(0) if dresidual is not None else 0,
+        dresidual_in.stride(0) if dresidual_in is not None else 0,
+        M,
+        N,
+        eps,
+        rows_per_program,
+        is_rms_norm,
+        BLOCK_N,
+        dresidual is not None,
+        dresidual_in is not None,
+        weight is not None,
+        bias is not None,
+    )
     dw = _dw.sum(0).to(weight.dtype) if weight is not None else None
     db = _db.sum(0).to(bias.dtype) if bias is not None else None
     # Don't need to compute dresidual_in separately in this case
@@ -384,7 +387,7 @@ def _layer_norm_bwd(
 class LayerNormLinearQuantFn(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     def forward(
         ctx,
         x,
@@ -405,7 +408,7 @@ class LayerNormLinearQuantFn(torch.autograd.Function):
             assert residual.shape == x_shape_og
             residual = residual.reshape(-1, residual.shape[-1])
         residual_dtype = residual.dtype if residual is not None else (torch.float32 if residual_in_fp32 else None)
-        y, mean, rstd, residual_out = _layer_norm_fwd_quant(
+        y, mean, rstd, residual_out = layer_norm_fwd_quant(
             x,
             norm_weight,
             norm_bias,
@@ -432,7 +435,7 @@ class LayerNormLinearQuantFn(torch.autograd.Function):
         return out if not prenorm else (out, residual_out.reshape(x_shape_og))
 
     @staticmethod
-    @contiguous
+    @input_guard
     def backward(ctx, dout, *args):
         x, norm_weight, norm_bias, linear_weight, mean, rstd = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])
@@ -445,7 +448,7 @@ class LayerNormLinearQuantFn(torch.autograd.Function):
             assert dresidual.shape == x.shape
         else:
             dresidual = None
-        dx, dnorm_weight, dnorm_bias, dresidual_in, y = _layer_norm_bwd(
+        dx, dnorm_weight, dnorm_bias, dresidual_in, y = layer_norm_bwd(
             dy,
             x,
             norm_weight,
@@ -525,6 +528,7 @@ def rms_norm_linear_quant(
     )
 
 
+@require_version("triton>=3.0", "Triton >= 3.0 is required to do online quantization.")
 def bit_linear(x, weight, bias=None, norm_weight=None, norm_bias=None, eps=1e-8):
     """
     A functional version of BitLinear that applies quantization to activations and weights.
@@ -541,13 +545,13 @@ def bit_linear(x, weight, bias=None, norm_weight=None, norm_bias=None, eps=1e-8)
         Output tensor with shape [n, out_features].
     """
     return layer_norm_linear_quant_fn(
-            x,
-            norm_weight,
-            norm_bias,
-            weight,
-            bias,
-            is_rms_norm=True
-        )
+        x,
+        norm_weight,
+        norm_bias,
+        weight,
+        bias,
+        is_rms_norm=True
+    )
 
 
 class BitLinear(nn.Linear):
@@ -556,7 +560,13 @@ class BitLinear(nn.Linear):
     This is primarily for training; kernel optimization is needed for efficiency in deployment.
     """
 
-    def __init__(self, in_features, out_features, bias=False):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        norm_eps: float = 1e-8
+    ):
         """
         Initializes the BitLinear layer.
 
@@ -568,7 +578,10 @@ class BitLinear(nn.Linear):
         # Initialize the superclass nn.Linear with the given parameters
         super(BitLinear, self).__init__(in_features, out_features, bias=bias)
 
-        self.norm = RMSNorm(in_features, eps=1e-8)
+        self.norm = RMSNorm(in_features, eps=norm_eps)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({super().extra_repr()}, norm_eps={self.norm.eps})"
 
     def forward(self, x):
         """

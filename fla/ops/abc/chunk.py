@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -7,12 +7,11 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import (logcumsumexp_fwd_kernel, softmax_bwd_kernel,
-                           softmax_fwd_kernel)
-from fla.utils import contiguous
+from fla.ops.utils import logcumsumexp_fwd_kernel, softmax_bwd, softmax_fwd
+from fla.utils import input_guard
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_fwd_kernel_h(
     k,
     v,
@@ -29,7 +28,7 @@ def chunk_abc_fwd_kernel_h(
     s_h_h,
     s_h_t,
     s_h_d,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -85,7 +84,7 @@ def chunk_abc_fwd_kernel_h(
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_fwd_kernel_intra_K(
     v,
     z,
@@ -94,7 +93,7 @@ def chunk_abc_fwd_kernel_intra_K(
     s_v_h,
     s_v_t,
     s_v_d,
-    T: tl.constexpr,
+    T,
     V: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
@@ -138,7 +137,7 @@ def chunk_abc_fwd_kernel_intra_K(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_fwd_kernel_K(
     q,
     k,
@@ -156,7 +155,7 @@ def chunk_abc_fwd_kernel_K(
     s_h_t,
     s_h_d,
     scale,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -204,7 +203,7 @@ def chunk_abc_fwd_kernel_K(
         tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_fwd_kernel_intra_V(
     q,
     k,
@@ -214,7 +213,7 @@ def chunk_abc_fwd_kernel_intra_V(
     s_k_t,
     s_k_d,
     scale,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
@@ -265,7 +264,7 @@ def chunk_abc_fwd_kernel_intra_V(
             p_k = tl.advance(p_k, (K,))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_fwd_kernel_V(
     q,
     v,
@@ -283,7 +282,7 @@ def chunk_abc_fwd_kernel_V(
     s_h_t,
     s_h_d,
     scale,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -325,7 +324,7 @@ def chunk_abc_fwd_kernel_V(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_bwd_kernel_dh(
     q,
     z,
@@ -341,7 +340,7 @@ def chunk_abc_bwd_kernel_dh(
     s_h_t,
     s_h_d,
     scale,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -393,7 +392,7 @@ def chunk_abc_bwd_kernel_dh(
         b_dh += tl.dot(b_q, b_do, allow_tf32=False)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_bwd_kernel_V(
     k,
     v,
@@ -416,7 +415,7 @@ def chunk_abc_bwd_kernel_V(
     s_h_t,
     s_h_d,
     scale,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -495,7 +494,7 @@ def chunk_abc_bwd_kernel_V(
         tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_bwd_kernel_intra_V(
     q,
     k,
@@ -506,7 +505,7 @@ def chunk_abc_bwd_kernel_intra_V(
     s_k_h,
     s_k_t,
     s_k_d,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
@@ -591,7 +590,7 @@ def chunk_abc_bwd_kernel_intra_V(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_bwd_kernel_intra_K(
     v,
     z,
@@ -601,7 +600,7 @@ def chunk_abc_bwd_kernel_intra_K(
     s_v_t,
     s_v_d,
     scale,
-    T: tl.constexpr,
+    T,
     V: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
@@ -652,7 +651,7 @@ def chunk_abc_bwd_kernel_intra_K(
             p_v = tl.advance(p_v, (V,))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_bwd_kernel_K(
     q,
     k,
@@ -676,7 +675,7 @@ def chunk_abc_bwd_kernel_K(
     s_h_t,
     s_h_d,
     scale,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -750,7 +749,7 @@ def chunk_abc_bwd_kernel_K(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_bwd_kernel_intra_KV(
     v,
     z,
@@ -760,7 +759,7 @@ def chunk_abc_bwd_kernel_intra_KV(
     s_v_h,
     s_v_t,
     s_v_d,
-    T: tl.constexpr,
+    T,
     V: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
@@ -807,7 +806,7 @@ def chunk_abc_bwd_kernel_intra_KV(
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_bwd_kernel_rcum_inter(
     s,
     z,
@@ -816,7 +815,7 @@ def chunk_abc_bwd_kernel_rcum_inter(
     s_s_h,
     s_s_t,
     s_s_d,
-    T: tl.constexpr,
+    T,
     S: tl.constexpr,
     BT: tl.constexpr,
     BS: tl.constexpr,
@@ -846,7 +845,7 @@ def chunk_abc_bwd_kernel_rcum_inter(
         b_zp = b_zc
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_abc_bwd_kernel_rcum_intra(
     s,
     z,
@@ -855,7 +854,7 @@ def chunk_abc_bwd_kernel_rcum_intra(
     s_s_h,
     s_s_t,
     s_s_d,
-    T: tl.constexpr,
+    T,
     S: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
@@ -903,7 +902,7 @@ def chunk_abc_bwd_kernel_rcum_intra(
 class ChunkABCFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     def forward(ctx, q, k, v, s, initial_state, output_final_state):
         B, H, T, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
         BT, BC = 64, 16
@@ -983,16 +982,8 @@ class ChunkABCFunction(torch.autograd.Function):
         ok = ok0.add_(ok1)
 
         scale = 1.
-        # equivalent to:
-        # p = ok.softmax(-1, torch.float)
         # p is kept in fp32 for safe softmax backward
-        p = torch.empty_like(ok, dtype=torch.float)
-        grid = (NT, B * H)
-        softmax_fwd_kernel[grid](
-            ok, p,
-            s.stride(1), s.stride(2), s.stride(3),
-            T=T, S=M, BT=BT
-        )
+        p = softmax_fwd(ok, dtype=torch.float)
         qv = p.to(q.dtype)
 
         scale = 1.
@@ -1031,7 +1022,7 @@ class ChunkABCFunction(torch.autograd.Function):
         return ov, final_state
 
     @staticmethod
-    @contiguous
+    @input_guard
     def backward(ctx, dov, dht=None):
         q, k, v, s, z, ok, p, hk, hv, Av = ctx.saved_tensors
         B, H, T, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
@@ -1120,13 +1111,7 @@ class ChunkABCFunction(torch.autograd.Function):
 
         # softmax gradient, equivalent to:
         # dok = p * (dp - (p * dp).sum(-1, True))
-        dok = torch.empty_like(ok)
-        grid = (NT, B * H)
-        softmax_bwd_kernel[grid](
-            p, dp, dok,
-            s.stride(1), s.stride(2), s.stride(3),
-            T=T, S=M, BT=BT
-        )
+        dok = softmax_bwd(p, dp, dtype=ok.dtype)
 
         scale = K ** -0.5
         dhk = bwd_inner(
@@ -1179,6 +1164,7 @@ class ChunkABCFunction(torch.autograd.Function):
         return dq, dk, dv, ds, None, None
 
 
+@torch.compiler.disable
 def chunk_abc(
     q: torch.Tensor,
     k: torch.Tensor,

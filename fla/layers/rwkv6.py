@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # "Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence"[https://arxiv.org/abs/2404.05892]
 
@@ -58,7 +58,7 @@ class RWKV6Attention(nn.Module):
         assert self.key_dim % num_heads == 0, f"key dim must be divisible by num_heads of {num_heads}"
         assert self.value_dim % num_heads == 0, f"value dim must be divisible by num_heads of {num_heads}"
 
-        self.head_qk_dim = self.key_dim // num_heads
+        self.head_k_dim = self.key_dim // num_heads
         self.head_v_dim = self.value_dim // num_heads
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
@@ -74,7 +74,7 @@ class RWKV6Attention(nn.Module):
         self.k_proj = DDLerpLinear(hidden_size, self.key_dim)
         self.v_proj = DDLerpLinear(hidden_size, self.value_dim)
         self.g_proj = DDLerpLinear(hidden_size, self.value_dim)
-        self.bonus = nn.Parameter(torch.zeros(num_heads, self.head_qk_dim))
+        self.bonus = nn.Parameter(torch.zeros(num_heads, self.head_k_dim))
 
         # For bounding the forgetting gate
         self.bound_w = gate_bound
@@ -115,7 +115,7 @@ class RWKV6Attention(nn.Module):
 
         batch_size, seq_len, hidden_size = hidden_states.shape
         # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if hidden_states.shape[1] == 1 else self.mode
+        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
@@ -128,7 +128,7 @@ class RWKV6Attention(nn.Module):
         else:
             shifted = self.time_shift(hidden_states)
             if last_state is not None:
-                shifted[:, 0] = last_state['conv_state'][0]
+                shifted[:, 0] = last_state['conv_state']
 
         delta = shifted - hidden_states
         x = self.x_proj[0](hidden_states, delta).view(batch_size, seq_len, -1, self.proj_low_rank_dim)
@@ -144,15 +144,15 @@ class RWKV6Attention(nn.Module):
         # dealing with left-padding
         if attention_mask is not None:
             v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
-        r, w, k, v = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=self.num_heads), (r, w, k, v))
-        
-        # Bounding w for safe
-        w = self.bound_w * F.softsign(w / self.bound_w)
-        
+
+        r, w, k = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_k_dim), (r, w, k))
+        v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
+
         w = -torch.exp(w)
         u = self.bonus
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_rwkv6(
                 r=r,
@@ -163,6 +163,7 @@ class RWKV6Attention(nn.Module):
                 scale=1.,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         elif mode == 'chunk':
@@ -175,6 +176,7 @@ class RWKV6Attention(nn.Module):
                 scale=1.,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         else:
@@ -201,7 +203,8 @@ class LoRA(nn.Module):
         input_dim: int,
         output_dim: int,
         low_rank_dim: int,
-        bias: Optional[bool] = True
+        bias: Optional[bool] = True,
+        activation: Optional[str] = 'tanh'
     ):
         super().__init__()
 
@@ -210,9 +213,20 @@ class LoRA(nn.Module):
         self.low_rank_dim = low_rank_dim
         self.bias = bias
 
+        if activation is None:
+            self.activation = nn.Identity()
+        elif activation == 'sigmoid':
+            self.activation = nn.Sigmoid()
+        elif activation == 'tanh':
+            self.activation = nn.Tanh()
+        elif activation == 'relu':
+            self.activation = nn.ReLU()
+        else:
+            raise ValueError(f"Not supported activation `{activation}`.")
+
         self.lora = nn.Sequential(
             nn.Linear(input_dim, low_rank_dim, bias=False),
-            nn.Tanh(),
+            self.activation,
             nn.Linear(low_rank_dim, output_dim, bias=bias)
         )
 

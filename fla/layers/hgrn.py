@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # "Hierarchically Gated Recurrent Neural Network for Sequence Modeling" [https://arxiv.org/abs/2311.04823]
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -13,9 +13,12 @@ import torch.nn.functional as F
 
 from fla.modules import FusedRMSNormSwishGate, ShortConvolution
 from fla.modules.activations import swiglu
+from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
 
 if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
+
     from fla.models.utils import Cache
 
 
@@ -61,17 +64,6 @@ class HGRNAttention(nn.Module):
         self.g_norm = FusedRMSNormSwishGate(self.input_dim, elementwise_affine, norm_eps)
         self.o_proj = nn.Linear(self.input_dim, hidden_size, bias=False)
 
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -80,7 +72,7 @@ class HGRNAttention(nn.Module):
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
         lower_bound: Optional[torch.Tensor] = None,
-        **kwargs
+        **kwargs: Unpack[Dict]
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -90,25 +82,32 @@ class HGRNAttention(nn.Module):
             )
 
         # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if hidden_states.shape[1] == 1 else self.mode
+        mode = 'fused_recurrent' if not self.training and hidden_states.shape[1] <= 64 else self.mode
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
+        cu_seqlens, position_ids, seq_idx = kwargs.get('cu_seqlens', None), kwargs.get('position_ids', None), None
         if self.use_short_conv:
             conv_state_i, conv_state_f = None, None
             if last_state is not None:
                 conv_state_i, conv_state_f = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
+            if cu_seqlens is not None:
+                if position_ids is None:
+                    position_ids = prepare_position_ids(cu_seqlens)
+                seq_idx = prepare_sequence_ids(position_ids).to(torch.int32).unsqueeze(0)
             i, conv_state_i = self.i_conv1d(x=self.i_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_i,
-                                            output_final_state=use_cache)
+                                            output_final_state=use_cache,
+                                            seq_idx=seq_idx)
             f, conv_state_f = self.f_conv1d(x=self.f_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_f,
-                                            output_final_state=use_cache)
+                                            output_final_state=use_cache,
+                                            seq_idx=seq_idx)
         else:
             i = self.i_proj(hidden_states)
             f = self.f_proj(hidden_states)
@@ -128,7 +127,8 @@ class HGRNAttention(nn.Module):
         if mode == 'chunk':
             o, recurrent_state = chunk_hgrn(i, f, recurrent_state, use_cache)
         elif mode == 'fused_recurrent':
-            o, recurrent_state = fused_recurrent_hgrn(i, f, recurrent_state, use_cache)
+            o, recurrent_state = fused_recurrent_hgrn(i, f, recurrent_state, use_cache,
+                                                      cu_seqlens=cu_seqlens)
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 

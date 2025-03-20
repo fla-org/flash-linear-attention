@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
+from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum, mean_pooling
 
 
 def reversed_cumsum(x, dim=-1):
@@ -193,3 +193,76 @@ def test_local_cumsum_varlen(
     ], 1)
     tri = chunk_local_cumsum(s, chunk_size=C, offsets=offsets, head_first=False)
     torch.testing.assert_close(ref, tri)
+
+
+@pytest.mark.parametrize("B", [4])
+@pytest.mark.parametrize("H", [4])
+@pytest.mark.parametrize("T", [150, 500, 1024])
+@pytest.mark.parametrize("C", [32, 64])
+@pytest.mark.parametrize("D", [50, 64, 100, 200])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("head_first", [True, False])
+def test_mean_pooling(
+    B: int,
+    H: int,
+    T: int,
+    C: int,
+    D: int,
+    dtype: torch.dtype,
+    head_first: bool
+):
+    torch.manual_seed(42)
+    x = torch.randn(B, H, T, D, dtype=dtype).cuda() if head_first else torch.randn(B, T, H, D, dtype=dtype).cuda()
+    x.requires_grad = True
+    if head_first:
+        ref = torch.cat([x[:, :, i:i+C].float().mean(2, True) for i in range(0, T, C)], 2).to(dtype)
+    else:
+        ref = torch.cat([x[:, i:i+C, :].float().mean(1, True) for i in range(0, T, C)], 1).to(dtype)
+    do = torch.randn_like(ref)
+    ref.backward(do)
+    ref_dx, x.grad = x.grad.clone(), None
+
+    tri = mean_pooling(x, chunk_size=C, head_first=head_first)
+    tri.backward(do)
+    tri_dx, x.grad = x.grad.clone(), None
+
+    torch.testing.assert_close(ref, tri)
+    torch.testing.assert_close(ref_dx, tri_dx)
+
+
+@pytest.mark.parametrize("B", [4])
+@pytest.mark.parametrize("T", [15, 64, 500, 1024])
+@pytest.mark.parametrize("H", [4])
+@pytest.mark.parametrize("C", [32, 64])
+@pytest.mark.parametrize("D", [50, 64, 100, 200])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_mean_pooling_varlen(
+    B: int,
+    T: int,
+    H: int,
+    C: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    offsets = torch.cat([
+        torch.tensor([0], dtype=torch.long),
+        torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
+        torch.tensor([T], dtype=torch.long)
+    ], 0).cuda().sort()[0]
+
+    x = torch.randn(1, T, H, D, dtype=dtype).cuda().requires_grad_(True)
+    ref = torch.cat([
+        torch.cat([x[:, i:min(end, i+C), :].float().mean(1, True) for i in range(start, end, C)], 1)
+        for start, end in zip(offsets[:-1], offsets[1:])
+    ], 1).to(dtype)
+    do = torch.randn_like(ref)
+    ref.backward(do)
+    ref_dx, x.grad = x.grad.clone(), None
+
+    tri = mean_pooling(x, chunk_size=C, cu_seqlens=offsets, head_first=False)
+    tri.backward(do)
+    tri_dx, x.grad = x.grad.clone(), None
+
+    torch.testing.assert_close(ref, tri)
+    torch.testing.assert_close(ref_dx, tri_dx)

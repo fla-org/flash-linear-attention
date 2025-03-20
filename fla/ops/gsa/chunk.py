@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -11,11 +11,24 @@ from einops import reduce
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.utils import chunk_local_cumsum, softmax_bwd, softmax_fwd
-from fla.utils import contiguous
+from fla.ops.utils.exp import safe_exp
+from fla.utils import input_guard
 
 
-@triton.heuristics({'USE_OFFSETS': lambda args: args['offsets'] is not None})
-@triton.jit
+@triton.heuristics({
+    'USE_OFFSETS': lambda args: args['offsets'] is not None
+})
+@triton.autotune(
+    configs=[
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
+        for BK in [32, 64]
+        for BV in [32, 64]
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['BT']
+)
+@triton.jit(do_not_specialize=['T'])
 def chunk_gsa_fwd_k_kernel_inter(
     q,
     k,
@@ -26,7 +39,7 @@ def chunk_gsa_fwd_k_kernel_inter(
     offsets,
     indices,
     scale,
-    T: tl.constexpr,
+    T,
     HQ: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -98,8 +111,10 @@ def chunk_gsa_fwd_k_kernel_inter(
         tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.heuristics({'USE_OFFSETS': lambda args: args['offsets'] is not None})
-@triton.jit
+@triton.heuristics({
+    'USE_OFFSETS': lambda args: args['offsets'] is not None
+})
+@triton.jit(do_not_specialize=['T'])
 def chunk_gsa_fwd_k_kernel_intra(
     v,
     g,
@@ -107,7 +122,7 @@ def chunk_gsa_fwd_k_kernel_intra(
     A,
     offsets,
     indices,
-    T: tl.constexpr,
+    T,
     HQ: tl.constexpr,
     H: tl.constexpr,
     V: tl.constexpr,
@@ -142,7 +157,7 @@ def chunk_gsa_fwd_k_kernel_intra(
         p_gn = tl.max_contiguous(tl.multiple_of(g + i_bg * T*V + min(i_t * BT + i_i * BC, T) * V + o_v, BV), BV)
     else:
         p_g = tl.make_block_ptr(g + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))
-        p_gn = tl.max_contiguous(tl.multiple_of(g + (bos + min(i_t * BT + i_i * BC, T)) * H*V + i_h * V + o_v, BV), BV)
+        p_gn = g + (bos + min(i_t * BT + i_i * BC, T)) * H*V + i_h * V + o_v
     # [BV,]
     b_gn = tl.load(p_gn, mask=m_v, other=0)
     # [BC, BV]
@@ -178,8 +193,8 @@ def chunk_gsa_fwd_k_kernel_intra(
             p_v = tl.max_contiguous(tl.multiple_of(v + i_bg * T*V + (i_t * BT + i_i * BC + j) * V + o_v, BV), BV)
             p_gv = tl.max_contiguous(tl.multiple_of(g + i_bg * T*V + (i_t * BT + i_i * BC + j) * V + o_v, BV), BV)
         else:
-            p_v = tl.max_contiguous(tl.multiple_of(v + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v, BV), BV)
-            p_gv = tl.max_contiguous(tl.multiple_of(g + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v, BV), BV)
+            p_v = v + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v
+            p_gv = g + (bos + i_t * BT + i_i * BC + j) * H*V + i_h * V + o_v
         # [BC,]
         b_A = tl.load(A + o_A + j, mask=m_A, other=0)
         # [BV,]
@@ -197,8 +212,17 @@ def chunk_gsa_fwd_k_kernel_intra(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.heuristics({'USE_OFFSETS': lambda args: args['offsets'] is not None})
-@triton.jit
+@triton.heuristics({
+    'USE_OFFSETS': lambda args: args['offsets'] is not None
+})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [2, 4, 8]
+    ],
+    key=["BT"]
+)
+@triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_dA(
     v,
     g,
@@ -207,8 +231,8 @@ def chunk_gsa_bwd_k_kernel_dA(
     indices,
     offsets,
     scale,
+    T,
     B: tl.constexpr,
-    T: tl.constexpr,
     HQ: tl.constexpr,
     H: tl.constexpr,
     V: tl.constexpr,
@@ -257,7 +281,7 @@ def chunk_gsa_bwd_k_kernel_dA(
         else:
             p_v = tl.make_block_ptr(v + (bos*H+i_h) * V, (V, T), (1, H*V), (i_v * BV, i_t*BT + i_j*BC), (BV, BC), (0, 1))
             p_gv = tl.make_block_ptr(g + (bos*H+i_h) * V, (V, T), (1, H*V), (i_v * BV, i_t*BT + i_j*BC), (BV, BC), (0, 1))
-            p_gn = tl.max_contiguous(tl.multiple_of(g + (bos + i_t*BT + i_i*BC) * H*V + i_h * V + o_v, BV), BV)
+            p_gn = g + (bos + i_t*BT + i_i*BC) * H*V + i_h * V + o_v
             p_g = tl.make_block_ptr(g + (bos*H+i_h) * V, (T, V), (H*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
             p_do = tl.make_block_ptr(do + (bos*HQ+i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
         # [BV,]
@@ -281,8 +305,8 @@ def chunk_gsa_bwd_k_kernel_dA(
         else:
             p_g = tl.make_block_ptr(g + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
             p_do = tl.make_block_ptr(do + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
-            p_v = tl.max_contiguous(tl.multiple_of(v + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v, BV), BV)
-            p_gv = tl.max_contiguous(tl.multiple_of(g + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v, BV), BV)
+            p_v = v + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v
+            p_gv = g + (bos + i_t*BT + i_j*BC) * H*V + i_h * V + o_v
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1)) * scale
@@ -305,8 +329,18 @@ def chunk_gsa_bwd_k_kernel_dA(
     tl.store(p_dA, b_dA.to(dA.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.heuristics({'USE_OFFSETS': lambda args: args['offsets'] is not None})
-@triton.jit
+@triton.heuristics({
+    'USE_OFFSETS': lambda args: args['offsets'] is not None
+})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['BT']
+)
+@triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_dqkvg(
     q,
     k,
@@ -325,8 +359,8 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     offsets,
     indices,
     scale,
+    T,
     B: tl.constexpr,
-    T: tl.constexpr,
     HQ: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -393,7 +427,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         else:
             p_v = tl.make_block_ptr(v + (bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_g = tl.make_block_ptr(g + (bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_gn = tl.max_contiguous(tl.multiple_of(g + (bos + o_t - 1) * H*V + i_h * V + o_v, BV), BV)
+            p_gn = g + (bos + o_t - 1) * H*V + i_h * V + o_v
             p_do = tl.make_block_ptr(do + (bos*HQ+i_hq)*V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_dv = tl.make_block_ptr(dv + ((i_k*all+bos)*HQ+i_hq)*V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_dg = tl.make_block_ptr(dg + (bos*HQ+i_hq)*V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -452,8 +486,10 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.heuristics({'USE_OFFSETS': lambda args: args['offsets'] is not None})
-@triton.jit
+@triton.heuristics({
+    'USE_OFFSETS': lambda args: args['offsets'] is not None
+})
+@triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_intra_dvg(
     v,
     g,
@@ -464,7 +500,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     dg,
     offsets,
     indices,
-    T: tl.constexpr,
+    T,
     HQ: tl.constexpr,
     H: tl.constexpr,
     V: tl.constexpr,
@@ -499,7 +535,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         p_gn = tl.max_contiguous(tl.multiple_of(g + i_bg * T*V + (min(i_t * BT + i_i * BC + BC, T) - 1) * V + o_v, BV), BV)
     else:
         p_gv = tl.make_block_ptr(g + (bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))
-        p_gn = tl.max_contiguous(tl.multiple_of(g + (bos + min(i_t * BT + i_i * BC + BC, T)-1)*H*V + i_h*V + o_v, BV), BV)
+        p_gn = g + (bos + min(i_t * BT + i_i * BC + BC, T)-1)*H*V + i_h*V + o_v
     # [BV,]
     b_gn = tl.load(p_gn, mask=m_v, other=0)
     # [BC, BV]
@@ -516,11 +552,11 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
             p_do = tl.make_block_ptr(do + (bos*HQ+i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_j*BC, i_v*BV), (BC, BV), (1, 0))
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * tl.exp(b_g - b_gn[None, :])).to(b_do.dtype)
+        b_do = tl.load(p_do, boundary_check=(0, 1)) * safe_exp(b_g - b_gn[None, :])
         # [BC, BC]
         b_A = tl.load(p_A, boundary_check=(0, 1))
-        b_dv += tl.dot(b_A, b_do)
+        # [BC, BV]
+        b_dv += tl.dot(b_A, b_do.to(b_A.dtype))
     b_dv *= tl.exp(b_gn[None, :] - b_gv)
 
     o_i = tl.arange(0, BC)
@@ -531,9 +567,9 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         p_A = tl.max_contiguous(tl.multiple_of(A + i_bh * T*BT + (i_t * BT + i_i * BC) * BT + o_c, BC), BC)
         p_do = tl.max_contiguous(tl.multiple_of(do + i_bh * T*V + (i_t * BT + i_i * BC) * V + o_v, BV), BV)
     else:
-        p_g = tl.max_contiguous(tl.multiple_of(g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v, BV), BV)
-        p_A = tl.max_contiguous(tl.multiple_of(A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + o_c, BC), BC)
-        p_do = tl.max_contiguous(tl.multiple_of(do + (bos + i_t*BT + i_i*BC) * HQ*V + i_hq * V + o_v, BV), BV)
+        p_g = g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v
+        p_A = A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + o_c
+        p_do = do + (bos + i_t*BT + i_i*BC) * HQ*V + i_hq * V + o_v
 
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # [BC,]
@@ -617,23 +653,13 @@ def chunk_gsa_fwd_k(
         B, H, T, K, V = *k.shape, v.shape[-1]
     else:
         B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, triton.next_power_of_2(T))
-    if offsets is None:
-        NT = triton.cdiv(T, BT)
-    else:
-        if indices is None:
-            indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], BT).tolist()])
-            indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
-        NT = len(indices)
+    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BC = min(16, BT)
-    BK = min(64, triton.next_power_of_2(K))
     BV = min(64, triton.next_power_of_2(V))
     HQ = q.shape[1] if head_first else q.shape[2]
-    NV = triton.cdiv(V, BV)
+    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     NC = triton.cdiv(BT, BC)
     NG = HQ // H
-    num_warps = 4 if BK == 64 else 2
-    num_stages = 1
 
     h, ht = chunk_fwd_h(
         k=k,
@@ -643,14 +669,14 @@ def chunk_gsa_fwd_k(
         gv=g,
         h0=h0,
         output_final_state=output_final_state,
-        states_in_fp32=False,
         offsets=offsets,
         head_first=head_first,
-        chunk_size=BT
+        chunk_size=BT,
+        states_in_fp32=False
     )
     o = v.new_empty(B, *((HQ, T) if head_first else (T, HQ)), V)
     A = q.new_empty(B, *((HQ, T) if head_first else (T, HQ)), BT)
-    grid = (NV, NT, B * HQ)
+    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * HQ)
     chunk_gsa_fwd_k_kernel_inter[grid](
         q,
         k,
@@ -667,14 +693,11 @@ def chunk_gsa_fwd_k(
         K=K,
         V=V,
         BT=BT,
-        BK=BK,
-        BV=BV,
         NG=NG,
-        HEAD_FIRST=head_first,
-        num_warps=num_warps,
-        num_stages=num_stages
+        HEAD_FIRST=head_first
     )
-    grid = (NV, NT * NC, B * HQ)
+
+    def grid(meta): return (triton.cdiv(V, meta['BV']), NT * NC, B * HQ)
     chunk_gsa_fwd_k_kernel_intra[grid](
         v,
         g,
@@ -692,8 +715,8 @@ def chunk_gsa_fwd_k(
         NC=NC,
         NG=NG,
         HEAD_FIRST=head_first,
-        num_warps=num_warps,
-        num_stages=num_stages
+        num_warps=4,
+        num_stages=2
     )
     return A, h, ht, o
 
@@ -756,24 +779,16 @@ def chunk_gsa_bwd_k(
         B, H, T, K, V = *k.shape, v.shape[-1]
     else:
         B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, triton.next_power_of_2(T))
-    if offsets is None:
-        NT = triton.cdiv(T, BT)
-    else:
-        if indices is None:
-            indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], BT).tolist()])
-            indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
-        NT = len(indices)
+    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
     BV = min(64, triton.next_power_of_2(V))
     HQ = q.shape[1] if head_first else q.shape[2]
+    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
     NG = HQ // H
-    num_warps = 4 if BK == 64 else 2
-    num_stages = 1
 
     if h is None:
         h, _ = chunk_fwd_h(
@@ -784,10 +799,10 @@ def chunk_gsa_bwd_k(
             gv=g,
             h0=h0,
             output_final_state=False,
-            states_in_fp32=False,
             offsets=offsets,
             head_first=head_first,
-            chunk_size=chunk_size
+            chunk_size=BT,
+            states_in_fp32=False
         )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -800,10 +815,10 @@ def chunk_gsa_bwd_k(
         h0=h0,
         dht=dht,
         scale=scale,
-        states_in_fp32=True,
         offsets=offsets,
         head_first=head_first,
-        chunk_size=BT
+        chunk_size=BT,
+        states_in_fp32=True
     )
     dA = q.new_empty(NV, B, *((HQ, T) if head_first else (T, HQ)), BT)
     grid = (NV, NT * NC * NC, B * HQ)
@@ -815,8 +830,8 @@ def chunk_gsa_bwd_k(
         offsets=offsets,
         indices=indices,
         scale=scale,
-        B=B,
         T=T,
+        B=B,
         HQ=HQ,
         H=H,
         V=V,
@@ -825,9 +840,7 @@ def chunk_gsa_bwd_k(
         BV=BV,
         NC=NC,
         NG=NG,
-        HEAD_FIRST=head_first,
-        num_warps=num_warps,
-        num_stages=num_stages
+        HEAD_FIRST=head_first
     )
     dA = dA.sum(0, dtype=dA.dtype)
 
@@ -855,8 +868,8 @@ def chunk_gsa_bwd_k(
         offsets=offsets,
         indices=indices,
         scale=scale,
-        B=B,
         T=T,
+        B=B,
         HQ=HQ,
         H=H,
         K=K,
@@ -865,15 +878,13 @@ def chunk_gsa_bwd_k(
         BK=BK,
         BV=BV,
         NG=NG,
-        HEAD_FIRST=head_first,
-        num_warps=num_warps,
-        num_stages=num_stages
+        HEAD_FIRST=head_first
     )
     A = A.sum(0, dtype=A.dtype)
     dv = dv.sum(0, dtype=dv.dtype)
     dgv = dgv.sum(0, dtype=dgv.dtype)
 
-    grid = (NV, NT * NC, B * HQ)
+    def grid(meta): return (triton.cdiv(V, meta['BV']), NT * NC, B * HQ)
     chunk_gsa_bwd_k_kernel_intra_dvg[grid](
         v,
         g,
@@ -894,8 +905,8 @@ def chunk_gsa_bwd_k(
         NC=NC,
         NG=NG,
         HEAD_FIRST=head_first,
-        num_warps=num_warps,
-        num_stages=num_stages
+        num_warps=4,
+        num_stages=2
     )
     dg = dgv.add_(chunk_local_cumsum(dg, chunk_size=BT, reverse=True, offsets=offsets, indices=indices, head_first=head_first))
 
@@ -1031,7 +1042,7 @@ def chunk_gsa_bwd(
 class ChunkGSAFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     def forward(
         ctx,
         q: torch.Tensor,
@@ -1048,7 +1059,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         head_first: bool = True
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         T = q.shape[2] if head_first else q.shape[1]
-        chunk_size = min(64, triton.next_power_of_2(T))
+        chunk_size = min(64, max(16, triton.next_power_of_2(T)))
 
         # 2-d indices denoting the offsets of chunks in each sequence
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
@@ -1094,7 +1105,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         return ov, hkt, hvt
 
     @staticmethod
-    @contiguous
+    @input_guard
     def backward(ctx, dov, dhkt=None, dhvt=None):
         q, k, v, s, g, ok, p, Av, hk0, hv0, hk, hv = ctx.saved_tensors
         scale = ctx.scale
@@ -1127,6 +1138,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         return dq, dk, dv, ds, dg, None, dhk0, dhv0, None, None, None, None
 
 
+@torch.compiler.disable
 def chunk_gsa(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1137,7 +1149,7 @@ def chunk_gsa(
     initial_state: Optional[Tuple[torch.Tensor]] = None,
     output_final_state: Optional[bool] = False,
     checkpoint_level: Optional[int] = 2,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: Optional[bool] = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -1170,12 +1182,9 @@ def chunk_gsa(
             - Level `0`: no memory saved, no recomputation.
             - Level `1`: recompute the fp32 cumulative values during backward.
             - Level `2`: recompute the fp32 cumulative values and forward hidden states during backward.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `True`.
@@ -1204,28 +1213,28 @@ def chunk_gsa(
                                     initial_state=h0,
                                     output_final_state=True,
                                     head_first=False)
-        # for variable-length inputs, the batch size `B` is expected to be 1 and `offsets` is required
+        # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, s, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, s, g))
-        # for a batch with 4 sequences, offsets with 5 start/end positions are expected
-        >>> offsets = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
+        # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
+        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
         >>> o_var, (hk_var, hv_var) = chunk_gsa(q, k, v, s, g,
                                                 initial_state=h0,
                                                 output_final_state=True,
-                                                offsets=offsets,
+                                                cu_seqlens=cu_seqlens,
                                                 head_first=False)
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert hk.allclose(hk_var)
         >>> assert hv.allclose(hv_var)
     """
-    if offsets is not None:
+    if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
+            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                              f"Please flatten variable-length inputs before processing.")
         if head_first:
             raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
-        if initial_state is not None and initial_state[0].shape[0] != len(offsets) - 1:
+        if initial_state is not None and initial_state[0].shape[0] != len(cu_seqlens) - 1:
             raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(offsets) - 1} rather than {initial_state[0].shape[0]}.")
+                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}.")
     assert checkpoint_level in [0, 1, 2]
     if g is None:
         # TODO: this 3 steps took huge amount of time, ought to be optimized
@@ -1249,7 +1258,7 @@ def chunk_gsa(
         hv0,
         output_final_state,
         checkpoint_level,
-        offsets,
+        cu_seqlens,
         head_first
     )
     return o, final_state

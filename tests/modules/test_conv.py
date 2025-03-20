@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from fla.modules.convolution import ShortConvolution
+from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
 
 
 def get_abs_err(x, y):
@@ -40,6 +41,27 @@ def test_shortconv(B: int, T: int, H: int, C: int):
     assert y_slow.shape == x.shape
     assert y_fast.shape == x.shape
     assert torch.allclose(y_slow, y_fast), f"{y_slow}\n{y_fast}"
+
+
+@pytest.mark.parametrize("N", [4])
+@pytest.mark.parametrize("T", [500, 1024])
+@pytest.mark.parametrize("H", [128])
+@pytest.mark.parametrize("C", [4])
+def test_shortconv_varlen(N: int, T: int, H: int, C: int):
+    torch.manual_seed(42)
+    conv = ShortConvolution(H, C, activation='silu', use_fast_conv1d=True).cuda()
+    offsets = torch.cat([
+        torch.tensor([0], dtype=torch.long),
+        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.tensor([T], dtype=torch.long)
+    ], 0).cuda().sort()[0]
+
+    x = torch.randn(1, T, H).cuda()
+    seq_idx = prepare_sequence_ids(prepare_position_ids(offsets)).to(torch.int32).unsqueeze(0)
+
+    ref = torch.cat([conv(x[:, bos:eos].contiguous())[0] for bos, eos in zip(offsets[:-1], offsets[1:])], 1)
+    tri, _ = conv(x, seq_idx=seq_idx)
+    assert_close("y", ref, tri, 1e-5)
 
 
 @pytest.mark.parametrize("B", [4])

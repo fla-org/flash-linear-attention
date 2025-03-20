@@ -29,6 +29,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.5)
     parser.add_argument("--topp", type=float, default=0.2)
     parser.add_argument("--repetition_penalty", type=float, default=1.1)
+    parser.add_argument("--compile", action='store_true')
     args = parser.parse_args()
 
     device = "cuda"
@@ -50,6 +51,9 @@ if __name__ == "__main__":
         torch_dtype=dtype,
         use_cache=not args.no_cache
     )
+    if args.compile:
+        print("Compiling the model")
+        model = torch.compile(model)
     model.eval()
     print(f"{model.config}\n{model}\nNumber of parameters: {model.num_parameters()} ({sizeof_fmt(model.num_parameters())})\n")
 

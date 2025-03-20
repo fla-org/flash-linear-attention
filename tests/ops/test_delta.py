@@ -133,7 +133,7 @@ def test_chunk_varlen(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
@@ -148,7 +148,7 @@ def test_chunk_varlen(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        offsets=offsets,
+        cu_seqlens=offsets,
         head_first=False
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
@@ -161,3 +161,137 @@ def test_chunk_varlen(
     assert_close(" dv", ref_dv, tri_dv, 0.007)
     assert_close(" db", ref_dbeta, tri_dbeta, 0.007)
     assert_close("dh0", ref_dh0, tri_dh0, 0.007)
+
+
+@pytest.mark.parametrize("B", [2])
+@pytest.mark.parametrize("T", [300])
+@pytest.mark.parametrize("H", [16])
+@pytest.mark.parametrize("D", [100, 200])
+@pytest.mark.parametrize("scale", [0.1])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_l2_in_kernel(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+    scale: float,
+):
+    q = torch.randn(B, H, T, D, dtype=dtype)
+    k = torch.randn(B, H, T, D, dtype=dtype)
+    v = torch.randn(B, H, T, D, dtype=dtype)
+    beta = torch.rand(B, H, T, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+
+    q, k, v, beta, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, beta, h0))
+    do = torch.rand_like(v)
+    dht = torch.rand_like(h0)
+
+    tri, tri_ht = chunk_delta_rule(
+        F.normalize(q.clone(), p=2, dim=-1).to(dtype),
+        F.normalize(k.clone(), p=2, dim=-1).to(dtype),
+        v.clone(),
+        beta.clone(),
+        scale=scale,
+        output_final_state=True,
+        initial_state=h0.clone(),
+        head_first=True
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = h0.grad = None
+
+    ref, ref_ht = chunk_delta_rule(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        beta.clone(),
+        scale=scale,
+        output_final_state=True,
+        initial_state=h0.clone(),
+        head_first=True,
+        use_qk_l2norm_in_kernel=True
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = h0.grad = None
+    assert_close("  o", ref, tri, 0.01)
+    assert_close(" ht", ref_ht, tri_ht, 0.01)
+    assert_close(" dq", ref_dq, tri_dq, 0.01)
+    assert_close(" dk", ref_dk, tri_dk, 0.01)
+    assert_close(" dv", ref_dv, tri_dv, 0.01)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.01)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.01)
+
+    tri, tri_ht = fused_recurrent_delta_rule(
+        F.normalize(q.clone().float(), p=2, dim=-1).to(dtype),
+        F.normalize(k.clone().float(), p=2, dim=-1).to(dtype),
+        v.clone(),
+        beta.clone(),
+        scale=scale,
+        output_final_state=True,
+        initial_state=h0.clone(),
+        head_first=True
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = h0.grad = None
+
+    ref, ref_ht = fused_recurrent_delta_rule(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        beta.clone(),
+        scale=scale,
+        output_final_state=True,
+        initial_state=h0.clone(),
+        head_first=True,
+        use_qk_l2norm_in_kernel=True
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = h0.grad = None
+
+    assert_close("  o", ref, tri, 0.002)
+    assert_close(" ht", ref_ht, tri_ht, 0.002)
+    assert_close(" dq", ref_dq, tri_dq, 0.002)
+    assert_close(" dk", ref_dk, tri_dk, 0.002)
+    assert_close(" dv", ref_dv, tri_dv, 0.002)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.002)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.002)
+
+    tri, tri_ht = fused_recurrent_delta_rule(
+        F.normalize(q.float().clone(), p=2, dim=-1).to(dtype),
+        F.normalize(k.float().clone(), p=2, dim=-1).to(dtype),
+        v.clone(),
+        beta.clone(),
+        scale=scale,
+        output_final_state=True,
+        initial_state=h0.clone(),
+        head_first=True
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = h0.grad = None
+
+    ref, ref_ht = fused_recurrent_delta_rule(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        beta.clone(),
+        scale=scale,
+        output_final_state=True,
+        initial_state=h0.clone(),
+        head_first=True,
+        use_qk_l2norm_in_kernel=True
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = h0.grad = None
+    assert_close("  o", ref, tri, 0.002)
+    assert_close(" ht", ref_ht, tri_ht, 0.002)
+    assert_close(" dq", ref_dq, tri_dq, 0.002)
+    assert_close(" dk", ref_dk, tri_dk, 0.002)
+    assert_close(" dv", ref_dv, tri_dv, 0.002)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.002)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.002)

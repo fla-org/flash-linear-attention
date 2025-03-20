@@ -27,10 +27,10 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
+from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.models.mamba.configuration_mamba import MambaConfig
-from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
-                         RMSNorm)
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 
 logger = logging.get_logger(__name__)
 
@@ -38,10 +38,8 @@ logger = logging.get_logger(__name__)
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     try:
-        from mamba_ssm.ops.selective_scan_interface import (mamba_inner_fn,
-                                                            selective_scan_fn)
-        from mamba_ssm.ops.triton.selective_state_update import \
-            selective_state_update
+        from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, selective_scan_fn
+        from mamba_ssm.ops.triton.selective_state_update import selective_state_update
     except ImportError:
         selective_state_update, selective_scan_fn, mamba_inner_fn = None, None, None
 
@@ -453,6 +451,8 @@ class MambaBlock(nn.Module):
             hidden_states, cache_params=cache_params, cache_position=cache_position, attention_mask=attention_mask
         )
         hidden_states = residual + hidden_states
+        if self.residual_in_fp32:
+            hidden_states = hidden_states.to(dtype=self.norm.weight.dtype)
         return hidden_states
 
 
@@ -470,7 +470,12 @@ class MambaPreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module):
         """Initialize the weights."""
-        if isinstance(module, MambaMixer):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                if not getattr(module.bias, "_no_reinit", False):
+                    nn.init.zeros_(module.bias)
+        elif isinstance(module, MambaMixer):
             module.A_log._no_weight_decay = True
             module.D._no_weight_decay = True
 
@@ -488,15 +493,12 @@ class MambaPreTrainedModel(PreTrainedModel):
             # # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
-                module.dt_proj.bias.copy_(inv_dt)
+                module.dt_proj.bias.data = nn.Parameter(inv_dt.to(module.dt_proj.bias.device))
             module.dt_proj.bias._no_reinit = True
-
-        if isinstance(module, nn.Linear):
-            if module.bias is not None:
-                if not getattr(module.bias, "_no_reinit", False):
-                    nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, std=self.config.initializer_range)
+        elif hasattr(module, 'reset_parameters'):
+            module.reset_parameters()
 
         if self.config.rescale_prenorm_residual:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
@@ -683,6 +685,8 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.backbone = MambaModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.criterion = None
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -720,6 +724,7 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
 
         return model_kwargs
 
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def prepare_inputs_for_generation(
         self,
         input_ids,
@@ -728,7 +733,7 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         cache_params: Optional[MambaCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
-        num_logits_to_keep: Optional[int] = None,
+        logits_to_keep: Optional[int] = None,
         **kwargs,
     ):
         if use_cache:
@@ -757,18 +762,19 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         else:
             model_inputs = {"input_ids": input_ids.contiguous()}
 
-        if num_logits_to_keep is not None:
-            model_inputs['num_logits_to_keep'] = num_logits_to_keep
+        if logits_to_keep is not None:
+            model_inputs['logits_to_keep'] = logits_to_keep
 
         model_inputs.update({
             'cache_params': cache_params,
             'use_cache': use_cache,
             'cache_position': cache_position,
             'attention_mask': attention_mask,
-            'num_logits_to_keep': num_logits_to_keep,
+            'logits_to_keep': logits_to_keep,
         })
         return model_inputs
 
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -780,7 +786,7 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
-        num_logits_to_keep: Optional[int] = 0,
+        logits_to_keep: Optional[int] = 0,
         **kwargs,  # for now we need this for generation
     ) -> Union[Tuple, MambaCausalLMOutput]:
         r"""
@@ -803,27 +809,27 @@ class MambaForCausalLM(MambaPreTrainedModel, GenerationMixin):
         )
         hidden_states = mamba_outputs[0]
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -num_logits_to_keep:])
 
-        loss = None
+        loss, logits = None, None
+        if not fuse_linear_and_cross_entropy or labels is None:
+            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if labels is not None:
-            if self.config.fuse_cross_entropy:
+            if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
-                    loss_fct = FusedLinearCrossEntropyLoss()
+                    criterion = FusedLinearCrossEntropyLoss()
+                elif self.config.fuse_cross_entropy:
+                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
                 else:
-                    loss_fct = FusedCrossEntropyLoss(inplace_backward=True)
+                    criterion = nn.CrossEntropyLoss()
             else:
-                loss_fct = nn.CrossEntropyLoss()
+                criterion = self.criterion
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
+            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
             if fuse_linear_and_cross_entropy:
-                loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
-                                labels.view(-1),
-                                self.lm_head.weight,
-                                self.lm_head.bias)
+                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
-                loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + mamba_outputs[1:]

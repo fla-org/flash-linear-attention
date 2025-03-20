@@ -154,8 +154,8 @@ class MambaConfig(PretrainedConfig):
         self.rescale_prenorm_residual = rescale_prenorm_residual
         self.residual_in_fp32 = residual_in_fp32
         self.use_cache = use_cache
-        self.fuse_cross_entropy = fuse_cross_entropy
         self.fuse_norm = fuse_norm
+        self.fuse_cross_entropy = fuse_cross_entropy
 
         super().__init__(
             bos_token_id=bos_token_id,

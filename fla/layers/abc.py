@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from fla.modules import (FusedRMSNormSwishGate, RMSNorm, RotaryEmbedding,
-                         ShortConvolution)
+from fla.modules import FusedRMSNormSwishGate, RMSNorm, RotaryEmbedding, ShortConvolution
 from fla.modules.activations import swiglu, swish
 from fla.ops.abc.chunk import chunk_abc
+from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -106,17 +106,6 @@ class ABCAttention(nn.Module):
         if self.use_rope:
             self.rotary = RotaryEmbedding(self.head_k_dim)
 
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -137,23 +126,37 @@ class ABCAttention(nn.Module):
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
+        cu_seqlens, position_ids, seq_idx = kwargs.get('cu_seqlens', None), kwargs.get('position_ids', None), None
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            q, conv_state_q = self.q_conv1d(x=self.q_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_q,
-                                            output_final_state=use_cache)
-            k, conv_state_k = self.k_conv1d(x=self.k_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_k,
-                                            output_final_state=use_cache)
-            v, conv_state_v = self.v_conv1d(x=self.v_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_v,
-                                            output_final_state=use_cache)
+            if cu_seqlens is not None:
+                if position_ids is None:
+                    position_ids = prepare_position_ids(cu_seqlens)
+                seq_idx = prepare_sequence_ids(position_ids).to(torch.int32).unsqueeze(0)
+            q, conv_state_q = self.q_conv1d(
+                x=self.q_proj(hidden_states),
+                mask=conv_mask,
+                cache=conv_state_q,
+                output_final_state=use_cache,
+                seq_idx=seq_idx
+            )
+            k, conv_state_k = self.k_conv1d(
+                x=self.k_proj(hidden_states),
+                mask=conv_mask,
+                cache=conv_state_k,
+                output_final_state=use_cache,
+                seq_idx=seq_idx
+            )
+            v, conv_state_v = self.v_conv1d(
+                x=self.v_proj(hidden_states),
+                mask=conv_mask,
+                cache=conv_state_v,
+                output_final_state=use_cache,
+                seq_idx=seq_idx
+            )
         else:
             q = self.q_proj(hidden_states)
             k = self.k_proj(hidden_states)
@@ -165,14 +168,15 @@ class ABCAttention(nn.Module):
         if attention_mask is not None:
             v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
 
-        q, k, v = map(lambda x: rearrange(x, '... (h d) -> ... h d', h=self.num_heads), (q, k, v))
+        q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
+        v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
         if self.use_rope:
             seqlen_offset = 0
             if past_key_values is not None:
                 seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            q, k = self.rotary(q, k, seqlen_offset)
+            q, k = self.rotary(q, k, seqlen_offset=seqlen_offset)
 
-        s = rearrange(self.s_proj(hidden_states), '... (h m) -> ... h m', h=self.num_heads)
+        s = rearrange(self.s_proj(hidden_states), '... (h m) -> ... h m', m=self.num_slots)
         s = s.clamp_(self.clamp_min, self.clamp_max)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
@@ -190,13 +194,13 @@ class ABCAttention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[2]
+                offset=q.shape[1]
             )
 
         if self.use_norm and not self.use_output_gate:
             o = self.g_norm(o)
         elif self.use_output_gate:
-            g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', h=self.num_heads)
+            g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.g_norm(o, g) if self.use_norm else swiglu(g, o)
         o = rearrange(o, '... h d -> ... (h d)')
         o = self.o_proj(o)
@@ -204,4 +208,4 @@ class ABCAttention(nn.Module):
         return o, None, past_key_values
 
     def state_size(self, seq_len: int = 2048):
-        return self.num_heads * self.key_dim * self.head_v_dim
+        return 2 * self.num_slots * self.hidden_size

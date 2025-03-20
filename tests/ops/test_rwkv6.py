@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
-from fla.ops.rwkv6.recurrent_naive import (naive_recurrent_rwkv6,
-                                           naive_recurrent_rwkv6_bwd)
+from fla.ops.rwkv6 import chunk_rwkv6
+from fla.ops.rwkv6.fused_recurrent import fused_recurrent_rwkv6
+
+
+def get_abs_err(x, y):
+    return (x-y).flatten().abs().max().item()
 
 
 def get_err_ratio(x, y):
@@ -15,57 +20,181 @@ def get_err_ratio(x, y):
     return err / base
 
 
-@pytest.mark.parametrize("B", [1])
-@pytest.mark.parametrize("H", [1])
-@pytest.mark.parametrize("T", [130, 146, 162, 178])
+def assert_close(prefix, ref, tri, ratio):
+    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
+    print(msg)
+    assert get_err_ratio(ref, tri) < ratio, msg
+
+
+@pytest.mark.parametrize("B", [4])
+@pytest.mark.parametrize("gate_logit_normalizer", [0.05, 1, 20])
+@pytest.mark.parametrize("T", [130, 146, 162, 178, 300, 2048])
+@pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("D", [300, 100])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("head_first", [True, False])
 def test_chunk(
     B: int,
-    H: int,
     T: int,
+    H: int,
     D: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
+    gate_logit_normalizer: float,
+    head_first: bool
 ):
     torch.manual_seed(42)
-    # [B, H, T, d_head]
-    q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((B, H, T, 2*D), dtype=dtype, device='cuda').requires_grad_()
-    g = torch.randn((B, H, T, D), dtype=dtype, device='cuda')
-    g = F.logsigmoid(g).requires_grad_(True)
-    u = torch.randn(H, D, device='cuda').to(dtype).requires_grad_(True)
-    u = torch.randn(H, D, device='cuda').to(dtype).requires_grad_(True)
-    h0 = torch.randn((B, H, D, 2*D), dtype=dtype, device='cuda').requires_grad_()
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+
+    if head_first:
+        q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
+        k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
+        v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
+        w = F.logsigmoid(torch.randn((B, H, T, D), dtype=dtype, device='cuda')) / gate_logit_normalizer
+    else:
+        q = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+        k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+        v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+        w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device='cuda')) / gate_logit_normalizer
+
+    u = torch.randn(H, D, dtype=dtype, device='cuda').requires_grad_(True)
+    h0 = torch.randn(B, H, D, D, dtype=dtype, device='cuda').requires_grad_()
+    w = w.requires_grad_()
     do = torch.randn_like(v)
-    dht = torch.randn((B, H, D, 2*D), dtype=dtype, device='cuda')
-    ref, ref_ht = naive_recurrent_rwkv6(q.clone(), k.clone(), v.clone(), g.clone(), u.clone(), initial_state=h0.clone(), output_final_state=True)
-    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
+
+    ref, ref_ht = fused_recurrent_rwkv6(q.clone(),
+                                        k.clone(),
+                                        v.clone(),
+                                        w.clone(),
+                                        u.clone(),
+                                        initial_state=h0.clone(),
+                                        output_final_state=True,
+                                        head_first=head_first)
+    ref, _ = fused_recurrent_rwkv6(q.clone(),
+                                   k.clone(),
+                                   v.clone(),
+                                   w.clone(),
+                                   u.clone(),
+                                   initial_state=h0.clone(),
+                                   output_final_state=False,
+                                   head_first=head_first)
+
+    ((ref * do).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
-    ref_dg, g.grad = g.grad.clone(), None
-    ref_dh0, h0.grad = h0.grad.clone(), None
+    ref_dw, w.grad = w.grad.clone(), None
     ref_du, u.grad = u.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
 
     # triton implementation
-    tri, tri_ht = chunk_rwkv6(q, k, v, g, u, initial_state=h0, output_final_state=True)
-    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+    tri, tri_ht = chunk_rwkv6(q.clone(),
+                              k.clone(),
+                              v.clone(),
+                              w.clone(),
+                              u.clone(),
+                              initial_state=h0.clone(),
+                              output_final_state=True,
+                              head_first=head_first)
+    ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
-    tri_dg, g.grad = g.grad.clone(), None
-    tri_dh0, h0.grad = h0.grad.clone(), None
+    tri_dw, w.grad = w.grad.clone(), None
     tri_du, u.grad = u.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert get_err_ratio(tri, ref) < 0.004, f" o diff: {torch.abs(ref - tri).max()}, ref_o_max: {ref.abs().max()}, tri_o_max: {tri.abs().max()}, ratio: {get_err_ratio(ref, tri)}"
-    assert get_err_ratio(tri_ht, ref_ht) < 0.005, f"ht diff: {torch.abs(ref_ht - tri_ht).max()}, ratio: {get_err_ratio(ref_ht, tri_ht)}"
-    assert get_err_ratio(tri_dq, ref_dq) < 0.005, f"dq diff: {torch.abs(ref_dq - tri_dq).max()}, ratio: {get_err_ratio(ref_dq, tri_dq)}"
-    assert get_err_ratio(tri_dk, ref_dk) < 0.005, f"dk diff: {torch.abs(ref_dk - tri_dk).max()}, ratio: {get_err_ratio(ref_dk, tri_dk)}"
-    assert get_err_ratio(tri_dv, ref_dv) < 0.005, f"dv diff: {torch.abs(ref_dv - tri_dv).max()}, ratio: {get_err_ratio(ref_dv, tri_dv)}"
-    assert get_err_ratio(tri_dg, ref_dg) < 0.005, f"dg diff: {torch.abs(ref_dg - tri_dg).max()}, ref_dg_max: {ref_dg.abs().max()}, tri_dg_max: {tri_dg.abs().max()},  ratio: {get_err_ratio(ref_dg, tri_dg)}"
-    assert get_err_ratio(tri_dh0, ref_dh0) < 0.005, f"dh0 diff: {torch.abs(ref_dh0 - tri_dh0).max()}, ref_dho_max: {ref_dh0.abs().max()}, tri_dh0_max: {tri_dh0.abs().max()}, ratio: {get_err_ratio(ref_dh0, tri_dh0)}"
-    assert get_err_ratio(tri_du, ref_du) < 0.005, f"du diff: {torch.abs(ref_du - tri_du).max()}, ref_du_max: {ref_du.abs().max()}, tri_du_max: {tri_du.abs().max()}, ratio: {get_err_ratio(ref_du, tri_du)}"
+    assert_close('  o', ref, tri, 0.004)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
+    assert_close(' dw', ref_dw, tri_dw, 0.005)
+    assert_close(' du', ref_du, tri_du, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
+@pytest.mark.parametrize("N", [4])
+@pytest.mark.parametrize("T", [64, 128, 200, 250, 256, 300, 400, 512, 1000, 2048])
+@pytest.mark.parametrize("H", [4])
+@pytest.mark.parametrize("D", [300, 100])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float])
+def test_chunk_varlen(
+    N: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    # randomly split the sequence into N segments
+    offsets = torch.cat([
+        torch.tensor([0], dtype=torch.long),
+        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.tensor([T], dtype=torch.long)
+    ], 0).cuda().sort()[0]
+    # seq-first required for inputs with variable lengths
+    q = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
+    w = F.logsigmoid(torch.randn((1, T, H, D), dtype=dtype, device='cuda')).requires_grad_(True)
+    u = torch.randn(H, D, dtype=dtype, device='cuda').requires_grad_(True)
+    h0 = torch.randn((N, H, D, D), dtype=dtype, device='cuda').requires_grad_()
+    do = torch.randn_like(v)
 
+    ref, ref_ht = fused_recurrent_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=offsets,
+        head_first=False
+    )
+    ref, _ = fused_recurrent_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=False,
+        cu_seqlens=offsets,
+        head_first=False
+    )
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dw, w.grad = w.grad.clone(), None
+    ref_du, u.grad = u.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
+
+    tri, tri_ht = chunk_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=offsets,
+        head_first=False
+    )
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dw, w.grad = w.grad.clone(), None
+    tri_du, u.grad = u.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
+    assert_close('  o', ref, tri, 0.004)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
+    assert_close(' dw', ref_dw, tri_dw, 0.005)
+    assert_close(' du', ref_du, tri_du, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)

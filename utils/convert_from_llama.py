@@ -43,14 +43,20 @@ def sizeof_fmt(num, suffix='B'):
 def convert(
     llama: str,
     config: str,
-    output: str
+    output: str,
+    precision: str = 'float32'
 ):
     AutoTokenizer.from_pretrained(llama).save_pretrained(output)
-    llama = AutoModelForCausalLM.from_pretrained(llama)
+    llama = AutoModelForCausalLM.from_pretrained(llama, torch_dtype=precision)
     print(f"Loading Llama ...\n{llama}")
 
     config = AutoConfig.from_pretrained(config)
+    config.torch_dtype = precision
     model = AutoModelForCausalLM.from_config(config)
+    if precision in ['float16', 'fp16']:
+        model = model.to(torch.float16)
+    elif precision in ['bfloat16', 'bf16']:
+        model = model.to(torch.bfloat16)
     num_parameters = model.num_parameters()
     print(f"Initializing the model from the config:\n{config}\n{model}")
     print(f"Number of parameters in total: {num_parameters} ({sizeof_fmt(num_parameters)})")
@@ -142,9 +148,12 @@ def convert(
                                            llama.model.layers[i].post_attention_layernorm.bias)
             model.model.layers[i].mlp.norm.eps = llama.model.layers[i].post_attention_layernorm.variance_epsilon
 
-        print(f"llama.model.layers.{i}.mlp.gate/up_proj.weight -> model.model.layers.{i}.mlp.gate_proj.weight")
-        model.model.layers[i].mlp.gate_proj.weight.data.copy_(torch.cat((llama.model.layers[i].mlp.gate_proj.weight,
-                                                                         llama.model.layers[i].mlp.up_proj.weight), 0))
+        print(f"llama.model.layers.{i}.mlp.gate_proj.weight -> model.model.layers.{i}.mlp.gate_proj.weight")
+        model.model.layers[i].mlp.gate_proj.weight.data.copy_(llama.model.layers[i].mlp.gate_proj.weight)
+        torch.testing.assert_close(model.model.layers[i].mlp.gate_proj.weight, llama.model.layers[i].mlp.gate_proj.weight)
+        print(f"llama.model.layers.{i}.mlp.up_proj.weight -> model.model.layers.{i}.mlp.up_proj.weight")
+        model.model.layers[i].mlp.up_proj.weight.data.copy_(llama.model.layers[i].mlp.up_proj.weight)
+        torch.testing.assert_close(model.model.layers[i].mlp.up_proj.weight, llama.model.layers[i].mlp.up_proj.weight)
 
         print(f"llama.model.layers.{i}.mlp.down_proj.weight -> model.model.layers.{i}.mlp.down_proj.weight")
         model.model.layers[i].mlp.down_proj.weight.data.copy_(llama.model.layers[i].mlp.down_proj.weight)
@@ -176,5 +185,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", default='mistralai/Mistral-7B-v0.1')
     parser.add_argument("--config", default='configs/transformer_7B.json')
     parser.add_argument("--output", default='converted/transformer-7B')
+    parser.add_argument('--precision', type=str, default='float32')
     args = parser.parse_args()
-    convert(args.model, args.config, args.output)
+    convert(args.model, args.config, args.output, precision=args.precision)

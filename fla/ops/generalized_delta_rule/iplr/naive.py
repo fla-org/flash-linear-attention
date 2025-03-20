@@ -39,6 +39,7 @@ def iplr_chunkwise(q, k, v, alpha, beta, initial_state=None, output_final_state=
     v = v
     assert l % chunk_size == 0
 
+    S = k.new_zeros(b, h, d_k, d_v)
     if initial_state is not None:
         S += initial_state
 
@@ -54,7 +55,6 @@ def iplr_chunkwise(q, k, v, alpha, beta, initial_state=None, output_final_state=
     attn = attn + torch.eye(chunk_size, dtype=torch.float, device=q.device)
     u = attn @ v2
     w = attn @ alpha
-    S = k.new_zeros(b, h, d_k, d_v)
     o = torch.zeros_like(v)
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=1)
     for i in range(0, l // chunk_size):

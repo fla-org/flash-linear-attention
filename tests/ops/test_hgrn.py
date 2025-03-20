@@ -110,7 +110,7 @@ def test_fused_recurrent_varlen(
     ref_dg, g.grad = g.grad.clone(), None
     ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, tri_ht = fused_recurrent_hgrn(x, g, h0, output_final_state=True, offsets=offsets)
+    tri, tri_ht = fused_recurrent_hgrn(x, g, h0, output_final_state=True, cu_seqlens=offsets)
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dx, x.grad = x.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None

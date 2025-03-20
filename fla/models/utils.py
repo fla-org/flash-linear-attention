@@ -15,10 +15,13 @@ class Cache(transformers.cache_utils.Cache):
     It stores the states of each layer as the tensor of shape `[batch_size, key_dim, value_dim]`.
     """
 
+    is_compileable = True
+
     def __init__(
         self,
         seen_tokens: int = 0
     ) -> Cache:
+        super().__init__()
 
         self.states: List[Dict[str, Any]] = []
 
@@ -129,6 +132,7 @@ class Cache(transformers.cache_utils.Cache):
         return tuple(self.states)
 
     @classmethod
+    @torch.compiler.disable
     def from_legacy_cache(
         cls,
         past_key_values: Optional[Tuple] = None,
@@ -137,7 +141,7 @@ class Cache(transformers.cache_utils.Cache):
         """Converts a cache in the legacy cache format into an equivalent `Cache`."""
 
         cache = cls(seen_tokens)
-        if past_key_values is not None:
+        if isinstance(past_key_values, list):
             for layer_idx in range(len(past_key_values)):
                 cache.states.append(past_key_values[layer_idx])
         return cache

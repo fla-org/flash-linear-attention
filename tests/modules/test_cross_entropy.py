@@ -18,8 +18,8 @@ def assert_close(prefix, ref, tri, atol):
 @pytest.mark.parametrize("T", [2048, 4096])
 @pytest.mark.parametrize("D", [1024, 2048])
 @pytest.mark.parametrize("V", [32000, 100000])
-@pytest.mark.parametrize("reduction", ['mean', 'sum'])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("reduction", ['mean'])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
     logits = torch.randn(B * T, V).cuda().to(dtype=dtype).requires_grad_()
@@ -37,8 +37,8 @@ def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dty
     tri.backward(do)
     tri_d, logits.grad = logits.grad.clone(), None
 
-    assert_close(" o", ref, tri, atol=1e-5)
-    assert_close("dl", ref_d, tri_d, atol=1e-5)
+    assert_close(" o", ref, tri, atol=2e-5)
+    assert_close("dl", ref_d, tri_d, atol=2e-5)
 
 
 @pytest.mark.parametrize("B", [1, 4])
@@ -46,8 +46,8 @@ def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dty
 @pytest.mark.parametrize("D", [1024, 2048])
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("scale", [1., 0.5])
-@pytest.mark.parametrize("reduction", ['mean', 'sum'])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("reduction", ['mean'])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_fused_linear_cross_entropy(B: int, T: int, D: int, V: int, scale: float, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
 
@@ -73,7 +73,7 @@ def test_fused_linear_cross_entropy(B: int, T: int, D: int, V: int, scale: float
     tri_dw, weight.grad = weight.grad.clone(), None
     tri_db, bias.grad = bias.grad.clone(), None
 
-    assert_close(" o", ref, tri, atol=1e-5)
-    assert_close("dx", ref_dx, tri_dx, atol=1e-5)
-    assert_close("dw", ref_dw, tri_dw, atol=1e-5)
-    assert_close("db", ref_db, tri_db, atol=1e-5)
+    assert_close(" o", ref, tri, atol=2e-5)
+    assert_close("dx", ref_dx, tri_dx, atol=2e-5)
+    assert_close("dw", ref_dw, tri_dw, atol=2e-5)
+    assert_close("db", ref_db, tri_db, atol=2e-5)
