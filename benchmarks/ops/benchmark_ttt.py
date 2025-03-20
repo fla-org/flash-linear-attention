@@ -8,7 +8,6 @@ from benchmark import benchmark_backward, benchmark_combined, benchmark_forward
 from fla.ops.delta_rule import chunk_delta_rule
 from fla.ops.gla import chunk_gla
 from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
-from fla.ops.ttt.naive import chunk_ttt_linear_ref
 from fla.utils import device
 
 # from flash_attn import flash_attn_func

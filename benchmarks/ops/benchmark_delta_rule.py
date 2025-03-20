@@ -5,9 +5,7 @@ import torch
 from benchmark import benchmark_backward, benchmark_combined, benchmark_forward
 from torch.nn import functional as F
 
-from fla.ops.delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
-from fla.ops.retention import fused_chunk_retention
-# from flash_attn import flash_attn_func
+from fla.ops.delta_rule import chunk_delta_rule, fused_chunk_delta_rule
 from fla.utils import device
 
 
