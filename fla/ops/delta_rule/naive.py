@@ -2,7 +2,6 @@
 
 import torch
 from einops import rearrange
-from torch.nn import functional as F
 
 
 def delta_rule_recurrence(q, k, v, beta, initial_state=None, output_final_state=True):
@@ -119,48 +118,3 @@ def delta_rule_parallel(q, k, v, beta, BM=128, BN=32):
         A[:, :, i*BN:i*BN+BN, i*BN:i*BN+BN] = A_local[:, :, i]
 
     return o, A
-
-
-if __name__ == '__main__':
-    B = 2
-    H = 4
-    L = 512
-    DK = 128
-    DV = 128
-    from fla.utils import device
-    q = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
-    k = (torch.randn(B, H, L, DK)).to(device)
-    k = F.normalize(k, dim=-1, p=2).requires_grad_(True)
-    v = (torch.randn(B, H, L, DV)).to(device).requires_grad_(True)
-    beta = torch.randn(B, H, L).to(device).sigmoid().requires_grad_(True)
-
-    o, _ = delta_rule_recurrence(q, k, v, beta)
-    do = torch.randn(B, H, L, DV).to(device)
-    o.backward(do, retain_graph=True)
-    q_grad, q.grad = q.grad, None
-    k_grad, k.grad = k.grad, None
-    v_grad, v.grad = v.grad, None
-    beta_grad, beta.grad = beta.grad, None
-
-    o2, _ = delta_rule_chunkwise(q, k, v, beta)
-    o2.backward(do)
-    assert torch.allclose(o, o2, atol=1e-4), breakpoint()
-    assert torch.allclose(q.grad, q_grad, atol=1e-4), breakpoint()
-    assert torch.allclose(k.grad, k_grad, atol=1e-4), breakpoint()
-    assert torch.allclose(v.grad, v_grad, atol=1e-4), breakpoint()
-    assert torch.allclose(beta.grad, beta_grad, atol=1e-4), breakpoint()
-
-    q_grad, q.grad = q.grad, None
-    k_grad, k.grad = k.grad, None
-    v_grad, v.grad = v.grad, None
-    beta_grad, beta.grad = beta.grad, None
-
-    o3, _ = delta_rule_parallel(q, k, v, beta)
-    o3.backward(do)
-    assert torch.allclose(o, o3, atol=1e-4), breakpoint()
-    assert torch.allclose(q.grad, q_grad, atol=1e-4), breakpoint()
-    assert torch.allclose(k.grad, k_grad, atol=1e-4), breakpoint()
-    assert torch.allclose(v.grad, v_grad, atol=1e-4), breakpoint()
-    assert torch.allclose(beta.grad, beta_grad, atol=1e-4), breakpoint()
-
-    print("All passed!")
