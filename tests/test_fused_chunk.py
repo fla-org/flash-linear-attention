@@ -101,10 +101,12 @@ if __name__ == '__main__':
     B, H, T, D = 2, 8, 1024, 128
     dtype = torch.float
     torch.manual_seed(42)
+    from fla.utils import device
+
     # [batch_size, n_heads, seq_len, d_head]
-    q = torch.randn((B, H, T, D), dtype=dtype, device='cuda')
-    k = torch.randn((B, H, T, D), dtype=dtype, device='cuda')
-    v = torch.randn((B, H, T, D), dtype=dtype, device='cuda')
+    q = torch.randn((B, H, T, D), dtype=dtype, device=device)
+    k = torch.randn((B, H, T, D), dtype=dtype, device=device)
+    v = torch.randn((B, H, T, D), dtype=dtype, device=device)
 
     ref = AttentionFunction.apply(q, k, v)
     infos = torch.cuda.get_device_properties(q)

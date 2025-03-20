@@ -20,6 +20,7 @@ def time_fwd_bwd(func, *args, **kwargs):
     time_fb = benchmark_combined(func, *args, **kwargs)
     return time_fb[1].mean
 
+
 def time_bwd(func, *args, **kwargs):
     time_fb = benchmark_backward(func, *args, **kwargs)
     return time_fb[1].mean
@@ -62,7 +63,8 @@ for causal in causal_vals:
             time_f_b[config, "chunk_gla"] = f_b
 
             q = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
+            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device,
+                                              dtype=dtype), p=2, dim=-1).requires_grad_(True)
             v = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             beta = torch.rand(B, H, seqlen, device=device, dtype=dtype).sigmoid().requires_grad_(True)
             o2, _ = chunk_delta_rule(q, k, v, beta)
@@ -73,7 +75,8 @@ for causal in causal_vals:
             time_f_b[config, "chunk_delta_rule"] = f_b
 
             q = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
+            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device,
+                                              dtype=dtype), p=2, dim=-1).requires_grad_(True)
             v = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             w = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)
             b = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)
@@ -86,7 +89,8 @@ for causal in causal_vals:
             time_f_b[config, "chunk_ttt_linear"] = f_b
 
             q = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
+            k = torch.nn.functional.normalize(torch.randn(B, H, seqlen, headdim, device=device,
+                                              dtype=dtype), p=2, dim=-1).requires_grad_(True)
             v = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             w = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)
             b = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)

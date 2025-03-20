@@ -82,5 +82,6 @@ def benchmark(T, provider):
         )
     return results
 
+
 if __name__ == '__main__':
     benchmark.run(print_data=True, save_path='.')

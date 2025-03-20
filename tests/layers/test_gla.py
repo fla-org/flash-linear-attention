@@ -18,8 +18,9 @@ def test_gla(
     dtype: torch.dtype,
     activation: str
 ):
-    naive = GatedLinearAttention(hidden_size=H, gate_fn=activation, fuse_norm=False).to(dtype).cuda()
-    fused = GatedLinearAttention(hidden_size=H, gate_fn=activation, fuse_norm=True).to(dtype).cuda()
+    from fla.utils import device
+    naive = GatedLinearAttention(hidden_size=H, gate_fn=activation, fuse_norm=False).to(dtype).to(device)
+    fused = GatedLinearAttention(hidden_size=H, gate_fn=activation, fuse_norm=True).to(dtype).to(device)
     fused.q_proj.weight.data.copy_(naive.q_proj.weight.data)
     fused.k_proj.weight.data.copy_(naive.k_proj.weight.data)
     fused.v_proj.weight.data.copy_(naive.v_proj.weight.data)
@@ -29,7 +30,7 @@ def test_gla(
     fused.gk_proj[1].weight.data.copy_(naive.gk_proj[1].weight.data)
     fused.gk_proj[1].bias.data.copy_(naive.gk_proj[1].bias.data)
 
-    x = torch.randn(B, T, H, dtype=dtype).cuda()
+    x = torch.randn(B, T, H, dtype=dtype).to(device)
     naive_x = x.clone().requires_grad_(True)
     fused_x = x.clone().requires_grad_(True)
     naive_o, *_ = naive(naive_x)

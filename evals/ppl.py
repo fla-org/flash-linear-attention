@@ -174,10 +174,14 @@ def main():
     parser.add_argument('--block_size', type=int, default=28672)
     parser.add_argument('--bucket_size', type=int, default=2048)
     parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--device', type=str, default=None)
     args = parser.parse_args()
 
     # Set device and random seed
-    device = "cuda"
+    if args.device is None:
+        from fla.utils import device
+    else:
+        device = args.device
     torch.manual_seed(0)
 
     # Load model and tokenizer
