@@ -34,6 +34,7 @@ class RWKV7Attention(nn.Module):
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
+        is_first_layer: bool = True,
         fuse_norm: bool = False,
         value_dim: int = None,
         **kwargs
@@ -60,6 +61,7 @@ class RWKV7Attention(nn.Module):
         self.a_low_rank_dim = a_low_rank_dim
         self.v_low_rank_dim = v_low_rank_dim
         self.layer_idx = layer_idx
+        self.is_first_layer = is_first_layer
         self.fuse_norm = fuse_norm
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
@@ -76,7 +78,7 @@ class RWKV7Attention(nn.Module):
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
         self.w_lora = LoRA(hidden_size, self.key_dim, low_rank_dim=decay_low_rank_dim, activation='tanh')
-        if self.layer_idx != 0:
+        if not is_first_layer:
             self.v_lora = LoRA(hidden_size, self.value_dim, low_rank_dim=v_low_rank_dim, activation=None)
         self.a_lora = LoRA(hidden_size, self.key_dim, low_rank_dim=a_low_rank_dim, activation=None)
         self.g_lora = LoRA(hidden_size, self.value_dim, low_rank_dim=gate_low_rank_dim, activation='sigmoid', bias=False)
@@ -163,7 +165,7 @@ class RWKV7Attention(nn.Module):
         k = self.k_proj(xk)
         v = self.v_proj(xv)
 
-        if self.layer_idx == 0:
+        if self.is_first_layer:
             v_first = v
         else:
             v = torch.lerp(v, v_first, self.v_lora(xv).sigmoid())
