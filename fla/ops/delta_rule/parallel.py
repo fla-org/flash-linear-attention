@@ -1,7 +1,5 @@
-
-
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Tuple
 
@@ -11,18 +9,17 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.delta_rule.wy_fast import fwd_prepare_T
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [1, 2, 4]
     ],
-    key=["BT", "K", "V"],
+    key=['BT', 'K', 'V'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def chunk_transform_qk_fwd_kernel(
     q,
     k,
@@ -33,27 +30,20 @@ def chunk_transform_qk_fwd_kernel(
     q_new,
     k_new,
     A_local,
-    s_k_h,
-    s_k_t,
-    s_k_d,
-    s_v_h,
-    s_v_t,
-    s_v_d,
     scale,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
     BT: tl.constexpr,
-    OUTPUT_ATTENTIONS: tl.constexpr,
-    # SAVE_ATTENTION: tl.constexpr
+    OUTPUT_ATTENTIONS: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
 
-    p_q = tl.make_block_ptr(q + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i_t * BT, 0), (BT, BV), (1, 0))
+    p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     b_q = (tl.load(p_q, boundary_check=(0, 1)) * scale).to(p_q.dtype.element_ty)
     b_k = tl.load(p_k, boundary_check=(0, 1))
     b_v = tl.load(p_v, boundary_check=(0, 1))
@@ -78,19 +68,29 @@ def chunk_transform_qk_fwd_kernel(
         tl.store(p_a, b_qkT.to(p_a.dtype.element_ty), boundary_check=(0, 1))
 
     b_kkT = tl.dot(b_kk, b_T, allow_tf32=False).to(b_k.dtype)
-    p_o = tl.make_block_ptr(o + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i_t * BT, 0), (BT, BV), (1, 0))
+    p_o = tl.make_block_ptr(o + i_bh * T*V, (T, V), (V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     tl.store(p_o, tl.dot(b_qkT, b_v).to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
-    p_q_new = tl.make_block_ptr(q_new + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_q_new = tl.make_block_ptr(q_new + i_bh * T*K, (T, K), (K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     tl.store(p_q_new, (b_q - tl.dot(b_qkT, b_k_beta, allow_tf32=False)).to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
 
-    p_k_new = tl.make_block_ptr(k_new + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i_t * BT, 0), (BT, BK), (1, 0))
-    tl.store(p_k_new, (b_k - tl.dot(tl.trans(b_kkT), b_k_beta, allow_tf32=False)
-                       ).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
+    p_k_new = tl.make_block_ptr(k_new + i_bh * T*K, (T, K), (K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    b_k_new = b_k - tl.dot(tl.trans(b_kkT), b_k_beta, allow_tf32=False)
+    tl.store(p_k_new, b_k_new.to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
 
 
-def chunk_transform_qk_fwd_fn(q, k, v, beta, A, scale, BT, output_attentions):
+def chunk_transform_qk_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    scale: float,
+    chunk_size: int,
+    output_attentions: bool
+):
     B, H, T, K = k.shape
+    BT = chunk_size
     q_new = torch.empty_like(q)
     k_new = torch.empty_like(k)
     o = torch.empty_like(v)
@@ -98,9 +98,15 @@ def chunk_transform_qk_fwd_fn(q, k, v, beta, A, scale, BT, output_attentions):
     V = v.shape[-1]
     A_local = torch.empty_like(A) if output_attentions else None
     chunk_transform_qk_fwd_kernel[grid](
-        q, k, v, beta, o, A, q_new, k_new, A_local,
-        q.stride(1), q.stride(2), q.stride(3),
-        v.stride(1), v.stride(2), v.stride(3),
+        q,
+        k,
+        v,
+        beta,
+        o,
+        A,
+        q_new,
+        k_new,
+        A_local,
         scale=scale,
         T=T,
         K=K,
@@ -118,13 +124,13 @@ def chunk_transform_qk_fwd_fn(q, k, v, beta, A, scale, BT, output_attentions):
         triton.Config({}, num_warps=1),
         triton.Config({}, num_warps=2),
     ],
-    key=["BT"],
+    key=['BT'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def save_intra_chunk_attn(
     A,
     A_local,
-    T: tl.constexpr,
+    T,
     BT: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -137,7 +143,7 @@ def save_intra_chunk_attn(
 @triton.heuristics({
     'OUTPUT_ATTENTIONS': lambda args: args['attn'] is not None
 })
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def parallel_delta_rule_fwd_kernel(
     q,
     k,
@@ -147,11 +153,7 @@ def parallel_delta_rule_fwd_kernel(
     o,
     o_new,
     attn,
-    s_k_h,
-    s_k_t,
-    s_v_h,
-    s_v_t,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -161,7 +163,7 @@ def parallel_delta_rule_fwd_kernel(
     OUTPUT_ATTENTIONS: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
-    p_q = tl.make_block_ptr(q + i_bh * s_k_h, (T, K), (s_k_t, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
 
     # the Q block is kept in the shared memory throughout the whole kernel
     # [BT, BK]
@@ -169,16 +171,16 @@ def parallel_delta_rule_fwd_kernel(
     b_q += tl.load(p_q, boundary_check=(0, 1))
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
-    p_o = tl.make_block_ptr(o + i_bh * s_v_h, (T, V), (s_v_t, 1), (i_t * BT, 0), (BT, BV), (1, 0))
+    p_o = tl.make_block_ptr(o + i_bh * T*V, (T, V), (V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     b_o += tl.load(p_o, boundary_check=(0, 1))
 
     # As opposed to Flashattention, this kernel requires scanning the KV blocks from right to left
     # Q block and K block have overlap.
     # masks required
     for offset in range((i_t + 1) * BT - 2 * BS, i_t * BT - BS, -BS):
-        p_k = tl.make_block_ptr(k + i_bh * s_k_h, (K, T), (1, s_k_t), (0, offset), (BK, BS), (0, 1))
-        p_k2 = tl.make_block_ptr(k2 + i_bh * s_k_h, (T, K), (s_k_t, 1), (offset, 0), (BS, BK), (1, 0))
-        p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, 1), (offset, 0), (BS, BV), (1, 0))
+        p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (0, offset), (BK, BS), (0, 1))
+        p_k2 = tl.make_block_ptr(k2 + i_bh * T*K, (T, K), (K, 1), (offset, 0), (BS, BK), (1, 0))
+        p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (offset, 0), (BS, BV), (1, 0))
         p_beta = tl.make_block_ptr(beta + i_bh * T, (T, ), (1, ), (offset, ), (BS, ), (0,))
         # [BK, BS]
         b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -202,10 +204,10 @@ def parallel_delta_rule_fwd_kernel(
     # Q block and K block have no overlap
     # no need for mask, thereby saving flops
     for offset in range(i_t * BT - BS, -BS, -BS):
-        p_k = tl.make_block_ptr(k + i_bh * s_k_h, (K, T), (1, s_k_t), (0, offset), (BK, BS), (0, 1))
-        p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, 1), (offset, 0), (BS, BV), (1, 0))
+        p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (0, offset), (BK, BS), (0, 1))
+        p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (offset, 0), (BS, BV), (1, 0))
         p_beta = tl.make_block_ptr(beta + i_bh * T, (T, ), (1, ), (offset, ), (BS, ), (0,))
-        p_k2 = tl.make_block_ptr(k2 + i_bh * s_k_h, (T, K), (s_k_t, 1), (offset, 0), (BS, BK), (1, 0))
+        p_k2 = tl.make_block_ptr(k2 + i_bh * T*K, (T, K), (K, 1), (offset, 0), (BS, BK), (1, 0))
 
         # [BK, BS]
         b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -224,14 +226,14 @@ def parallel_delta_rule_fwd_kernel(
             p_a = tl.make_block_ptr(attn + i_bh * T * T, (T, T), (T, 1), (i_t * BT, offset), (BT, BS), (1, 0))
             tl.store(p_a, b_s.to(p_a.dtype.element_ty), boundary_check=(0, 1))
 
-    p_o_new = tl.make_block_ptr(o_new + i_bh * s_v_h, (T, V), (s_v_t, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+    p_o_new = tl.make_block_ptr(o_new + i_bh * T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
     tl.store(p_o_new, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
 class ParallelDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, beta, scale, output_attentions):
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -243,7 +245,16 @@ class ParallelDeltaRuleFunction(torch.autograd.Function):
 
         A = fwd_prepare_T(k, beta, BS)
         attn = q.new_zeros(B, H, T, T) if output_attentions else None
-        q_new, k_new, o, A_local = chunk_transform_qk_fwd_fn(q, k, v, beta, A, scale, BS, output_attentions)
+        q_new, k_new, o, A_local = chunk_transform_qk_fwd(
+            q,
+            k,
+            v,
+            beta,
+            A,
+            scale,
+            BS,
+            output_attentions
+        )
 
         num_stages = 3 if K <= 64 else 2
         num_warps = 4
@@ -259,10 +270,6 @@ class ParallelDeltaRuleFunction(torch.autograd.Function):
             o=o,
             o_new=o_new,
             attn=attn,
-            s_k_h=k.stride(1),
-            s_k_t=k.stride(2),
-            s_v_h=v.stride(1),
-            s_v_t=v.stride(2),
             T=T,
             K=K,
             V=V,
@@ -277,12 +284,15 @@ class ParallelDeltaRuleFunction(torch.autograd.Function):
         if output_attentions:
             grid = (triton.cdiv(T, BS), B * H)
             save_intra_chunk_attn[grid](
-                A=attn, A_local=A_local, T=T, BT=BS
+                A=attn,
+                A_local=A_local,
+                T=T,
+                BT=BS
             )
         return o_new.to(q.dtype), attn
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, d_attn=None):
         raise NotImplementedError('Backward pass is not implemented. Stay tuned!')
@@ -382,19 +392,3 @@ def naive_delta_rule_parallel(q, k, v, beta, BM=128, BN=32):
         A[:, :, i*BN:i*BN+BN, i*BN:i*BN+BN] = A_local[:, :, i]
 
     return o, A
-
-
-if __name__ == "__main__":
-    B, H, T, K, V = 2, 4, 512, 64, 64
-    torch.set_default_dtype(torch.bfloat16)
-
-    q = torch.randn[B, H, T, K].cuda()
-    k = torch.nn.functional.normalize(torch.randn[B, H, T, K].cuda(), p=2, dim=-1)
-    v = torch.randn[B, H, T, V].cuda()
-    beta = torch.ones(B, H, T).cuda()
-
-    output_attentions = True
-    ref_o, ref_attn = naive_delta_rule_parallel(q.clone(), k.clone(), v.clone(), beta.clone())
-    o, attn = parallel_delta_rule(q.clone(), k.clone(), v.clone(), beta.clone(), K**-0.5, output_attentions)
-    print((ref_o-o).abs().max())
-    print((ref_attn-attn).abs().max())

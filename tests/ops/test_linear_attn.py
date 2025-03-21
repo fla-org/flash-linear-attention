@@ -2,11 +2,10 @@
 
 import pytest
 import torch
-import torch.nn.functional as F
 
-from fla.ops.linear_attn import (chunk_linear_attn, fused_chunk_linear_attn,
-                                 fused_recurrent_linear_attn)
+from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from fla.ops.linear_attn.naive import naive_chunk_linear_attn
+from fla.utils import device
 
 
 @pytest.mark.parametrize("B", [4])
@@ -23,9 +22,9 @@ def test_fused_recurrent(
 ):
     torch.manual_seed(42)
     atol = 1e-3
-    q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
+    q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
 
     do = torch.randn_like(v)
     ref = naive_chunk_linear_attn(q, k, v, normalize=False)
@@ -60,10 +59,10 @@ def test_chunk(
 ):
     torch.manual_seed(42)
     atol = 1e-3
-    q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    h0 = torch.randn((B, H, D, D), dtype=dtype, device='cuda').requires_grad_()
+    q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    h0 = torch.randn((B, H, D, D), dtype=dtype, device=device).requires_grad_()
     do = torch.randn_like(v)
     ref, ref_ht = fused_recurrent_linear_attn(q, k, v, initial_state=h0, output_final_state=True, normalize=False)
     ref.backward(do)
@@ -98,10 +97,10 @@ def test_fused_chunk(
 ):
     torch.manual_seed(42)
     atol = 1e-3
-    q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_()
-    h0 = torch.zeros((B, H, D, D), dtype=dtype, device='cuda').requires_grad_()
+    q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
+    h0 = torch.zeros((B, H, D, D), dtype=dtype, device=device).requires_grad_()
     do = torch.randn_like(v)
     ref, ref_ht = fused_recurrent_linear_attn(q, k, v, initial_state=h0, output_final_state=True, normalize=False)
     ref.backward(do)

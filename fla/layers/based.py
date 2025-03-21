@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 """
 Linear attention in Based.
@@ -47,30 +47,20 @@ class BasedLinearAttention(nn.Module):
         self.feature_map = TaylorFeatureMap(feature_dim)
         self.eps = eps
 
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
-
     def forward(self, hidden_states: torch.Tensor, **kwargs):
         mode = self.mode
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-        q, k, v = map(lambda x: rearrange(x, "... (h d) -> ... h d", h=self.num_heads), [q, k, v])
+        q, k, v = map(lambda x: rearrange(x, "... (h d) -> ... h d", d=self.head_dim), [q, k, v])
         if mode == "fused_chunk":
             q, k = self.feature_map(q), self.feature_map(k)
-            o = fused_chunk_linear_attn(q, k, v, normalize=True, scale=1, head_first=False)
+            o, _ = fused_chunk_linear_attn(q, k, v, normalize=True, scale=1, head_first=False)
         elif mode == 'chunk':
             q, k = self.feature_map(q), self.feature_map(k)
-            o = chunk_linear_attn(q, k, v, normalize=True, scale=1, head_first=False)
+            o, _ = chunk_linear_attn(q, k, v, normalize=True, scale=1, head_first=False)
         elif mode == 'parallel':
             assert q.shape[-1] <= 128
-            o = parallel_based(q, k, v, True, True, head_first=False)
+            o = parallel_based(q, k, v, scale=1, use_norm=True, head_first=False)
+        o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
         o = self.dropout(o)
         return o

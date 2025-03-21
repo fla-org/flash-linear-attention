@@ -32,16 +32,16 @@ class GSAConfig(PretrainedConfig):
         max_position_embeddings: int = 2048,
         hidden_act: str = "swish",
         elementwise_affine: Optional[bool] = True,
-        norm_first: bool = True,
         norm_eps: float = 1e-6,
         attn: Optional[Dict] = None,
         use_cache: bool = True,
         pad_token_id: int = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
-        initializer_range: float = 0.02,
+        initializer_range: float = 0.006,
         tie_word_embeddings: bool = False,
         fuse_norm: bool = True,
+        fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
         **kwargs
@@ -66,13 +66,14 @@ class GSAConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.hidden_act = hidden_act
         self.elementwise_affine = elementwise_affine
-        self.norm_first = norm_first
         self.norm_eps = norm_eps
         self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
-        self.fuse_cross_entropy = fuse_cross_entropy
+
         self.fuse_norm = fuse_norm
+        self.fuse_swiglu = fuse_swiglu
+        self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
 
         if attn is not None:
@@ -83,7 +84,9 @@ class GSAConfig(PretrainedConfig):
             if 'num_heads' not in attn:
                 raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
             attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
+            attn['qkv_bias'] = attn.get('qkv_bias', False)
             attn['window_size'] = attn.get('window_size', None)
+            attn['rope_theta'] = attn.get('rope_theta', 10000.)
 
         super().__init__(
             pad_token_id=pad_token_id,

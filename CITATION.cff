@@ -8,6 +8,6 @@ authors:
   given-names: "Yu"
   orcid: "https://orcid.org/0000-0002-8345-3835"
 title: "FLA: A Triton-Based Library for Hardware-Efficient Implementations of Linear Attention Mechanism"
-version: 0.0.1
+version: 0.1
 date-released: 2024-01-18
-url: "https://github.com/sustcsonglin/flash-linear-attention"
+url: "https://github.com/fla-org/flash-linear-attention"

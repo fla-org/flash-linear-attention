@@ -450,16 +450,6 @@ class FusedRecurrentRWKV4Function(Function):
     ) -> tuple[Tensor, Tensor]:
         ctx.input_dtype = k.dtype
 
-        if (
-            w.device.type != "cuda"
-            or u.device.type != "cuda"
-            or k.device.type != "cuda"
-            or v.device.type != "cuda"
-        ):
-            raise ValueError(
-                "Calling the CUDA kernel for wkv attention requires all tensors to be on CUDA devices."
-            )
-
         w = -torch.exp(w.float().contiguous())
         if k.dtype == torch.float16:
             u = u.float()

@@ -1,0 +1,40 @@
+[project]
+name = "flash-linear-attention"
+dynamic = ["version"]
+description = "Fast Triton-based implementations of causal linear attention"
+readme = "README.md"
+authors = [
+    { name = "Songlin Yang", email = "yangsl66@mit.edu" },
+    { name = "Yu Zhang", email = "yzhang.cs@outlook.com" },
+]
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.5",
+    "transformers>=4.45.0",
+    "triton>=3.0",
+    "datasets>=3.3.0",
+    "einops",
+    "ninja",
+]
+
+[project.optional-dependencies]
+conv1d = ["causal-conv1d>=1.4.0"]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/fla-org/flash-linear-attention"
+
+[build-system]
+requires = ["setuptools>=45", "wheel", "ninja", "torch"]
+build-backend = "setuptools.build_meta"
+
+[tool.isort]
+line_length = 127
+multi_line_output = 3

@@ -8,20 +8,16 @@ import triton
 import triton.language as tl
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-        triton.Config({}, num_warps=16),
-        triton.Config({}, num_warps=32),
-    ],
-    key=['D']
-)
 @triton.heuristics({
     'HAS_SCALE': lambda args: args['scale'] is not None
 })
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [1, 2, 4, 8, 16, 32]
+    ],
+    key=['D']
+)
 @triton.jit
 def logsumexp_fwd_kernel(
     x,
@@ -31,7 +27,7 @@ def logsumexp_fwd_kernel(
     B: tl.constexpr,
     HAS_SCALE: tl.constexpr
 ):
-    i_n, i_d = tl.program_id(0), tl.program_id(1)
+    i_n, i_d = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     o_d = i_d * B + tl.arange(0, B)
     m_d = o_d < D
 

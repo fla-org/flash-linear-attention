@@ -4,24 +4,26 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import (BaseModelOutputWithPast,
-                                           CausalLMOutputWithPast)
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
+from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.rwkv6 import LerpLinear, RWKV6Attention
 from fla.models.rwkv6.configuration_rwkv6 import RWKV6Config
 from fla.models.utils import Cache
-from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
-                         LayerNorm)
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
 from fla.modules.activations import ACT2FN
+
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
 
 logger = logging.get_logger(__name__)
 
@@ -64,12 +66,12 @@ class RWKV6FeedForward(nn.Module):
     ) -> torch.Tensor:
         if attention_mask is not None:
             x = x.mul_(attention_mask[:, -x.shape[-2]:, None])
-        if x.shape[1] == 1 and state is not None:
+        if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
         else:
             shifted = self.time_shift(x)
-            if state[self.layer_idx]['ffn_state'] is not None:
-                shifted[:, 0] = state[self.layer_idx]['ffn_state'][-1]
+            if state is not None and state[self.layer_idx]['ffn_state'] is not None:
+                shifted[:, 0] = state[self.layer_idx]['ffn_state']
         delta = shifted - x
         key = self.act_fn(self.key(x, delta))
         value = self.value(key)
@@ -84,20 +86,29 @@ class RWKV6FeedForward(nn.Module):
 class RWKV6Block(nn.Module):
     def __init__(self, config: RWKV6Config, layer_idx: int):
         super().__init__()
-        self.hidden_size = config.hidden_size
 
         self.config = config
         self.layer_idx = layer_idx
 
         if config.norm_first and layer_idx == 0:
-            self.pre_norm = LayerNorm(hidden_size=config.hidden_size, bias=config.norm_bias, eps=config.norm_eps)
-        self.attn_norm = LayerNorm(hidden_size=config.hidden_size, bias=config.norm_bias, eps=config.norm_eps)
+            self.pre_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
+                config.hidden_size,
+                bias=config.norm_bias,
+                eps=config.norm_eps
+            )
+        self.attn_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
+            config.hidden_size,
+            bias=config.norm_bias,
+            eps=config.norm_eps
+        )
         if config.attn is not None and layer_idx in config.attn['layers']:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
                 num_heads=config.attn['num_heads'],
                 num_kv_heads=config.attn['num_kv_heads'],
+                qkv_bias=config.attn['qkv_bias'],
                 window_size=config.attn['window_size'],
+                rope_theta=config.attn['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx
             )
@@ -114,7 +125,11 @@ class RWKV6Block(nn.Module):
                 fuse_norm=config.fuse_norm,
                 layer_idx=layer_idx
             )
-        self.ffn_norm = LayerNorm(hidden_size=config.hidden_size, bias=config.norm_bias, eps=config.norm_eps)
+        self.ffn_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
+            config.hidden_size,
+            bias=config.norm_bias,
+            eps=config.norm_eps
+        )
         self.ffn = RWKV6FeedForward(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
@@ -139,9 +154,15 @@ class RWKV6Block(nn.Module):
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            output_attentions=output_attentions
+            output_attentions=output_attentions,
+            **kwargs
         )
-        hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
+        if self.config.fuse_norm:
+            hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
+        else:
+            hidden_states = residual + hidden_states
+            residual = hidden_states
+            hidden_states = self.ffn_norm(hidden_states)
         hidden_states, past_key_values = self.ffn(hidden_states, attention_mask, past_key_values)
         hidden_states = residual + hidden_states
 
@@ -153,8 +174,10 @@ class RWKV6Block(nn.Module):
 class RWKV6PreTrainedModel(PreTrainedModel):
 
     config_class = RWKV6Config
+    base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['RWKV6Block']
+    _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
@@ -175,8 +198,8 @@ class RWKV6PreTrainedModel(PreTrainedModel):
             nn.init.normal_(module, mean=0.0, std=self.config.initializer_range)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+        elif hasattr(module, 'reset_parameters'):
+            module.reset_parameters()
 
         if rescale_prenorm_residual:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
@@ -185,14 +208,19 @@ class RWKV6PreTrainedModel(PreTrainedModel):
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
             # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
-            for name, p in module.named_parameters():
-                if name in ["o_proj.weight", "down_proj.weight"]:
-                    # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                    # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                    # We need to reinit p since this code could be called multiple times
-                    # Having just p *= scale would repeatedly scale it down
-                    with torch.no_grad():
-                        p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
+            p = None
+            if hasattr(module, 'o_proj'):
+                p = module.o_proj.weight
+            elif hasattr(module, 'down_proj'):
+                p = module.down_proj.weight
+            if p is not None:
+                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
+                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
+                # We need to reinit p since this code could be called multiple times
+                # Having just p *= scale would repeatedly scale it down
+                nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+                with torch.no_grad():
+                    p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
 class RWKV6Model(RWKV6PreTrainedModel):
@@ -204,7 +232,11 @@ class RWKV6Model(RWKV6PreTrainedModel):
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([RWKV6Block(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.norm = LayerNorm(config.hidden_size, bias=config.norm_bias, eps=config.norm_eps)
+        self.norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
+            config.hidden_size,
+            bias=config.norm_bias,
+            eps=config.norm_eps
+        )
 
         self.gradient_checkpointing = False
 
@@ -225,7 +257,8 @@ class RWKV6Model(RWKV6PreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None
+        return_dict: Optional[bool] = None,
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
             warnings.warn("`RWKV6Model` does not `output_attentions` now, setting it to `False`.")
@@ -265,7 +298,8 @@ class RWKV6Model(RWKV6PreTrainedModel):
                     attention_mask,
                     past_key_values,
                     use_cache,
-                    output_attentions
+                    output_attentions,
+                    **kwargs
                 )
             else:
                 hidden_states, attentions, past_key_values = layer(
@@ -273,7 +307,8 @@ class RWKV6Model(RWKV6PreTrainedModel):
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=use_cache,
-                    output_attentions=output_attentions
+                    output_attentions=output_attentions,
+                    **kwargs
                 )
 
             if output_attentions:
@@ -304,6 +339,7 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
         self.model = RWKV6Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.criterion = None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -341,6 +377,7 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
             else:
                 raise exception
 
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor = None,
@@ -348,14 +385,14 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         use_cache: bool = True,
-        num_logits_to_keep: Optional[int] = None,
+        logits_to_keep: Optional[int] = None,
         **kwargs
     ):
-        # only last token for `inputs_ids` if the `past_key_values` is passed along.
-        if past_key_values is not None:
+        # only last token for `inputs_ids` if the `past_key_values` is not empty.
+        if past_key_values is not None and len(past_key_values) > 0:
             input_ids = input_ids[:, -1:]
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
+        if inputs_embeds is not None and len(past_key_values) == 0:
             model_inputs = {'inputs_embeds': inputs_embeds}
         else:
             # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
@@ -364,17 +401,17 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
             # TODO: use `next_tokens` directly instead.
             model_inputs = {'input_ids': input_ids.contiguous()}
 
-        if num_logits_to_keep is not None:
-            model_inputs['num_logits_to_keep'] = num_logits_to_keep
+        if logits_to_keep is not None:
+            model_inputs['logits_to_keep'] = logits_to_keep
 
         model_inputs.update({
             'past_key_values': past_key_values,
             'use_cache': use_cache,
             'attention_mask': attention_mask,
-            'num_logits_to_keep': num_logits_to_keep,
         })
         return model_inputs
 
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -386,7 +423,8 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        num_logits_to_keep: Optional[int] = 0
+        logits_to_keep: Optional[int] = 0,
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -402,32 +440,32 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            return_dict=return_dict,
+            **kwargs
         )
 
         hidden_states = outputs[0]
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -num_logits_to_keep:])
 
-        loss = None
+        loss, logits = None, None
+        if not fuse_linear_and_cross_entropy or labels is None:
+            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if labels is not None:
-            if self.config.fuse_cross_entropy:
+            if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
-                    loss_fct = FusedLinearCrossEntropyLoss()
+                    criterion = FusedLinearCrossEntropyLoss()
+                elif self.config.fuse_cross_entropy:
+                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
                 else:
-                    loss_fct = FusedCrossEntropyLoss(inplace_backward=True)
+                    criterion = nn.CrossEntropyLoss()
             else:
-                loss_fct = nn.CrossEntropyLoss()
-            # Enable model parallelism
+                criterion = self.criterion
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
+            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
             if fuse_linear_and_cross_entropy:
-                loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
-                                labels.view(-1),
-                                self.lm_head.weight,
-                                self.lm_head.bias)
+                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
-                loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]

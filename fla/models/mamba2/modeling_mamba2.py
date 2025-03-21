@@ -25,10 +25,10 @@ from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
+from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.models.mamba2.configuration_mamba2 import Mamba2Config
-from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
-                         RMSNorm)
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.layernorm_gated import RMSNormGated
 
 logger = logging.get_logger(__name__)
@@ -36,10 +36,8 @@ logger = logging.get_logger(__name__)
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     try:
-        from mamba_ssm.ops.triton.selective_state_update import \
-            selective_state_update
-        from mamba_ssm.ops.triton.ssd_combined import (
-            mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined)
+        from mamba_ssm.ops.triton.selective_state_update import selective_state_update
+        from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined
     except ImportError:
         (
             selective_state_update,
@@ -109,6 +107,17 @@ def segment_sum(input_tensor):
     return tensor_segsum
 
 
+def apply_mask_to_padding_states(hidden_states, attention_mask):
+    """
+    Tunes out the hidden states for padding tokens, see https://github.com/state-spaces/mamba/issues/66
+    """
+    if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
+        dtype = hidden_states.dtype
+        hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
+
+    return hidden_states
+
+
 class Mamba2Cache:
     """
     Arguments:
@@ -118,10 +127,25 @@ class Mamba2Cache:
         device: torch.device
 
     Attributes:
-        seqlen_offset: int
-        dtype: torch.dtype
-        conv_states: Dict[int, torch.Tensor] # layer_idx -> [batch_size, intermediate_size, conv_kernel_size]
-        ssm_states: Dict[int, torch.Tensor] # layer_idx -> [batch_size, intermediate_size, ssm_state_size]
+        dtype: (`torch.dtype`):
+            The default `dtype` used to initializing the cache.
+        conv_kernel_size: (`int`):
+            Model's convolution kernel size taken from config.
+        n_groups: (`int`):
+            Model's number of groups taken from the config - similar to tensor parallel in Transformer.
+        state_size: (`int`):
+            Model's SSM state size taken from config.
+        num_heads: (`int`):
+            The number of heads used in the linear attention / SSM.
+        head_dim: (`int`):
+            The respective dimension of the heads used in the linear attention / SSM.
+        intermediate_size: (`int`):
+            Model's intermediate_size based on (expand * hidden_dim) from config.
+        conv_states: (`torch.Tensor`):
+            A tensor of shape `[num_layers, batch_size, conv_kernel_size, intermediate_size + 2 * n_groups * state_size]`
+            that holds convolutional states.
+        ssm_states: (`torch.Tensor`):
+            A tensor of shape `[num_layers, batch_size, num_heads, head_dim, state_size]` that holds ssm states.
     """
 
     def __init__(
@@ -131,49 +155,48 @@ class Mamba2Cache:
         dtype: torch.dtype = torch.float16,
         device: Optional[str] = None,
     ):
-        self.seqlen_offset = 0
         self.dtype = dtype
         self.conv_kernel_size = config.conv_kernel
+        self.n_groups = config.n_groups
+        self.state_size = config.state_size
+        self.num_heads = config.num_heads
+        self.head_dim = config.head_dim
         self.intermediate_size = int(config.expand * config.hidden_size)
 
-        self.conv_states = {
-            i: torch.zeros(
-                batch_size,
-                self.intermediate_size + 2 * config.n_groups * config.state_size,
-                self.conv_kernel_size,
-                device=device,
-                dtype=dtype,
-            )
-            for i in range(config.num_hidden_layers)
-        }
-        self.ssm_states = {
-            i: torch.zeros(
-                batch_size,
-                config.num_heads,
-                config.head_dim,
-                config.state_size,
-                device=device,
-                dtype=dtype,
-            )
-            for i in range(config.num_hidden_layers)
-        }
-        self.activation = config.hidden_act
-        self.act = ACT2FN[config.hidden_act]
+        self.conv_states = torch.zeros(
+            config.num_hidden_layers,
+            batch_size,
+            self.intermediate_size + 2 * self.n_groups * self.state_size,
+            self.conv_kernel_size,
+            device=device,
+            dtype=dtype,
+        )
+        self.ssm_states = torch.zeros(
+            config.num_hidden_layers,
+            batch_size,
+            self.num_heads,
+            self.head_dim,
+            self.state_size,
+            device=device,
+            dtype=dtype,
+        )
 
     def update_conv_state(
         self,
         layer_idx: int,
         new_conv_state: torch.Tensor,
-        cache_position: torch.LongTensor,
+        cache_init: bool = False
     ) -> torch.Tensor:
-        conv_state = self.conv_states[layer_idx]
-        cache_position = cache_position.clamp(0, self.conv_kernel_size - 1)
-
-        conv_state = conv_state.roll(shifts=-1, dims=-1)
-        conv_state[:, :, cache_position] = new_conv_state.to(conv_state.device)
-        self.conv_states[layer_idx].zero_()
-        self.conv_states[layer_idx] += conv_state
+        if cache_init:
+            self.conv_states[layer_idx] = new_conv_state.to(self.conv_states.device)
+        else:
+            self.conv_states[layer_idx] = self.conv_states[layer_idx].roll(shifts=-1, dims=-1)
+            self.conv_states[layer_idx][:, :, -1] = new_conv_state[:, 0, :].to(self.conv_states.device)
         return self.conv_states[layer_idx]
+
+    def update_ssm_state(self, layer_idx: int, new_ssm_state: torch.Tensor):
+        self.ssm_states[layer_idx] = new_ssm_state.to(self.ssm_states.device)
+        return self.ssm_states[layer_idx]
 
     def reset(self):
         for layer_idx in self.conv_states:
@@ -267,18 +290,27 @@ class Mamba2Mixer(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ):
-        # set up dimensions for reshapes later
+        # 1. Gated MLP's linear projection
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+        projected_states = self.in_proj(hidden_states)
+
+        # Set up dimensions for reshapes later
         batch_size, seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
-        d_to_remove = 2 * self.intermediate_size + 2 * self.n_groups * self.ssm_state_size + self.num_heads
+        d_mlp = (
+            projected_states.shape[-1]
+            - 2 * self.intermediate_size
+            - 2 * self.n_groups * self.ssm_state_size
+            - self.num_heads
+        ) // 2
 
-        # getting projected states from cache if it exists
-        if cache_params is not None and cache_params.seqlen_offset > 0:
-            in_projected_states = self.in_proj(hidden_states.squeeze(1))  # (B 2D)
-            d_mlp = (in_projected_states.shape[-1] - d_to_remove) // 2
-            split_projection_dim = [d_mlp, d_mlp, self.intermediate_size, self.conv_dim, self.num_heads]
-            _, _, gate, hidden_states_B_C, dt = torch.split(in_projected_states, split_projection_dim, dim=-1)
+        # Single step calculations via cache
+        if cache_params is not None and cache_position is not None and cache_position[0] > 0:
+            _, _, gate, hidden_states_B_C, dt = projected_states.squeeze(1).split(
+                [d_mlp, d_mlp, self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
+            )
 
+            # 2. Convolution sequence transformation
             hidden_states_B_C = causal_conv1d_update(
                 hidden_states_B_C,
                 cache_params.conv_states[self.layer_idx],
@@ -296,8 +328,9 @@ class Mamba2Mixer(nn.Module):
                 ],
                 dim=-1,
             )
-            A = -torch.exp(self.A_log.float())  # (nheads,)
 
+            # 3. SSM transformation
+            A = -torch.exp(self.A_log.float())  # (nheads,)
             A = A[:, None, ...][:, :, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
@@ -320,20 +353,18 @@ class Mamba2Mixer(nn.Module):
             )
             hidden_states = hidden_states.view(batch_size, self.num_heads * self.head_dim)
             hidden_states = self.norm(hidden_states, gate)
+
+            # 4. Final linear projection
             out = self.out_proj(hidden_states)[:, None, ...]
-        # if no cache is found, calling the kernel
+
+        # Fused calculations or step by step if no initialized cache is found
         else:
-            if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
-                # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66
-                dtype = hidden_states.dtype
-                hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
-            # 1. Gated MLP's linear projection
-            projected_states = self.in_proj(hidden_states)
             A = -torch.exp(self.A_log.float())  # (num_heads) or (intermediate_size, state_size)
             dt_limit_kwargs = {} if self.time_step_limit == (0.0, float("inf")) else {"dt_limit": self.time_step_limit}
 
+            # 2-4. Fused kernel for conv1d, SSM, and the final projection
             if self.training and cache_params is None:
-                out, ssm_state = mamba_split_conv1d_scan_combined(
+                out = mamba_split_conv1d_scan_combined(
                     projected_states,
                     self.conv1d.weight.squeeze(1),
                     self.conv1d.bias,
@@ -350,41 +381,50 @@ class Mamba2Mixer(nn.Module):
                     headdim=self.head_dim,
                     ngroups=self.n_groups,
                     norm_before_gate=False,
-                    return_final_states=True,
+                    return_final_states=False,
                     **dt_limit_kwargs,
                 )
 
             else:
-                gate, hidden_states_B_C, time_step = torch.split(
-                    projected_states,
-                    [self.intermediate_size, self.conv_dim, self.num_heads],
-                    dim=-1,
+                _, _, gate, hidden_states_B_C, dt = projected_states.split(
+                    [d_mlp, d_mlp, self.intermediate_size, self.conv_dim, self.num_heads], dim=-1
                 )
 
-                # 1D Convolution
-                if causal_conv1d_fn is None or self.activation not in ["silu", "swish"]:
+                # 2. Convolution sequence transformation
+                # Init cache
+                if cache_params is not None:
+                    hidden_states_B_C_transposed = hidden_states_B_C.transpose(1, 2)
+                    conv_states = nn.functional.pad(
+                        hidden_states_B_C_transposed,
+                        (cache_params.conv_kernel_size - hidden_states_B_C_transposed.shape[-1], 0),
+                    )
+                    cache_params.update_conv_state(
+                        layer_idx=self.layer_idx, new_conv_state=conv_states, cache_init=True
+                    )
+
+                if self.activation not in ["silu", "swish"]:
                     hidden_states_B_C = self.act(
-                        self.conv1d(hidden_states_B_C.transpose(1, 2)).transpose(1, 2)[:, :seq_len]
-                    )  # (B, L, self.d_inner + 2 * ngroups * d_state)
+                        self.conv1d(hidden_states_B_C.transpose(1, 2))[..., :seq_len].transpose(1, 2)
+                    )
                 else:
                     hidden_states_B_C = causal_conv1d_fn(
                         x=hidden_states_B_C.transpose(1, 2),
                         weight=self.conv1d.weight.squeeze(1),
                         bias=self.conv1d.bias,
                         activation=self.activation,
-                    ).transpose(1, 2)[:, :seq_len]
+                    ).transpose(1, 2)
+
+                hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
                 hidden_states, B, C = torch.split(
                     hidden_states_B_C,
                     [self.intermediate_size, groups_time_state_size, groups_time_state_size],
                     dim=-1,
                 )
-                if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
-                    # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66
-                    dtype = hidden_states.dtype
-                    hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
+
+                # 3. SSM transformation
                 scan_output, ssm_state = mamba_chunk_scan_combined(
                     hidden_states.view(batch_size, seq_len, -1, self.head_dim),
-                    time_step,
+                    dt,
                     A,
                     B.view(batch_size, seq_len, self.n_groups, -1),
                     C.view(batch_size, seq_len, self.n_groups, -1),
@@ -397,11 +437,16 @@ class Mamba2Mixer(nn.Module):
                     dt_softplus=True,
                     **dt_limit_kwargs,
                 )
+
+                # Init cache
                 if ssm_state is not None and cache_params is not None:
-                    cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
+                    cache_params.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
+
                 scan_output = scan_output.view(batch_size, seq_len, -1)
                 # Multiply "gate" branch and apply extra normalization layer
                 scan_output = self.norm(scan_output, gate)
+
+                # 4. Final linear projection
                 out = self.out_proj(scan_output)
         return out
 
@@ -415,68 +460,65 @@ class Mamba2Mixer(nn.Module):
     ):
         batch_size, seq_len, _ = input_states.shape
         dtype = input_states.dtype
-        # Gated MLP's linear projection
-        projected_states = self.in_proj(input_states.squeeze(1))
+
+        # 1. Gated MLP's linear projection
+        input_states = apply_mask_to_padding_states(input_states, attention_mask)
+        projected_states = self.in_proj(input_states)
         d_mlp = (projected_states.shape[-1] - 2 * self.intermediate_size -
                  2 * self.n_groups * self.ssm_state_size - self.num_heads) // 2
-        _, _, gate, hidden_states, dt = projected_states.split(
-                [d_mlp, d_mlp, self.intermediate_size,  self.conv_dim, self.num_heads], dim=-1
+        _, _, gate, hidden_states_B_C, dt = projected_states.split(
+            [d_mlp, d_mlp, self.intermediate_size,  self.conv_dim, self.num_heads], dim=-1
         )
 
-        # Convolution sequence transformation
-        if cache_params is not None:
-            ssm_state = cache_params.ssm_states[self.layer_idx].clone()
-            ssm_state = ssm_state.to(hidden_states.device)
-            if cache_params.seqlen_offset > 0:
-                # [batch, intermediate_size, conv_kernel_size]
-                conv_state = cache_params.conv_states[self.layer_idx]
-                conv_state = torch.roll(conv_state, shifts=-1, dims=-1)
-                # handle batched generation - states are copied through
-                conv_state[:, :, -1] = hidden_states[:, 0, :] if hidden_states.ndim == 3 else hidden_states
-                cache_params.conv_states[self.layer_idx].copy_(conv_state)
-                hidden_states = torch.sum(conv_state.to(projected_states.device) * self.conv1d.weight[:, 0, :], dim=-1)
-                if self.use_conv_bias:
-                    hidden_states += self.conv1d.bias
-                # [batch, 1, intermediate_size] : decoding
-                hidden_states = self.act(hidden_states).to(dtype)[:, None, ...]
-            else:
-                hidden_states = hidden_states.transpose(1, 2)
-                conv_state = nn.functional.pad(
-                    hidden_states,
-                    (self.conv_kernel_size - hidden_states.shape[-1], 0)
-                )
-                cache_params.conv_states[self.layer_idx].copy_(conv_state)
-                # [batch, intermediate_size, seq_len]
-                hidden_states = self.act(self.conv1d(hidden_states).transpose(1, 2))[:, :seq_len, :]
-                if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
-                    dtype = hidden_states.dtype
-                    # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66
-                    hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
-        else:
-            ssm_state = torch.zeros(
-                (batch_size, self.num_heads, self.head_dim, self.ssm_state_size),
-                device=hidden_states.device, dtype=dtype
+        # 2. Convolution sequence transformation
+        if cache_params is not None and cache_position is not None and cache_position[0] > 0:
+            cache_params.update_conv_state(layer_idx=self.layer_idx, new_conv_state=hidden_states_B_C, cache_init=False)
+
+            # We need to guarantee that anything regarding the cache is on the same device
+            conv_states = cache_params.conv_states[self.layer_idx].to(device=self.conv1d.weight.device)
+
+            hidden_states_B_C = torch.sum(
+                conv_states * self.conv1d.weight.squeeze(1), dim=-1
             )
-            hidden_states = self.act(self.conv1d(hidden_states.transpose(1, 2))[..., :seq_len].transpose(1, 2))
+            if self.use_conv_bias:
+                hidden_states_B_C = hidden_states_B_C + self.conv1d.bias
+            hidden_states_B_C = self.act(hidden_states_B_C)
+        else:
+            # Init cache
+            if cache_params is not None:
+                hidden_states_B_C_transposed = hidden_states_B_C.transpose(1, 2)
+                conv_states = nn.functional.pad(
+                    hidden_states_B_C_transposed, (cache_params.conv_kernel_size - hidden_states_B_C_transposed.shape[-1], 0)
+                )
+                cache_params.update_conv_state(layer_idx=self.layer_idx, new_conv_state=conv_states, cache_init=True)
+
+            hidden_states_B_C = self.act(self.conv1d(hidden_states_B_C.transpose(1, 2))[..., :seq_len].transpose(1, 2))
+
+        hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
         hidden_states, B, C = torch.split(
-            hidden_states,
+            hidden_states_B_C,
             [self.intermediate_size, self.n_groups * self.ssm_state_size, self.n_groups * self.ssm_state_size],
             dim=-1
         )
+
+        # 3. SSM transformation
         A = -torch.exp(self.A_log.float())                            # [num_heads]
-        if cache_params is not None and cache_params.seqlen_offset > 0:
+        if cache_params is not None and cache_position is not None and cache_position[0] > 0:
+            # We need to guarantee that anything regarding the cache is on the same device
+            cache_device = cache_params.ssm_states.device
+
             # Note: there is no need to pad parameter matrices here, as there is just one new token
             # for batched generation
-            dt = dt[:, None, ...] if dt.ndim == 2 else dt[:, 0, :][:, None, ...]
+            dt = dt[:, 0, :][:, None, ...]
             dt = dt.transpose(1, 2).expand(batch_size, dt.shape[-1], self.head_dim)
             # [num_heads] -> [num_heads, head_dim]
             dt_bias = self.dt_bias[..., None].expand(self.dt_bias.shape[0], self.head_dim)
 
             dt = torch.nn.functional.softplus(dt + dt_bias.to(dt.dtype))
-            dt = torch.clamp(dt, self.time_step_min)
+            dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
             A = A[..., None, None].expand(self.num_heads, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             # [bsz, num_heads, head_dim, state_size]
-            dA = torch.exp(dt[..., None] * A)
+            dA = (torch.exp(dt[..., None] * A)).to(device=cache_device)
 
             # Discretize B
             # [bsz, n_groups * state_size] -> [bsz, n_groups, 1, state_size] ->
@@ -490,11 +532,12 @@ class Mamba2Mixer(nn.Module):
             # Discretize x into dB
             # [bsz, intermediate_size] -> [bsz, num_heads, head_dim]
             hidden_states = hidden_states.reshape(batch_size, -1, self.head_dim)
-            dBx = dB * hidden_states[..., None]
+            dBx = (dB * hidden_states[..., None]).to(device=cache_device)
 
             # State calculation
-            cache_params.ssm_states[self.layer_idx].copy_(
-                cache_params.ssm_states[self.layer_idx] * dA + dBx
+            cache_params.update_ssm_state(
+                layer_idx=self.layer_idx,
+                new_ssm_state=cache_params.ssm_states[self.layer_idx] * dA + dBx
             )
 
             # Subsequent output
@@ -504,7 +547,7 @@ class Mamba2Mixer(nn.Module):
             C = C.reshape(batch_size, -1, C.shape[-1])
             # [bsz, num_heads, head_dim]
 
-            ssm_states = cache_params.ssm_states[self.layer_idx].to(C.dtype)  # Shape: [b, h, d, n]
+            ssm_states = cache_params.ssm_states[self.layer_idx].to(device=C.device, dtype=C.dtype)  # Shape: [b, h, d, n]
             # Reshape ssm_states to merge the first two dimensions
             # Shape: [b*h, d, n]
             ssm_states_reshaped = ssm_states.view(batch_size * self.num_heads, self.head_dim, self.ssm_state_size)
@@ -522,9 +565,9 @@ class Mamba2Mixer(nn.Module):
         else:
             # begin ssd naive implementation without einsums
             dt = nn.functional.softplus(dt + self.dt_bias)
-            dt = torch.clamp(dt, self.time_step_min)
+            dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
             hidden_states = hidden_states.reshape(batch_size, seq_len, -1, self.head_dim).float()
-            B = B.reshape(batch_size, seq_len,  -1, self.ssm_state_size).float()
+            B = B.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
             C = C.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
             B = B.repeat(1, 1, self.num_heads // self.n_groups, 1)
             C = C.repeat(1, 1, self.num_heads // self.n_groups, 1)
@@ -567,8 +610,8 @@ class Mamba2Mixer(nn.Module):
 
             # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
             # (middle term of factorization of off-diag blocks; A terms)
-            if cache_params is not None and cache_params.seqlen_offset > 0:
-                previous_states = cache_params.ssm_states[self.layer_idx][:, None, ...]
+            if cache_params is not None and cache_position is not None and cache_position[0] > 0:
+                previous_states = cache_params.ssm_states[self.layer_idx][:, None, ...].to(device=states.device)
             else:
                 previous_states = torch.zeros_like(states[:, :1])
             states = torch.cat([previous_states, states], dim=1)
@@ -594,10 +637,13 @@ class Mamba2Mixer(nn.Module):
             if pad_size > 0:
                 y = y[:, :seq_len, :, :]
             y = y.reshape(batch_size, seq_len, -1)
+
+            # Init cache
             if ssm_state is not None and cache_params is not None:
-                cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
+                cache_params.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
 
         scan_output = self.norm(y, gate)
+
         # end ssd naive
 
         # 4. Final linear projection
@@ -639,7 +685,7 @@ class Mamba2Block(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
     ):
         residual = hidden_states
-        hidden_states = self.norm(hidden_states.to(dtype=self.norm.weight.dtype))
+        hidden_states = self.norm(hidden_states)
         if self.residual_in_fp32:
             residual = residual.to(torch.float32)
 
@@ -650,6 +696,8 @@ class Mamba2Block(nn.Module):
             attention_mask=attention_mask,
         )
         hidden_states = residual + hidden_states
+        if self.residual_in_fp32:
+            hidden_states = hidden_states.to(dtype=self.norm.weight.dtype)
         return hidden_states
 
 
@@ -665,30 +713,56 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
     supports_gradient_checkpointing = True
     _is_stateful = True
 
-    def _init_weights(self, module):
+    def _init_weights(
+        self,
+        module: nn.Module,
+        num_residuals_per_layer: int = 1,
+    ):
         """Initialize the weights."""
         if isinstance(module, Mamba2Mixer):
+
+            # --- A_log ---
+            A = torch.arange(1, module.num_heads + 1)
+            with torch.no_grad():
+                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                    module.A_log.copy_(torch.log(A))
+                else:
+                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
             module.A_log._no_weight_decay = True
+
+            # --- D ---
+            nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
+            # --- dt_bias ---
             dt = torch.exp(
                 torch.rand(self.config.num_heads)
                 * (math.log(self.config.time_step_max) - math.log(self.config.time_step_min))
                 + math.log(self.config.time_step_min)
             ).clamp(min=self.config.time_step_floor)
 
-            # # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
-                module.dt_bias.copy_(inv_dt)
+                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                    module.dt_bias.copy_(inv_dt)
+                else:
+                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
             module.dt_bias._no_reinit = True
 
-        if isinstance(module, nn.Linear):
+        elif isinstance(module, (nn.Linear, nn.Conv1d)):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
-                if not getattr(module.bias, "_no_reinit", False):
-                    nn.init.zeros_(module.bias)
+                nn.init.zeros_(module.bias)
+                # guard against deprecated behavior
+                if hasattr(module.bias, "_no_reinit"):
+                    raise ValueError("This is not supposed to happen")
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, std=self.config.initializer_range)
+            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+        elif hasattr(module, 'reset_parameters'):
+            module.reset_parameters()
 
         if self.config.rescale_prenorm_residual:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
@@ -697,15 +771,23 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
             # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
-            for name, p in module.named_parameters():
-                if name in ["out_proj.weight"]:
-                    # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                    # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                    # We need to reinit p since this code could be called multiple times
-                    # Having just p *= scale would repeatedly scale it down
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
-                    with torch.no_grad():
-                        p /= math.sqrt(self.config.num_hidden_layers)
+            p = None
+            if hasattr(module, 'o_proj'):
+                # p = module.o_proj.weight
+                # guard against deprecated behavior
+                raise ValueError("This is not supposed to happen")
+            elif hasattr(module, 'out_proj'):
+                p = module.out_proj.weight
+            elif hasattr(module, 'down_proj'):
+                p = module.down_proj.weight
+            if p is not None:
+                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
+                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
+                # We need to reinit p since this code could be called multiple times
+                # Having just p *= scale would repeatedly scale it down
+                nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+                with torch.no_grad():
+                    p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
 @dataclass
@@ -857,9 +939,6 @@ class Mamba2Model(Mamba2PreTrainedModel):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-        if use_cache:
-            cache_params.seqlen_offset += inputs_embeds.shape[1]
-
         hidden_states = self.norm_f(hidden_states)
 
         if output_hidden_states:
@@ -882,6 +961,8 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel):
         super().__init__(config)
         self.backbone = Mamba2Model(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.criterion = None
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -897,6 +978,7 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel):
     def set_input_embeddings(self, new_embeddings):
         return self.backbone.set_input_embeddings(new_embeddings)
 
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def prepare_inputs_for_generation(
         self,
         input_ids,
@@ -905,13 +987,9 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel):
         cache_params: Optional[Mamba2Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        num_logits_to_keep: Optional[int] = None,
+        logits_to_keep: Optional[int] = None,
         **kwargs,
     ):
-        if inputs_embeds is not None:
-            past_len = inputs_embeds.shape[1] + input_ids.shape[1]
-        else:
-            past_len = input_ids.shape[1]
         if use_cache:
             # `cache_position` should have been initialized in `generate`
             if cache_position is None:
@@ -920,50 +998,36 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel):
                     "`model.generate`, you are responsible for passing in a valid `cache_position` if "
                     "you are calling `prepare_inputs_for_generation` directly with `use_cache=True`"
                 )
-            # how do we detect that we are in decoding without cache?
             if cache_position[0] > 0:
                 input_ids = input_ids[:, -1][..., None]
-                attention_mask = attention_mask[:, -1][..., None]
+
+                if attention_mask is not None:
+                    attention_mask = None
             else:
                 # we initialize the `cache_position` to full size of `conv_states` at prefill stage
                 # considering padding will be applied when input length is shorter, and truncation
                 # will be applied when it is longer, so it will be equivalent to always have it match
                 # the length of `cache_params.conv_states`, which is `config.conv_kernel`
-                cache_position = torch.arange(0, past_len, device=input_ids.device)
-                # if the cache is not used, we also do have to extend the attention mask here
-                # TODO there is likely a cleverer way to do this
-                extended_mask = torch.ones(
-                    attention_mask.size(0), past_len - attention_mask.shape[1], device=attention_mask.device
-                )
-                attention_mask = torch.cat([attention_mask, extended_mask], dim=1)
-                cache_params = None
+                cache_position = torch.arange(0, self.config.conv_kernel, device=input_ids.device)
 
-        if attention_mask.shape[1] < past_len:
-            # we have to update manually the attention mask if
-            # we are in decoding without cache
-            # and we don't have position_ids here
-            # TODO but we should be able to use cache_position though at a later time
-            extended_mask = torch.ones(
-                attention_mask.size(0), past_len - attention_mask.shape[1], device=attention_mask.device
-            )
-            attention_mask = torch.cat([attention_mask, extended_mask], dim=1)
         if inputs_embeds is not None and cache_params is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
             model_inputs = {"input_ids": input_ids}
 
-        if num_logits_to_keep is not None:
-            model_inputs['num_logits_to_keep'] = num_logits_to_keep
+        if logits_to_keep is not None:
+            model_inputs['logits_to_keep'] = logits_to_keep
 
         model_inputs.update({
             'attention_mask': attention_mask,
             'cache_params': cache_params,
             'use_cache': use_cache,
             'cache_position': cache_position,
-            'num_logits_to_keep': num_logits_to_keep
+            'logits_to_keep': logits_to_keep
         })
         return model_inputs
 
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -975,7 +1039,7 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        num_logits_to_keep: Optional[int] = 0,
+        logits_to_keep: Optional[int] = 0,
         **kwargs,  # for now we need this for generation
     ) -> Union[Tuple, Mamba2CausalLMOutput]:
         r"""
@@ -998,27 +1062,26 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel):
         )
         hidden_states = outputs[0]
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -num_logits_to_keep:])
 
-        loss = None
+        loss, logits = None, None
+        if not fuse_linear_and_cross_entropy or labels is None:
+            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if labels is not None:
-            if self.config.fuse_cross_entropy:
+            if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
-                    loss_fct = FusedLinearCrossEntropyLoss()
+                    criterion = FusedLinearCrossEntropyLoss()
+                elif self.config.fuse_cross_entropy:
+                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
                 else:
-                    loss_fct = FusedCrossEntropyLoss(inplace_backward=True)
+                    criterion = nn.CrossEntropyLoss()
             else:
-                loss_fct = nn.CrossEntropyLoss()
-            # Enable model parallelism
+                criterion = self.criterion
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
+            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
             if fuse_linear_and_cross_entropy:
-                loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
-                                labels.view(-1),
-                                self.lm_head.weight,
-                                self.lm_head.bias)
+                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
-                loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -9,7 +9,7 @@ import triton.language as tl
 from packaging import version
 
 from fla.ops.linear_attn.utils import normalize_output
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.jit
@@ -20,12 +20,6 @@ def fused_chunk_linear_attn_fwd_kernel(
     o,  # output [B, H, T, V]
     h0,
     ht,
-    s_k_h,  # stride size: T * K
-    s_k_t,  # stride size: K
-    s_k_d,  # stride size: 1
-    s_v_h,  # stride size: T * V
-    s_v_t,  # stride size: V
-    s_v_d,  # stride size: 1
     scale,
     B,  # batch size
     H,  # H
@@ -50,10 +44,10 @@ def fused_chunk_linear_attn_fwd_kernel(
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
     # make block pointers
-    p_q = tl.make_block_ptr(q + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (0, i_k * BK), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + i_bh * s_k_h, (K, T), (s_k_d, s_k_t), (i_k * BK, 0), (BK, BT), (0, 1))
-    p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (0, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o + (i_bh+i_k*B*H) * s_v_h, (T, V), (s_v_t, s_v_d), (0, i_v * BV), (BT, BV), (1, 0))
+    p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (0, i_k * BK), (BT, BK), (1, 0))
+    p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (i_k * BK, 0), (BK, BT), (0, 1))
+    p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
+    p_o = tl.make_block_ptr(o + (i_bh+i_k*B*H) * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
 
     if USE_INITIAL_STATE:
         p_h0 = tl.make_block_ptr(h0 + i_bh * K * V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
@@ -99,15 +93,7 @@ def fused_chunk_linear_attn_bwd_kernel(
     dq,  # gradient of query [NV, B, H, T, K]
     dk,  # gradient of key [NV, B, H, T, K]
     dv,  # gradient of value [NK, B, H, T, V]
-
     h0,  # initial state of the chunk [B, H, K, V]
-
-    s_k_h,  # stride size: T * K
-    s_k_t,  # stride size: K
-    s_k_d,  # stride size: 1
-    s_v_h,  # stride size: T * V
-    s_v_t,  # stride size: V
-    s_v_d,  # stride size: 1
     scale,  # K ** -0.5
     B,  # B
     H,  # H
@@ -131,10 +117,10 @@ def fused_chunk_linear_attn_bwd_kernel(
         b_h = tl.load(p_h, boundary_check=(0, 1)).to(tl.float32)
 
     for i in range(0, tl.cdiv(T, BT)):
-        p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_v = tl.make_block_ptr(v + i_bh * s_v_h, (V, T), (s_v_d, s_v_t), (i_v * BV, i * BT), (BV, BT), (0, 1))
-        p_do = tl.make_block_ptr(do + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dq = tl.make_block_ptr(dq + (i_bh + i_v*B*H) * s_k_h, (T, K), (s_k_t, s_k_d), (i*BT, i_k*BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i * BT, i_k * BK), (BT, BK), (1, 0))
+        p_v = tl.make_block_ptr(v + i_bh * T*V, (V, T), (1, V), (i_v * BV, i * BT), (BV, BT), (0, 1))
+        p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dq = tl.make_block_ptr(dq + (i_bh + i_v*B*H) * T*K, (T, K), (K, 1), (i*BT, i_k*BK), (BT, BK), (1, 0))
 
         # [BT, BK]
         b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -165,12 +151,12 @@ def fused_chunk_linear_attn_bwd_kernel(
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
     m_s = o_i[:, None] <= o_i[None, :]
     for i in range(1, tl.cdiv(T, BT) + 1):
-        p_q = tl.make_block_ptr(q + i_bh * s_k_h, (K, T), (s_k_d, s_k_t), (i_k * BK, T - i * BT), (BK, BT), (0, 1))
-        p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (T - i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_do = tl.make_block_ptr(do + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dk = tl.make_block_ptr(dk + (i_bh+i_v*B*H) * s_k_h, (T, K), (s_k_t, s_k_d), (T - i*BT, i_k*BK), (BT, BK), (1, 0))
-        p_dv = tl.make_block_ptr(dv + (i_bh+i_k*B*H) * s_v_h, (T, V), (s_v_t, s_v_d), (T - i*BT, i_v*BV), (BT, BV), (1, 0))
+        p_q = tl.make_block_ptr(q + i_bh * T*K, (K, T), (1, K), (i_k * BK, T - i * BT), (BK, BT), (0, 1))
+        p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (T - i * BT, i_k * BK), (BT, BK), (1, 0))
+        p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
+        p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (T - i * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dk = tl.make_block_ptr(dk + (i_bh+i_v*B*H) * T*K, (T, K), (K, 1), (T - i*BT, i_k*BK), (BT, BK), (1, 0))
+        p_dv = tl.make_block_ptr(dv + (i_bh+i_k*B*H) * T*V, (T, V), (V, 1), (T - i*BT, i_v*BV), (BT, BV), (1, 0))
         # [BK, BT]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_q = (b_q * scale).to(b_q.dtype)
@@ -206,7 +192,7 @@ def fused_chunk_linear_attn_bwd_kernel(
 class FusedChunkLinearAttentionFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, scale, initial_state, output_final_state):
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -235,8 +221,6 @@ class FusedChunkLinearAttentionFunction(torch.autograd.Function):
         grid = (NV, NK, B * H)
         fused_chunk_linear_attn_fwd_kernel[grid](
             q, k, v, o, initial_state, final_state,
-            q.stride(1), q.stride(2), q.stride(3),
-            v.stride(1), v.stride(2), v.stride(3),
             scale,
             B=B, H=H, T=T, K=K, V=V, BT=BT, BK=BK, BV=BV,
             USE_INITIAL_STATE=initial_state is not None,
@@ -253,7 +237,7 @@ class FusedChunkLinearAttentionFunction(torch.autograd.Function):
         return o.to(q.dtype), final_state
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht=None):
         q, k, v, initial_state = ctx.saved_tensors
@@ -273,8 +257,6 @@ class FusedChunkLinearAttentionFunction(torch.autograd.Function):
 
         fused_chunk_linear_attn_bwd_kernel[grid](
             q, k, v, do, dq, dk, dv, initial_state,
-            q.stride(1), q.stride(2), q.stride(3),
-            v.stride(1), v.stride(2), v.stride(3),
             scale,
             B=B, H=H, T=T, K=K, V=V, BT=BT, BK=BK, BV=BV,
             USE_INITIAL_STATE=initial_state is not None,

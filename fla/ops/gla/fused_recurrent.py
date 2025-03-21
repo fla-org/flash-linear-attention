@@ -18,7 +18,7 @@ def fused_recurrent_gla(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -44,12 +44,9 @@ def fused_recurrent_gla(
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
-        offsets (Optional[torch.LongTensor]):
-            Offsets of shape `[N+1]` defining the bos/eos positions of `N` variable-length sequences in the batch.
-            For example,
-            if `offsets` is `[0, 1, 3, 6, 10, 15]`, there are `N=5` sequences with lengths 1, 2, 3, 4 and 5 respectively.
-            If provided, the inputs are concatenated and the batch size `B` is expected to be 1.
-            Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `True`.
@@ -76,27 +73,27 @@ def fused_recurrent_gla(
                                         initial_state=h0,
                                         output_final_state=True,
                                         head_first=False)
-        # for variable-length inputs, the batch size `B` is expected to be 1 and `offsets` is required
+        # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, g))
-        # for a batch with 4 sequences, offsets with 5 start/end positions are expected
-        >>> offsets = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
+        # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
+        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
         >>> o_var, ht_var = fused_recurrent_gla(q, k, v, g,
                                                 initial_state=h0,
                                                 output_final_state=True,
-                                                offsets=offsets,
+                                                cu_seqlens=cu_seqlens,
                                                 head_first=False)
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
-    if offsets is not None:
+    if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
+            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                              f"Please flatten variable-length inputs before processing.")
         if head_first:
             raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
-        if initial_state is not None and initial_state.shape[0] != len(offsets) - 1:
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(offsets) - 1} rather than {initial_state.shape[0]}.")
+                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = fused_recurrent(
@@ -110,7 +107,7 @@ def fused_recurrent_gla(
         initial_state=initial_state,
         output_final_state=output_final_state,
         reverse=reverse,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         head_first=head_first
     )
     return o, final_state

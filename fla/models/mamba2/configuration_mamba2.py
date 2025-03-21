@@ -119,6 +119,7 @@ class Mamba2Config(PretrainedConfig):
         use_cache: bool = True,
         rms_norm: bool = True,
         chunk_size: int = 256,
+        fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
         tie_word_embeddings: bool = False,
         **kwargs,
@@ -156,6 +157,7 @@ class Mamba2Config(PretrainedConfig):
         self.state_size = state_size
         self.chunk_size = chunk_size
         self.time_step_limit = time_step_limit
+        self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
         self.tie_word_embeddings = tie_word_embeddings
 

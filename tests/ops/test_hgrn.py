@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
 from fla.ops.hgrn.naive import naive_recurrent_hgrn
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -39,8 +40,8 @@ def test_fused_recurrent(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    x = torch.randn((B, T, D), dtype=dtype, device='cuda')
-    g = torch.randn((B, T, D), dtype=dtype, device='cuda')
+    x = torch.randn((B, T, D), dtype=dtype, device=device)
+    g = torch.randn((B, T, D), dtype=dtype, device=device)
     h0 = torch.randn_like(x[:, 0])
     x, g = (1 - g.sigmoid()) * x, F.logsigmoid(g)
     x, g, h0 = (i.detach().clone().to(dtype).requires_grad_() for i in (x, g, h0))
@@ -83,11 +84,11 @@ def test_fused_recurrent_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
 
-    x = torch.randn((1, T, D), dtype=dtype, device='cuda')
-    g = torch.randn((1, T, D), dtype=dtype, device='cuda')
-    h0 = torch.randn(N, D, dtype=dtype, device='cuda')
+    x = torch.randn((1, T, D), dtype=dtype, device=device)
+    g = torch.randn((1, T, D), dtype=dtype, device=device)
+    h0 = torch.randn(N, D, dtype=dtype, device=device)
     x, g = (1 - g.sigmoid()) * x, F.logsigmoid(g)
     x, g, h0 = (i.detach().clone().to(dtype).requires_grad_() for i in (x, g, h0))
 
@@ -110,7 +111,7 @@ def test_fused_recurrent_varlen(
     ref_dg, g.grad = g.grad.clone(), None
     ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, tri_ht = fused_recurrent_hgrn(x, g, h0, output_final_state=True, offsets=offsets)
+    tri, tri_ht = fused_recurrent_hgrn(x, g, h0, output_final_state=True, cu_seqlens=offsets)
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dx, x.grad = x.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None
@@ -136,8 +137,8 @@ def test_chunk(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    x = torch.randn((B, T, D), dtype=dtype, device='cuda')
-    g = torch.randn((B, T, D), dtype=dtype, device='cuda')
+    x = torch.randn((B, T, D), dtype=dtype, device=device)
+    g = torch.randn((B, T, D), dtype=dtype, device=device)
     x, g = (1 - g.sigmoid()) * x, F.logsigmoid(g)
     x, g = (i.detach().clone().to(dtype).requires_grad_() for i in (x, g))
 

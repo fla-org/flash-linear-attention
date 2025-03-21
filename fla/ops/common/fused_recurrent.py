@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional
 
@@ -8,48 +8,47 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import chunk_global_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-    ],
-    key=["BK", "BV", "USE_GK", "USE_GV", "USE_G"],
-)
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
-@triton.jit
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [1, 2, 4]
+    ],
+    key=["BK", "BV", "USE_GK", "USE_GV", "USE_G"],
+)
+@triton.jit(do_not_specialize=['T'])
 def fused_recurrent_fwd_kernel(
-    q,  # query [B, H, T, K]/[B, T, H, K]
-    k,  # key [B, H, T, K]/[B, T, H, K]
-    v,  # value [B, H, T, V]/[B, T, H, V]
-    g,  # log gate [B, H, T]/[B, T, H] or None
-    gk,  # log gate [B, H, T, K]/[B, T, H, K] or None
-    gv,  # log gate [B, H, T, V]/[B, T, H, V] or None
-    o,  # output [NK, B, H, T, V]/[NK, B, T, H, V]
-    h0,  # initial hidden state [B, H, K, V]
-    ht,  # final hidden state [B, H, K, V]
+    q,
+    k,
+    v,
+    g,
+    gk,
+    gv,
+    o,
+    h0,
+    ht,
     offsets,
     scale,
+    T,
     B: tl.constexpr,
-    T: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    REVERSE: tl.constexpr,  # whether to reverse the recurrence
-    USE_G: tl.constexpr,  # whether to use g
-    USE_GK: tl.constexpr,  # whether to use gk
-    USE_GV: tl.constexpr,  # whether to use gv
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
+    REVERSE: tl.constexpr,
+    USE_G: tl.constexpr,
+    USE_GK: tl.constexpr,
+    USE_GV: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
@@ -129,52 +128,50 @@ def fused_recurrent_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-    ],
-    key=["BK", "BV", "USE_GK", "USE_GV", "USE_G"],
-)
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
-# Similar to Algorithm1 of https://arxiv.org/abs/2006.16236
-@triton.jit
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [1, 2, 4]
+    ],
+    key=['BK', 'BV', 'USE_GK', 'USE_GV', 'USE_G'],
+)
+@triton.jit(do_not_specialize=['T'])
 def fused_recurrent_bwd_kernel(
-    q,  # query [B, H, T, K]/[B, T, H, K]
-    k,  # key [B, H, T, V]/[B, T, H, V]
-    v,  # value [B, H, T, V]/[B, T, H, V]
-    g,  # log gate [B, H, T]/[B, T, H] or None
-    gk,  # log gate [B, H, T, K]/[B, T, H, K] or None
-    gv,  # log gate [B, H, T, V]/[B, T, H, V] or None
-    h0,  # initial hidden state [B, H, K, V]
-    do,  # gradient wrt output [B, H, T, V]/[B, T, H, V]
-    dq,  # gradient wrt query [NV, B, H, T, K]/[NK, B, T, H, K]
-    dk,  # gradient wrt key [NV, B, H, T, K]/[NK, B, T, H, K]
-    dv,  # gradient wrt value [NK, B, H, T, V]/[NV, B, T, H, V]
-    dht,  # gradient wrt final hidden state [B, H, K, V]
-    dh0,  # gradient wrt initial hidden state [B, H, K, V]
+    q,
+    k,
+    v,
+    g,
+    gk,
+    gv,
+    h0,
+    do,
+    dq,
+    dk,
+    dv,
+    dht,
+    dh0,
     offsets,
     scale,
+    T,
     B: tl.constexpr,
-    T: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    REVERSE: tl.constexpr,  # whether to do autoregressive modeling in the reverse direction
-    USE_G: tl.constexpr,  # whether to use g
-    USE_GK: tl.constexpr,  # whether to use gk
-    USE_GV: tl.constexpr,  # whether to use gv
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    STORE_INITIAL_STATE_GRADIENT: tl.constexpr,  # whether to store gradient wrt initial state
-    USE_FINAL_STATE_GRADIENT: tl.constexpr,  # whether to compute gradient wrt final state
+    REVERSE: tl.constexpr,
+    USE_G: tl.constexpr,
+    USE_GK: tl.constexpr,
+    USE_GV: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
@@ -364,8 +361,8 @@ def fused_recurrent_fwd(
         ht,
         offsets,
         scale,
-        B=B,
         T=T,
+        B=B,
         H=H,
         K=K,
         V=V,
@@ -474,7 +471,7 @@ def fused_recurrent_bwd(
 class FusedRecurrentFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -513,19 +510,19 @@ class FusedRecurrentFunction(torch.autograd.Function):
         return o.to(q.dtype), ht
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         q, k, v, g, gk, gv, initial_state, o = ctx.saved_tensors
-
         # not supported yet.
         if dht is not None:
-            if g is not None:
-                assert g.requires_grad is False, "Cannot load final state gradient and use gates at the same time"
-            if gk is not None:
-                assert gk.requires_grad is False, "Cannot load final state gradient and use gates at the same time"
-            if gv is not None:
-                assert gv.requires_grad is False, "Cannot load final state gradient and use gates at the same time"
+            if not dht.eq(0).all():
+                if g is not None:
+                    assert g.requires_grad is False, "Cannot load final state gradient and use gates at the same time"
+                if gk is not None:
+                    assert gk.requires_grad is False, "Cannot load final state gradient and use gates at the same time"
+                if gv is not None:
+                    assert gv.requires_grad is False, "Cannot load final state gradient and use gates at the same time"
         dq, dk, dv, dg, dgk, dgv, dh0 = fused_recurrent_bwd(
             q=q,
             k=k,
@@ -556,7 +553,7 @@ def fused_recurrent(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = True
 ):
     if scale is None:
@@ -572,6 +569,6 @@ def fused_recurrent(
         initial_state,
         output_final_state,
         reverse,
-        offsets,
+        cu_seqlens,
         head_first
     )

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional
 
@@ -7,31 +7,25 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def fused_chunk_based_fwd_kernel(
-    q,  # query [B, H, L, K]
-    k,  # key [B, H, L, V]
-    v,  # value [B, H, L, V]
-    o,  # output [B, H, L, V]
-    z,  # normalizer [B, H, L, 1]
-    s_k_h,  # stride size: L * K
-    s_k_t,  # stride size: K
-    s_k_d,  # stride size: 1
-    s_v_h,  # stride size: L * V
-    s_v_t,  # stride size: V
-    s_v_d,  # stride size: 1
+    q,
+    k,
+    v,
+    o,
+    z,
     scale,  # K ** -0.5
-    B: tl.constexpr,  # batch size
-    H: tl.constexpr,  # H
-    T: tl.constexpr,  # T
-    K: tl.constexpr,  # K
-    V: tl.constexpr,  # V
-    BT: tl.constexpr,  # BLOCK SIZE along the sequence dimension, a.k.a. chunk size
-    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
+    T,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
 ):
     # indices
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -49,10 +43,10 @@ def fused_chunk_based_fwd_kernel(
     b_h_2o = tl.zeros([BK*BK, BV], dtype=tl.float32)
 
     # make block pointers
-    p_q = tl.make_block_ptr(q + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (0, i_k * BK), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k + i_bh * s_k_h, (K, T), (s_k_d, s_k_t), (i_k * BK, 0), (BK, BT), (0, 1))
-    p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (0, i_v * BV), (BT, BV), (1, 0))
-    p_o = tl.make_block_ptr(o + (i_bh + i_k*B*H) * s_v_h, (T, V), (s_v_t, s_v_d), (0, i_v * BV), (BT, BV), (1, 0))
+    p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (0, i_k * BK), (BT, BK), (1, 0))
+    p_k = tl.make_block_ptr(k + i_bh * T*K, (K, T), (1, K), (i_k * BK, 0), (BK, BT), (0, 1))
+    p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
+    p_o = tl.make_block_ptr(o + (i_bh + i_k*B*H) * T*V, (T, V), (V, 1), (0, i_v * BV), (BT, BV), (1, 0))
 
     p_z = z + (i_bh + i_k * B * H) * T + tl.arange(0, BT)
     k_2o = tl.zeros([1, BK * BK], dtype=tl.float32)
@@ -118,29 +112,23 @@ def fused_chunk_based_fwd_kernel(
 @triton.jit
 def fused_chunk_based_bwd_kernel(
     # NV: number of split in the V dimension. NK: number of split in the K dimension
-    q,  # query [B, H, L, K]
-    k,  # key [B, H, L, V]
-    v,  # value [B, H, L, V]
-    do,  # gradient of output [B, H, L, V]
-    dz,  # gradient of normalizer [B, H, L]
-    dq,  # gradient of query [NV, B, H, L, K]
-    dk,  # gradient of key [NV, B, H, L, K]
-    dv,  # gradient of value [NK, B, H, L, V]
-    s_k_h,  # stride size: L * K
-    s_k_t,  # stride size: K
-    s_k_d,  # stride size: 1
-    s_v_h,  # stride size: L * V
-    s_v_t,  # stride size: V
-    s_v_d,  # stride size: 1
+    q,
+    k,
+    v,
+    do,
+    dz,
+    dq,
+    dk,
+    dv,
     scale,  # K ** -0.5
-    B: tl.constexpr,  # B
-    H: tl.constexpr,  # H
-    T: tl.constexpr,  # T
-    K: tl.constexpr,  # K
-    V: tl.constexpr,  # V
-    BT: tl.constexpr,  # BLOCK SIZE along the sequence dimension, a.k.a. chunk size
-    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
+    T,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
 ):
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
@@ -158,11 +146,11 @@ def fused_chunk_based_bwd_kernel(
     k_2o = tl.zeros([1, BK * BK], dtype=tl.float32)
 
     for i in range(0, tl.cdiv(T, BT)):
-        p_q = tl.make_block_ptr(q + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i * BT, i_k * BK), (BT, BK), (1, 0))
-        p_v = tl.make_block_ptr(v + i_bh * s_v_h, (V, T), (s_v_d, s_v_t), (i_v * BV, i * BT), (BV, BT), (0, 1))
-        p_do = tl.make_block_ptr(do + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dq = tl.make_block_ptr(dq + (i_bh + i_v*B*H) * s_k_h, (T, K), (s_k_t, s_k_d), (i*BT, i_k*BK), (BT, BK), (1, 0))
+        p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (i * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i * BT, i_k * BK), (BT, BK), (1, 0))
+        p_v = tl.make_block_ptr(v + i_bh * T*V, (V, T), (1, V), (i_v * BV, i * BT), (BV, BT), (0, 1))
+        p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dq = tl.make_block_ptr(dq + (i_bh + i_v*B*H) * T*K, (T, K), (K, 1), (i*BT, i_k*BK), (BT, BK), (1, 0))
         p_dz = dz + (i_bh) * T + tl.arange(0, BT) + i * BT
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)
 
@@ -230,12 +218,12 @@ def fused_chunk_based_bwd_kernel(
     dq_2o = tl.zeros([BK * BK, 1], dtype=tl.float32)
 
     for i in range(tl.cdiv(T, BT) * BT - BT, -BT, -BT):
-        p_q = tl.make_block_ptr(q + i_bh * s_k_h, (K, T), (s_k_d, s_k_t), (i_k * BK, i), (BK, BT), (0, 1))
-        p_k = tl.make_block_ptr(k + i_bh * s_k_h, (T, K), (s_k_t, s_k_d), (i, i_k * BK), (BT, BK), (1, 0))
-        p_v = tl.make_block_ptr(v + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i, i_v * BV), (BT, BV), (1, 0))
-        p_do = tl.make_block_ptr(do + i_bh * s_v_h, (T, V), (s_v_t, s_v_d), (i, i_v * BV), (BT, BV), (1, 0))
-        p_dk = tl.make_block_ptr(dk + (i_bh+i_v*B*H) * s_k_h, (T, K), (s_k_t, s_k_d), (i, i_k*BK), (BT, BK), (1, 0))
-        p_dv = tl.make_block_ptr(dv + (i_bh+i_k*B*H) * s_v_h, (T, V), (s_v_t, s_v_d), (i, i_v*BV), (BT, BV), (1, 0))
+        p_q = tl.make_block_ptr(q + i_bh * T*K, (K, T), (1, K), (i_k * BK, i), (BK, BT), (0, 1))
+        p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i, i_k * BK), (BT, BK), (1, 0))
+        p_v = tl.make_block_ptr(v + i_bh * T*V, (T, V), (V, 1), (i, i_v * BV), (BT, BV), (1, 0))
+        p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i, i_v * BV), (BT, BV), (1, 0))
+        p_dk = tl.make_block_ptr(dk + (i_bh+i_v*B*H) * T*K, (T, K), (K, 1), (i, i_k*BK), (BT, BK), (1, 0))
+        p_dv = tl.make_block_ptr(dv + (i_bh+i_k*B*H) * T*V, (T, V), (V, 1), (i, i_v*BV), (BT, BV), (1, 0))
         p_dz = dz + (i_bh) * T + tl.arange(0, BT) + i
 
         b_dk = tl.zeros([BT, BK], dtype=tl.float32)
@@ -302,7 +290,7 @@ def fused_chunk_based_bwd_kernel(
 class FusedChunkBasedFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, scale=1):
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -322,10 +310,8 @@ class FusedChunkBasedFunction(torch.autograd.Function):
         grid = (NV, NK, B * H)
         fused_chunk_based_fwd_kernel[grid](
             q, k, v, o, z,
-            q.stride(1), q.stride(2), q.stride(3),
-            v.stride(1), v.stride(2), v.stride(3),
             scale,
-            B=B, H=H, T=T, K=K, V=V, BT=BT, BK=BK, BV=BV,
+            T=T, B=B, H=H, K=K, V=V, BT=BT, BK=BK, BV=BV,
             num_warps=num_warps,
         )
         o = o.sum(0)
@@ -335,7 +321,7 @@ class FusedChunkBasedFunction(torch.autograd.Function):
         return o.to(q.dtype), z.to(z.dtype)
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dz):
         q, k, v = ctx.saved_tensors
@@ -356,10 +342,8 @@ class FusedChunkBasedFunction(torch.autograd.Function):
 
         fused_chunk_based_bwd_kernel[grid](
             q, k, v, do, dz, dq, dk, dv,
-            q.stride(1), q.stride(2), q.stride(3),
-            v.stride(1), v.stride(2), v.stride(3),
             scale,
-            B=B, H=H, T=T, K=K, V=V, BT=BT, BK=BK, BV=BV,
+            T=T, B=B, H=H, K=K, V=V, BT=BT, BK=BK, BV=BV,
             num_warps=num_warps,
             num_stages=num_stages
         )

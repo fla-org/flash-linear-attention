@@ -87,7 +87,9 @@ class ShortConvolution(nn.Conv1d):
         kernel_size: int,
         bias: bool = False,
         activation: Optional[str] = 'silu',
-        use_fast_conv1d: Optional[bool] = True
+        use_fast_conv1d: Optional[bool] = True,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
     ):
         super().__init__(
             in_channels=hidden_size,
@@ -95,7 +97,9 @@ class ShortConvolution(nn.Conv1d):
             kernel_size=kernel_size,
             groups=hidden_size,
             bias=bias,
-            padding=kernel_size - 1
+            padding=kernel_size - 1,
+            device=device,
+            dtype=dtype,
         )
 
         self.hidden_size = hidden_size
@@ -144,7 +148,8 @@ class ShortConvolution(nn.Conv1d):
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         cache: Optional[torch.Tensor] = None,
-        output_final_state: bool = False
+        output_final_state: bool = False,
+        seq_idx: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -157,6 +162,10 @@ class ShortConvolution(nn.Conv1d):
                 If provided, the cache is updated **inplace**.
             output_final_state (Optional[bool]):
                 Whether to output the final state of shape `[batch_size, hidden_size, kernel_size]`. Default: `False`.
+            seq_idx (Optional[torch.Tensor]):
+                Sequence index for each token. Used for varlen. Default: `None`.
+                Shape: [batch_size, seq_len]
+                Suppose a batch consists of two sequences with lengths 3 and 4, seq_idx=[0, 0, 0, 1, 1, 1, 1] for this batch.
         Returns:
             Tensor of shape `[batch_size, seq_len, hidden_size]`.
         """
@@ -178,6 +187,7 @@ class ShortConvolution(nn.Conv1d):
                 weight=rearrange(self.weight, "d 1 w -> d w"),
                 bias=self.bias,
                 activation=self.activation,
+                seq_idx=seq_idx,
             )
         else:
             x = self._conv_forward(x, self.weight, self.bias)[..., :x.shape[-1]]

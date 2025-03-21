@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
@@ -13,15 +13,14 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.modules import RMSNorm, RotaryEmbedding
+from fla.modules import RotaryEmbedding
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import (index_first_axis, pad_input,
-                                         unpad_input)
+    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 except ImportError:
     warnings.warn(
         "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
@@ -39,36 +38,34 @@ class Attention(nn.Module):
         hidden_size: int = 2048,
         num_heads: int = 32,
         num_kv_heads: Optional[int] = None,
+        qkv_bias: bool = False,
         window_size: Optional[int] = None,
         rope_theta: Optional[float] = 10000.,
         max_position_embeddings: Optional[int] = None,
-        norm_first: bool = False,
-        norm_eps: float = 1e-5,
         layer_idx: int = None
     ):
         super().__init__()
 
+        self.hidden_size = hidden_size
         self.num_heads = num_heads
         if num_kv_heads is None:
             self.num_kv_heads = self.num_heads
         else:
             self.num_kv_heads = num_kv_heads
         self.num_kv_groups = num_heads // self.num_kv_heads
-        self.hidden_size = hidden_size
         self.head_dim = self.hidden_size // self.num_heads
         self.kv_dim = self.num_kv_heads * self.head_dim
         self.kv_dim = self.num_kv_heads * self.head_dim
+        self.qkv_bias = qkv_bias
+
         self.window_size = window_size
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        self.norm_first = norm_first
         self.layer_idx = layer_idx
 
-        if norm_first:
-            self.norm = RMSNorm(self.hidden_size, eps=norm_eps)
-        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=False)
-        self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=False)
+        self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
+        self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
+        self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
@@ -91,12 +88,12 @@ class Attention(nn.Module):
 
         batch_size, q_len, _ = hidden_states.size()
 
-        if self.norm_first:
-            hidden_states = self.norm(hidden_states)
+        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
 
-        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', h=self.num_heads)
-        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
-        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', h=self.num_kv_heads)
+        # equivalent to cu_seqlens in `flash_attn`
+        cu_seqlens = kwargs.get('cu_seqlens', None)
 
         seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
@@ -110,17 +107,20 @@ class Attention(nn.Module):
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        q, k = self.rotary(q, k, seqlen_offset, max_seqlen)
+        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
-            k, v = past_key_values.update(
+            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
             )['attn_state']
-            k = rearrange(k, '... (h d) -> ... h d', h=self.num_kv_heads)
-            v = rearrange(v, '... (h d) -> ... h d', h=self.num_kv_heads)
+            if cache_has_content:
+                k, v = k_cached, v_cached
+                k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
+                v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -140,13 +140,23 @@ class Attention(nn.Module):
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
             o = pad_input(o, indices_q, batch_size, q_len)
+        elif cu_seqlens is not None:
+            o = flash_attn_varlen_func(
+                q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=True,
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+            ).unsqueeze(0)
         else:
             o = flash_attn_func(
                 q, k, v,
                 causal=True,
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
-        o = o.reshape(batch_size, q_len, self.hidden_size)
+        o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
         if not output_attentions:
@@ -155,11 +165,12 @@ class Attention(nn.Module):
         return o, attentions, past_key_values
 
     def _upad_input(self, q, k, v, attention_mask, q_len):
-        seqlens = attention_mask.sum(-1, dtype=torch.int32)
-        indices_k = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
+        cache_mask = attention_mask[:, -seq_len:]
+        seqlens = cache_mask.sum(-1, dtype=torch.int32)
+        indices_k = torch.nonzero(cache_mask.flatten(), as_tuple=False).flatten()
         max_seqlen_k = seqlens.max().item()
         cu_seqlens_k = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
 
         k = index_first_axis(k.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
         v = index_first_axis(v.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)

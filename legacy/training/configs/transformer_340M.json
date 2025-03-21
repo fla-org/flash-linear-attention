@@ -1,0 +1,18 @@
+{
+    "attention_bias": false,
+    "bos_token_id": 1,
+    "eos_token_id": 2,
+    "fuse_cross_entropy": true,
+    "fuse_norm": true,
+    "hidden_act": "swish",
+    "hidden_size": 1024,
+    "initializer_range": 0.02,
+    "max_position_embeddings": 8192,
+    "model_type": "transformer",
+    "num_heads": 16,
+    "num_hidden_layers": 24,
+    "norm_eps": 1e-06,
+    "tie_word_embeddings": true,
+    "use_cache": true,
+    "vocab_size": 32000
+}

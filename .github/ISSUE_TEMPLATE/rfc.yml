@@ -1,0 +1,20 @@
+name: 📝 Request for Comments
+description: Propose a new feature or change and gather feedback.
+title: "[RFC] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Provide a brief description of your proposal for a new feature or change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Rationale
+      description: Why do you think this feature is important or beneficial?
+    validations:
+      required: false

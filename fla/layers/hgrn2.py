@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # "HGRN2: Gated Linear RNNs with State Expansion"[https://arxiv.org/abs/2404.07904]
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -15,9 +15,12 @@ from einops import rearrange
 from fla.modules import RMSNorm, ShortConvolution
 from fla.modules.activations import swish
 from fla.modules.layernorm import rms_norm_linear
+from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
 from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
 
 if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
+
     from fla.models.utils import Cache
 
 
@@ -78,17 +81,6 @@ class HGRN2Attention(nn.Module):
         self.g_norm = RMSNorm(hidden_size=self.hidden_size, elementwise_affine=elementwise_affine, eps=norm_eps)
         self.o_proj = nn.Linear(self.input_dim, hidden_size, bias=False)
 
-        self.apply(self._initialize_weights)
-
-    def _initialize_weights(self, module: nn.Module):
-        if getattr(module, "_is_hf_initialized", False):
-            return
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=2 ** -2.5)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        module._is_hf_initialized = True
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -97,7 +89,7 @@ class HGRN2Attention(nn.Module):
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
         lower_bound: Optional[torch.Tensor] = None,
-        **kwargs
+        **kwargs: Unpack[Dict]
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -107,29 +99,39 @@ class HGRN2Attention(nn.Module):
             )
 
         # launching the triton kernel for just one token will actually be slower
-        mode = 'fused_recurrent' if hidden_states.shape[1] == 1 else self.mode
+        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
+        cu_seqlens, position_ids, seq_idx = kwargs.get('cu_seqlens', None), kwargs.get('position_ids', None), None
         if self.use_short_conv:
             conv_state_q, conv_state_f, conv_state_i = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_f, conv_state_i = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
+            if cu_seqlens is not None:
+                if position_ids is not None:
+                    seq_idx = prepare_sequence_ids(position_ids)
+                else:
+                    seq_idx = prepare_sequence_ids(prepare_position_ids(cu_seqlens))
+                seq_idx = seq_idx.to(torch.int32).unsqueeze(0)
             q, conv_state_q = self.q_conv1d(x=self.q_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_q,
-                                            output_final_state=use_cache)
+                                            output_final_state=use_cache,
+                                            seq_idx=seq_idx)
             f, conv_state_f = self.f_conv1d(x=self.f_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_f,
-                                            output_final_state=use_cache)
+                                            output_final_state=use_cache,
+                                            seq_idx=seq_idx)
             i, conv_state_i = self.i_conv1d(x=self.i_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_i,
-                                            output_final_state=use_cache)
+                                            output_final_state=use_cache,
+                                            seq_idx=seq_idx)
         else:
             q = self.q_proj(hidden_states)
             f = self.f_proj(hidden_states)
@@ -151,7 +153,8 @@ class HGRN2Attention(nn.Module):
             g = lower_bound + (1 - lower_bound) * f.sigmoid()
             k, g = 1 - g, g.log()
 
-        q, k, i, g = map(lambda x: rearrange(x, '... (h d) -> ... h d', h=self.num_heads), (q, k.to(i), i, g))
+        q, k, g = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_f_dim), (q, k.to(i), g))
+        i = rearrange(i, '... (h d) -> ... h d', d=self.head_i_dim)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'fused_recurrent':
@@ -162,6 +165,7 @@ class HGRN2Attention(nn.Module):
                 gk=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         elif mode == 'fused_chunk':
@@ -182,6 +186,7 @@ class HGRN2Attention(nn.Module):
                 g=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
                 head_first=False
             )
         else:
@@ -192,7 +197,7 @@ class HGRN2Attention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_f, conv_state_i) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[2]
+                offset=q.shape[1]
             )
 
         o = rearrange(o, '... h d -> ... (h d)')

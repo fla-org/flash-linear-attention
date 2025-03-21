@@ -33,7 +33,7 @@ class RWKV6Config(PretrainedConfig):
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
-        initializer_range: float = 0.02,
+        initializer_range: float = 0.006,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
@@ -69,7 +69,9 @@ class RWKV6Config(PretrainedConfig):
             if 'num_heads' not in attn:
                 raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
             attn['num_kv_heads'] = attn.get('num_kv_heads', attn['num_heads'])
+            attn['qkv_bias'] = attn.get('qkv_bias', False)
             attn['window_size'] = attn.get('window_size', None)
+            attn['rope_theta'] = attn.get('rope_theta', 10000.)
 
         super().__init__(
             pad_token_id=pad_token_id,

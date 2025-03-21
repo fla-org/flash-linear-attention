@@ -8,10 +8,9 @@ https://github.com/sustcsonglin/flash-linear-attention/pull/49
 
 import torch
 import triton
+from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
 from fla.ops.simple_gla import chunk_simple_gla
-
-from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 
 
 @triton.testing.perf_report(
@@ -36,7 +35,7 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 )
 def benchmark(T, provider):
     # TODO: also add bwd pass benchmark
-    device = 'cuda'
+    from fla.utils import device
     dtype = torch.bfloat16
     B, H, D = 16, 8, 128
     # TODO: test more shapes
@@ -81,6 +80,7 @@ def benchmark(T, provider):
             quantiles=quantiles
         )
     return results
+
 
 if __name__ == '__main__':
     benchmark.run(print_data=True, save_path='.')
