@@ -9,6 +9,7 @@ import triton
 from fla.ops.common.utils import prepare_token_indices
 from fla.ops.nsa.naive import naive_nsa
 from fla.ops.nsa.parallel import parallel_nsa
+from fla.utils import device
 from utils import assert_close
 
 
@@ -35,12 +36,12 @@ def test_parallel(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    do = torch.randn((B, T, HQ, D), dtype=dtype, device='cuda')
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
 
-    indices = torch.full((B, T, H, S), T, dtype=torch.long, device='cuda')
+    indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
     for b in range(B):
         for t in range(T):
             for h in range(H):
@@ -92,14 +93,14 @@ def test_parallel_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    do = torch.randn((1, T, HQ, D), dtype=dtype, device='cuda')
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
 
-    indices = torch.full((1, T, H, S), T, dtype=torch.long, device='cuda')
+    indices = torch.full((1, T, H, S), T, dtype=torch.long, device=device)
     seq_indices = prepare_token_indices(offsets).tolist()
 
     for i in range(T):

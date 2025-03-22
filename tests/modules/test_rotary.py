@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from fla.modules.rotary import RotaryEmbedding, rotary_embedding_ref
+from fla.utils import device
 
 
 def assert_close(prefix, ref, tri, atol):
@@ -20,9 +21,9 @@ def assert_close(prefix, ref, tri, atol):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_rotary(B: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
     torch.manual_seed(42)
-    q = torch.randn(B, T, H, D).cuda().to(dtype=dtype).requires_grad_()
-    k = torch.randn(B, T, H//G, D).cuda().to(dtype=dtype).requires_grad_()
-    rotary = RotaryEmbedding(D).cuda()
+    q = torch.randn(B, T, H, D).to(device).to(dtype=dtype).requires_grad_()
+    k = torch.randn(B, T, H//G, D).to(device).to(dtype=dtype).requires_grad_()
+    rotary = RotaryEmbedding(D).to(device)
 
     tri_q, tri_k = rotary(q, k)
     tri_dq = torch.autograd.grad(tri_q.sum(), q, retain_graph=True)[0]
@@ -47,11 +48,11 @@ def test_rotary(B: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
     torch.manual_seed(42)
-    q = torch.randn(B, T, H, D).cuda().to(dtype=dtype).requires_grad_()
-    k = torch.randn(B, T, H//G, D).cuda().to(dtype=dtype).requires_grad_()
-    seqlen_offset = torch.randint(0, T//2, (B,)).cuda()
+    q = torch.randn(B, T, H, D).to(device).to(dtype=dtype).requires_grad_()
+    k = torch.randn(B, T, H//G, D).to(device).to(dtype=dtype).requires_grad_()
+    seqlen_offset = torch.randint(0, T//2, (B,)).to(device)
     max_seqlen = T + seqlen_offset.max().item()
-    rotary = RotaryEmbedding(D).cuda()
+    rotary = RotaryEmbedding(D).to(device)
 
     tri_q, tri_k = rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen)
     tri_dq = torch.autograd.grad(tri_q.sum(), q, retain_graph=True)[0]
@@ -82,15 +83,15 @@ def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torc
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
     torch.manual_seed(42)
-    q = torch.randn(1, T, H, D).cuda().to(dtype=dtype).requires_grad_()
-    k = torch.randn(1, T, H//G, D).cuda().to(dtype=dtype).requires_grad_()
+    q = torch.randn(1, T, H, D).to(device).to(dtype=dtype).requires_grad_()
+    k = torch.randn(1, T, H//G, D).to(device).to(dtype=dtype).requires_grad_()
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(1, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     max_seqlen = cu_seqlens[-1].item()
-    rotary = RotaryEmbedding(D).cuda()
+    rotary = RotaryEmbedding(D).to(device)
 
     tri_q, tri_k = rotary(q, k, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
     tri_dq = torch.autograd.grad(tri_q.sum(), q, retain_graph=True)[0]

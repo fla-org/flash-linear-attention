@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.utils import device
 
 
 def assert_close(prefix, ref, tri, atol):
@@ -22,13 +23,13 @@ def assert_close(prefix, ref, tri, atol):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
-    logits = torch.randn(B * T, V).cuda().to(dtype=dtype).requires_grad_()
-    target = torch.randint(0, V, (B, T,)).cuda()
+    logits = torch.randn(B * T, V).to(device).to(dtype=dtype).requires_grad_()
+    target = torch.randint(0, V, (B, T,)).to(device)
     target = torch.cat((target[..., 1:], torch.full_like(target[..., :1], -100)), -1)
     target = target.flatten()
 
     ref = nn.CrossEntropyLoss(reduction=reduction)(logits, target).to(dtype=dtype)
-    do = torch.randn_like(ref).cuda().to(dtype=dtype)
+    do = torch.randn_like(ref).to(device).to(dtype=dtype)
 
     ref.backward(do)
     ref_d, logits.grad = logits.grad.clone(), None
@@ -51,16 +52,16 @@ def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dty
 def test_fused_linear_cross_entropy(B: int, T: int, D: int, V: int, scale: float, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
 
-    x = torch.randn(B * T, D).cuda().to(dtype=dtype).requires_grad_()
-    target = torch.randint(0, V, (B, T,)).cuda()
+    x = torch.randn(B * T, D).to(device).to(dtype=dtype).requires_grad_()
+    target = torch.randint(0, V, (B, T,)).to(device)
     target = torch.cat((target[..., 1:], torch.full_like(target[..., :1], -100)), -1)
     target = target.flatten()
-    weight = torch.randn(V, D).cuda().to(dtype=dtype).requires_grad_()
-    bias = torch.randn(V).cuda().to(dtype=dtype).requires_grad_()
+    weight = torch.randn(V, D).to(device).to(dtype=dtype).requires_grad_()
+    bias = torch.randn(V).to(device).to(dtype=dtype).requires_grad_()
 
     logits = F.linear(x, weight, bias)
     ref = FusedCrossEntropyLoss(logit_scale=scale, reduction=reduction)(logits, target)
-    do = torch.randn_like(ref).cuda().to(dtype=dtype)
+    do = torch.randn_like(ref).to(device).to(dtype=dtype)
 
     ref.backward(do)
     ref_dx, x.grad = x.grad.clone(), None

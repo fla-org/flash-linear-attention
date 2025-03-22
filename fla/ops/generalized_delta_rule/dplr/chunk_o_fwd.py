@@ -80,11 +80,12 @@ def chunk_dplr_fwd_kernel_o(
         p_v_new = tl.make_block_ptr(v_new + i_bh * T*V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_o = tl.make_block_ptr(o + i_bh * T*V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     else:
-        p_Aqk = tl.make_block_ptr(A_qk + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        p_Aqb = tl.make_block_ptr(A_qb + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_v_new = tl.make_block_ptr(v_new + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_o = tl.make_block_ptr(o + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        valid_T = tl.minimum(BT, T - i_t * BT)
+        p_Aqk = tl.make_block_ptr(A_qk + (bos * H + i_h) * BT, (valid_T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+        p_Aqb = tl.make_block_ptr(A_qb + (bos * H + i_h) * BT, (valid_T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+        p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (valid_T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_v_new = tl.make_block_ptr(v_new + (bos * H + i_h) * V, (valid_T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_o = tl.make_block_ptr(o + (bos * H + i_h) * V, (valid_T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
     m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
     b_Aqk = tl.load(p_Aqk, boundary_check=(0, 1))

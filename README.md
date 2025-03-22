@@ -20,7 +20,8 @@ This repo aims at providing a collection of efficient Triton-based implementatio
   * [Fused Modules](#fused-modules)
   * [Generation](#generation)
   * [Hybrid Models](#hybrid-models)
-* [Evaluations](#evaluations)
+* [Training](#training)
+* [Evaluation](#evaluation)
 * [Benchmarks](#benchmarks)
 * [Citation](#citation)
 * [Star History](#star-history)
@@ -76,11 +77,14 @@ The following requirements should be satisfied
 - [datasets](https://github.com/huggingface/datasets) >=3.3.0
 - [causal-conv1d](https://github.com/Dao-AILab/causal-conv1d) >=1.4.0
 
-As `fla` is actively developed now, no released packages are provided at this time.
-If you do need to use `fla` ops/modules and contemplate further explorations, an alternative way is to install the package from source
+You can install `fla` with pip:
+```sh
+pip install flash-linear-attention
+```
+As `fla` is actively developed now, for the latest features and updates, an alternative way is to install the package from source
 ```sh
 # uninstall `fla` first to ensure a successful upgrade
-pip uninstall fla && pip install -U git+https://github.com/fla-org/flash-linear-attention
+pip uninstall flash-linear-attention && pip install -U git+https://github.com/fla-org/flash-linear-attention
 ```
 or manage `fla` with submodules
 ```sh
@@ -354,7 +358,13 @@ SambaForCausalLM(
 During inference, you **DO NOT** need to revise anything for generation!
 The model will produce output as-is, without any need for additional configurations or modifications.
 
-## Evaluations
+## Training
+
+We provide a minimal framework called [:fire: `flame`](https://github.com/fla-org/flame) built on top of `torchtitan`, for efficient training of `fla` models.
+
+Checkout [the GLA example](https://github.com/fla-org/flash-linear-attention/blob/main/examples/training.md) for more details.
+
+## Evaluation
 
 The [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) library allows you to easily perform (zero-shot) model evaluations.
 Follow the steps below to use this library:
@@ -401,23 +411,25 @@ If a GPU can't load a full copy of the model, please refer to [this link](https:
 ## Benchmarks
 
 We compared our Triton-based RetNet implementation with CUDA-based FlashAttention2, using a batch size of 8, 32 heads, and a head dimension of 128, across different sequence lengths.
-These tests were conducted on a single A100 80GB GPU, as illustrated in the following graph
+These tests were conducted on a single H100 80GB GPU, as illustrated in the following graph
 ```py
 # you might have to first install `fla` to enable its import via `pip install -e .`
 $ python benchmark_retention.py
 Performance:
-   seq_len  fused_chunk_fwd  chunk_fwd  parallel_fwd  fused_chunk_fwdbwd  chunk_fwdbwd  parallel_fwdbwd  flash_fwd  flash_fwdbwd
-0    128.0         0.093184   0.185344      0.067584            1.009664      1.591296         1.044480   0.041984      0.282624
-1    256.0         0.165888   0.219136      0.126976            1.024000      1.596928         1.073152   0.074752      0.413696
-2    512.0         0.308224   0.397312      0.265216            1.550336      1.603584         1.301504   0.156672      0.883712
-3   1024.0         0.603136   0.747520      0.706560            3.044864      3.089408         3.529728   0.467968      2.342912
-4   2048.0         1.191424   1.403904      2.141184            6.010880      6.059008        11.009024   1.612800      7.135232
-5   4096.0         2.377728   2.755072      7.392256           11.932672     11.938816        37.792770   5.997568     24.435200
-6   8192.0         4.750336   5.491712     26.402817           23.759359     23.952385       141.014023  22.682114     90.619904
-7  16384.0         9.591296  10.870784    101.262337           47.666176     48.745472       539.853821  91.346947    346.318848
+         T  chunk_fwd  parallel_fwd  flash_fwd  chunk_fwdbwd  parallel_fwdbwd  flash_fwdbwd
+0    128.0   0.264032      0.243536   0.083488      1.301856         1.166784      0.320704
+1    256.0   0.273472      0.252848   0.094304      1.345872         1.300608      0.807936
+2    512.0   0.303600      0.278896   0.098112      1.503168         1.433184      0.857216
+3   1024.0   0.357248      0.367360   0.156528      1.773552         2.303424      1.160864
+4   2048.0   0.454624      0.605616   0.340928      2.283728         4.483360      1.955936
+5   4096.0   0.638960      1.378016   1.004992      3.374720        12.271215      4.813776
+6   8192.0   1.012352      4.201344   3.625008      5.581808        40.833618     15.023697
+7  16384.0   1.748512     14.489664  13.710080     10.191552       153.093765     54.336864
 ```
 
-![Performance](https://github.com/fla-org/flash-linear-attention/assets/30831390/36961182-da39-48ba-96a6-84c572ce51d7)
+<div align="center">
+  <img width="500" alt="image" src="https://github.com/user-attachments/assets/c2607015-63af-43d1-90d1-ad5fe1670a03">
+</div>
 
 
 ## Citation
@@ -431,7 +443,7 @@ If you find this repository helpful, please cite our work:
   year   = {2024}
 }
 
-@misc{yang2024gdn,
+@inproceedings{yang2024gdn,
     title     = {Gated Delta Networks: Improving Mamba2 with Delta Rule},
     author    = {Songlin Yang and Jan Kautz and Ali Hatamizadeh},
     booktitle = {Proceedings of ICLR},

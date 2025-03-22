@@ -5,9 +5,9 @@ import os
 import pytest
 import torch
 
-from fla.ops.retention import (chunk_retention, fused_recurrent_retention,
-                               parallel_retention)
+from fla.ops.retention import chunk_retention, fused_recurrent_retention, parallel_retention
 from fla.ops.retention.naive import naive_retention
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -47,14 +47,14 @@ def test_chunk(
     V = K * expand_ratio
 
     if head_first:
-        q = torch.randn((B, H, T, K), dtype=dtype, device='cuda').requires_grad_()
-        k = torch.randn((B, H, T, K), dtype=dtype, device='cuda').requires_grad_()
-        v = torch.randn((B, H, T, V), dtype=dtype, device='cuda').requires_grad_()
+        q = torch.randn((B, H, T, K), dtype=dtype, device=device).requires_grad_()
+        k = torch.randn((B, H, T, K), dtype=dtype, device=device).requires_grad_()
+        v = torch.randn((B, H, T, V), dtype=dtype, device=device).requires_grad_()
     else:
-        q = torch.randn((B, T, H, K), dtype=dtype, device='cuda').requires_grad_()
-        k = torch.randn((B, T, H, K), dtype=dtype, device='cuda').requires_grad_()
-        v = torch.randn((B, T, H, V), dtype=dtype, device='cuda').requires_grad_()
-    h0 = torch.randn((B, H, K, V), dtype=dtype, device='cuda').requires_grad_()
+        q = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_()
+        k = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_()
+        v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
+    h0 = torch.randn((B, H, K, V), dtype=dtype, device=device).requires_grad_()
 
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
@@ -100,12 +100,12 @@ def test_chunk_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, K), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((1, T, H, K), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((1, T, H, V), dtype=dtype, device='cuda').requires_grad_()
-    h0 = torch.randn((N, H, K, V), dtype=dtype, device='cuda').requires_grad_()
+    q = torch.randn((1, T, H, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, K), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, V), dtype=dtype, device=device).requires_grad_()
+    h0 = torch.randn((N, H, K, V), dtype=dtype, device=device).requires_grad_()
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
@@ -164,9 +164,9 @@ def test_parallel(
     torch.manual_seed(42)
     V = K * expand_ratio
 
-    q = torch.randn((B, H, T, K), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((B, H, T, K), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((B, H, T, V), dtype=dtype, device='cuda').requires_grad_()
+    q = torch.randn((B, H, T, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, H, T, K), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, H, T, V), dtype=dtype, device=device).requires_grad_()
     do = torch.randn_like(v)
 
     ref = naive_retention(q, k, v)

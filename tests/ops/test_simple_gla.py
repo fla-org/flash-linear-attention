@@ -11,6 +11,7 @@ from einops import rearrange
 from fla.ops.simple_gla import chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.ops.simple_gla.parallel import parallel_simple_gla
+from fla.utils import device
 from utils import assert_close
 
 
@@ -117,16 +118,16 @@ def test_chunk(
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # [B, H, T, D]
     if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_(True)
-        k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_(True)
-        v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_(True)
-        g = torch.randn((B, H, T), dtype=torch.float32, device='cuda')
+        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
+        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
+        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
+        g = torch.randn((B, H, T), dtype=torch.float32, device=device)
     else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-        k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-        v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-        g = torch.randn((B, T, H), dtype=torch.float32, device='cuda')
-    h0 = torch.rand((B, H, D, D), dtype=torch.float32, device='cuda').requires_grad_(True)
+        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+        g = torch.randn((B, T, H), dtype=torch.float32, device=device)
+    h0 = torch.rand((B, H, D, D), dtype=torch.float32, device=device).requires_grad_(True)
     dht = torch.randn_like(h0)
     g = (F.logsigmoid(g) / gate_logit_normalizer).requires_grad_(True)
     do = torch.randn_like(v)
@@ -184,13 +185,13 @@ def test_chunk_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    g = F.logsigmoid(torch.randn((1, T, H), dtype=dtype, device='cuda')).requires_grad_()
-    h0 = torch.randn((N, H, D, D), dtype=torch.float32, device='cuda').requires_grad_()
+    q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((1, T, H), dtype=dtype, device=device)).requires_grad_()
+    h0 = torch.randn((N, H, D, D), dtype=torch.float32, device=device).requires_grad_()
     do = torch.randn_like(v)
 
     ref, ref_ht = fused_recurrent_simple_gla(
@@ -256,12 +257,12 @@ def test_parallel_varlen(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    k = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    v = torch.randn((1, T, H, D), dtype=dtype, device='cuda').requires_grad_()
-    g = F.logsigmoid(torch.randn((1, T, H), dtype=dtype, device='cuda')).requires_grad_()
+    q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((1, T, H), dtype=dtype, device=device)).requires_grad_()
     do = torch.randn_like(v)
 
     ref, _ = fused_recurrent_simple_gla(
@@ -322,15 +323,15 @@ def test_parallel(
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     USE_G = gate_logit_normalizer > 0
     if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_(True)
-        k = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_(True)
-        v = torch.randn((B, H, T, D), dtype=dtype, device='cuda').requires_grad_(True)
-        g = F.logsigmoid(torch.randn((B, H, T), dtype=dtype, device='cuda')) if USE_G else None
+        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
+        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
+        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
+        g = F.logsigmoid(torch.randn((B, H, T), dtype=dtype, device=device)) if USE_G else None
     else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-        k = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-        v = torch.randn((B, T, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-        g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device='cuda')) if USE_G else None
+        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+        g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device=device)) if USE_G else None
     g = (g / gate_logit_normalizer).requires_grad_(True) if USE_G else None
     do = torch.randn_like(v)
 
@@ -379,7 +380,6 @@ def test_simple_gla_to_mamba2(vary_A, dtype):
     n_heads = dim // headdim  # (H) in the paper
     ngroups = n_heads  # (G) in the paper; NOTE: do not use group-query here
     dstate = 64  # (N) in the paper
-    device = "cuda"
     atol = 5e-4 if dtype == torch.float else 1e-2
 
     x = 0.1 * torch.randn(batch, seq_len, n_heads, headdim, dtype=dtype, device=device)

@@ -165,11 +165,12 @@ class Attention(nn.Module):
         return o, attentions, past_key_values
 
     def _upad_input(self, q, k, v, attention_mask, q_len):
-        seqlens = attention_mask.sum(-1, dtype=torch.int32)
-        indices_k = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
+        cache_mask = attention_mask[:, -seq_len:]
+        seqlens = cache_mask.sum(-1, dtype=torch.int32)
+        indices_k = torch.nonzero(cache_mask.flatten(), as_tuple=False).flatten()
         max_seqlen_k = seqlens.max().item()
         cu_seqlens_k = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
 
         k = index_first_axis(k.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
         v = index_first_axis(v.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
