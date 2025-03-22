@@ -180,6 +180,11 @@ def fwd_wu_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    current_offset = i_t * BT
+    valid_T = tl.minimum(BT, T - current_offset)
+    tl.device_assert(current_offset < T, "i_t out of range")
+    tl.device_assert(valid_T > 0, "valid_T must be positive")
+
     if HEAD_FIRST:
         p_A_ab_inv = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
         p_A_ak = tl.make_block_ptr(A_ak + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
@@ -202,9 +207,28 @@ def fwd_wu_kernel(
             p_ag = tl.make_block_ptr(ag + i_bh * T * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             p_w = tl.make_block_ptr(w + i_bh * T * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         else:
-            p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            # p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            # p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            valid_T = tl.minimum(BT, T - i_t * BT)
+            p_ag = tl.make_block_ptr(
+                ag + (bos*H + i_h) * K,
+                (valid_T, K),  # 动态shape
+                (H*K, 1),
+                (i_t * BT, i_k * BK),
+                (BT, BK),
+                (1, 0)
+            )
+            p_w = tl.make_block_ptr(
+                w + (bos*H + i_h) * K,
+                (valid_T, K),  # 同步调整
+                (H*K, 1),
+                (i_t * BT, i_k * BK),
+                (BT, BK),
+                (1, 0)
+            )
+            
         b_ag = tl.load(p_ag, boundary_check=(0, 1))
+        tl.device_assert(b_ag.shape[0] <= BT, "AG data block overflow")
         b_w = tl.dot(b_Aab_inv, b_ag)  # both bf16 or fp16
         tl.store(p_w, b_w.to(p_w.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
@@ -213,8 +237,26 @@ def fwd_wu_kernel(
             p_v = tl.make_block_ptr(v + i_bh * T * V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_u = tl.make_block_ptr(u + i_bh * T * V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         else:
-            p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            # p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            # p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            valid_T = tl.minimum(BT, T - i_t * BT)
+            # 调整v和u的指针shape
+            p_v = tl.make_block_ptr(
+                v + (bos*H + i_h) * V,
+                (valid_T, V),  # 动态shape
+                (H*V, 1),
+                (i_t * BT, i_v * BV),
+                (BT, BV),
+                (1, 0)
+            )
+            p_u = tl.make_block_ptr(
+                u + (bos*H + i_h) * V,
+                (valid_T, V),  # 同步调整
+                (H*V, 1),
+                (i_t * BT, i_v * BV),
+                (BT, BV),
+                (1, 0)
+            )
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_u = tl.dot(b_Aak, b_v)  # both bf16 or fp16
         tl.store(p_u, b_u.to(p_u.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
@@ -237,12 +279,14 @@ def fwd_prepare_wy_repr(
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
     if offsets is None:
-        NT = triton.cdiv(T, BT)
+        NT = (T + BT - 1) // BT
     else:
         if indices is None:
             indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], BT).tolist()])
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
+    assert NT * BT >= T, f"NT={NT}, BT={BT}, T={T} 分块参数不匹配"
+    # print(f"BT={BT}, NT={NT}, T={T}, Remainder={T % BT}")
     BC = min(BT, 32)
     fwd_fn = fwd_prepare_wy_repr_kernel_chunk64 if BT == 64 else fwd_prepare_wy_repr_kernel_chunk32
     A_ab_inv = torch.empty_like(A_ab)
@@ -280,6 +324,14 @@ def fwd_wu(
     head_first: bool,
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    # print(f"[DEBUG] Input shapes:")
+    # print(f"ag.shape: {ag.shape}")
+    # print(f"v.shape: {v.shape}")
+    # print(f"A_ak.shape: {A_ak.shape}")
+    # print(f"A_ab_inv.shape: {A_ab_inv.shape}")
+    # print(f"head_first: {head_first}")
+
     if head_first:
         B, H, T, K, V = *ag.shape, v.shape[-1]
     else:

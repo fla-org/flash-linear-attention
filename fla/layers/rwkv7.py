@@ -46,7 +46,8 @@ class RWKV7Attention(nn.Module):
         self.hidden_size = hidden_size
 
         self.key_dim = hidden_size
-        self.value_dim = value_dim if value_dim is not None else hidden_size
+        #self.value_dim = value_dim if value_dim is not None else hidden_size
+        self.value_dim = hidden_size
         if head_dim is None and num_heads is None:
             raise ValueError("Either `head_dim` or `num_heads` must be specified.")
         elif head_dim is not None:
@@ -55,7 +56,8 @@ class RWKV7Attention(nn.Module):
         elif num_heads is not None:
             self.head_dim = int(hidden_size // num_heads)
             self.num_heads = num_heads
-
+        print("self.head_dim:", self.head_dim)
+        print("self.num_heads:", self.num_heads)
         self.decay_low_rank_dim = decay_low_rank_dim
         self.gate_low_rank_dim = gate_low_rank_dim
         self.a_low_rank_dim = a_low_rank_dim
@@ -183,7 +185,8 @@ class RWKV7Attention(nn.Module):
         if attention_mask is not None:
             v = v * attention_mask[:, -v.shape[-2]:, None]
         r, w, k, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, a))
-        v = rearrange(v, 'b t (h d) -> b t h d', d=self.value_dim)
+        # v = rearrange(v, 'b t (h d) -> b t h d', d=self.value_dim)
+        v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_dim)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
 
@@ -215,8 +218,17 @@ class RWKV7Attention(nn.Module):
             o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))
         else:
             o = self.g_norm(rearrange(o, 'b t h d -> (b t) (h d)')).view(batch_size, seq_len, -1)
+        
+        right_term = (r * k * self.r_k).sum(-1, keepdim=True) * v
+        right_term = rearrange(right_term, 'b t h d -> b t (h d)') 
+        # print("right_term", right_term.shape)
+        # print("o", o.shape)
+        # print("v", v.shape)
+        # print("k", k.shape)
+        # print("r", r.shape)
+        # print("self.r_k", self.r_k.shape)
 
-        o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
+        o = o + right_term
         o = self.o_proj(o * g)
 
         return o, None, past_key_values, v_first
