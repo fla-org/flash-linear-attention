@@ -54,7 +54,7 @@ class RWKV7Attention(nn.Module):
         elif num_heads is not None:
             self.head_dim = int(hidden_size // num_heads)
             self.num_heads = num_heads
-        self.head_v_dim = int(self.value_dim // num_heads)
+        self.head_v_dim = int(self.value_dim // self.num_heads)
 
         self.decay_low_rank_dim = decay_low_rank_dim
         self.gate_low_rank_dim = gate_low_rank_dim
