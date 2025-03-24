@@ -182,6 +182,9 @@ def fwd_wu_kernel(
 
     current_offset = i_t * BT
     valid_T = tl.minimum(BT, T - current_offset)
+    valid_mask_row = tl.arange(0, BT)[:, None] < valid_T  # (BT, 1)
+    valid_mask_col = tl.arange(0, BT)[None, :] < valid_T  # (1, BT)
+    Aab_mask = valid_mask_row & valid_mask_col            # (BT, BT)
     tl.device_assert(current_offset < T, "i_t out of range")
     tl.device_assert(valid_T > 0, "valid_T must be positive")
 
@@ -191,8 +194,12 @@ def fwd_wu_kernel(
     else:
         p_A_ab_inv = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
         p_A_ak = tl.make_block_ptr(A_ak + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_Aab_inv = tl.load(p_A_ab_inv, boundary_check=(0, 1))
-    b_Aak = tl.load(p_A_ak, boundary_check=(0, 1))
+    
+    b_Aab_inv = tl.load(p_A_ab_inv, boundary_check=(0, 1), padding_option="zero")
+    b_Aab_inv = tl.where(Aab_mask, b_Aab_inv, 0.0)
+    b_Aak = tl.load(p_A_ak, boundary_check=(0, 1), padding_option="zero")
+    b_Aak = tl.where(Aab_mask, b_Aak, 0.0)
+
     o_s = tl.arange(0, BT)
     b_Aab_inv = tl.where(o_s[:, None] >= o_s[None, :], b_Aab_inv, 0)
     b_Aak = tl.where(o_s[:, None] > o_s[None, :], b_Aak, 0)
@@ -207,29 +214,12 @@ def fwd_wu_kernel(
             p_ag = tl.make_block_ptr(ag + i_bh * T * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             p_w = tl.make_block_ptr(w + i_bh * T * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         else:
-            # p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            # p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            valid_T = tl.minimum(BT, T - i_t * BT)
-            p_ag = tl.make_block_ptr(
-                ag + (bos*H + i_h) * K,
-                (valid_T, K),  # 动态shape
-                (H*K, 1),
-                (i_t * BT, i_k * BK),
-                (BT, BK),
-                (1, 0)
-            )
-            p_w = tl.make_block_ptr(
-                w + (bos*H + i_h) * K,
-                (valid_T, K),  # 同步调整
-                (H*K, 1),
-                (i_t * BT, i_k * BK),
-                (BT, BK),
-                (1, 0)
-            )
-            
-        b_ag = tl.load(p_ag, boundary_check=(0, 1))
-        tl.device_assert(b_ag.shape[0] <= BT, "AG data block overflow")
-        b_w = tl.dot(b_Aab_inv, b_ag)  # both bf16 or fp16
+            p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        
+        b_ag = tl.load(p_ag, boundary_check=(0,1), padding_option="zero")
+        b_ag = tl.where(valid_mask_row, b_ag, 0.0)
+        b_w = tl.dot(b_Aab_inv, b_ag)
         tl.store(p_w, b_w.to(p_w.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
     for i_v in range(tl.cdiv(V, BV)):
@@ -237,27 +227,11 @@ def fwd_wu_kernel(
             p_v = tl.make_block_ptr(v + i_bh * T * V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_u = tl.make_block_ptr(u + i_bh * T * V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         else:
-            # p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            # p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            valid_T = tl.minimum(BT, T - i_t * BT)
-            # 调整v和u的指针shape
-            p_v = tl.make_block_ptr(
-                v + (bos*H + i_h) * V,
-                (valid_T, V),  # 动态shape
-                (H*V, 1),
-                (i_t * BT, i_v * BV),
-                (BT, BV),
-                (1, 0)
-            )
-            p_u = tl.make_block_ptr(
-                u + (bos*H + i_h) * V,
-                (valid_T, V),  # 同步调整
-                (H*V, 1),
-                (i_t * BT, i_v * BV),
-                (BT, BV),
-                (1, 0)
-            )
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+            p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+        b_v = tl.where(valid_mask_row, b_v, 0.0)
         b_u = tl.dot(b_Aak, b_v)  # both bf16 or fp16
         tl.store(p_u, b_u.to(p_u.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 

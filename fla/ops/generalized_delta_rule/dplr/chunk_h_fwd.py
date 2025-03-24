@@ -82,6 +82,11 @@ def chunk_dplr_fwd_kernel_h(
         b_hc = tl.zeros([BK, BV], dtype=tl.float32)
         # since we need to make all DK in the SRAM. we face serve SRAM memory burden. By subchunking we allievate such burden
         for i_c in range(tl.cdiv(min(BT, T - i_t * BT), BC)):
+            current_offset = i_t * BT + i_c * BC
+            valid_TC = tl.minimum(BC, T - current_offset)
+            valid_mask_row = tl.arange(0, BC)[:, None] < valid_TC  # [BC, 1]
+            valid_mask_col = tl.arange(0, BC)[None, :] < valid_TC  # [1, BC]
+            
             if HEAD_FIRST:
                 p_kg = tl.make_block_ptr(kg + i_nh * T*K, (K, T), (1, K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
                 p_bg = tl.make_block_ptr(bg + i_nh * T*K, (K, T), (1, K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
@@ -90,21 +95,26 @@ def chunk_dplr_fwd_kernel_h(
                 p_u = tl.make_block_ptr(u + i_nh * T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
                 p_v_new = tl.make_block_ptr(v_new+i_nh*T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
             else:
-                valid_T = tl.minimum(BT, T - i_t * BT)
-                p_kg = tl.make_block_ptr(kg+(bos*H+i_h)*K, (K, valid_T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-                p_bg = tl.make_block_ptr(bg+(bos*H+i_h)*K, (K, valid_T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-                p_w = tl.make_block_ptr(w+(bos*H+i_h)*K, (valid_T, K), (H*K, 1), (i_t * BT + i_c * BC, i_k * BK), (BC, BK), (1, 0))
-                p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (valid_T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-                p_u = tl.make_block_ptr(u+(bos*H+i_h)*V, (valid_T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-                p_v_new = tl.make_block_ptr(v_new+(bos*H+i_h)*V, (valid_T, V), (H*V, 1), (i_t*BT+i_c*BC, i_v * BV), (BC, BV), (1, 0))
-            # [BK, BC]
-            b_kg = tl.load(p_kg, boundary_check=(0, 1))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_w = tl.load(p_w, boundary_check=(0, 1))
-            b_bg = tl.load(p_bg, boundary_check=(0, 1))
-            b_v2 = tl.dot(b_w, b_h.to(b_w.dtype)) + tl.load(p_u, boundary_check=(0, 1))
-            b_hc += tl.dot(b_kg, b_v)
-            b_hc += tl.dot(b_bg.to(b_hc.dtype), b_v2)
+                p_kg = tl.make_block_ptr(kg+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
+                p_bg = tl.make_block_ptr(bg+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
+                p_w = tl.make_block_ptr(w+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_c * BC, i_k * BK), (BC, BK), (1, 0))
+                p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
+                p_u = tl.make_block_ptr(u+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
+                p_v_new = tl.make_block_ptr(v_new+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC, i_v * BV), (BC, BV), (1, 0))
+            
+            b_kg = tl.load(p_kg, boundary_check=(0,1), padding_option="zero")
+            b_kg = tl.where(valid_mask_col, b_kg, 0.0)
+            b_v = tl.load(p_v, boundary_check=(0,1), padding_option="zero")
+            b_v = tl.where(valid_mask_row, b_v, 0.0)
+            b_w = tl.load(p_w, boundary_check=(0,1), padding_option="zero")
+            b_w = tl.where(valid_mask_row, b_w, 0.0)
+            b_bg = tl.load(p_bg, boundary_check=(0,1), padding_option="zero")
+            b_bg = tl.where(valid_mask_col, b_bg, 0.0)
+            b_u = tl.load(p_u, boundary_check=(0,1), padding_option="zero")
+            b_u = tl.where(valid_mask_row, b_u, 0.0)
+            b_v2 = tl.dot(b_w, b_h.to(b_w.dtype)) + b_u
+            b_hc += tl.dot(b_kg, b_v) + tl.dot(b_bg.to(b_hc.dtype), b_v2)
+            b_v2 = tl.where(valid_mask_row, b_v2, 0.0)
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
 
         last_idx = min((i_t + 1) * BT, T) - 1
