@@ -104,6 +104,7 @@ class LinearAttention(nn.Module):
             raise NotImplementedError(f"Not supported output norm `{output_norm}`.")
 
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
+        
 
         self.norm_q = norm_q
         self.norm_k = norm_k
@@ -155,5 +156,6 @@ class LinearAttention(nn.Module):
         else:
             raise NotImplementedError
         o = self.norm(o)
+        o = rearrange(o, '... h d -> ... (h d)')
         o = self.o_proj(o)
         return o
