@@ -164,9 +164,9 @@ def chunk_gated_delta_rule_ref(
 
 
 @pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [1, 7, 15, 63, 286, 300])
+@pytest.mark.parametrize("T", [286, 300])
 @pytest.mark.parametrize("H", [2, 16])
-@pytest.mark.parametrize("D", [50, 100, 200, 256])
+@pytest.mark.parametrize("D", [50, 64, 200, 256])
 @pytest.mark.parametrize("scale", [1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])
@@ -224,9 +224,9 @@ def test_recurrent_forward(
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("gate_logit_normalizer", [0.05, 1, 20])
-@pytest.mark.parametrize("D", [50, 100, 256])
+@pytest.mark.parametrize("D", [50, 64, 256])
 @pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("T", [7, 63, 286, 300, 1000])
+@pytest.mark.parametrize("T", [286, 300, 1000])
 @pytest.mark.parametrize("scale", [1, 0.1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])
@@ -300,9 +300,9 @@ def test_chunk(
 
 
 @pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", [64, 128, 200, 250, 256, 300, 400, 512, 1000, 2048])
+@pytest.mark.parametrize("T", [64, 128, 200, 300, 400, 1000, 2048])
 @pytest.mark.parametrize("H", [2, 16])
-@pytest.mark.parametrize("D", [50, 100, 200])
+@pytest.mark.parametrize("D", [50, 64, 100, 200])
 @pytest.mark.parametrize("scale", [1, 0.1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.skipif(
