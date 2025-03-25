@@ -4,21 +4,6 @@ import torch
 from einops import rearrange
 
 
-def get_abs_err(x, y):
-    return (x-y).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x-y).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
-    return err / base
-
-
-def assert_close(prefix, ref, tri, ratio):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
-    assert get_err_ratio(ref, tri) < ratio, msg
-
 # S_t = S_t @ (I + alpha_t beta_t^T) + v_t k_t^T
 # q, k, alpha, beta [B, H, L, D_K]
 # v [B, H, L, D_V]
@@ -110,49 +95,3 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
             (beta_i * decay).transpose(-1, -2) @ v2_i
     S = None if output_final_state is False else S
     return rearrange(o, 'b h n c d -> b h (n c) d'), S
-
-
-if __name__ == '__main__':
-    from torch.nn import functional as F
-
-    from fla.utils import device
-
-    # disallow tf32
-    torch.set_float32_matmul_precision('high')
-    torch.set_default_dtype(torch.float32)
-    B = 2
-    H = 4
-    L = 2048
-    DK = 128
-    DV = 128
-    q = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
-    k = (torch.randn(B, H, L, DK)).to(device).requires_grad_(True)
-    v = (torch.randn(B, H, L, DV)).to(device).requires_grad_(True)
-
-    alpha = -F.normalize(torch.randn(B, H, L, DK).to(device), dim=-1, p=2)
-    beta = -alpha
-    alpha = alpha.clone().detach().requires_grad_(True)
-    beta = beta.clone().detach().requires_grad_(True)
-    gate_logit_normalizer = 16
-    w = torch.nn.functional.logsigmoid(torch.randn(B, H, L, DK)) / gate_logit_normalizer
-
-    w = w.to(device).requires_grad_(True)
-    o, s = dplr_recurrence(q.clone(), k.clone(), v.clone(), -alpha.clone(), beta.clone(), w.clone())
-    do = torch.randn_like(o).to(device)
-    o.backward(do, retain_graph=True)
-    q_grad, q.grad = q.grad, None
-    k_grad, k.grad = k.grad, None
-    v_grad, v.grad = v.grad, None
-    alpha_grad, alpha.grad = alpha.grad, None
-    beta_grad, beta.grad = beta.grad, None
-
-    o2, s2 = dplr_chunkwise(q.clone(), k.clone(), v.clone(), -alpha.clone(), beta.clone(), w.clone(), chunk_size=16)
-    o2.backward(do)
-    assert_close("o", o, o2, 0.002)
-    assert_close("s", s, s2, 0.002)
-    assert_close("q.grad", q.grad, q_grad, 0.002)
-    assert_close("k.grad", k.grad, k_grad, 0.002)
-    assert_close("v.grad", v.grad, v_grad, 0.002)
-    assert_close("alpha.grad", alpha.grad, alpha_grad, 0.002)
-    assert_close("beta.grad", beta.grad, beta_grad, 0.002)
-    print("All passed!")
