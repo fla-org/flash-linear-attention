@@ -36,8 +36,6 @@ __pycache__
 *.pkl
 *.pt
 
-# hidden files
-.*
 
 # vscode
 .vscode

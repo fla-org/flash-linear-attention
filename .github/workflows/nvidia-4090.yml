@@ -1,0 +1,39 @@
+name: Nvidia 4090
+
+on:
+  push:
+    branches: [ '*' ]
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+  test:
+    runs-on: 'nvidia-4090'
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Setup python
+        run: pip install --upgrade pytest setuptools wheel ninja
+
+      - name: Setup fla
+        run: pip install --no-use-pep517 .
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v46.0.3
+
+      - name: Find dependent test files
+        id: find-dependent-tests
+        run: |
+          # Run the Python script to find dependent test files
+          TEST_FILES=$(python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
+          echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
+
+      - name: Run pytest on dependent test files
+        run: |
+          if [ -n "${{ steps.find-dependent-tests.outputs.test_files }}" ]; then
+            pytest ${{ steps.find-dependent-tests.outputs.test_files }}
+          else
+            echo "No dependent test files to run."
+          fi
