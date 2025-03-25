@@ -38,7 +38,6 @@ setup(
     install_requires=[
         'torch>=2.5',
         'transformers>=4.45.0',
-        'triton>=3.0',
         'datasets>=3.3.0',
         'einops',
         'ninja'
