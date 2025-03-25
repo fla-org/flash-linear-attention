@@ -18,7 +18,7 @@ from fla.utils import use_cuda_graph
     configs=[
         triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64]
-        for num_warps in [1, 2, 4, 8]
+        for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=['BC', 'K'],
@@ -133,8 +133,9 @@ def chunk_dplr_fwd_A_kernel_intra_sub_inter(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
     ],
     key=['BK', 'BT'],
     use_cuda_graph=use_cuda_graph,
@@ -235,7 +236,6 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     tl.store(p_bg, b_bg.to(p_bg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_ag, b_ag.to(p_ag.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    b_qg, b_kg, b_ag, b_bg = None, None, None, None
     tl.debug_barrier()
 
     b_q = b_q.to(b_k.dtype)

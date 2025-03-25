@@ -117,7 +117,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         offsets: Optional[torch.LongTensor] = None,
         head_first: bool = True
     ):
-        chunk_size = 64
+        chunk_size = 16
 
         # 2-d indices denoting the offsets of chunks in each sequence
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,

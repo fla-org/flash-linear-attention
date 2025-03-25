@@ -17,7 +17,7 @@ from fla.utils import device_capacity, use_cuda_graph
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16]
+        for num_warps in [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
     key=['BK', 'NC', 'BT', 'K'],

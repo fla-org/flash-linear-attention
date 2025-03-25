@@ -282,7 +282,7 @@ def test_fused_recurrent_fwd(
 @pytest.mark.parametrize("gate_logit_normalizer", [1, 0.1, 10])
 @pytest.mark.parametrize("T", [256, 300])
 @pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("D", [256, 100])
+@pytest.mark.parametrize("D", [256, 100, 64])
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [False, True])
@@ -368,7 +368,7 @@ def test_chunk(
 @pytest.mark.parametrize("N", [4])
 @pytest.mark.parametrize("T", [64, 128, 200, 250, 256, 300, 400, 512, 1000, 2048])
 @pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("D", [50, 100, 200])
+@pytest.mark.parametrize("D", [64, 100, 200])
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_chunk_varlen(

@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_triton_shared_mem_enough, use_cuda_graph
 
 
 @triton.heuristics({
@@ -22,6 +22,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
         for num_warps in [2, 4, 8, 16]
     ],
     key=['BT', 'BK', 'BV'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
@@ -119,6 +120,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
         for num_stages in [2, 3]
     ],
     key=['BT'],
+    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
@@ -283,12 +285,17 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
-    if torch.cuda.get_device_capability()[0] >= 9:
+
+    if is_triton_shared_mem_enough(233472, k.device.index):
         BV = 64
         BC = 64 if K <= 128 else 32
-    else:
+    elif is_triton_shared_mem_enough(131072, k.device.index):  # A100
         BV = 32
         BC = 32
+    else:
+        BV = 16
+        BC = 16
+
     BC = min(BT, BC)
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
