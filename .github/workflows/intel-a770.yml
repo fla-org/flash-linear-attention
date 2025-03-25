@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: 'intel-a770'
+    env:
+      SKIP_TEST_CHUNK_VARLEN: 1
     steps:
       - name: Check out repo
         uses: actions/checkout@v4

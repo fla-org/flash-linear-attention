@@ -1,4 +1,4 @@
-name: Nvidia 4090
+name: Nvidia 4090 Varlen
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
   test:
     runs-on: 'nvidia-4090'
     env:
-      SKIP_TEST_CHUNK_VARLEN: 1
+      SKIP_TEST_CHUNK_VARLEN: 0
     steps:
       - name: Check out repo
         uses: actions/checkout@v4

@@ -83,6 +83,10 @@ def test_chunk(
 @pytest.mark.parametrize("K", [32, 64, 100])
 @pytest.mark.parametrize("expand_ratio", [1, 2])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+)
 def test_chunk_varlen(
     N: int,
     T: int,

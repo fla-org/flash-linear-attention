@@ -1,4 +1,4 @@
-name: Nvidia 4090
+name: Intel A770 Varlen
 
 on:
   push:
@@ -8,9 +8,9 @@ on:
 
 jobs:
   test:
-    runs-on: 'nvidia-4090'
+    runs-on: 'intel-a770'
     env:
-      SKIP_TEST_CHUNK_VARLEN: 1
+      SKIP_TEST_CHUNK_VARLEN: 0
     steps:
       - name: Check out repo
         uses: actions/checkout@v4

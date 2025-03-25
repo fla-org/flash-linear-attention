@@ -100,6 +100,10 @@ def test_chunk(
 @pytest.mark.parametrize("D", [50, 100, 200])
 @pytest.mark.parametrize("scale", [1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+)
 def test_chunk_varlen(
     N: int,
     T: int,

@@ -219,6 +219,10 @@ def test_fused_chunk_fwd(
 @pytest.mark.parametrize("D", [50, 63, 64, 100])
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+)
 def test_chunk_varlen_fwd(
     N: int,
     T: int,
