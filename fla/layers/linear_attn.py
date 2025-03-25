@@ -155,5 +155,6 @@ class LinearAttention(nn.Module):
         else:
             raise NotImplementedError
         o = self.norm(o)
+        o = rearrange(o, '... h d -> ... (h d)')
         o = self.o_proj(o)
         return o
