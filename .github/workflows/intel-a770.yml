@@ -1,4 +1,4 @@
-name: Pytest CI
+name: Intel A770
 
 on:
   push:
