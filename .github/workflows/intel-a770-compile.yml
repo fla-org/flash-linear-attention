@@ -7,9 +7,6 @@ on:
 jobs:
   test:
     runs-on: 'intel-a770'
-    if: |
-      (github.event_name == 'push' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/pull/')) ||
-      (github.event_name == 'pull_request' && github.event.pull_request.base.ref != 'main')
     env:
       COMPILER_MODE: 1
       CI_ENV: 1

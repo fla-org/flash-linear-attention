@@ -56,7 +56,7 @@ def cumsum_global_reference(s, reverse=False, head_first=False):
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 def test_cumsum_local_vector(B, T, H, D, dtype, head_first, reverse, chunk_size):
@@ -77,7 +77,7 @@ def test_cumsum_local_vector(B, T, H, D, dtype, head_first, reverse, chunk_size)
 @pytest.mark.parametrize("reverse", [True, False])
 @pytest.mark.parametrize("chunk_size", [32, 64])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 def test_cumsum_local_scalar(B, T, H, dtype, head_first, reverse, chunk_size):
@@ -98,7 +98,7 @@ def test_cumsum_local_scalar(B, T, H, dtype, head_first, reverse, chunk_size):
 @pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.parametrize("reverse", [True, False])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 def test_cumsum_global_vector(B, T, H, D, dtype, head_first, reverse):
@@ -118,7 +118,7 @@ def test_cumsum_global_vector(B, T, H, D, dtype, head_first, reverse):
 @pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.parametrize("reverse", [True, False])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 def test_cumsum_global_scalar(B, T, H, dtype, head_first, reverse):

@@ -155,7 +155,7 @@ def recurrence_iplr_delta_rule_ref(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 def test_chunk(

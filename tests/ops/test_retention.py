@@ -32,7 +32,7 @@ test_h_list = [2]
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 def test_chunk(
@@ -86,7 +86,7 @@ def test_chunk(
 @pytest.mark.parametrize("expand_ratio", [1, 2])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") is None,
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
 )
 def test_chunk_varlen(
@@ -160,7 +160,7 @@ def test_chunk_varlen(
 @pytest.mark.parametrize("expand_ratio", [1, 2])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 def test_parallel(

@@ -37,7 +37,7 @@ test_h_list = [2]
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 @pytest.mark.skipif(
@@ -124,7 +124,7 @@ def test_fused_recurrent(
 @pytest.mark.parametrize("M", test_m_list)
 @pytest.mark.parametrize("dtype", [torch.float])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 @pytest.mark.skipif(
@@ -235,7 +235,7 @@ def test_fused_recurrent_varlen(
 @pytest.mark.parametrize("gate_logit_normalizer", [1, 0.05, 20])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 @pytest.mark.skipif(
@@ -302,7 +302,7 @@ def test_chunk(
 @pytest.mark.parametrize("M", test_m_list)
 @pytest.mark.parametrize("dtype", [torch.float])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") is None,
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
 )
 @pytest.mark.skipif(
@@ -394,7 +394,7 @@ def test_chunk_varlen(
 @pytest.mark.parametrize("M", test_m_list)
 @pytest.mark.parametrize("dtype", [torch.float])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 @pytest.mark.skipif(

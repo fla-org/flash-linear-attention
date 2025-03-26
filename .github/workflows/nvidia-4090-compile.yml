@@ -7,9 +7,6 @@ on:
 jobs:
   test:
     runs-on: 'nvidia-4090'
-    if: |
-      (github.event_name == 'push' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/pull/')) ||
-      (github.event_name == 'pull_request' && github.event.pull_request.base.ref != 'main')
     env:
       COMPILER_MODE: 1
       SKIP_TEST_CHUNK_VARLEN: 1
