@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.exp import safe_exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_triton_shared_mem_enough
 
 
 @triton.heuristics({
@@ -490,12 +490,16 @@ def parallel_simple_gla_fwd(
     else:
         B, T, H, K, V = *k.shape, v.shape[-1]
     BT, BS = chunk_size, 32
-    if torch.cuda.get_device_capability()[0] >= 9:
+    if is_triton_shared_mem_enough(233472, k.device.index):
         BK = min(256, triton.next_power_of_2(K))
         BV = min(256, triton.next_power_of_2(V))
-    else:
+    elif is_triton_shared_mem_enough(131072, k.device.index):
         BK = min(128, triton.next_power_of_2(K))
         BV = min(128, triton.next_power_of_2(V))
+    else:
+        BK = min(64, triton.next_power_of_2(K))
+        BV = min(64, triton.next_power_of_2(V))
+
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
     assert BT % BS == 0
