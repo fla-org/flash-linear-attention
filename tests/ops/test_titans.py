@@ -1,12 +1,27 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
+
 # from fla.ops.titans.fused_chunk import fused_chunk_titans_linear
 from fla.ops.titans.naive import chunk_titans_linear_ref
-
 from fla.utils import device
+
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+if compiled_mode:
+    test_b_list = [1]
+    test_t_list = [64]
+    test_t_varlen_list = test_t_list
+    test_d_list = [64, 128, 256]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 7, 15, 63, 286, 300]
+    test_t_varlen_list = [1, 7, 15, 63, 286, 300, 1024]
+    test_d_list = [50, 64, 100, 200, 256]
+test_h_list = [2]
 
 
 def get_abs_err(x, y):
@@ -59,13 +74,17 @@ def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
     return theta
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [512])
-@pytest.mark.parametrize("H", [32])
-@pytest.mark.parametrize("D", [512])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [1])
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_naive_chunk_fwd(
     B: int, T: int, H: int, D: int, dtype: torch.dtype, scale: float, head_first: bool
 ):
@@ -135,10 +154,10 @@ def test_naive_chunk_fwd(
     assert_close("ht", ref_ht, ref_ht_naive, 0.005)
 
 
-# @pytest.mark.parametrize("B", [2])
-# @pytest.mark.parametrize("T", [64])
-# @pytest.mark.parametrize("H", [16])
-# @pytest.mark.parametrize("D", [32])
+# @pytest.mark.parametrize("B", test_b_list)
+# @pytest.mark.parametrize("T", test_t_list)
+# @pytest.mark.parametrize("H", test_h_list)
+# @pytest.mark.parametrize("D", test_d_list)
 # @pytest.mark.parametrize("scale", [1])
 # @pytest.mark.parametrize("dtype", [torch.float32])
 # @pytest.mark.parametrize("head_first", [True, False])

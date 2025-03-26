@@ -9,33 +9,32 @@ import torch.nn.functional as F
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
 from fla.ops.hgrn.naive import naive_recurrent_hgrn
 from fla.utils import device
+from utils import assert_close
+
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+if compiled_mode:
+    test_b_list = [1]
+    test_t_list = [64]
+    test_t_varlen_list = test_t_list
+    test_d_list = [500, 1024]
+    test_gate_list = [1.0]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 7, 15, 63, 286, 300]
+    test_t_varlen_list = [1, 7, 15, 63, 286, 300, 1024]
+    test_d_list = [500, 1024]
+    test_gate_list = [1, 0.1, 10]
+test_h_list = [2]
 
 
-def get_abs_err(x, y):
-    return (x-y).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x-y).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
-    return err / base
-
-
-def assert_close(prefix, ref, tri, ratio, warning=False):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
-    if warning or str(prefix).strip().lower() == "dh0":
-        if get_err_ratio(ref, tri) > ratio:
-            import warnings
-            warnings.warn(msg)
-    else:
-        assert get_err_ratio(ref, tri) < ratio, msg
-
-
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("D", [500, 1024])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.float])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_fused_recurrent(
     B: int,
     T: int,
@@ -72,10 +71,14 @@ def test_fused_recurrent(
     assert_close("dh0", ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("D", [500, 1024])
+@pytest.mark.parametrize("N", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.float])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_fused_recurrent_varlen(
     N: int,
     T: int,
@@ -129,10 +132,14 @@ def test_fused_recurrent_varlen(
     assert_close("dh0", ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("D", [500, 1024])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_chunk(
     B: int,
     T: int,

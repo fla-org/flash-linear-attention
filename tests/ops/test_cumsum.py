@@ -1,31 +1,26 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 import pytest
 import torch
 
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.utils import device
+from utils import assert_close
 
-
-def get_abs_err(x, y):
-    return (x-y).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x-y).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
-    return err / base
-
-
-def assert_close(prefix, ref, tri, ratio, warning=False):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
-    if warning or str(prefix).strip().lower() == "dh0":
-        if get_err_ratio(ref, tri) > ratio:
-            import warnings
-            warnings.warn(msg)
-    else:
-        assert get_err_ratio(ref, tri) < ratio, msg
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+if compiled_mode:
+    test_b_list = [1]
+    test_t_list = [64]
+    test_t_varlen_list = test_t_list
+    test_d_list = [64, 128, 256]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 7, 15, 63, 286, 300]
+    test_t_varlen_list = [1, 7, 15, 63, 286, 300, 1024]
+    test_d_list = [50, 64, 100, 200, 256]
+test_h_list = [2]
 
 
 def rev_cumsum(s, dim=-1):
@@ -52,14 +47,18 @@ def cumsum_global_reference(s, reverse=False, head_first=False):
     return fn(s.float(), dim=2).to(s) if head_first else fn(s.float(), dim=1).to(s)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [32, 64, 100])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("chunk_size", [32, 64])
 @pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_cumsum_local_vector(B, T, H, D, dtype, head_first, reverse, chunk_size):
     if head_first:
         s = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
@@ -70,13 +69,17 @@ def test_cumsum_local_vector(B, T, H, D, dtype, head_first, reverse, chunk_size)
     assert_close("local cumsum vector", ref, tri, 0.001 if dtype == torch.float else 0.003)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300])
-@pytest.mark.parametrize("H", [4])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("reverse", [True, False])
 @pytest.mark.parametrize("chunk_size", [32, 64])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_cumsum_local_scalar(B, T, H, dtype, head_first, reverse, chunk_size):
     if head_first:
         s = torch.randn((B, H, T), dtype=dtype, device=device).requires_grad_()
@@ -87,13 +90,17 @@ def test_cumsum_local_scalar(B, T, H, dtype, head_first, reverse, chunk_size):
     assert_close("local cumsum scalar", ref, tri, 0.001 if dtype == torch.float else 0.003)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [32, 64, 100])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
 @pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.parametrize("reverse", [True, False])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_cumsum_global_vector(B, T, H, D, dtype, head_first, reverse):
     if head_first:
         s = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
@@ -104,12 +111,16 @@ def test_cumsum_global_vector(B, T, H, D, dtype, head_first, reverse):
     assert_close("global cumsum vector", ref, tri, 0.001 if dtype == torch.float else 0.003)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("H", [4])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
 @pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.parametrize("reverse", [True, False])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_cumsum_global_scalar(B, T, H, dtype, head_first, reverse):
     if head_first:
         s = torch.randn((B, H, T), dtype=dtype, device=device).requires_grad_()

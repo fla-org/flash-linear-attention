@@ -1,18 +1,19 @@
-name: intel-a770
+name: nvidia-4090-compile
 
 on:
-  workflow_run:
-    workflows: [intel-a770-compile]
-    types:
-      - completed
+  push:
+    branches: [ '*' ]
+  pull_request:
+    branches: [ '*' ]
 
 jobs:
   test:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: 'intel-a770'
+    runs-on: 'nvidia-4090'
     env:
+      COMPILER_MODE: 1
       SKIP_TEST_CHUNK_VARLEN: 1
       CI_ENV: 1
+      TRITON_PRINT_AUTOTUNING: 1
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -43,10 +44,9 @@ jobs:
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
       - name: Run pytest on dependent test files
-        continue-on-error: true
         run: |
           if [ -n "${{ steps.find-dependent-tests.outputs.test_files }}" ]; then
-            pytest ${{ steps.find-dependent-tests.outputs.test_files }}
+            pytest ${{ steps.find-dependent-tests.outputs.test_files }} --capture=no
           else
             echo "No dependent test files to run."
           fi

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import os
 from typing import Optional
 
 import pytest
@@ -11,6 +12,21 @@ from fla.ops.generalized_delta_rule.iplr.chunk import chunk_iplr_delta_rule
 from fla.ops.generalized_delta_rule.iplr.fused_recurrent import fused_recurrent_iplr_delta_rule
 from fla.utils import device
 from utils import assert_close
+
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+if compiled_mode:
+    test_b_list = [1]
+    test_t_list = [64]
+    test_t_varlen_list = test_t_list
+    test_d_list = [64, 128, 256]
+    test_gate_list = [1.0]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 7, 15, 63, 286, 300]
+    test_t_varlen_list = [1, 7, 15, 63, 286, 300, 1024]
+    test_d_list = [50, 64, 100, 200, 256]
+    test_gate_list = [1, 0.1, 10]
+test_h_list = [2]
 
 
 def chunk_iplr_delta_rule_ref(
@@ -131,13 +147,17 @@ def recurrence_iplr_delta_rule_ref(
     return o.to(orig_dtype), S
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [256, 300, 1024])
-@pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("D", [256, 100])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_chunk(
     B: int,
     T: int,
@@ -188,10 +208,10 @@ def test_chunk(
     assert_close(" ht", ref_ht, tri_ht, 0.008)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [256, 300, 1024])
-@pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("D", [256, 100])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_first", [True, False])

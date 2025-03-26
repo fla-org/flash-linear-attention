@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 import pytest
 import torch
 
@@ -7,12 +9,27 @@ from fla.ops.based import fused_chunk_based, parallel_based
 from fla.ops.based.naive import naive_parallel_based
 from fla.utils import device
 
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+if compiled_mode:
+    test_b_list = [1]
+    test_t_list = [64]
+    test_d_list = [64, 128, 256]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 7, 15, 63, 286, 300]
+    test_d_list = [50, 64, 100, 200, 256]
+test_h_list = [2]
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("D", [8, 15])
+
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_based(
     B: int,
     H: int,

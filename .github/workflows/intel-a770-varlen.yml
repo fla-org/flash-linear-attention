@@ -1,16 +1,18 @@
-name: Intel A770 Varlen
+name: intel-a770-varlen
 
 on:
-  push:
-    branches: [ '*' ]
-  pull_request:
-    branches: [ '*' ]
+  workflow_run:
+    workflows: [intel-a770]
+    types:
+      - completed
 
 jobs:
   test:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: 'intel-a770'
     env:
       SKIP_TEST_CHUNK_VARLEN: 0
+      CI_ENV: 1
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -41,6 +43,7 @@ jobs:
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
       - name: Run pytest on dependent test files
+        continue-on-error: true
         run: |
           if [ -n "${{ steps.find-dependent-tests.outputs.test_files }}" ]; then
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}

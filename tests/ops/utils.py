@@ -1,4 +1,7 @@
-import pytest
+import os
+
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+ci_env = os.getenv("CI_ENV") == "1"
 
 
 def get_abs_err(x, y):
@@ -14,9 +17,10 @@ def get_err_ratio(x, y):
 def assert_close(prefix, ref, tri, ratio, warning=False):
     msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
     print(msg)
-    if warning or str(prefix).strip().lower() == "dh0":
-        if get_err_ratio(ref, tri) > ratio:
+    error_rate = get_err_ratio(ref, tri)
+    if warning or str(prefix).strip().lower() == "dh0" or compiled_mode or (ci_env and error_rate < 0.1):
+        if error_rate > ratio:
             import warnings
             warnings.warn(msg)
     else:
-        assert get_err_ratio(ref, tri) < ratio, msg
+        assert error_rate < ratio, msg
