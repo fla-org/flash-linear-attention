@@ -35,6 +35,7 @@ class ABCAttention(nn.Module):
         norm_eps: float = 1e-5,
         gate_low_rank_dim: int = 16,
         gate_logit_normalizer: int = 16,
+        use_rope: bool = True,
         use_input_gate: bool = False,
         use_output_gate: bool = True,
         use_norm: bool = True,
@@ -61,6 +62,7 @@ class ABCAttention(nn.Module):
         self.gate_low_rank_dim = gate_low_rank_dim
         self.gate_logit_normalizer = gate_logit_normalizer
 
+        self.use_rope = use_rope
         self.use_input_gate = use_input_gate
         self.use_output_gate = use_output_gate
         self.use_norm = use_norm
@@ -135,6 +137,8 @@ class ABCAttention(nn.Module):
             last_state = past_key_values[self.layer_idx]
 
         cu_seqlens, position_ids, seq_idx = kwargs.get('cu_seqlens', None), kwargs.get('position_ids', None), None
+        if cu_seqlens is not None:
+            raise NotImplementedError("Training with cu_seqlens is not supported yet for ABCAttention")
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:

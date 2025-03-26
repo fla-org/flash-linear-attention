@@ -35,9 +35,7 @@ def logcumsumexp_fwd_kernel(
         b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
         # [S,]
         b_mc = tl.max(b_s, 0)
-        # workaround for compiler bugs
-        if i_t > 0:
-            b_mc = tl.maximum(b_mp, b_mc)
+        b_mc = tl.maximum(b_mp, b_mc)
         b_zp = b_zp * tl.exp(b_mp - b_mc)
         # [BT, S]
         b_s = tl.exp(b_s - b_mc)

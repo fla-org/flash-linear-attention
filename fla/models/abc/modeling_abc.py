@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -24,6 +24,9 @@ from fla.modules import GatedMLP as ABCMLP
 from fla.modules import RMSNorm
 
 logger = logging.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
 
 
 class ABCBlock(nn.Module):
@@ -57,6 +60,7 @@ class ABCBlock(nn.Module):
                 gate_fn=config.hidden_act,
                 elementwise_affine=config.elementwise_affine,
                 norm_eps=config.norm_eps,
+                use_rope=config.use_rope,
                 clamp_min=config.clamp_min,
                 clamp_max=config.clamp_max,
                 fuse_norm=config.fuse_norm,
@@ -78,7 +82,7 @@ class ABCBlock(nn.Module):
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
-        **kwargs,
+        **kwargs: Unpack[Dict]
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
 
         residual = hidden_states
@@ -89,7 +93,8 @@ class ABCBlock(nn.Module):
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=use_cache,
-            output_attentions=output_attentions
+            output_attentions=output_attentions,
+            **kwargs
         )
         if self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
@@ -190,7 +195,8 @@ class ABCModel(ABCPreTrainedModel):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None
+        return_dict: Optional[bool] = None,
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
             warnings.warn("`ABCModel` does not `output_attentions` now, setting it to `False`.")
@@ -230,7 +236,8 @@ class ABCModel(ABCPreTrainedModel):
                     attention_mask,
                     past_key_values,
                     use_cache,
-                    output_attentions
+                    output_attentions,
+                    **kwargs
                 )
             else:
                 hidden_states, attentions, past_key_values = layer(
@@ -238,7 +245,8 @@ class ABCModel(ABCPreTrainedModel):
                     attention_mask,
                     past_key_values=past_key_values,
                     use_cache=use_cache,
-                    output_attentions=output_attentions
+                    output_attentions=output_attentions,
+                    **kwargs
                 )
 
             if output_attentions:
@@ -353,7 +361,8 @@ class ABCForCausalLM(ABCPreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0
+        logits_to_keep: Optional[int] = 0,
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -369,7 +378,8 @@ class ABCForCausalLM(ABCPreTrainedModel, GenerationMixin):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict
+            return_dict=return_dict,
+            **kwargs
         )
 
         hidden_states = outputs[0]

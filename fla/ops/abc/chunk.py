@@ -289,7 +289,7 @@ def chunk_abc_fwd_kernel_V(
     b_v = tl.load(p_v, boundary_check=(0, 1))
     # [BT, BT]
     b_A = tl.load(p_A, boundary_check=(0, 1))
-    b_o += tl.dot(b_A, b_v, allow_tf32=False)
+    b_o += tl.dot(b_A.to(b_v.dtype), b_v, allow_tf32=False)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -412,7 +412,7 @@ def chunk_abc_bwd_kernel_V(
         # [BT, BV]
         b_dv = tl.dot(b_k, b_dh, allow_tf32=False)
         if i_k == 0:
-            b_dv += tl.dot(b_A, b_do, allow_tf32=False)
+            b_dv += tl.dot(b_A.to(b_do.dtype), b_do, allow_tf32=False)
         b_do = (b_do * scale).to(b_do.dtype)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
         # [BT, BT]

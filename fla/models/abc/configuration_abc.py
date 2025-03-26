@@ -29,6 +29,7 @@ class ABCConfig(PretrainedConfig):
         max_position_embeddings: int = 2048,
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-6,
+        use_rope: bool = True,
         attn: Optional[Dict] = None,
         use_cache: bool = True,
         pad_token_id: int = None,
@@ -59,6 +60,7 @@ class ABCConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.elementwise_affine = elementwise_affine
         self.norm_eps = norm_eps
+        self.use_rope = use_rope
         self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
