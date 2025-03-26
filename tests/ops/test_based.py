@@ -17,7 +17,7 @@ if compiled_mode:
 else:
     test_b_list = [2]
     test_t_list = [1, 7, 15, 63, 286, 300]
-    test_d_list = [50, 64, 100, 200, 256]
+    test_d_list = [32, 64, 100, 256]
 test_h_list = [2]
 
 

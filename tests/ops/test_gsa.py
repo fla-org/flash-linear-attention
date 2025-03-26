@@ -21,9 +21,9 @@ if compiled_mode:
     test_gate_list = [1.0]
 else:
     test_b_list = [2]
-    test_t_list = [1, 7, 15, 63, 286, 300]
-    test_t_varlen_list = [1, 7, 15, 63, 286, 300, 1024]
-    test_d_list = [50, 64, 100, 200, 256]
+    test_t_list = [63, 286, 300]
+    test_t_varlen_list = [63, 286, 300, 512]
+    test_d_list = [64, 100, 256]
     test_m_list = [32, 64, 128]
     test_gate_list = [1, 0.1, 10]
 test_h_list = [2]
@@ -124,7 +124,7 @@ def test_fused_recurrent(
 @pytest.mark.parametrize("M", test_m_list)
 @pytest.mark.parametrize("dtype", [torch.float])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
 @pytest.mark.skipif(

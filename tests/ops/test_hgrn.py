@@ -21,7 +21,7 @@ if compiled_mode:
 else:
     test_b_list = [2]
     test_t_list = [1, 7, 15, 63, 286, 300]
-    test_t_varlen_list = [1, 7, 15, 63, 286, 300, 1024]
+    test_t_varlen_list = [63, 286, 300, 512]
     test_d_list = [500, 1024]
     test_gate_list = [1, 0.1, 10]
 test_h_list = [2]

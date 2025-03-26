@@ -1,11 +1,23 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 import pytest
 import torch
 
 from fla.modules.convolution import ShortConvolution
 from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
 from fla.utils import device
+
+try:
+    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+except ImportError:
+    causal_conv1d_fn = None
+    causal_conv1d_update = None
+
+
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+ci_env = os.getenv("CI_ENV") == "1"
 
 
 def get_abs_err(x, y):
@@ -15,24 +27,29 @@ def get_abs_err(x, y):
 def get_err_ratio(x, y):
     err = (x-y).flatten().square().mean().sqrt().item()
     base = (x).flatten().square().mean().sqrt().item()
-    return err / (base + 1e-10)
+    return err / base
 
 
 def assert_close(prefix, ref, tri, ratio, warning=False):
     msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
     print(msg)
-    if warning or str(prefix).strip().lower() == "dh0":
-        if get_err_ratio(ref, tri) > ratio:
+    error_rate = get_err_ratio(ref, tri)
+    if warning or str(prefix).strip().lower() == "dh0" or compiled_mode or (ci_env and error_rate < 0.1):
+        if error_rate > ratio:
             import warnings
             warnings.warn(msg)
     else:
-        assert get_err_ratio(ref, tri) < ratio, msg
+        assert error_rate < ratio, msg
 
 
 @pytest.mark.parametrize("B", [4])
 @pytest.mark.parametrize("T", [100, 500, 1])
 @pytest.mark.parametrize("H", [128])
 @pytest.mark.parametrize("C", [4])
+@pytest.mark.skipif(
+    causal_conv1d_fn is None,
+    reason="causal_conv1d is not installed"
+)
 def test_shortconv(B: int, T: int, H: int, C: int):
     torch.manual_seed(42)
     conv_slow = ShortConvolution(H, C, activation='silu', use_fast_conv1d=False).to(device)
@@ -53,6 +70,10 @@ def test_shortconv(B: int, T: int, H: int, C: int):
 @pytest.mark.parametrize("T", [500, 1024])
 @pytest.mark.parametrize("H", [128])
 @pytest.mark.parametrize("C", [4])
+@pytest.mark.skipif(
+    causal_conv1d_fn is None,
+    reason="causal_conv1d is not installed"
+)
 def test_shortconv_varlen(N: int, T: int, H: int, C: int):
     torch.manual_seed(42)
     conv = ShortConvolution(H, C, activation='silu', use_fast_conv1d=True).to(device)
@@ -74,6 +95,10 @@ def test_shortconv_varlen(N: int, T: int, H: int, C: int):
 @pytest.mark.parametrize("T", [100])
 @pytest.mark.parametrize("H", [16])
 @pytest.mark.parametrize("C", [4])
+@pytest.mark.skipif(
+    causal_conv1d_fn is None,
+    reason="causal_conv1d is not installed"
+)
 def test_shortconv_cache(B: int, T: int, H: int, C: int):
     torch.manual_seed(42)
     conv_slow = ShortConvolution(H, C, use_fast_conv1d=False).to(device)

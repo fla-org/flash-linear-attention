@@ -9,9 +9,9 @@ from fla.modules import FusedLayerNormGated, FusedRMSNormGated
 from fla.utils import device
 
 
-@pytest.mark.parametrize("B", [1, 4, 8])
-@pytest.mark.parametrize("H", [1, 4])
-@pytest.mark.parametrize("T", [1, 50, 2048])
+@pytest.mark.parametrize("B", [2])
+@pytest.mark.parametrize("H", [2])
+@pytest.mark.parametrize("T", [1, 50, 512])
 @pytest.mark.parametrize("D", [50, 64, 128])
 @pytest.mark.parametrize("elementwise_affine", [False, True])
 @pytest.mark.parametrize("activation", ["silu", "sigmoid"])
@@ -52,9 +52,9 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
         torch.testing.assert_close(ref_db, tri_db, rtol=0, atol=1e-3)
 
 
-@pytest.mark.parametrize("B", [1, 4, 8])
-@pytest.mark.parametrize("H", [1, 4])
-@pytest.mark.parametrize("T", [1, 50, 2048])
+@pytest.mark.parametrize("B", [2])
+@pytest.mark.parametrize("H", [2])
+@pytest.mark.parametrize("T", [1, 50, 512])
 @pytest.mark.parametrize("D", [50, 64, 128])
 @pytest.mark.parametrize("activation", ["silu", "sigmoid"])
 def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):

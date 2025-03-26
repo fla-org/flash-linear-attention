@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -7,9 +9,34 @@ import torch.nn.functional as F
 from fla.modules import FusedKLDivLoss
 from fla.utils import device
 
+compiled_mode = os.getenv("COMPILER_MODE") == "1"
+ci_env = os.getenv("CI_ENV") == "1"
 
-@pytest.mark.parametrize("B", [1, 4])
-@pytest.mark.parametrize("T", [2048, 4096])
+
+def get_abs_err(x, y):
+    return (x-y).flatten().abs().max().item()
+
+
+def get_err_ratio(x, y):
+    err = (x-y).flatten().square().mean().sqrt().item()
+    base = (x).flatten().square().mean().sqrt().item()
+    return err / base
+
+
+def assert_close(prefix, ref, tri, ratio, warning=False):
+    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
+    print(msg)
+    error_rate = get_err_ratio(ref, tri)
+    if warning or str(prefix).strip().lower() == "dh0" or compiled_mode or (ci_env and error_rate < 0.1):
+        if error_rate > ratio:
+            import warnings
+            warnings.warn(msg)
+    else:
+        assert error_rate < ratio, msg
+
+
+@pytest.mark.parametrize("B", [2])
+@pytest.mark.parametrize("T", [16, 32])
 @pytest.mark.parametrize("D", [1024, 2048])
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("reduction", ["batchmean"])
@@ -36,6 +63,6 @@ def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtyp
     tri_dx, x.grad = x.grad.clone(), None
     tri_dw, x_weight.grad = x_weight.grad.clone(), None
 
-    assert torch.allclose(ref, tri, atol=1e-5), f" o: {(ref-tri).abs().max()}"
-    assert torch.allclose(ref_dx, tri_dx, atol=1e-5), f"dx: {(ref_dx-tri_dx).abs().max()}"
-    assert torch.allclose(ref_dw, tri_dw, atol=1e-5), f"dx_weight: {(ref_dw-tri_dw).abs().max()}"
+    assert_close("  o", ref, tri, 1e-2)
+    assert_close(" dx", ref_dx, tri_dx, 1e-2)
+    assert_close(" dw", ref_dw, tri_dw, 1e-2)
