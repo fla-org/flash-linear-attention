@@ -9,7 +9,9 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.exp import safe_exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_triton_shared_mem_enough
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_intel_a770, is_triton_shared_mem_enough
+
+triton_config = {'grf_mode': 'large'} if is_intel_a770 else {}
 
 
 @triton.heuristics({
@@ -357,7 +359,7 @@ def parallel_simple_gla_bwd_kernel_dkv(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
+        triton.Config(triton_config, num_warps=num_warps)
         for num_warps in [2, 4, 8, 16]
     ],
     key=['BT', 'BS', 'BK', 'BV', 'USE_G'],
@@ -558,8 +560,19 @@ def parallel_simple_gla_bwd(
     else:
         B, T, H, K, V = *k.shape, v.shape[-1]
     BT, BS = chunk_size, 32
-    BK = min(128, triton.next_power_of_2(k.shape[-1]))
-    BV = min(128, triton.next_power_of_2(v.shape[-1]))
+    if is_triton_shared_mem_enough(233472, k.device.index):
+        BK = min(256, triton.next_power_of_2(K))
+        BV = min(256, triton.next_power_of_2(V))
+    elif is_triton_shared_mem_enough(131072, k.device.index):
+        BK = min(128, triton.next_power_of_2(K))
+        BV = min(128, triton.next_power_of_2(V))
+    elif is_triton_shared_mem_enough(100000, k.device.index):
+        BK = min(64, triton.next_power_of_2(K))
+        BV = min(64, triton.next_power_of_2(V))
+    else:
+        BK = min(32, triton.next_power_of_2(K))
+        BV = min(32, triton.next_power_of_2(V))
+
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
     assert BT % BS == 0
