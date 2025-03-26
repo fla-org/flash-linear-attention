@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
-from fla.utils import device
+from fla.utils import device, device_platform
 from utils import assert_close
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
@@ -100,6 +100,10 @@ def test_cumsum_local_scalar(B, T, H, dtype, head_first, reverse, chunk_size):
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason="Intel Triton Failure"
 )
 def test_cumsum_global_vector(B, T, H, D, dtype, head_first, reverse):
     if head_first:
