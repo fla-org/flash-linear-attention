@@ -8,6 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import safe_exp
+from fla.utils import device_capacity, is_triton_shared_mem_enough
+
+BKV_LIST = [64, 128] if device_capacity else [32, 64]
 
 
 @triton.heuristics({
@@ -17,8 +20,8 @@ from fla.ops.utils.exp import safe_exp
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [64, 128]
-        for BV in [64, 128]
+        for BK in BKV_LIST
+        for BV in BKV_LIST
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
@@ -358,8 +361,6 @@ def chunk_bwd_kernel_dv(
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * s_g)
         b_dv *= safe_exp(-b_g + b_g_last)[:, None]
-    else:
-        b_g, b_g_last = None, None
 
     mask = (tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :])
     if USE_G:
@@ -512,8 +513,15 @@ def chunk_bwd_dv(
     else:
         B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    BK = min(triton.next_power_of_2(K), 128)
-    BV = min(triton.next_power_of_2(V), 128)
+    # H100 can have larger block size
+    if is_triton_shared_mem_enough(233472, k.device.index):
+        CONST_TILING = 128
+    elif device_capacity:
+        CONST_TILING = 64
+    else:
+        CONST_TILING = 32
+    BK = min(triton.next_power_of_2(K), CONST_TILING)
+    BV = min(triton.next_power_of_2(V), CONST_TILING)
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     NV = triton.cdiv(V, BV)
 
@@ -558,8 +566,15 @@ def chunk_bwd_dv_local(
     else:
         B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    BK = min(triton.next_power_of_2(K), 128)
-    BV = min(triton.next_power_of_2(V), 128)
+    # H100 can have larger block size
+    if is_triton_shared_mem_enough(233472, k.device.index):
+        CONST_TILING = 128
+    elif device_capacity:
+        CONST_TILING = 64
+    else:
+        CONST_TILING = 32
+    BK = min(triton.next_power_of_2(K), CONST_TILING)
+    BV = min(triton.next_power_of_2(V), CONST_TILING)
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     dv = torch.empty_like(do)
@@ -609,8 +624,9 @@ def chunk_bwd_dqkwg(
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    CONST_TILING = 64 if device_capacity else 32
+    BK = min(triton.next_power_of_2(K), CONST_TILING)
+    BV = min(triton.next_power_of_2(V), CONST_TILING)
     NK = triton.cdiv(K, BK)
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)

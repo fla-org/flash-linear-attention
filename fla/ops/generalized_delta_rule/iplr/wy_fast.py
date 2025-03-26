@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import device_capacity
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
@@ -307,8 +309,9 @@ def fwd_wu(
         B, T, H, K, V = *a.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    CONST_TILING = 64 if device_capacity else 32
+    BK = min(triton.next_power_of_2(K), CONST_TILING)
+    BV = min(triton.next_power_of_2(V), CONST_TILING)
 
     u = torch.empty_like(v)
     w = torch.empty_like(a)

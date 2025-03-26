@@ -198,10 +198,11 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             chunk_size=chunk_size
         )
         if g is not None:
-            dg = chunk_local_cumsum(dg, chunk_size, reverse=True, offsets=offsets, indices=indices, head_first=head_first)
+            dg = chunk_local_cumsum(dg, chunk_size, reverse=True, offsets=offsets,
+                                    indices=indices, head_first=head_first).to(g.dtype)
         else:
             dg = None
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg.to(g.dtype), None, dh0, None, None, None
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, None, dh0, None, None, None
 
 
 @torch.compiler.disable

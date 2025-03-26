@@ -8,7 +8,16 @@ import triton
 import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_triton_shared_mem_enough, use_cuda_graph
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    device_capacity,
+    input_guard,
+    is_triton_shared_mem_enough,
+    use_cuda_graph
+)
+
+BKV_LIST = [64, 128] if device_capacity else [32, 64]
 
 
 @triton.heuristics({
@@ -114,8 +123,8 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [64, 128]
-        for BV in [64, 128]
+        for BK in BKV_LIST
+        for BV in BKV_LIST
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3]
     ],

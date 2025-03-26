@@ -189,7 +189,7 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
     # indices
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
-    bos, eos = i_n * T, i_n * T + T
+    bos, _ = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)
     boh = i_n * NT
 
@@ -332,7 +332,7 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     # indices
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
-    bos, eos = i_n * T, i_n * T + T
+    bos, _ = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)
     boh = i_n * NT
 

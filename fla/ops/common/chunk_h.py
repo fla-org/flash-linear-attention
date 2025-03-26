@@ -8,6 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
+from fla.utils import device_capacity
+
+BKV_LIST = [32, 64] if device_capacity else [16, 32]
 
 
 @triton.heuristics({
@@ -18,8 +21,8 @@ from fla.ops.common.utils import prepare_chunk_offsets
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64]
-        for BV in [32, 64]
+        for BK in BKV_LIST
+        for BV in BKV_LIST
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
@@ -156,8 +159,8 @@ def chunk_fwd_kernel_h(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64]
-        for BV in [32, 64]
+        for BK in BKV_LIST
+        for BV in BKV_LIST
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
