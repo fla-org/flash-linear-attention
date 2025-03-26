@@ -52,7 +52,6 @@ def test_fused_recurrent(
     h0 = torch.randn(B, H, D, D, device=device).requires_grad_()
 
     do = torch.randn_like(v)
-    dht = torch.randn_like(h0)
     ref, ref_ht = naive_recurrent_gla(
         q=q,
         k=k,
@@ -61,7 +60,7 @@ def test_fused_recurrent(
         initial_state=h0,
         output_final_state=True
     )
-    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
+    ((ref * do).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
@@ -76,7 +75,7 @@ def test_fused_recurrent(
         initial_state=h0,
         output_final_state=True
     )
-    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+    ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None

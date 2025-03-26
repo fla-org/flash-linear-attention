@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
 from fla.ops.ttt.naive import chunk_ttt_linear_ref
-from fla.utils import device
+from fla.utils import device, device_capacity
 from utils import assert_close
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
@@ -45,6 +45,8 @@ def test_chunk(
     scale: float,
     head_first: bool
 ):
+    if D > 64 and device_capacity is False:
+        pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
     if head_first:
         q = torch.randn(B, H, T, D, dtype=dtype)
@@ -142,6 +144,8 @@ def test_fused_chunk_fwd(
     scale: float,
     head_first: bool
 ):
+    if D > 64 and device_capacity is False:
+        pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
     if head_first:
         q = torch.randn(B, H, T, D, dtype=dtype)
@@ -237,6 +241,8 @@ def test_chunk_varlen_fwd(
     scale: float,
     dtype: torch.dtype,
 ):
+    if D > 64 and device_capacity is False:
+        pytest.skip(reason="Current CI do not support this config")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
