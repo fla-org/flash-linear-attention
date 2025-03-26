@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.gla import chunk_gla, fused_recurrent_gla
 from fla.ops.gla.naive import naive_recurrent_gla
-from fla.utils import device
+from fla.utils import device, device_platform
 from utils import assert_close
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
@@ -35,6 +35,10 @@ test_h_list = [2]
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason="Intel Triton Failure"
 )
 def test_fused_recurrent(
     B: int,
@@ -101,6 +105,10 @@ def test_fused_recurrent(
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason="Intel Triton Failure"
 )
 def test_chunk(
     B: int,
