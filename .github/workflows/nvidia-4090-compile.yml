@@ -8,10 +8,7 @@ jobs:
   test:
     runs-on: 'nvidia-4090'
     env:
-      COMPILER_MODE: 1
-      SKIP_TEST_CHUNK_VARLEN: 1
       CI_ENV: 1
-      TRITON_PRINT_AUTOTUNING: 1
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -41,10 +38,23 @@ jobs:
           TEST_FILES=$(python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
-      - name: Run pytest on dependent test files
+      - name: Test compiling on dependent test files
+        if: steps.find-dependent-tests.outputs.test_files
         run: |
-          if [ -n "${{ steps.find-dependent-tests.outputs.test_files }}" ]; then
+          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=1 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} --capture=no
-          else
-            echo "No dependent test files to run."
-          fi
+
+      - name: Run pytest on test files
+        continue-on-error: true
+        if: steps.find-dependent-tests.outputs.test_files
+        run: |
+          COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
+            pytest ${{ steps.find-dependent-tests.outputs.test_files }}
+
+      - name: Run pytest on varlen test files
+        if: steps.find-dependent-tests.outputs.test_files
+        continue-on-error: true
+        run: |
+          COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
+            pytest ${{ steps.find-dependent-tests.outputs.test_files }} || \
+            echo "Varlen tests failed (non-critical)"
