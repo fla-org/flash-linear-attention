@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.modules import FusedKLDivLoss
-from fla.utils import device
+from fla.utils import device, device_platform
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 ci_env = os.getenv("CI_ENV") == "1"
@@ -41,6 +41,10 @@ def assert_close(prefix, ref, tri, ratio, warning=False):
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("reduction", ["batchmean"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason="Intel Triton Failure"
+)
 def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
     x = torch.randn(B * T, D).to(device).to(dtype=dtype).requires_grad_()
