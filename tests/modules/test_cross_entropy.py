@@ -21,7 +21,7 @@ def get_abs_err(x, y):
 def get_err_ratio(x, y):
     err = (x-y).flatten().square().mean().sqrt().item()
     base = (x).flatten().square().mean().sqrt().item()
-    return err / base
+    return err / (base + 1e-15)
 
 
 def assert_close(prefix, ref, tri, ratio, warning=False):
