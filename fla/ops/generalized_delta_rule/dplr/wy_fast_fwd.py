@@ -260,7 +260,7 @@ def fwd_prepare_wy_repr(
             indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
         NT = len(indices)
     assert NT * BT >= T, f"NT={NT}, BT={BT}, T={T} 分块参数不匹配"
-    # print(f"BT={BT}, NT={NT}, T={T}, Remainder={T % BT}")
+
     BC = min(BT, 32)
     fwd_fn = fwd_prepare_wy_repr_kernel_chunk64 if BT == 64 else fwd_prepare_wy_repr_kernel_chunk32
     A_ab_inv = torch.empty_like(A_ab)
@@ -298,13 +298,6 @@ def fwd_wu(
     head_first: bool,
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    
-    # print(f"[DEBUG] Input shapes:")
-    # print(f"ag.shape: {ag.shape}")
-    # print(f"v.shape: {v.shape}")
-    # print(f"A_ak.shape: {A_ak.shape}")
-    # print(f"A_ab_inv.shape: {A_ab_inv.shape}")
-    # print(f"head_first: {head_first}")
 
     if head_first:
         B, H, T, K, V = *ag.shape, v.shape[-1]

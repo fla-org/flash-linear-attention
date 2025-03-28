@@ -56,8 +56,6 @@ class RWKV7Attention(nn.Module):
         elif num_heads is not None:
             self.head_dim = int(hidden_size // num_heads)
             self.num_heads = num_heads
-        print("self.head_dim:", self.head_dim)
-        print("self.num_heads:", self.num_heads)
         self.decay_low_rank_dim = decay_low_rank_dim
         self.gate_low_rank_dim = gate_low_rank_dim
         self.a_low_rank_dim = a_low_rank_dim
@@ -219,12 +217,6 @@ class RWKV7Attention(nn.Module):
         
         right_term = (r * k * self.r_k).sum(-1, keepdim=True) * v
         right_term = rearrange(right_term, 'b t h d -> b t (h d)') 
-        # print("right_term", right_term.shape)
-        # print("o", o.shape)
-        # print("v", v.shape)
-        # print("k", k.shape)
-        # print("r", r.shape)
-        # print("self.r_k", self.r_k.shape)
 
         o = o + right_term
         o = self.o_proj(o * g)

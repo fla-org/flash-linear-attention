@@ -45,7 +45,7 @@ class GatedSlotAttention(nn.Module):
         use_norm: bool = True,
         layer_idx: Optional[int] = None,
         scale: Optional[float] = 1.,
-        gate_bound: float = 50.0,
+        gate_bound: float = 20.0,
         **kwargs
     ) -> GatedSlotAttention:
         super().__init__()
