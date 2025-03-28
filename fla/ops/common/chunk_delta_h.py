@@ -357,7 +357,7 @@ def chunk_gated_delta_rule_bwd_dhu(
         BC = 64 if K <= 128 else 32
     else:
         BV = 32 if K <= 128 else 16
-        BC = 32 if K <= 128 else 16
+        BC = 16
 
     BC = min(BT, BC)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
