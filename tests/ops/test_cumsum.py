@@ -6,8 +6,8 @@ import pytest
 import torch
 
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
+from fla.ops.utils.testing import assert_close
 from fla.utils import device, device_platform
-from utils import assert_close
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:

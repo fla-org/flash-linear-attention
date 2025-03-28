@@ -7,8 +7,8 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
+from fla.ops.utils.testing import assert_close
 from fla.utils import device
-from utils import assert_close
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:

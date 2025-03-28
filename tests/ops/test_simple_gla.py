@@ -11,8 +11,8 @@ from einops import rearrange
 from fla.ops.simple_gla import chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.ops.simple_gla.parallel import parallel_simple_gla
+from fla.ops.utils.testing import assert_close
 from fla.utils import device
-from utils import assert_close
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:

@@ -7,8 +7,8 @@ import torch
 
 from fla.ops.retention import chunk_retention, fused_recurrent_retention, parallel_retention
 from fla.ops.retention.naive import naive_retention
+from fla.ops.utils.testing import assert_close
 from fla.utils import device
-from utils import assert_close
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:

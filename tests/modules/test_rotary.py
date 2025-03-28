@@ -4,13 +4,8 @@ import pytest
 import torch
 
 from fla.modules.rotary import RotaryEmbedding, rotary_embedding_ref
+from fla.ops.utils.testing import assert_close
 from fla.utils import device
-
-
-def assert_close(prefix, ref, tri, atol):
-    msg = f"{prefix} diff: {(ref-tri).flatten().abs().max().item():.8f}"
-    print(msg)
-    assert ref.allclose(tri, 0, atol), msg
 
 
 @pytest.mark.parametrize("B", [2])

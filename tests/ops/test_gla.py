@@ -8,8 +8,8 @@ import torch.nn.functional as F
 
 from fla.ops.gla import chunk_gla, fused_recurrent_gla
 from fla.ops.gla.naive import naive_recurrent_gla
+from fla.ops.utils.testing import assert_close
 from fla.utils import device, device_platform
-from utils import assert_close
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
