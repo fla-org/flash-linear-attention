@@ -29,10 +29,10 @@ def test_rotary(B: int, T: int, H: int, G: int, D: int, dtype: torch.dtype):
     ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
     ref_dk = torch.autograd.grad(ref_k.sum(), k, retain_graph=True)[0]
 
-    assert_close(" q", ref_q, tri_q, atol=1e-5)
-    assert_close(" k", ref_k, tri_k, atol=1e-5)
-    assert_close("dq", ref_dq, tri_dq, atol=1e-5)
-    assert_close("dk", ref_dk, tri_dk, atol=1e-5)
+    assert_close(" q", ref_q, tri_q, ratio=1e-5)
+    assert_close(" k", ref_k, tri_k, ratio=1e-5)
+    assert_close("dq", ref_dq, tri_dq, ratio=1e-5)
+    assert_close("dk", ref_dk, tri_dk, ratio=1e-5)
 
 
 @pytest.mark.parametrize("B", [2])
@@ -64,10 +64,10 @@ def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torc
     ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
     ref_dk = torch.autograd.grad(ref_k.sum(), k, retain_graph=True)[0]
 
-    assert_close(" q", ref_q, tri_q, atol=1e-5)
-    assert_close(" k", ref_k, tri_k, atol=1e-5)
-    assert_close("dq", ref_dq, tri_dq, atol=1e-5)
-    assert_close("dk", ref_dk, tri_dk, atol=1e-5)
+    assert_close(" q", ref_q, tri_q, ratio=1e-5)
+    assert_close(" k", ref_k, tri_k, ratio=1e-5)
+    assert_close("dq", ref_dq, tri_dq, ratio=1e-5)
+    assert_close("dk", ref_dk, tri_dk, ratio=1e-5)
 
 
 @pytest.mark.parametrize("N", [4])
@@ -107,7 +107,7 @@ def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtyp
     ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
     ref_dk = torch.autograd.grad(ref_k.sum(), k, retain_graph=True)[0]
 
-    assert_close(" q", ref_q, tri_q, atol=1e-5)
-    assert_close(" k", ref_k, tri_k, atol=1e-5)
-    assert_close("dq", ref_dq, tri_dq, atol=1e-5)
-    assert_close("dk", ref_dk, tri_dk, atol=1e-5)
+    assert_close(" q", ref_q, tri_q, ratio=1e-5)
+    assert_close(" k", ref_k, tri_k, ratio=1e-5)
+    assert_close("dq", ref_dq, tri_dq, ratio=1e-5)
+    assert_close("dk", ref_dk, tri_dk, ratio=1e-5)
