@@ -22,7 +22,7 @@ BKV_LIST = [64, 128] if device_capacity else [32, 64]
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in BKV_LIST
         for BV in BKV_LIST
-        for num_warps in [2, 4, 8]
+        for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT'],
@@ -121,7 +121,7 @@ def chunk_fwd_kernel_o(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8]
+        for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_DW'],
