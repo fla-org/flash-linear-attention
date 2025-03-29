@@ -24,6 +24,7 @@ jobs:
         run: |
           pip uninstall -y fla flash-linear-attention rwkv-fla
           pip install --upgrade pytest setuptools wheel ninja
+          pip install -U --index-url https://pypi.fla-org.com/simple/ triton --upgrade
           pip install --no-use-pep517 .
 
       - name: Check GPU status

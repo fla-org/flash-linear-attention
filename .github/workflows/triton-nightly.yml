@@ -1,0 +1,135 @@
+name: triton-nightly
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/wheels.yml
+  schedule:
+    - cron: "0 8 * * *"
+
+
+jobs:
+
+  Build-Wheels:
+    timeout-minutes: 120
+    runs-on: ${{ matrix.config.runs_on }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - {runs_on: ['self-hosted', 'docker'], arch: 'x86_64'}
+        # - {runs_on: 'ubuntu-22.04-arm', arch: 'aarch64'}
+
+
+    steps:
+
+      - name: Prune stale docker containers
+        run: |
+          # If cibuildwheel crashes (or, say, is OOM-killed), it leaves behind a
+          # docker container.  Eventually these consume all the disk space on
+          # this machine.
+          docker container prune -f
+
+      - name: Cache Triton repository
+        uses: actions/cache@v4
+        id: cache-triton
+        with:
+            path: triton
+            key: ${{ runner.os }}-fla-triton-${{ hashFiles('.github/workflows/triton-nightly.yml') }}
+            restore-keys: |
+                ${{ runner.os }}-triton-
+
+      - name: Checkout Triton
+        if: steps.cache-triton.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+           repository: triton-lang/triton
+           path: triton 
+
+      - name: Update Triton repository
+        if: steps.cache-triton.outputs.cache-hit == 'true'
+        working-directory: triton
+        run:
+            git fetch --all
+            git checkout main --force
+            git reset --hard origin/main
+
+
+      # The LATEST_DATE here should be kept in sync with the one in Patch setup.py
+      - id: check-version
+        name: Check latest version
+        working-directory: triton
+        run: |
+
+          export PACKAGE_DATE=$(python3 -m pip install --user --index-url https://pypi.fla-org.com/simple/ --dry-run triton-nightly== |& grep -oP '(?<=, )[0-9\.]+dev[0-9]+(?=\))' | grep -oP '(?<=dev)[0-9]+')
+          export LATEST_DATE=$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%d%H%M%S' --format="%cd")
+          if cmp -s <(echo $PACKAGE_DATE) <(echo $LATEST_DATE); then
+            echo "new_commit=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_commit=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Patch setup.py
+        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
+        working-directory: triton
+        run: |
+          echo "" >> python/setup.cfg
+          echo "[build_ext]" >> python/setup.cfg
+          echo "base-dir=/project" >> python/setup.cfg
+          # mirror
+
+      - name: Patch setup.py mirror
+        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
+        working-directory: triton
+        run: |
+            # Replace the URL using sed
+            sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' python/setup.py
+            
+            # Verify the change (optional)
+            grep "llvm.fla-org.com" python/setup.py || (echo "URL replacement failed"; exit 1)          
+
+
+      - name: Build wheels
+        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
+        working-directory: triton
+        run: |
+          # Make sure cibuildwheel is updated to latest, this will enable latest python builds
+          python3 -m pip install cibuildwheel --upgrade --user
+          # Pass MAX_JOBS=12 because, at time of writing, the VM "only" has 64GB
+          # of RAM and OOMs while building if we give it the default number of
+          # workers (2 * NUM_CPUs).
+          export CIBW_ENVIRONMENT="MAX_JOBS=12 \
+                  TRITON_BUILD_WITH_CLANG_LLD=1 \
+                  SOCKS_PROXY=$SOCKS_PROXY \
+                  ALL_PROXY=$ALL_PROXY \
+                  HTTPS_PROXY=$ALL_PROXY"
+
+          # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
+          # With this install, it gets clang 16.0.6.
+          export CIBW_BEFORE_ALL="dnf install clang lld -y"
+
+          if [[ ${{ matrix.config.arch }} == 'x86_64' ]]; then
+            export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_${{ matrix.config.arch }}:latest"
+          else
+            export CIBW_MANYLINUX_AARCH64_IMAGE="quay.io/pypa/manylinux_2_28_${{ matrix.config.arch }}:latest"
+          fi
+          # Since fla only support 3.10 +
+          export CIBW_BUILD="cp3{10,11,12,13,13t}-manylinux_${{ matrix.config.arch }}"
+          export CIBW_SKIP="cp{35,36,37,38,39}-*"
+          export CIBW_FREE_THREADED_SUPPORT=1
+          python3 -m cibuildwheel python --output-dir wheelhouse
+
+
+      - name: Publish wheels to fla
+        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
+        run: |
+          python3 -m pip install twine pkginfo --upgrade
+          python3 -m twine upload \
+            --repository-url http://pypi-upload.fla-org.com/ \
+            --username fla \
+            --password ${{ secrets.FLA_PYPI_PASSWD }} \
+            --verbose \
+            --non-interactive \
+            wheelhouse/*
+

@@ -7,10 +7,10 @@ Assertion `!(srcMmaLayout && dstMmaLayout && !srcMmaLayout.isAmpere()) && "mma -
 ```
 
 This issue has been fixed in [PR #4492](https://github.com/triton-lang/triton/pull/4492).
-It is recommended to use the nightly version of triton.
+It is recommended to use the nightly version of triton (built by fla:).
 
 ```sh
-pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly
+pip install -U --index-url https://pypi.fla-org.com/simple/ triton --upgrade
 ```
 
 ## AttributeError: 'NoneType' object has no attribute 'start'
@@ -25,6 +25,6 @@ This is a known triton issue [triton-lang/triton#5609](https://github.com/triton
 
 Use the nightly version of triton
 ```sh
-pip install -U --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/ triton-nightly
+pip install -U --index-url https://pypi.fla-org.com/simple/ triton --upgrade
 ```
 or build it from scratch.
