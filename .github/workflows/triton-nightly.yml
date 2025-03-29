@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
            repository: triton-lang/triton
-           path: triton 
+           path: triton
 
       - name: Update Triton repository
         if: steps.cache-triton.outputs.cache-hit == 'true'
@@ -85,9 +85,9 @@ jobs:
         run: |
             # Replace the URL using sed
             sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' python/setup.py
-            
+
             # Verify the change (optional)
-            grep "llvm.fla-org.com" python/setup.py || (echo "URL replacement failed"; exit 1)          
+            grep "llvm.fla-org.com" python/setup.py || (echo "URL replacement failed"; exit 1)
 
 
       - name: Build wheels
@@ -132,4 +132,3 @@ jobs:
             --verbose \
             --non-interactive \
             wheelhouse/*
-
