@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
-      
+
       - name: Setup python
         run: |
           pip uninstall -y fla flash-linear-attention rwkv-fla
