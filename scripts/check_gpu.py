@@ -57,7 +57,9 @@ def check_gpu_memory():
 
         # Extract GPU memory usage
         if device_platform == 'intel':
-            memory_used_mib = get_xpu_memory_usage()
+            # memory_used_mib = get_xpu_memory_usage()
+            # since xpu-smi have conflicts in apt
+            memory_used_mib = 0
         elif device_platform == 'nvidia':
             memory_used_mib = get_nvgpu_memory_usage()
         if memory_used_mib is None:

@@ -29,7 +29,9 @@ jobs:
           fi
 
       - name: Setup python
-        run: pip install --upgrade pytest setuptools wheel ninja
+        run: |
+          pip uninstall -y fla flash-linear-attention rwkv-fla
+          pip install --upgrade pytest setuptools wheel ninja
 
       - name: Setup fla
         run: pip install --no-use-pep517 .

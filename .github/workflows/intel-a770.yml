@@ -32,7 +32,9 @@ jobs:
         run: pip install --upgrade pytest setuptools wheel ninja
 
       - name: Setup fla
-        run: pip install --no-use-pep517 .
+        run: |
+          pip uninstall -y fla flash-linear-attention rwkv-fla
+          pip install --no-use-pep517 .
 
       - name: Get changed files
         if: github.event_name == 'pull_request'
