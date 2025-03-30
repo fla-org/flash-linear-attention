@@ -825,7 +825,7 @@ def chunk_gla_bwd_kernel_inter(
     b_dq += tl.load(p_dq, boundary_check=(0, 1))
     b_dk += tl.load(p_dk, boundary_check=(0, 1))
     b_dg = b_q * b_dq - b_k * b_dk
-    tl.debug_barrier()
+    # tl.debug_barrier()
     b_dg = b_dg - tl.cumsum(b_dg, axis=0) + tl.sum(b_dg, axis=0)[None, :] + b_dgk[None, :]
     # Buggy due to strange triton compiler issue.
     # m_s = tl.where(tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :], 1., 0.)
