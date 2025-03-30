@@ -8,9 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
-from fla.utils import is_triton_shared_mem_enough, use_cuda_graph, device_platform
+from fla.utils import device_platform, is_triton_shared_mem_enough, use_cuda_graph
 
-NUM_WARPS = [2, 4, 16] if (device_platform == 'nvidia' and torch.cuda.get_device_capability()[0] >= 9) \
+NUM_WARPS = [2, 4] if (device_platform == 'nvidia' and torch.cuda.get_device_capability()[0] >= 9) \
     else [2, 4, 8, 16]
 
 
@@ -134,7 +134,7 @@ def chunk_gated_delta_rule_fwd_kernel_h(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16]
+        for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV', 'USE_G'],
@@ -273,7 +273,7 @@ def chunk_gated_delta_rule_fwd_h(
     # H100 can have larger block size
     if is_triton_shared_mem_enough(233472, k.device.index):
         BV = 64
-        BC = 64
+        BC = 64 if K <= 128 else 32
     # A100
     elif is_triton_shared_mem_enough(131072, k.device.index):
         BV = 32
@@ -353,7 +353,7 @@ def chunk_gated_delta_rule_bwd_dhu(
     # H100
     if is_triton_shared_mem_enough(233472, q.device.index):
         BV = 64
-        BC = 64
+        BC = 64 if K <= 128 else 32
     # A100
     elif is_triton_shared_mem_enough(131072, q.device.index):
         BV = 32

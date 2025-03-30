@@ -8,11 +8,12 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import safe_exp
-from fla.utils import device_capacity, is_triton_shared_mem_enough, device_platform
+from fla.utils import device_capacity, device_platform, is_triton_shared_mem_enough
 
 BKV_LIST = [64, 128] if device_capacity else [32, 64]
 NUM_WARPS = [2, 4] if (device_platform == 'nvidia' and torch.cuda.get_device_capability()[0] >= 9) \
     else [2, 4, 8]
+
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
