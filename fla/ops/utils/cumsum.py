@@ -7,7 +7,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import input_guard
+from fla.utils import device_capacity, input_guard
+
+BS_LIST = [32, 64] if device_capacity else [16, 32]
 
 
 @triton.heuristics({
@@ -63,10 +65,10 @@ def chunk_local_cumsum_scalar_kernel(
 @triton.autotune(
     configs=[
         triton.Config({'BS': BS}, num_warps=num_warps)
-        for BS in [16, 32, 64]
+        for BS in BS_LIST
         for num_warps in [2, 4, 8]
     ],
-    key=['S', 'BT']
+    key=['S', 'BT'],
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_local_cumsum_vector_kernel(

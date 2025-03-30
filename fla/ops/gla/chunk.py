@@ -11,7 +11,10 @@ from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.exp import safe_exp
-from fla.utils import input_guard
+from fla.utils import check_shared_mem, device_capacity, input_guard
+
+BK_LIST = [32, 64] if device_capacity else [16, 32]
+BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
 
 
 @triton.heuristics({
@@ -633,8 +636,8 @@ def chunk_gla_bwd_kernel_dA(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
-        for BK in [32, 64]
-        for BV in [64, 128]
+        for BK in BK_LIST
+        for BV in BV_LIST
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
@@ -719,8 +722,8 @@ def chunk_gla_bwd_kernel_dv(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
-        for BK in [32, 64]
-        for BV in [64, 128]
+        for BK in BK_LIST
+        for BV in BV_LIST
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
@@ -822,7 +825,7 @@ def chunk_gla_bwd_kernel_inter(
     b_dq += tl.load(p_dq, boundary_check=(0, 1))
     b_dk += tl.load(p_dk, boundary_check=(0, 1))
     b_dg = b_q * b_dq - b_k * b_dk
-    # tl.debug_barrier()
+    tl.debug_barrier()
     b_dg = b_dg - tl.cumsum(b_dg, axis=0) + tl.sum(b_dg, axis=0)[None, :] + b_dgk[None, :]
     # Buggy due to strange triton compiler issue.
     # m_s = tl.where(tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :], 1., 0.)
