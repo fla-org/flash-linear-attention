@@ -1,6 +1,6 @@
 # Chunkwise-form Parallelism of DeltaNet
 
-This section expands on the formulation presented in Appendix B of the DeltaNet paper.[ ^ 1]
+This section expands on the formulation presented in Appendix B of the DeltaNet paper.[^1]
 
 To reduce notational clutter, we focus on the first chunk, denoting $\mathbf{S}^r=\mathbf{S}_{[1]}^r$. By partially expanding the recurrence, we have:
 ```math
