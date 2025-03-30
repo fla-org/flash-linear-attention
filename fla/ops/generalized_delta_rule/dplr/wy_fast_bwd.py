@@ -9,6 +9,7 @@ import triton.language as tl
 
 from fla.utils import device_capacity, is_intel_alchemist, use_cuda_graph
 
+# https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
 triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
 
 
