@@ -40,7 +40,7 @@ jobs:
 
       - name: Get changed files
         if: |
-          github.event_name == 'pull_request' || 
+          github.event_name == 'pull_request' ||
           (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
         id: changed-files
         uses: tj-actions/changed-files@v46.0.3
@@ -48,7 +48,7 @@ jobs:
       - name: Find dependent test files
         id: find-dependent-tests
         if: |
-          github.event_name == 'pull_request' || 
+          github.event_name == 'pull_request' ||
           (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
         run: |
           # Run the Python script to find dependent test files
