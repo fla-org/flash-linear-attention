@@ -392,11 +392,12 @@ def parallel_attn_fwd(
     HQ = q.shape[2]
     G = HQ // H
     BT = chunk_size
-    BS = min(32, triton.next_power_of_2(T))
     if torch.cuda.get_device_capability()[0] >= 9:
+        BS = min(64, triton.next_power_of_2(T))
         BK = min(256, max(16, triton.next_power_of_2(K)))
         BV = min(256, max(16, triton.next_power_of_2(V)))
     else:
+        BS = min(32, triton.next_power_of_2(T))
         BK = min(128, max(16, triton.next_power_of_2(K)))
         BV = min(128, max(16, triton.next_power_of_2(V)))
     NK = triton.cdiv(K, BK)
@@ -472,7 +473,7 @@ def parallel_attn_bwd(
 
     delta = parallel_attn_bwd_preprocess(o, do)
 
-    dq = torch.empty(NV, *q.shape, dtype=q.dtype if NV == 1 else torch.float, device=q.device)
+    dq = torch.empty(NV, B, T, HQ, K, dtype=k.dtype if NV == 1 and H == HQ else torch.float, device=q.device)
     dk = torch.empty(NV, B, T, HQ, K, dtype=k.dtype if NV == 1 and H == HQ else torch.float, device=q.device)
     dv = torch.empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float, device=q.device)
     grid = (NV, NT, B * HQ)
