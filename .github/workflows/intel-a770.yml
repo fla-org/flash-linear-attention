@@ -26,6 +26,7 @@ jobs:
         run: |
           pip uninstall -y flash-linear-attention
           pip install --upgrade pytest setuptools wheel ninja
+          pip install --upgrade torch pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
           pip install --no-use-pep517 .
 
       - name: Check GPU status

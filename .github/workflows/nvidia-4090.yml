@@ -25,7 +25,7 @@ jobs:
       - name: Setup python
         run: |
           pip uninstall -y flash-linear-attention
-          pip install --upgrade pytest setuptools wheel ninja
+          pip install --upgrade pytest setuptools wheel ninja torch triton
           pip install --no-use-pep517 .
 
       - name: Check GPU status

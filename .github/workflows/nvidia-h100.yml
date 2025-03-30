@@ -24,11 +24,9 @@ jobs:
 
       - name: Setup python
         run: |
-          pip uninstall -y flash-linear-attention triton
-          pip install --upgrade pytest setuptools wheel ninja
-          pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+          pip uninstall -y flash-linear-attention
+          pip install --upgrade pytest setuptools wheel ninja torch triton
           pip install --no-use-pep517 .
-          pip install -U --index-url http://pypi.fla-org.com/simple/ triton-nightly --upgrade --trusted-host pypi.fla-org.com
 
       - name: Check GPU status
         run: |
