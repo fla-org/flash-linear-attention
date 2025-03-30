@@ -515,7 +515,7 @@ def chunk_bwd_dv(
         B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     # H100 can have larger block size
-    if is_triton_shared_mem_enough(233472, k.device.index):
+    if is_triton_shared_mem_enough('hopper', k.device.index):
         CONST_TILING = 128
     elif device_capacity:
         CONST_TILING = 64
@@ -568,7 +568,7 @@ def chunk_bwd_dv_local(
         B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     # H100 can have larger block size
-    if is_triton_shared_mem_enough(233472, k.device.index):
+    if is_triton_shared_mem_enough('hopper', k.device.index):
         CONST_TILING = 128
     elif device_capacity:
         CONST_TILING = 64

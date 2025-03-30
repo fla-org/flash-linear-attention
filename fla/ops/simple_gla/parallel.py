@@ -492,10 +492,10 @@ def parallel_simple_gla_fwd(
     else:
         B, T, H, K, V = *k.shape, v.shape[-1]
     BT, BS = chunk_size, 32
-    if is_triton_shared_mem_enough(233472, k.device.index):
+    if is_triton_shared_mem_enough('hopper', k.device.index):
         BK = min(256, triton.next_power_of_2(K))
         BV = min(256, triton.next_power_of_2(V))
-    elif is_triton_shared_mem_enough(131072, k.device.index):
+    elif is_triton_shared_mem_enough('ampere', k.device.index):
         BK = min(128, triton.next_power_of_2(K))
         BV = min(128, triton.next_power_of_2(V))
     else:
@@ -560,13 +560,13 @@ def parallel_simple_gla_bwd(
     else:
         B, T, H, K, V = *k.shape, v.shape[-1]
     BT, BS = chunk_size, 32
-    if is_triton_shared_mem_enough(233472, k.device.index):
+    if is_triton_shared_mem_enough('hopper', k.device.index):
         BK = min(256, triton.next_power_of_2(K))
         BV = min(256, triton.next_power_of_2(V))
-    elif is_triton_shared_mem_enough(131072, k.device.index):
+    elif is_triton_shared_mem_enough('ampere', k.device.index):
         BK = min(128, triton.next_power_of_2(K))
         BV = min(128, triton.next_power_of_2(V))
-    elif is_triton_shared_mem_enough(100000, k.device.index):
+    elif is_triton_shared_mem_enough('ada', k.device.index):
         BK = min(64, triton.next_power_of_2(K))
         BV = min(64, triton.next_power_of_2(V))
     else:

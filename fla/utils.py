@@ -179,12 +179,20 @@ def get_all_max_shared_memory():
         return [-1]
 
 
+def get_shared_memory(arch: str) -> int:
+    return {
+        "hopper": 233472,
+        "ampere": 131072,
+        "ada": 101376,
+    }.get(arch, 102400)
+
+
 @lru_cache(maxsize=None)
-def is_triton_shared_mem_enough(max_shared_mem: int = 102400, tensor_idx: int = 0) -> bool:
+def is_triton_shared_mem_enough(arch: str = "none", tensor_idx: int = 0) -> bool:
     try:
         device_shared_mem_list = get_all_max_shared_memory()
         max_shared_memory = device_shared_mem_list[tensor_idx]
-        return max_shared_memory >= max_shared_mem
+        return max_shared_memory >= get_shared_memory(arch)
     except Exception:
         return False
 

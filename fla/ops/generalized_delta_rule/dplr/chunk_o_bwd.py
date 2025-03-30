@@ -430,9 +430,9 @@ def chunk_dplr_bwd_dAu(
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
-    if is_triton_shared_mem_enough(131072):  # A100
+    if is_triton_shared_mem_enough('ampere'):  # A100
         BV = min(triton.next_power_of_2(V), 128)
-    elif is_triton_shared_mem_enough(101376):  # 4090
+    elif is_triton_shared_mem_enough('ada'):  # 4090
         BV = min(triton.next_power_of_2(V), 64)
     else:
         BV = min(triton.next_power_of_2(V), 32)
