@@ -105,9 +105,9 @@ jobs:
           if [[ "${{ runner.name }}" == "intel-a770" ]]; then
             export CIBW_ENVIRONMENT="MAX_JOBS=16 \
                     TRITON_BUILD_WITH_CLANG_LLD=1 \
-                    SOCKS_PROXY=http://100.77.75.108:7890 \
-                    ALL_PROXY=http://100.77.75.108:7890 \
-                    HTTPS_PROXY=http://100.77.75.108:7890"
+                    SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} \
+                    ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
+                    HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
           else
             export CIBW_ENVIRONMENT="MAX_JOBS=4 \
                     TRITON_BUILD_WITH_CLANG_LLD=1"
