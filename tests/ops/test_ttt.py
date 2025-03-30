@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
 from fla.ops.ttt.naive import chunk_ttt_linear_ref
 from fla.ops.utils.testing import assert_close
-from fla.utils import device, check_shared_mem
+from fla.utils import check_shared_mem, device
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
