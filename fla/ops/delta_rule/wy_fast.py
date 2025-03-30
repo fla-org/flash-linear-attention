@@ -7,10 +7,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import device_capacity, device_platform
+from fla.utils import device_capacity, is_nvidia_hopper
 
-NUM_WARPS = [2, 4] if (device_platform == 'nvidia' and torch.cuda.get_device_capability()[0] >= 9) \
-    else [2, 4, 8]
+NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 
 @triton.heuristics({

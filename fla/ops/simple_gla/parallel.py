@@ -9,9 +9,9 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.exp import safe_exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_intel_a770, is_triton_shared_mem_enough
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_intel_alchemist, is_triton_shared_mem_enough
 
-triton_config = {'grf_mode': 'large'} if is_intel_a770 else {}
+triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
 
 
 @triton.heuristics({

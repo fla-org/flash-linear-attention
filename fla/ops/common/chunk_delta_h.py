@@ -8,10 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
-from fla.utils import device_platform, is_triton_shared_mem_enough, use_cuda_graph
+from fla.utils import is_nvidia_hopper, is_triton_shared_mem_enough, use_cuda_graph
 
-NUM_WARPS = [2, 4] if (device_platform == 'nvidia' and torch.cuda.get_device_capability()[0] >= 9) \
-    else [2, 4, 8, 16]
+NUM_WARPS = [2, 4, 16] if is_nvidia_hopper else [2, 4, 8, 16]
 
 
 @triton.heuristics({

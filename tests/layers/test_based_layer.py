@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from fla.layers.based import BasedLinearAttention
-from fla.utils import is_intel_a770
+from fla.utils import is_intel_alchemist
 
 
 @pytest.mark.parametrize("B", [2])
@@ -12,7 +12,7 @@ from fla.utils import is_intel_a770
 @pytest.mark.parametrize("H", [16*12])
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.skipif(
-    is_intel_a770,
+    is_intel_alchemist,
     reason="Intel A770 do not have enough shared memory for float32"
 )
 def test_based_layer(

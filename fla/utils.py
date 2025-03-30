@@ -160,7 +160,8 @@ device_platform = _check_platform()
 is_intel = (device_platform == 'intel')
 is_nvidia = (device_platform == 'nvidia')
 is_amd = (device_platform == 'amd')
-is_intel_a770 = (is_intel and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
+is_intel_alchemist = (is_intel and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
+is_nvidia_hopper = (is_nvidia and 'NVIDIA H' in torch.cuda.get_device_name(0))
 use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
 
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
