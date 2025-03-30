@@ -29,6 +29,8 @@ jobs:
           # If cibuildwheel crashes (or, say, is OOM-killed), it leaves behind a
           # docker container.  Eventually these consume all the disk space on
           # this machine.
+          RUNNER_NAME=${{ runner.name }}
+          echo "Current runner: $RUNNER_NAME"
           docker container prune -f
 
       - name: Cache Triton repository
@@ -98,11 +100,16 @@ jobs:
           # Pass MAX_JOBS=12 because, at time of writing, the VM "only" has 64GB
           # of RAM and OOMs while building if we give it the default number of
           # workers (2 * NUM_CPUs).
-          export CIBW_ENVIRONMENT="MAX_JOBS=12 \
-                  TRITON_BUILD_WITH_CLANG_LLD=1 \
-                  SOCKS_PROXY=$SOCKS_PROXY \
-                  ALL_PROXY=$ALL_PROXY \
-                  HTTPS_PROXY=$ALL_PROXY"
+          if [[ "${{ runner.name }}" == "intel-a770" ]]; then
+            export CIBW_ENVIRONMENT="MAX_JOBS=12 \
+                    TRITON_BUILD_WITH_CLANG_LLD=1 \
+                    SOCKS_PROXY=http://100.77.75.108:7890 \
+                    ALL_PROXY=http://100.77.75.108:7890 \
+                    HTTPS_PROXY=http://100.77.75.108:7890"
+          else
+            export CIBW_ENVIRONMENT="MAX_JOBS=4 \
+                    TRITON_BUILD_WITH_CLANG_LLD=1"
+          fi
 
           # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
           # With this install, it gets clang 16.0.6.
