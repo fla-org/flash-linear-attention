@@ -252,7 +252,7 @@ def test_chunk(
     gate_logit_normalizer: float,
     head_first: bool
 ):
-    if (D > 64 or M > 64) and check_shared_mem is False:
+    if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -319,7 +319,7 @@ def test_chunk_varlen(
     M: int,
     dtype: torch.dtype,
 ):
-    if (D > 64 or M > 64) and check_shared_mem is False:
+    if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
