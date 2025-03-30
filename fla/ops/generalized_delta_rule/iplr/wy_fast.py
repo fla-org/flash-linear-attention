@@ -8,7 +8,10 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import device_capacity
+from fla.utils import device_capacity, device_platform
+
+NUM_WARPS = [2, 4] if (device_platform == 'nvidia' and torch.cuda.get_device_capability()[0] >= 9) \
+    else [2, 4, 8]
 
 
 @triton.heuristics({
@@ -172,7 +175,7 @@ def fwd_prepare_wy_repr_kernel_chunk64(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        for num_warps in NUM_WARPS
     ],
     key=['BT', 'BK', 'BV']
 )
