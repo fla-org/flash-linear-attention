@@ -10,6 +10,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - '*'
 
 jobs:
   test:
@@ -35,12 +37,16 @@ jobs:
           fi
 
       - name: Get changed files
-        if: github.event_name == 'pull_request'
+        if: |
+          github.event_name == 'pull_request' || 
+          (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
         id: changed-files
         uses: tj-actions/changed-files@v46.0.3
 
       - name: Find dependent test files
-        if: github.event_name == 'pull_request'
+        if: |
+          github.event_name == 'pull_request' || 
+          (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
         id: find-dependent-tests
         run: |
           # Run the Python script to find dependent test files
@@ -69,21 +75,21 @@ jobs:
             echo "Varlen tests failed (non-critical)"
 
       - name: Test full compiling on all test files
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=1 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest tests/ --capture=no
 
       - name: Run full pytest on test files
         continue-on-error: true
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run full pytest on varlen test files
         continue-on-error: true
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} || \

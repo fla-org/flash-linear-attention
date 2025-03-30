@@ -48,8 +48,8 @@ def get_nvgpu_memory_usage():
 
 def check_gpu_memory():
     max_memory_mib = 4096  # Threshold in MiB (4 GB)
-    max_wait_time = 600    # 10 minutes in seconds
-    sleep_time = 600       # Sleep for 600 seconds
+    max_wait_time = 3600    # 60 minutes in seconds
+    sleep_time = 30       # Sleep for 30 seconds
 
     start_time = time.time()
 
