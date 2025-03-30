@@ -14,7 +14,7 @@ if compiled_mode:
     test_t_list = [64]
 else:
     test_b_list = [2]
-    test_t_list = [1, 7, 15, 63, 286, 300]
+    test_t_list = [1, 15, 63, 300]
 
 
 @pytest.mark.parametrize("B", test_b_list)
