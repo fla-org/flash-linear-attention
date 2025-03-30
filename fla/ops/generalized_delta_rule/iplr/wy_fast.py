@@ -10,7 +10,7 @@ import triton.language as tl
 
 from fla.utils import device_capacity, is_nvidia_hopper
 
-NUM_WARPS = [2, 4] if  is_nvidia_hopper else [2, 4, 8]
+NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 
 @triton.heuristics({
