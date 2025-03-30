@@ -8,7 +8,10 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
-from fla.utils import is_triton_shared_mem_enough, use_cuda_graph
+from fla.utils import is_triton_shared_mem_enough, use_cuda_graph, device_platform
+
+NUM_WARPS = [2, 4, 16] if (device_platform == 'nvidia' and torch.cuda.get_device_capability()[0] >= 9) \
+    else [2, 4, 8, 16]
 
 
 @triton.heuristics({
@@ -20,7 +23,7 @@ from fla.utils import is_triton_shared_mem_enough, use_cuda_graph
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16]
+        for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G'],
