@@ -243,7 +243,7 @@ def test_chunk(
     head_first: bool,
     gate_logit_normalizer: float
 ):
-    if is_nvidia_hopper and compiled_mode is False and D == 32:
+    if is_nvidia_hopper and not compiled_mode and D == 32:
         pytest.skip(reason="workaround the magic problem, testing 32 and then 64 will cause an error on hopper")
     if head_first:
         q = torch.randn(B, H, T, D, dtype=dtype)

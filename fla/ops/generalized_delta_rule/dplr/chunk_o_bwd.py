@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import exp
-from fla.utils import device_capacity, is_triton_shared_mem_enough, use_cuda_graph
+from fla.utils import check_shared_mem, device_capacity, use_cuda_graph
 
 BK_LIST = [64, 128] if device_capacity else [16, 32]
 
@@ -430,9 +430,9 @@ def chunk_dplr_bwd_dAu(
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
-    if is_triton_shared_mem_enough('ampere'):  # A100
+    if check_shared_mem('ampere'):  # A100
         BV = min(triton.next_power_of_2(V), 128)
-    elif is_triton_shared_mem_enough('ada'):  # 4090
+    elif check_shared_mem('ada'):  # 4090
         BV = min(triton.next_power_of_2(V), 64)
     else:
         BV = min(triton.next_power_of_2(V), 32)

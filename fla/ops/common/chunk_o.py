@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import safe_exp
-from fla.utils import device_capacity, is_nvidia_hopper, is_triton_shared_mem_enough
+from fla.utils import check_shared_mem, device_capacity, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if device_capacity else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
@@ -515,7 +515,7 @@ def chunk_bwd_dv(
         B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     # H100 can have larger block size
-    if is_triton_shared_mem_enough('hopper', k.device.index):
+    if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
     elif device_capacity:
         CONST_TILING = 64
@@ -568,7 +568,7 @@ def chunk_bwd_dv_local(
         B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     # H100 can have larger block size
-    if is_triton_shared_mem_enough('hopper', k.device.index):
+    if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
     elif device_capacity:
         CONST_TILING = 64

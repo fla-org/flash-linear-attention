@@ -8,14 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
-from fla.utils import (
-    autocast_custom_bwd,
-    autocast_custom_fwd,
-    device_capacity,
-    input_guard,
-    is_triton_shared_mem_enough,
-    use_cuda_graph
-)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, device_capacity, input_guard, use_cuda_graph
 
 BKV_LIST = [64, 128] if device_capacity else [32, 64]
 
@@ -295,10 +288,10 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
 
-    if is_triton_shared_mem_enough('hopper', k.device.index):
+    if check_shared_mem('hopper', k.device.index):
         BV = 64
         BC = 64 if K <= 128 else 32
-    elif is_triton_shared_mem_enough('ampere', k.device.index):  # A100
+    elif check_shared_mem('ampere', k.device.index):  # A100
         BV = 32
         BC = 32
     else:
