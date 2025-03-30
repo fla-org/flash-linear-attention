@@ -204,9 +204,6 @@ def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
         return False
 
 
-device_capacity = check_shared_mem()
-
-
 if check_pytorch_version('2.4'):
     device = 'cuda' if device == 'cpu' else device
     autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)

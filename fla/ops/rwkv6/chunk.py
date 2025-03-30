@@ -9,10 +9,10 @@ import triton.language as tl
 
 from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_bwd_dv, chunk_gla_fwd_o_gk
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, device_capacity, input_guard, use_cuda_graph
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, use_cuda_graph
 
-BK_LIST = [32, 64] if device_capacity else [16, 32]
-BV_LIST = [32, 64] if device_capacity else [16, 32]
+BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
+BV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
@@ -1301,7 +1301,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
         head_first
     ):
         T = q.shape[2] if head_first else q.shape[1]
-        chunk_size = min(32, max(32, triton.next_power_of_2(T))) if device_capacity \
+        chunk_size = min(32, max(32, triton.next_power_of_2(T))) if check_shared_mem \
             else min(64, max(32, triton.next_power_of_2(T)))
 
         # 2-d indices denoting the offsets of chunks in each sequence

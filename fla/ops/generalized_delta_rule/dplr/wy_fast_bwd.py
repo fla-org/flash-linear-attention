@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import device_capacity, is_intel_alchemist, use_cuda_graph
+from fla.utils import check_shared_mem, is_intel_alchemist, use_cuda_graph
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
 triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
@@ -151,7 +151,7 @@ def chunk_dplr_bwd_wy(
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64) if device_capacity else min(triton.next_power_of_2(V), 32)
+    BV = min(triton.next_power_of_2(V), 64) if check_shared_mem() else min(triton.next_power_of_2(V), 32)
 
     dA_ab = torch.empty_like(A_ab_inv, dtype=torch.float)
     dA_ak = torch.empty_like(A_ak, dtype=torch.float)

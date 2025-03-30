@@ -8,9 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import exp
-from fla.utils import check_shared_mem, device_capacity, use_cuda_graph
+from fla.utils import check_shared_mem, use_cuda_graph
 
-BK_LIST = [64, 128] if device_capacity else [16, 32]
+BK_LIST = [64, 128] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
@@ -370,8 +370,8 @@ def chunk_dplr_bwd_o(
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
-    BK = min(triton.next_power_of_2(K), 64) if device_capacity else min(triton.next_power_of_2(K), 32)
-    BV = min(triton.next_power_of_2(V), 64) if device_capacity else min(triton.next_power_of_2(K), 32)
+    BK = min(triton.next_power_of_2(K), 64) if check_shared_mem() else min(triton.next_power_of_2(K), 32)
+    BV = min(triton.next_power_of_2(V), 64) if check_shared_mem() else min(triton.next_power_of_2(K), 32)
     NK = triton.cdiv(K, BK)
     dq = torch.empty_like(k)
     dk = torch.empty_like(k)

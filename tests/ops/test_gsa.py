@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from fla.ops.gsa import chunk_gsa, fused_recurrent_gsa
 from fla.ops.gsa.naive import naive_recurrent_gsa
 from fla.ops.utils.testing import assert_close
-from fla.utils import device, device_capacity, device_platform
+from fla.utils import device, check_shared_mem, device_platform
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
@@ -252,7 +252,7 @@ def test_chunk(
     gate_logit_normalizer: float,
     head_first: bool
 ):
-    if (D > 64 or M > 64) and device_capacity is False:
+    if (D > 64 or M > 64) and check_shared_mem is False:
         pytest.skip(reason="Current CI do not support this config")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -319,7 +319,7 @@ def test_chunk_varlen(
     M: int,
     dtype: torch.dtype,
 ):
-    if (D > 64 or M > 64) and device_capacity is False:
+    if (D > 64 or M > 64) and check_shared_mem is False:
         pytest.skip(reason="Current CI do not support this config")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'

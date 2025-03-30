@@ -8,9 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, device_capacity, input_guard, use_cuda_graph
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, use_cuda_graph
 
-BKV_LIST = [64, 128] if device_capacity else [32, 64]
+BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 
 
 @triton.heuristics({

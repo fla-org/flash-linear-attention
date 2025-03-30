@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import exp
-from fla.utils import device_capacity, use_cuda_graph
+from fla.utils import check_shared_mem, use_cuda_graph
 
 
 @triton.heuristics({
@@ -352,7 +352,7 @@ def chunk_dplr_bwd_dqk_intra(
         B, T, H, K = q.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BC = min(16, BT)
-    BK = min(64, triton.next_power_of_2(K)) if device_capacity else min(32, triton.next_power_of_2(K))
+    BK = min(64, triton.next_power_of_2(K)) if check_shared_mem() else min(32, triton.next_power_of_2(K))
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)

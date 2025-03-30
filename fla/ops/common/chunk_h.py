@@ -8,9 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
-from fla.utils import device_capacity
+from fla.utils import check_shared_mem
 
-BKV_LIST = [32, 64] if device_capacity else [16, 32]
+BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({

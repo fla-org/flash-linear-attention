@@ -7,9 +7,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import device_capacity, input_guard
+from fla.utils import check_shared_mem, input_guard
 
-BS_LIST = [32, 64] if device_capacity else [16, 32]
+BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({

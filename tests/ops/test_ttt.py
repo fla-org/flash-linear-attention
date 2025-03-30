@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
 from fla.ops.ttt.naive import chunk_ttt_linear_ref
 from fla.ops.utils.testing import assert_close
-from fla.utils import device, device_capacity
+from fla.utils import device, check_shared_mem
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
@@ -45,7 +45,7 @@ def test_chunk(
     scale: float,
     head_first: bool
 ):
-    if D > 64 and device_capacity is False:
+    if D > 64 and check_shared_mem is False:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
     if head_first:
@@ -144,7 +144,7 @@ def test_fused_chunk_fwd(
     scale: float,
     head_first: bool
 ):
-    if D > 64 and device_capacity is False:
+    if D > 64 and check_shared_mem is False:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
     if head_first:
@@ -241,7 +241,7 @@ def test_chunk_varlen_fwd(
     scale: float,
     dtype: torch.dtype,
 ):
-    if D > 64 and device_capacity is False:
+    if D > 64 and check_shared_mem is False:
         pytest.skip(reason="Current CI do not support this config")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
