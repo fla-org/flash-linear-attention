@@ -63,7 +63,7 @@ jobs:
         name: Check latest version
         working-directory: triton
         run: |
-          export PACKAGE_DATE=$(python3 -m pip install --user --index-url https://pypi.fla-org.com/simple/ --dry-run triton== |& grep -oP '(?<=, )[0-9\.]+dev[0-9]+(?=\))' | grep -oP '(?<=dev)[0-9]+')
+          export PACKAGE_DATE=$(python3 -m pip install --user --index-url http://pypi.fla-org.com/simple/ --dry-run triton== |& grep -oP '(?<=, )[0-9\.]+dev[0-9]+(?=\))' | grep -oP '(?<=dev)[0-9]+')
           export LATEST_DATE=$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%d%H%M%S' --format="%cd")
           if cmp -s <(echo $PACKAGE_DATE) <(echo $LATEST_DATE); then
             echo "new_commit=false" >> "$GITHUB_OUTPUT"
@@ -85,7 +85,7 @@ jobs:
         working-directory: triton
         run: |
             # Replace the URL using sed
-            sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' python/setup.py
+            sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|http://llvm.fla-org.com/|g' python/setup.py
 
             # Verify the change (optional)
             grep "llvm.fla-org.com" python/setup.py || (echo "URL replacement failed"; exit 1)
@@ -132,7 +132,7 @@ jobs:
         run: |
           python3 -m pip install twine pkginfo --upgrade
           python3 -m twine upload \
-            --repository-url http://pypi-upload.fla-org.com/ \
+            --repository-url http://pypi.fla-org.com/ \
             --username fla \
             --password ${{ secrets.FLA_PYPI_PASSWD }} \
             --verbose \
