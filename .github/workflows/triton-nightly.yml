@@ -136,7 +136,7 @@ jobs:
 
             mv "tmp_pkg/triton-${OLD_VERSION}" "tmp_pkg/triton_nightly-${NEW_VERSION}" &&
             mv "tmp_pkg/triton_nightly-${NEW_VERSION}/triton-${OLD_VERSION}.dist-info" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info" &&
-            
+
             sed -i -e "s/^Name: triton$/Name: triton-nightly/" -e "s/^Version: ${OLD_VERSION}$/Version: ${NEW_VERSION}/" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info/METADATA" &&
 
             wheel pack "tmp_pkg/triton_nightly-${NEW_VERSION}" -d . --build-number "" &&
