@@ -24,11 +24,11 @@ jobs:
 
       - name: Setup python
         run: |
-          pip uninstall -y fla flash-linear-attention rwkv-fla
+          pip uninstall -y fla flash-linear-attention rwkv-fla triton
           pip install --upgrade pytest setuptools wheel ninja
-          pip3 install --upgrade --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126
+          pip install --upgrade --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126
           pip install --no-use-pep517 .
-          pip install -U --index-url http://pypi.fla-org.com/simple/ triton --upgrade --trusted-host pypi.fla-org.com
+          pip install -U --index-url http://pypi.fla-org.com/simple/ triton-nightly --upgrade --trusted-host pypi.fla-org.com
 
       - name: Check GPU status
         run: |

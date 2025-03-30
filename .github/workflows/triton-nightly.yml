@@ -63,12 +63,14 @@ jobs:
         name: Check latest version
         working-directory: triton
         run: |
-          export PACKAGE_DATE=$(python3 -m pip install --user --index-url http://pypi.fla-org.com/simple/ --dry-run triton== |& grep -oP '(?<=, )[0-9\.]+dev[0-9]+(?=\))' | grep -oP '(?<=dev)[0-9]+')
-          export LATEST_DATE=$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%d%H%M%S' --format="%cd")
-          if cmp -s <(echo $PACKAGE_DATE) <(echo $LATEST_DATE); then
-            echo "new_commit=false" >> "$GITHUB_OUTPUT"
+          export PACKAGE_DATE=$(python3 -m pip install --user --index-url https://pypi.fla-org.com/simple/ --dry-run --upgrade triton-nightly --force-reinstall |& grep -oP '(?<=\.dev)[0-9]{12}(?=[^0-9]|$)')
+          export LATEST_DATE=$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%d%H%M' --format="%cd")
+          if [[ "$PACKAGE_DATE" >= "$LATEST_DATE" ]]; then
+              echo "new_commit=false" >> "$GITHUB_OUTPUT"
           else
-            echo "new_commit=true" >> "$GITHUB_OUTPUT"
+              echo "new_commit=true" >> "$GITHUB_OUTPUT"
+              export BUILD_DATE=$(date -u +"%Y%m%d%H%M")
+              echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
           fi
 
       - name: Patch setup.py
@@ -85,7 +87,7 @@ jobs:
         working-directory: triton
         run: |
             # Replace the URL using sed
-            sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|http://llvm.fla-org.com/|g' python/setup.py
+            sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' python/setup.py
 
             # Verify the change (optional)
             grep "llvm.fla-org.com" python/setup.py || (echo "URL replacement failed"; exit 1)
@@ -96,12 +98,12 @@ jobs:
         working-directory: triton
         run: |
           # Make sure cibuildwheel is updated to latest, this will enable latest python builds
-          python3 -m pip install cibuildwheel --upgrade --user
-          # Pass MAX_JOBS=12 because, at time of writing, the VM "only" has 64GB
+          python3 -m pip install cibuildwheel wheel --upgrade --user
+          # Pass MAX_JOBS=16 because, at time of writing, the VM "only" has 64GB
           # of RAM and OOMs while building if we give it the default number of
           # workers (2 * NUM_CPUs).
           if [[ "${{ runner.name }}" == "intel-a770" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=12 \
+            export CIBW_ENVIRONMENT="MAX_JOBS=16 \
                     TRITON_BUILD_WITH_CLANG_LLD=1 \
                     SOCKS_PROXY=http://100.77.75.108:7890 \
                     ALL_PROXY=http://100.77.75.108:7890 \
@@ -116,7 +118,7 @@ jobs:
           export CIBW_BEFORE_ALL="dnf install clang lld -y"
 
           if [[ ${{ matrix.config.arch }} == 'x86_64' ]]; then
-            export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_${{ matrix.config.arch }}:latest"
+            export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
           else
             export CIBW_MANYLINUX_AARCH64_IMAGE="quay.io/pypa/manylinux_2_28_${{ matrix.config.arch }}:latest"
           fi
@@ -124,15 +126,35 @@ jobs:
           export CIBW_BUILD="cp3{10,11,12,13,13t}-manylinux_${{ matrix.config.arch }}"
           export CIBW_SKIP="cp{35,36,37,38,39}-*"
           export CIBW_FREE_THREADED_SUPPORT=1
+          rm -rf ./wheelhouse* || :
           python3 -m cibuildwheel python --output-dir wheelhouse
+          cd wheelhouse
+          for whl in triton-*.whl; do
+            wheel unpack "$whl" -d tmp_pkg &&
+            OLD_VERSION=$(unzip -p "$whl" *dist-info/METADATA | grep "^Version:" | cut -d' ' -f2) &&
+            NEW_VERSION=$(echo "$OLD_VERSION" | sed 's/+git.*$/.dev'"$BUILD_DATE"'/') &&
 
+            mv "tmp_pkg/triton-${OLD_VERSION}" "tmp_pkg/triton_nightly-${NEW_VERSION}" &&
+            mv "tmp_pkg/triton_nightly-${NEW_VERSION}/triton-${OLD_VERSION}.dist-info" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info" &&
+            
+            sed -i -e "s/^Name: triton$/Name: triton-nightly/" -e "s/^Version: ${OLD_VERSION}$/Version: ${NEW_VERSION}/" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info/METADATA" &&
+
+            wheel pack "tmp_pkg/triton_nightly-${NEW_VERSION}" -d . --build-number "" &&
+            ORIG_WHL_NAME="triton-${NEW_VERSION}"*.whl &&
+            NEW_WHL_NAME="triton_nightly-${NEW_VERSION}-${ORIG_WHL_NAME#*${NEW_VERSION}-}" &&
+
+            rm -f "$whl" &&
+            rm -rf tmp_pkg &&
+            echo "Processed: $whl → $NEW_WHL_NAME"
+          done
+          cd ../
 
       - name: Publish wheels to fla
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
         run: |
           python3 -m pip install twine pkginfo --upgrade
           python3 -m twine upload \
-            --repository-url http://pypi.fla-org.com/ \
+            --repository-url http://pypi-upload.fla-org.com/ \
             --username fla \
             --password ${{ secrets.FLA_PYPI_PASSWD }} \
             --verbose \
