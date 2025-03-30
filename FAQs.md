@@ -10,7 +10,10 @@ This issue has been fixed in [PR #4492](https://github.com/triton-lang/triton/pu
 It is recommended to use the nightly version of triton (built by fla:).
 
 ```sh
-pip install -U --index-url https://pypi.fla-org.com/simple/ triton --upgrade
+pip uninstall triton torch -y
+pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+pip uninstall triton -y
+pip install -U --index-url https://pypi.fla-org.com/simple/ triton-nightly --upgrade
 ```
 
 ## AttributeError: 'NoneType' object has no attribute 'start'
@@ -25,6 +28,9 @@ This is a known triton issue [triton-lang/triton#5609](https://github.com/triton
 
 Use the nightly version of triton
 ```sh
-pip install -U --index-url https://pypi.fla-org.com/simple/ triton --upgrade
+pip uninstall triton torch -y
+pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+pip uninstall triton -y
+pip install -U --index-url https://pypi.fla-org.com/simple/ triton-nightly --upgrade
 ```
 or build it from scratch.
