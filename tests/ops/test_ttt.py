@@ -45,7 +45,7 @@ def test_chunk(
     scale: float,
     head_first: bool
 ):
-    if D > 64 and check_shared_mem is False:
+    if D > 64 and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
     if head_first:
@@ -144,7 +144,7 @@ def test_fused_chunk_fwd(
     scale: float,
     head_first: bool
 ):
-    if D > 64 and check_shared_mem is False:
+    if D > 64 and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
     if head_first:
@@ -241,7 +241,7 @@ def test_chunk_varlen_fwd(
     scale: float,
     dtype: torch.dtype,
 ):
-    if D > 64 and check_shared_mem is False:
+    if D > 64 and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
