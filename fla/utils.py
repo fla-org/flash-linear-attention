@@ -181,9 +181,9 @@ def get_all_max_shared_mem():
 
 
 class Backend(Enum):
-    HOPPER = 233472    # H100
-    AMPERE = 131072    # A100
     ADA = 101376       # RTX 4090
+    AMPERE = 131072    # A100
+    HOPPER = 233472    # H100
     DEFAULT = 102400   # Default
 
     @classmethod
