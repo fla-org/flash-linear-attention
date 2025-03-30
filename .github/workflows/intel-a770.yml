@@ -24,7 +24,7 @@ jobs:
 
       - name: Setup python
         run: |
-          pip uninstall -y fla flash-linear-attention rwkv-fla
+          pip uninstall -y flash-linear-attention
           pip install --upgrade pytest setuptools wheel ninja
           pip install --no-use-pep517 .
 

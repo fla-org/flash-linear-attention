@@ -24,9 +24,9 @@ jobs:
 
       - name: Setup python
         run: |
-          pip uninstall -y fla flash-linear-attention rwkv-fla triton
+          pip uninstall -y flash-linear-attention triton
           pip install --upgrade pytest setuptools wheel ninja
-          pip install --upgrade --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126
+          pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
           pip install --no-use-pep517 .
           pip install -U --index-url http://pypi.fla-org.com/simple/ triton-nightly --upgrade --trusted-host pypi.fla-org.com
 
