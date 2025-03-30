@@ -1301,7 +1301,7 @@ class ChunkRWKV6Function(torch.autograd.Function):
         head_first
     ):
         T = q.shape[2] if head_first else q.shape[1]
-        chunk_size = min(32, max(32, triton.next_power_of_2(T))) if check_shared_mem \
+        chunk_size = min(32, max(32, triton.next_power_of_2(T))) if check_shared_mem() \
             else min(64, max(32, triton.next_power_of_2(T)))
 
         # 2-d indices denoting the offsets of chunks in each sequence
