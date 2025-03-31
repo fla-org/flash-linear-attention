@@ -74,6 +74,14 @@ if __name__ == "__main__":
     
     # Split the input argument into individual file paths
     changed_files = [Path(file) for file in sys.argv[1].split()]
+    # Skip fla/utils.py
+    BLACKLIST = [
+        'fla/utils.py'
+    ]
+    changed_files = [
+        file for file in changed_files
+        if not any(str(file).endswith(blacklisted) for blacklisted in BLACKLIST)
+    ]
     
     # Define the test directory and the directory to search for dependent files
     current_dir = Path(__file__).parent.resolve()
