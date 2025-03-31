@@ -9,7 +9,7 @@ import triton.language as tl
 from einops import rearrange, reduce
 
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous, is_nvidia
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
 
 @triton.heuristics({
