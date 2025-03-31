@@ -65,7 +65,7 @@ jobs:
         run: |
           export PACKAGE_DATE=$(python3 -m pip install --user --index-url https://pypi.fla-org.com/simple/ --dry-run --upgrade triton-nightly --force-reinstall |& grep -oP '(?<=\.dev)[0-9]{12}(?=[^0-9]|$)')
           export LATEST_DATE=$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%d%H%M' --format="%cd")
-          if [[ "$PACKAGE_DATE" >= "$LATEST_DATE" ]]; then
+          if [[ "$PACKAGE_DATE" -ge "$LATEST_DATE" ]]; then
               echo "new_commit=false" >> "$GITHUB_OUTPUT"
           else
               echo "new_commit=true" >> "$GITHUB_OUTPUT"
