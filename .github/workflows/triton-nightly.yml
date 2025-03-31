@@ -128,7 +128,7 @@ jobs:
           export CIBW_FREE_THREADED_SUPPORT=1
           rm -rf ./wheelhouse* || :
           python3 -m cibuildwheel python --output-dir wheelhouse
-          
+
 
       - name: Publish wheels to fla
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
