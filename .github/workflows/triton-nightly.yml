@@ -128,6 +128,11 @@ jobs:
           export CIBW_FREE_THREADED_SUPPORT=1
           rm -rf ./wheelhouse* || :
           python3 -m cibuildwheel python --output-dir wheelhouse
+          
+
+      - name: Publish wheels to fla
+        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
+        run: |
           cd wheelhouse
           for whl in triton-*.whl; do
             wheel unpack "$whl" -d tmp_pkg &&
@@ -141,17 +146,12 @@ jobs:
 
             wheel pack "tmp_pkg/triton_nightly-${NEW_VERSION}" -d . --build-number "" &&
             ORIG_WHL_NAME="triton-${NEW_VERSION}"*.whl &&
-            NEW_WHL_NAME="triton_nightly-${NEW_VERSION}-${ORIG_WHL_NAME#*${NEW_VERSION}-}" &&
+            NEW_WHL_NAME="triton_nightly-${NEW_VERSION}-*.whl" &&
 
             rm -f "$whl" &&
             rm -rf tmp_pkg &&
             echo "Processed: $whl → $NEW_WHL_NAME"
           done
-          cd ../
-
-      - name: Publish wheels to fla
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        run: |
           python3 -m pip install twine pkginfo --upgrade
           python3 -m twine upload \
             --repository-url http://pypi-upload.fla-org.com/ \
@@ -159,4 +159,4 @@ jobs:
             --password ${{ secrets.FLA_PYPI_PASSWD }} \
             --verbose \
             --non-interactive \
-            wheelhouse/*
+            *.whl
