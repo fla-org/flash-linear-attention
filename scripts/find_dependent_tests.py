@@ -56,7 +56,7 @@ def find_dependent_tests(changed_file, test_dir, search_dir):
 
     # Find files that use these definitions
     dependent_files = find_files_using_definitions(definitions, search_dir)
-    
+
     # Find test files that call these definitions or are dependent on the dependent files
     test_files = set()
     for test_file in Path(test_dir).rglob("test_*.py"):
@@ -67,7 +67,7 @@ def find_dependent_tests(changed_file, test_dir, search_dir):
                 if find_calls_in_file(test_file, extract_definitions(dependent_file)):
                     test_files.add(str(test_file))
                     break
-    
+
     return test_files
 
 
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python scripts/find_dependent_tests.py <file_paths>")
         sys.exit(1)
-    
+
     # Split the input argument into individual file paths
     changed_files = [Path(file) for file in sys.argv[1].split()]
     # Skip fla/utils.py
@@ -87,16 +87,16 @@ if __name__ == "__main__":
         file for file in changed_files
         if not any(str(file).endswith(blacklisted) for blacklisted in BLACKLIST)
     ]
-    
+
     # Define the test directory and the directory to search for dependent files
     current_dir = Path(__file__).parent.resolve()
     test_dir = current_dir.parent / "tests"
     search_dir = current_dir.parent / "fla"
-    
+
     # Find dependent test files for each changed file
     dependent_tests = set()
     for changed_file in changed_files:
         dependent_tests.update(find_dependent_tests(changed_file, test_dir, search_dir))
-    
+
     # Output the test files as a space-separated string
     print(" ".join(dependent_tests))
