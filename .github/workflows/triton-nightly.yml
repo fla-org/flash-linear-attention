@@ -132,6 +132,7 @@ jobs:
 
       - name: Publish wheels to fla
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
+        working-directory: triton
         run: |
           cd wheelhouse
           for whl in triton-*.whl; do
