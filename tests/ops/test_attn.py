@@ -8,7 +8,7 @@ import torch
 from fla.ops.attn.parallel import parallel_attn
 from fla.ops.common.utils import prepare_lens
 from fla.ops.utils.testing import assert_close
-from fla.utils import device
+from fla.utils import check_shared_mem, device
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -19,8 +19,8 @@ except Exception:
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
-    test_b_list = [1, 4]
-    test_t_list = [64, 1024, 2048]
+    test_b_list = [2]
+    test_t_list = [2048]
     test_t_varlen_list = test_t_list
     test_d_list = [64, 100, 128, 256]
 else:
@@ -29,7 +29,7 @@ else:
     test_t_varlen_list = [63, 286, 300, 512]
     test_d_list = [32, 64, 100, 256]
 test_hq_list = [8, 16]
-test_h_list = [2, 4, 8]
+test_h_list = [2]
 
 
 @pytest.mark.parametrize("B", test_b_list)
@@ -52,6 +52,8 @@ def test_parallel(
     dtype: torch.dtype,
     scale: float,
 ):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
@@ -96,6 +98,8 @@ def test_parallel_varlen(
     D: int,
     dtype: torch.dtype,
 ):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 

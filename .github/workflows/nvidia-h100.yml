@@ -27,6 +27,7 @@ jobs:
           pip install --upgrade pytest setuptools wheel ninja
           pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
           pip uninstall -y flash-linear-attention triton
+          MAX_JOBS=4 pip install --upgrade flash-attn --no-build-isolation
           pip install -U --index-url http://pypi.fla-org.com/simple/ triton-nightly --upgrade --trusted-host pypi.fla-org.com
           pip install --no-use-pep517 .
 

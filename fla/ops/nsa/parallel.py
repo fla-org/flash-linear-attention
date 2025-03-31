@@ -12,7 +12,7 @@ from einops import rearrange
 from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_lens, prepare_token_indices
 from fla.ops.nsa.utils import _bitonic_merge
 from fla.ops.utils import mean_pooling
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -815,7 +815,7 @@ def parallel_nsa_compression_fwd(
     H = k.shape[2]
     G = HQ // H
     BC = BS = block_size
-    if torch.cuda.get_device_capability()[0] >= 9:
+    if check_shared_mem('hopper', q.device.index):
         BK = min(256, triton.next_power_of_2(K))
         BV = min(256, triton.next_power_of_2(V))
     else:
@@ -1064,7 +1064,7 @@ def parallel_nsa_fwd(
     HQ = q.shape[2]
     G = HQ // H
     BS = block_size
-    if torch.cuda.get_device_capability()[0] >= 9:
+    if check_shared_mem('hopper', q.device.index):
         BK = min(256, triton.next_power_of_2(K))
         BV = min(256, triton.next_power_of_2(V))
     else:

@@ -9,7 +9,7 @@ import triton.language as tl
 from einops import rearrange, reduce
 
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous, is_nvidia
 
 
 @triton.heuristics({
@@ -18,7 +18,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4] + ([8] if torch.cuda.get_device_capability()[0] >= 9 else [])
+        for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
     key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
@@ -151,7 +151,7 @@ def parallel_attn_bwd_kernel_preprocess(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4] + ([8] if torch.cuda.get_device_capability()[0] >= 9 else [])
+        for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
     key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
@@ -262,7 +262,7 @@ def parallel_attn_bwd_kernel_dq(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4, 8]
+        for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
     key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
@@ -392,14 +392,18 @@ def parallel_attn_fwd(
     HQ = q.shape[2]
     G = HQ // H
     BT = chunk_size
-    if torch.cuda.get_device_capability()[0] >= 9:
-        BS = min(64, triton.next_power_of_2(T))
+    if check_shared_mem('hopper', q.device.index):
+        BS = min(64, max(16, triton.next_power_of_2(T)))
         BK = min(256, max(16, triton.next_power_of_2(K)))
         BV = min(256, max(16, triton.next_power_of_2(V)))
-    else:
-        BS = min(32, triton.next_power_of_2(T))
-        BK = min(128, max(16, triton.next_power_of_2(K)))
+    elif check_shared_mem('ampere', q.device.index):
+        BS = min(32, max(16, triton.next_power_of_2(T)))
+        BK = min(256, max(16, triton.next_power_of_2(K)))
         BV = min(128, max(16, triton.next_power_of_2(V)))
+    else:
+        BS = min(32, max(16, triton.next_power_of_2(T)))
+        BK = min(256, max(16, triton.next_power_of_2(K)))
+        BV = min(64, max(16, triton.next_power_of_2(V)))
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
@@ -465,9 +469,10 @@ def parallel_attn_bwd(
     HQ = q.shape[2]
     G = HQ // H
     BT = chunk_size
-    BS = min(32, triton.next_power_of_2(T))
+    BS = max(16, triton.next_power_of_2(T))
+    BS = min(32, BS) if check_shared_mem('ampere') else min(16, BS)
     BK = max(16, triton.next_power_of_2(K))
-    BV = min(128, max(16, triton.next_power_of_2(v.shape[-1])))
+    BV = max(16, triton.next_power_of_2(V))
     NV = triton.cdiv(V, BV)
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 

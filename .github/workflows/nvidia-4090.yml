@@ -26,6 +26,7 @@ jobs:
         run: |
           pip uninstall -y flash-linear-attention
           pip install --upgrade pytest setuptools wheel ninja torch triton
+          MAX_JOBS=4 pip install --upgrade flash-attn --no-build-isolation
           pip install --no-use-pep517 .
 
       - name: Check GPU status
