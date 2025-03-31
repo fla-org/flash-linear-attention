@@ -2,6 +2,7 @@ import sys
 import ast
 from pathlib import Path
 
+
 def extract_definitions(file_path):
     """Extract function and class definitions from a Python file."""
     if file_path.suffix != ".py":
@@ -20,6 +21,7 @@ def extract_definitions(file_path):
     except BaseException:
         return set()
 
+
 def find_calls_in_file(file_path, definitions):
     """Check if a file calls any of the given definitions."""
     if file_path.suffix != ".py":
@@ -35,6 +37,7 @@ def find_calls_in_file(file_path, definitions):
                 return True
     return False
 
+
 def find_files_using_definitions(definitions, directory):
     """Find files in the directory that use any of the given definitions."""
     files = []
@@ -42,6 +45,7 @@ def find_files_using_definitions(definitions, directory):
         if find_calls_in_file(file_path, definitions):
             files.append(file_path)
     return files
+
 
 def find_dependent_tests(changed_file, test_dir, search_dir):
     """Find test files that call any of the definitions in the changed file or files that use these definitions."""
@@ -65,6 +69,7 @@ def find_dependent_tests(changed_file, test_dir, search_dir):
                     break
     
     return test_files
+
 
 if __name__ == "__main__":
     # Get the changed files from the command line arguments
