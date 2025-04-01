@@ -26,7 +26,7 @@ if not check_pytorch_version('2.4'):
 )
 @triton.jit
 def fused_addcmul_fwd_kernel(
-    hiddn_ptr,
+    hidden_ptr,
     x_ptr,
     ixr_ptr,
     ixw_ptr,
@@ -51,16 +51,16 @@ def fused_addcmul_fwd_kernel(
     valid_indices = xnumel - xoffset
     xmask = xindex < (xoffset + valid_indices)
     x0 = xindex % hidden_dim
-    b_hiddn = tl.load(hiddn_ptr + (xindex), xmask, other=0.).to(tl.float32)
+    b_hiddn = tl.load(hidden_ptr + (xindex), xmask, other=0.).to(tl.float32)
     b_x = tl.load(x_ptr + (xindex), xmask, other=0.).to(tl.float32)
     b_ixr = tl.load(ixr_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
     b_ixw = tl.load(ixw_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_iwk = tl.load(ixk_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
+    b_ixk = tl.load(ixk_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
     b_ixv = tl.load(ixv_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
     b_ixa = tl.load(ixa_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
     b_oxr = b_hiddn + b_x * b_ixr
     b_oxw = b_hiddn + b_x * b_ixw
-    b_oxk = b_hiddn + b_x * b_iwk
+    b_oxk = b_hiddn + b_x * b_ixk
     b_oxv = b_hiddn + b_x * b_ixv
     b_oxa = b_hiddn + b_x * b_ixa
 
