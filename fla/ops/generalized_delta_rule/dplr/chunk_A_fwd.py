@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import exp
-from fla.utils import triton_have_gather, use_cuda_graph
+from fla.utils import is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
@@ -168,7 +168,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     NC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    TL_HAS_GATHER: tl.constexpr = triton_have_gather,
+    GATHER_SUPPORTED: tl.constexpr = is_gather_supported,
 ):
     i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -243,7 +243,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     # inner attn
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # a trick to index the j-th row of b_k, b_g, b_b
-        if TL_HAS_GATHER:
+        if GATHER_SUPPORTED:
             row_idx = tl.full([1, BK], j, dtype=tl.int16)
             # [1, BK]
             b_k_j = tl.gather(b_k, row_idx, axis=0)

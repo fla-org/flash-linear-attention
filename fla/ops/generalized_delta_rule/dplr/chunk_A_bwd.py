@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import exp
-from fla.utils import check_shared_mem, triton_have_gather, use_cuda_graph
+from fla.utils import check_shared_mem, is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
@@ -57,7 +57,7 @@ def chunk_dplr_bwd_kernel_intra(
     NC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    GATHER: tl.constexpr = triton_have_gather
+    GATHER_SUPPORTED: tl.constexpr = is_gather_supported
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -202,7 +202,7 @@ def chunk_dplr_bwd_kernel_intra(
     # intra chunk gradient calculation
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # trick to index the block
-        if GATHER:
+        if GATHER_SUPPORTED:
             row_idx = tl.full([1, BK], j, dtype=tl.int16)
             col_idx = tl.full([BC, 1], j, dtype=tl.int16)
             row_idx_bc = tl.full([1, BC], j, dtype=tl.int16)
