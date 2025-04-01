@@ -194,7 +194,7 @@ def parallel_attn_bwd_kernel_dq(
         bos, eos = i_n * T, i_n * T + T
 
     p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    p_dq = tl.make_block_ptr(dq + ((i_v*B*T+bos) * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_dq = tl.make_block_ptr(dq + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_do = tl.make_block_ptr(do + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_lse = tl.make_block_ptr(lse + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
     p_delta = tl.make_block_ptr(delta + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
@@ -307,7 +307,7 @@ def parallel_attn_bwd_kernel_dkv(
 
     p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + ((i_v * B*T + bos) * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_dk = tl.make_block_ptr(dk + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_dv = tl.make_block_ptr(dv + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
     # [BT, BK]
@@ -478,8 +478,8 @@ def parallel_attn_bwd(
 
     delta = parallel_attn_bwd_preprocess(o, do)
 
-    dq = torch.empty(NV, B, T, HQ, K, dtype=k.dtype if NV == 1 and H == HQ else torch.float, device=q.device)
-    dk = torch.empty(NV, B, T, HQ, K, dtype=k.dtype if NV == 1 and H == HQ else torch.float, device=q.device)
+    dq = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
+    dk = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
     dv = torch.empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float, device=q.device)
     grid = (NV, NT, B * HQ)
     parallel_attn_bwd_kernel_dq[grid](
@@ -529,8 +529,7 @@ def parallel_attn_bwd(
         BK=BK,
         BV=BV
     )
-    dq = reduce(dq, 'n b t h k -> b t h k', reduction='sum')
-    dk = reduce(dk, 'n b t (h g) k -> b t h k', g=G, reduction='sum')
+    dk = reduce(dk, 'b t (h g) k -> b t h k', g=G, reduction='sum')
     dv = reduce(dv, 'b t (h g) v -> b t h v', g=G, reduction='sum')
     return dq, dk, dv
 
