@@ -725,6 +725,7 @@ def chunk_ttt_linear_fwd_h(
     initial_state_bias: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     chunk_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -737,9 +738,7 @@ def chunk_ttt_linear_fwd_h(
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N = len(offsets) - 1
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
     BK = triton.next_power_of_2(K)
     BV = triton.next_power_of_2(V)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
@@ -853,6 +852,7 @@ def chunk_ttt_linear_bwd_h(
     initial_state: Optional[torch.Tensor] = None,
     initial_state_bias: Optional[torch.Tensor] = None,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     chunk_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -865,9 +865,7 @@ def chunk_ttt_linear_bwd_h(
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N = len(offsets) - 1
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
     BK = triton.next_power_of_2(K)
     BV = triton.next_power_of_2(V)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
@@ -980,6 +978,7 @@ def chunk_ttt_linear_bwd_norm(
     do: torch.Tensor,  # [B, H, L, D]
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     chunk_size: int = 16
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -993,9 +992,7 @@ def chunk_ttt_linear_bwd_norm(
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N = len(offsets) - 1
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
 
     BK = triton.next_power_of_2(K)
     BV = triton.next_power_of_2(V)
@@ -1077,6 +1074,7 @@ def chunk_ttt_linear_bwd_norm_ref(
     scale: float,
     eps: float,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     chunk_size: int = 16
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1092,11 +1090,7 @@ def chunk_ttt_linear_bwd_norm_ref(
             [q, k, v, v_new, kh, y, h, eta, dv_new, do]
         ]
     BT = chunk_size
-    if offsets is None:
-        NT, chunk_offsets = triton.cdiv(T, BT), None
-    else:
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
+    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     pad_len = (BT - (T % BT)) % BT
     if pad_len > 0:
         q, k, v, v_new, kh, y, eta, dv_new, do = [
@@ -1258,6 +1252,7 @@ def chunk_ttt_linear_fwd(
         initial_state_bias=initial_state_bias,
         output_final_state=output_final_state,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT
     )
@@ -1306,6 +1301,7 @@ def chunk_ttt_linear_bwd(
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT
     )
@@ -1340,6 +1336,7 @@ def chunk_ttt_linear_bwd(
         do=do,
         scale=scale,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT
     )

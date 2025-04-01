@@ -40,35 +40,30 @@ def recurrent_gated_delta_rule_ref(
 ):
     q, k, v, beta, g = map(lambda x: x.to(torch.float32), [q, k, v, beta, g])
     if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        beta = beta.transpose(1, 2)
-        g = g.transpose(1, 2)
-    b, h, l, d_k = q.shape
-    d_v = v.shape[-1]
-    o = torch.zeros_like(v)
-    S = torch.zeros(b, h, d_k, d_v).to(v)
+        q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous(), (q, k, v, beta, g))
+    B, H, T, K, V = *k.shape, v.shape[-1]
+    o = torch.zeros(B, H, T, V).to(v)
+    h = torch.zeros(B, H, K, V).to(v)
     if initial_state is not None:
-        S = initial_state
+        h = initial_state
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
     q = q * scale
-    for i in range(l):
-        _k = k[:, :, i]
-        _q = q[:, :, i]
-        _v = v[:, :, i].clone()
-        S = S.clone() * g[:, :, i].exp()[..., None, None]
-        beta_i = beta[:, :, i]
-        _v = _v - (S.clone() * _k[..., None]).sum(-2)
-        _v = _v * beta_i[..., None]
-        S = S.clone() + _k.unsqueeze(-1) * _v.unsqueeze(-2)
-        o[:, :, i] = torch.einsum('bhd,bhdm->bhm', _q, S)
+    for i in range(T):
+        b_q = q[:, :, i]
+        b_k = k[:, :, i]
+        b_v = v[:, :, i].clone()
+        h = h.clone() * g[:, :, i].exp()[..., None, None]
+        b_beta = beta[:, :, i]
+        b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
+        b_v = b_v * b_beta[..., None]
+        h = h.clone() + b_k.unsqueeze(-1) * b_v.unsqueeze(-2)
+        o[:, :, i] = torch.einsum('bhd,bhdm->bhm', b_q, h)
     if not output_final_state:
-        S = None
+        h = None
     if not head_first:
         o = o.transpose(1, 2)
-    return o, S
+    return o, h
 
 
 def chunk_gated_delta_rule_ref(
@@ -164,7 +159,8 @@ def chunk_gated_delta_rule_ref(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("scale", [1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("use_qk_l2norm_in_kernel", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -177,18 +173,20 @@ def test_recurrent_forward(
     D: int,
     scale: float,
     dtype: torch.dtype,
-    head_first: bool,
-    gate_logit_normalizer: float
+    use_qk_l2norm_in_kernel: bool,
+    gate_logit_normalizer: float,
+    head_first: bool
 ):
+    torch.manual_seed(42)
     if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+        q = torch.randn(B, H, T, D, dtype=torch.float32)
+        k = torch.randn(B, H, T, D, dtype=torch.float32)
         v = torch.randn(B, H, T, D, dtype=dtype)
         beta = torch.rand(B, H, T, dtype=dtype).sigmoid()
         g = F.logsigmoid(torch.rand(B, H, T, dtype=torch.float32))
     else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+        q = torch.randn(B, T, H, D, dtype=torch.float32)
+        k = torch.randn(B, T, H, D, dtype=torch.float32)
         v = torch.randn(B, T, H, D, dtype=dtype)
         beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
         g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
@@ -196,8 +194,8 @@ def test_recurrent_forward(
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
     ref, ref_ht = recurrent_gated_delta_rule_ref(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1).to(dtype),
+        k=F.normalize(k.clone(), p=2, dim=-1).to(dtype),
         v=v.clone(),
         beta=beta.clone(),
         g=g.clone(),
@@ -207,13 +205,14 @@ def test_recurrent_forward(
         head_first=head_first
     )
     tri, tri_ht = fused_recurrent_gated_delta_rule(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1).to(dtype) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1).to(dtype) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
         beta=beta.clone(),
         g=g.clone(),
         scale=scale,
         initial_state=h0.clone(),
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         output_final_state=True,
         head_first=head_first
     )

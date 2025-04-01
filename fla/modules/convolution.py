@@ -271,7 +271,7 @@ class ShortConvolution(nn.Conv1d):
         cache: torch.Tensor
     ):
         shape = x.shape
-        x = x.squeeze()
+        x = x.squeeze(1)
         if self.use_fast_conv1d:
             x = causal_conv1d_update(
                 x=x,

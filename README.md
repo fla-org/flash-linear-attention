@@ -1,6 +1,6 @@
 <div align="center">
 
-# :boom: Flash Linear Attention
+# 💥 Flash Linear Attention
 
 [![hf_model](https://img.shields.io/badge/-Models-gray.svg?logo=huggingface&style=flat-square)](https://huggingface.co/fla-hub)  [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white&style=flat-square)](https://discord.gg/vDaJTmKNcS)
 
@@ -29,21 +29,21 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 
 ## News
 
-- **$\texttt{[2025-03]}$:** We have changed the default `initializer_range` to the magic :whale: 0.006, leading to great improvements across all models.
-- **$\texttt{[2025-02]}$:** :whale: Add NSA implementations to `fla`. See kernels [here](fla/ops/nsa).
-- **$\texttt{[2025-01]}$:** :fire: We are migrating to `torchtitan`-based training framework. Check out the [flame](https://github.com/fla-org/flame) repo for more details.
-- **$\texttt{[2025-01]}$:** :tada: Add RWKV7 implementations (both kernels and models) to `fla`.
+- **$\texttt{[2025-03]}$:** We have changed the default `initializer_range` to the magic 🐳 0.006, leading to great improvements across all models.
+- **$\texttt{[2025-02]}$:** 🐳 Add NSA implementations to `fla`. See kernels [here](fla/ops/nsa).
+- **$\texttt{[2025-01]}$:** 🔥 We are migrating to `torchtitan`-based training framework. Check out the [flame](https://github.com/fla-org/flame) repo for more details.
+- **$\texttt{[2025-01]}$:** 🎉 Add RWKV7 implementations (both kernels and models) to `fla`.
 - **$\texttt{[2024-12]}$:** Integrated `flash-bidirectional-attention` to `fla-org` ([repo](https://github.com/fla-org/flash-bidirectional-linear-attention))
-- **$\texttt{[2024-12]}$:** :tada: Add Gated DeltaNet implementation to `fla` ([paper](https://arxiv.org/abs/2412.06464)).
-- **$\texttt{[2024-12]}$:** :rocket: `fla` now officially supports kernels with variable-length inputs.
+- **$\texttt{[2024-12]}$:** 🎉 Add Gated DeltaNet implementation to `fla` ([paper](https://arxiv.org/abs/2412.06464)).
+- **$\texttt{[2024-12]}$:** 🚀 `fla` now officially supports kernels with variable-length inputs.
 - **$\texttt{[2024-11]}$:** The inputs are now switched from head-first to seq-first format.
-- **$\texttt{[2024-11]}$:** :boom: `fla` now provides a flexible way for training hybrid models.
-- **$\texttt{[2024-10]}$:** :fire: Announcing `flame`, a minimal and scalable framework for training `fla` models. Check out the details [here](training/README.md).
+- **$\texttt{[2024-11]}$:** 💥 `fla` now provides a flexible way for training hybrid models.
+- **$\texttt{[2024-10]}$:** 🔥 Announcing `flame`, a minimal and scalable framework for training `fla` models. Check out the details [here](training/README.md).
 - **$\texttt{[2024-09]}$:** `fla` now includes a fused linear and cross-entropy layer, significantly reducing memory usage during training.
-- **$\texttt{[2024-09]}$:** :tada: Add GSA implementation to `fla` ([paper](https://arxiv.org/abs/2409.07146)).
-- **$\texttt{[2024-05]}$:** :tada: Add DeltaNet implementation to `fla` ([paper](https://arxiv.org/abs/2102.11174)).
-- **$\texttt{[2024-05]}$:** :boom: `fla` v0.1: a variety of subquadratic kernels/layers/models integrated (RetNet/GLA/Mamba/HGRN/HGRN2/RWKV6, etc., see [Models](#models)).
-- **$\texttt{[2023-12]}$:** :boom: Launched `fla`, offering a collection of implementations for state-of-the-art linear attention models.
+- **$\texttt{[2024-09]}$:** 🎉 Add GSA implementation to `fla` ([paper](https://arxiv.org/abs/2409.07146)).
+- **$\texttt{[2024-05]}$:** 🎉 Add DeltaNet implementation to `fla` ([paper](https://arxiv.org/abs/2102.11174)).
+- **$\texttt{[2024-05]}$:** 💥 `fla` v0.1: a variety of subquadratic kernels/layers/models integrated (RetNet/GLA/Mamba/HGRN/HGRN2/RWKV6, etc., see [Models](#models)).
+- **$\texttt{[2023-12]}$:** 💥 Launched `fla`, offering a collection of implementations for state-of-the-art linear attention models.
 
 ## Models
 
@@ -115,8 +115,8 @@ MultiScaleRetention(
   (v_proj): Linear(in_features=1024, out_features=2048, bias=False)
   (g_proj): Linear(in_features=1024, out_features=2048, bias=False)
   (o_proj): Linear(in_features=2048, out_features=1024, bias=False)
-  (g_norm_swish_gate): FusedRMSNormSwishGate(512, eps=1e-05)
-  (rotary): RotaryEmbedding()
+  (g_norm_swish_gate): FusedRMSNormGated(512, eps=1e-05, activation=swish)
+  (rotary): RotaryEmbedding(dim=256, base=10000.0, interleaved=False, pos_idx_in_fp32=True)
 )
 >>> x = torch.randn(batch_size, seq_len, hidden_size).to(device=device, dtype=dtype)
 >>> y, *_ = retnet(x)
@@ -149,7 +149,7 @@ GLAConfig {
   "hidden_act": "swish",
   "hidden_ratio": 4,
   "hidden_size": 2048,
-  "initializer_range": 0.02,
+  "initializer_range": 0.006,
   "intermediate_size": null,
   "max_position_embeddings": 2048,
   "model_type": "gla",
@@ -158,7 +158,7 @@ GLAConfig {
   "num_hidden_layers": 24,
   "num_kv_heads": null,
   "tie_word_embeddings": false,
-  "transformers_version": "4.48.2",
+  "transformers_version": "4.50.1",
   "use_cache": true,
   "use_gk": true,
   "use_gv": false,
@@ -184,13 +184,14 @@ GLAForCausalLM(
             (1): Linear(in_features=16, out_features=1024, bias=True)
           )
           (o_proj): Linear(in_features=2048, out_features=2048, bias=False)
-          (g_norm_swish_gate): FusedRMSNormSwishGate(512, eps=1e-06)
+          (g_norm_swish_gate): FusedRMSNormGated(512, eps=1e-06, activation=swish)
         )
         (mlp_norm): RMSNorm(2048, eps=1e-06)
         (mlp): GatedMLP(
           (gate_proj): Linear(in_features=2048, out_features=5632, bias=False)
           (up_proj): Linear(in_features=2048, out_features=5632, bias=False)
           (down_proj): Linear(in_features=5632, out_features=2048, bias=False)
+          (swiglu_linear): SwiGLULinear()
         )
       )
     )
@@ -268,6 +269,8 @@ For example, to create a 2-layer Samba model with interleaved Mamba and local at
   'layers': [1],
   'num_heads': 18,
   'num_kv_heads': 18,
+  'qkv_bias': False,
+  'rope_theta': 10000.,
   'window_size': 2048
 }
 >>> config
@@ -278,6 +281,8 @@ SambaConfig {
     ],
     "num_heads": 18,
     "num_kv_heads": 18,
+    "qkv_bias": false,
+    "rope_theta": 10000.0,
     "window_size": 2048
   },
   "bos_token_id": 1,
@@ -286,7 +291,8 @@ SambaConfig {
   "expand": 2,
   "fuse_cross_entropy": true,
   "fuse_norm": true,
-  "hidden_act": "silu",
+  "fuse_swiglu": true,
+  "hidden_act": "swish",
   "hidden_ratio": 4,
   "hidden_size": 2304,
   "initializer_range": 0.02,
@@ -306,7 +312,7 @@ SambaConfig {
   "time_step_min": 0.001,
   "time_step_rank": 144,
   "time_step_scale": 1.0,
-  "transformers_version": "4.45.0",
+  "transformers_version": "4.50.1",
   "use_bias": false,
   "use_cache": true,
   "use_conv_bias": true,
@@ -329,10 +335,11 @@ SambaForCausalLM(
           (out_proj): Linear(in_features=4608, out_features=2304, bias=False)
         )
         (mlp_norm): RMSNorm(2304, eps=1e-05)
-        (mlp): SambaMLP(
-          (gate_proj): Linear(in_features=2304, out_features=12288, bias=False)
+        (mlp): GatedMLP(
+          (gate_proj): Linear(in_features=2304, out_features=6144, bias=False)
+          (up_proj): Linear(in_features=2304, out_features=6144, bias=False)
           (down_proj): Linear(in_features=6144, out_features=2304, bias=False)
-          (act_fn): SiLU()
+          (swiglu_linear): SwiGLULinear()
         )
       )
       (1): SambaBlock(
@@ -342,13 +349,14 @@ SambaForCausalLM(
           (k_proj): Linear(in_features=2304, out_features=2304, bias=False)
           (v_proj): Linear(in_features=2304, out_features=2304, bias=False)
           (o_proj): Linear(in_features=2304, out_features=2304, bias=False)
-          (rotary): RotaryEmbedding()
+          (rotary): RotaryEmbedding(dim=128, base=10000.0, interleaved=False, pos_idx_in_fp32=True)
         )
         (mlp_norm): RMSNorm(2304, eps=1e-05)
-        (mlp): SambaMLP(
-          (gate_proj): Linear(in_features=2304, out_features=12288, bias=False)
+        (mlp): GatedMLP(
+          (gate_proj): Linear(in_features=2304, out_features=6144, bias=False)
+          (up_proj): Linear(in_features=2304, out_features=6144, bias=False)
           (down_proj): Linear(in_features=6144, out_features=2304, bias=False)
-          (act_fn): SiLU()
+          (swiglu_linear): SwiGLULinear()
         )
       )
     )
@@ -363,7 +371,7 @@ The model will produce output as-is, without any need for additional configurati
 
 ## Training
 
-We provide a minimal framework called [:fire: `flame`](https://github.com/fla-org/flame) built on top of `torchtitan`, for efficient training of `fla` models.
+We provide a minimal framework called [🔥 `flame`](https://github.com/fla-org/flame) built on top of `torchtitan`, for efficient training of `fla` models.
 
 Checkout [the GLA example](https://github.com/fla-org/flash-linear-attention/blob/main/examples/training.md) for more details.
 

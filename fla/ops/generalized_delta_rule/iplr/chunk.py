@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.chunk_delta_h import prepare_chunk_offsets
 from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, use_cuda_graph
 
@@ -267,7 +268,7 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    chunk_offsets: Optional[torch.Tensor] = None,
+    indices: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -280,10 +281,8 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N = len(offsets) - 1
-        if chunk_offsets is None:
-            chunk_offsets = torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], BT)]).cumsum(-1)
-        NT = chunk_offsets[-1]
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
@@ -375,6 +374,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT
     )

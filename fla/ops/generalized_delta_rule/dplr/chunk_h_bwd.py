@@ -130,6 +130,7 @@ def chunk_dplr_bwd_dhu(
     do: torch.Tensor,
     dv: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -155,9 +156,7 @@ def chunk_dplr_bwd_dhu(
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N = len(offsets) - 1
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
 
     BC = min(BT, BC)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)

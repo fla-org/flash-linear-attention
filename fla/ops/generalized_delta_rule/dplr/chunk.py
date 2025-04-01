@@ -76,6 +76,7 @@ def chunk_dplr_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT
     )
@@ -199,6 +200,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             gk=gi,
             initial_state=initial_state,
             offsets=offsets,
+            indices=indices,
             head_first=head_first,
             chunk_size=BT
         )
@@ -229,6 +231,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             do=do,
             dv=dv_new_intra,
             offsets=offsets,
+            indices=indices,
             head_first=head_first,
             chunk_size=BT
         )

@@ -49,6 +49,7 @@ def chunk_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT
     )
@@ -102,6 +103,7 @@ def chunk_delta_rule_bwd(
         initial_state=initial_state,
         output_final_state=False,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT
     )
@@ -128,6 +130,7 @@ def chunk_delta_rule_bwd(
         dv=dv,
         scale=scale,
         offsets=offsets,
+        indices=indices,
         head_first=head_first,
         chunk_size=BT
     )

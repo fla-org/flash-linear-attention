@@ -10,7 +10,7 @@ import triton.language as tl
 from fla.ops.common.utils import prepare_chunk_offsets
 from fla.utils import check_shared_mem, is_nvidia_hopper, use_cuda_graph
 
-NUM_WARPS = [2, 4, 16] if is_nvidia_hopper else [2, 4, 8, 16]
+NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
 
 @triton.heuristics({
@@ -252,6 +252,7 @@ def chunk_gated_delta_rule_fwd_h(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -264,9 +265,7 @@ def chunk_gated_delta_rule_fwd_h(
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N = len(offsets) - 1
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
@@ -330,6 +329,7 @@ def chunk_gated_delta_rule_bwd_dhu(
     dv: torch.Tensor,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
     head_first: bool = True,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -342,9 +342,7 @@ def chunk_gated_delta_rule_bwd_dhu(
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N = len(offsets) - 1
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
 
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension being larger than 256."
