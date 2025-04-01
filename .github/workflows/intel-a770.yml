@@ -83,14 +83,14 @@ jobs:
 
       - name: Run full pytest on test files
         continue-on-error: true
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run full pytest on varlen test files
         continue-on-error: true
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} || \

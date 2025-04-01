@@ -4,10 +4,9 @@ import os
 
 import torch
 import triton
+from flash_attn import flash_attn_func
 
 from fla.ops.retention import chunk_retention, parallel_retention
-
-from flash_attn import flash_attn_func
 
 
 @triton.testing.perf_report(
