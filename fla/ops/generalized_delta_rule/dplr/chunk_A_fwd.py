@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.exp import exp
-from fla.utils import use_cuda_graph
+from fla.utils import triton_have_gather, use_cuda_graph
 
 
 @triton.heuristics({
@@ -167,7 +167,8 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     BK: tl.constexpr,
     NC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
+    TL_HAS_GATHER: tl.constexpr = triton_have_gather,
 ):
     i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -236,25 +237,33 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     tl.store(p_bg, b_bg.to(p_bg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_ag, b_ag.to(p_ag.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.debug_barrier()
+    # tl.debug_barrier()
 
     b_q = b_q.to(b_k.dtype)
     # inner attn
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # a trick to index the j-th row of b_k, b_g, b_b
+        if TL_HAS_GATHER:
+            row_idx = tl.full([1, BK], j, dtype=tl.int16)
+            # [1, BK]
+            b_k_j = tl.gather(b_k, row_idx, axis=0)
+            b_gk_j = tl.gather(b_gi, row_idx, axis=0)
+            b_b_j = tl.gather(b_b, row_idx, axis=0)
+        else:
+            mask = tl.arange(0, BC) == j
+            b_k_j = tl.sum(tl.where(mask[:, None], b_k, 0), 0)[None, :]
+            b_gk_j = tl.sum(tl.where(mask[:, None], b_gi, 0), 0)[None, :]
+            b_b_j = tl.sum(tl.where(mask[:, None], b_b, 0), 0)[None, :]
         mask = tl.arange(0, BC) == j
-        b_k_j = tl.sum(tl.where(mask[:, None], b_k, 0), 0)
-        b_gk_j = tl.sum(tl.where(mask[:, None], b_gi, 0), 0)
-        b_b_j = tl.sum(tl.where(mask[:, None], b_b, 0), 0)
-        tmp = exp(b_gi - b_gk_j[None, :])
-        b_A_qk = tl.sum(b_q * b_k_j[None, :] * tmp, 1)
+        tmp = exp(b_gi - b_gk_j)
+        b_A_qk = tl.sum(b_q * b_k_j * tmp, 1)
         b_A_qk = tl.where(o_i >= j, b_A_qk, 0.)
-        b_A_qb = tl.sum(b_q * b_b_j[None] * tmp, 1)
+        b_A_qb = tl.sum(b_q * b_b_j * tmp, 1)
         b_A_qb = tl.where(o_i >= j, b_A_qb, 0.)
-        tmp2 = exp(b_ge - b_gk_j[None, :])
-        b_A_ak = tl.sum(b_a * b_k_j[None, :] * tmp2, 1)
+        tmp2 = exp(b_ge - b_gk_j)
+        b_A_ak = tl.sum(b_a * b_k_j * tmp2, 1)
         b_A_ak = tl.where(o_i > j, b_A_ak, 0.)
-        b_A_ab = tl.sum(b_a * b_b_j[None, :] * tmp2, 1)
+        b_A_ab = tl.sum(b_a * b_b_j * tmp2, 1)
         b_A_ab = tl.where(o_i > j, b_A_ab, 0.)
         tl.store(Aqk + o_A + j, b_A_qk.to(dtype=Aqk.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
         tl.store(Aqb + o_A + j, b_A_qb.to(dtype=Aqb.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
