@@ -12,6 +12,7 @@ from fla.utils import device
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 
+
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [1024])
 @pytest.mark.parametrize("n_embd", [512, 1024])
@@ -67,7 +68,6 @@ def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdi
     assert_close(" dx_k", x_k.grad, x_k2.grad, ratio=1e-3)
     assert_close(" dK_", K_.grad, K_2.grad, ratio=1e-3)
     assert_close(" dV_", V_.grad, V_2.grad, ratio=1e-3)
-
 
 
 @pytest.mark.parametrize("B", [4])
