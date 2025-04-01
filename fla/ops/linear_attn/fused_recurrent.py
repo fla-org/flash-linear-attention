@@ -235,6 +235,7 @@ def fused_recurrent_linear_attn(
     v: torch.Tensor,
     scale: Optional[float] = None,
     initial_state: torch.Tensor = None,
+    cum_k: torch.Tensor = None,
     output_final_state: bool = False,
     normalize: bool = False,
     head_first: bool = True
@@ -245,7 +246,7 @@ def fused_recurrent_linear_attn(
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
     o, final_state = FusedRecurrentLinearAttentionFunction.apply(q, k, v, scale, initial_state, output_final_state)
     if normalize:
-        o = normalize_output(q * scale, k, o)
+        o = normalize_output(q * scale, k, o, cum_k)
     if not head_first:
         o = o.transpose(1, 2)
     return o, final_state
