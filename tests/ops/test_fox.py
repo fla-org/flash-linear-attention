@@ -20,7 +20,6 @@ if compiled_mode:
 else:
     test_b_list = [2, 4]
     test_t_list = [3, 15, 63, 286, 300, 1024, 2048]
-    # test_t_list = [286, 300, 1024, 2048]
     test_t_varlen_list = [63, 286, 300, 512]
     test_d_list = [256]
 test_hq_list = [8, 16]
