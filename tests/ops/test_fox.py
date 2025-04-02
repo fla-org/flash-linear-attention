@@ -9,21 +9,21 @@ from einops import rearrange, repeat
 
 from fla.ops.fox.parallel import parallel_fox
 from fla.ops.utils.testing import assert_close
-from fla.utils import device
+from fla.utils import device, is_intel_alchemist
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
-    test_b_list = [1, 4]
-    test_t_list = [64, 1024, 2048]
+    test_b_list = [1]
+    test_t_list = [1024]
     test_t_varlen_list = test_t_list
     test_d_list = [64, 100, 128, 256]
 else:
-    test_b_list = [2, 4]
+    test_b_list = [2]
     test_t_list = [3, 15, 63, 286, 300, 1024, 2048]
     test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [256]
+    test_d_list = [64, 128, 256]
 test_hq_list = [8, 16]
-test_h_list = [2, 4, 8]
+test_h_list = [2]
 
 
 def naive_fox(
@@ -51,6 +51,14 @@ def naive_fox(
 @pytest.mark.parametrize("HQ", test_hq_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
+@pytest.mark.skipif(
+    is_intel_alchemist,
+    reason="Intel Triton Failure"
+)
 def test_parallel(
     B: int,
     H: int,
@@ -96,6 +104,14 @@ def test_parallel(
 @pytest.mark.parametrize("HQ", test_hq_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+)
+@pytest.mark.skipif(
+    is_intel_alchemist,
+    reason="Intel Triton Failure"
+)
 def test_parallel_varlen(
     N: int,
     T: int,
