@@ -7,6 +7,7 @@ concurrency:
 on:
   pull_request:
     branches: [ '*' ]
+    types: [opened, synchronize, reopened, closed]
   push:
     branches:
       - main
@@ -15,6 +16,7 @@ on:
 
 jobs:
   test:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: 'nvidia-h100'
     env:
       CI_ENV: 1
