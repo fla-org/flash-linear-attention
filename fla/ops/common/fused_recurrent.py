@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import chunk_global_cumsum
+from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -101,13 +102,13 @@ def fused_recurrent_fwd_kernel(
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
         if USE_GK:
             b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
-            b_h = b_h * tl.exp(b_gk[None, :])
+            b_h = b_h * exp(b_gk[None, :])
         if USE_GV:
             b_gv = tl.load(p_gv, mask=mask_v, other=0).to(tl.float32)
-            b_h = b_h * tl.exp(b_gv[:, None])
+            b_h = b_h * exp(b_gv[:, None])
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
-            b_h = b_h * tl.exp(b_g)
+            b_h = b_h * exp(b_g)
         b_h += b_k[None, :] * b_v[:, None]
         b_o = b_h * b_q[None, :]
         b_o = tl.sum(b_o, axis=1)
@@ -223,13 +224,13 @@ def fused_recurrent_bwd_kernel(
         b_do = tl.load(p_do, mask=mask_v, other=0).to(tl.float32)
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
-            b_h = b_h * tl.exp(b_g)
+            b_h = b_h * exp(b_g)
         if USE_GK:
             b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
-            b_h = b_h * tl.exp(b_gk[:, None])
+            b_h = b_h * exp(b_gk[:, None])
         if USE_GV:
             b_gv = tl.load(p_gv, mask=mask_v, other=0).to(tl.float32)
-            b_h = b_h * tl.exp(b_gv[None, :])
+            b_h = b_h * exp(b_gv[None, :])
         b_h += b_k[:, None] * b_v[None, :]
         b_dq = b_h * b_do[None, :]
         b_dq = tl.sum(b_dq, axis=1) * scale
@@ -291,13 +292,13 @@ def fused_recurrent_bwd_kernel(
         b_dv = tl.sum(b_dh * b_k[:, None], axis=0)
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
-            b_dh *= tl.exp(b_g)
+            b_dh *= exp(b_g)
         if USE_GK:
             b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
-            b_dh *= tl.exp(b_gk)[:, None]
+            b_dh *= exp(b_gk)[:, None]
         if USE_GV:
             b_gv = tl.load(p_gv, mask=mask_v, other=0).to(tl.float32)
-            b_dh *= tl.exp(b_gv)[None, :]
+            b_dh *= exp(b_gv)[None, :]
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=mask_k)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=mask_v)
 

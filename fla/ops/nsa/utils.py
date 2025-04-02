@@ -10,6 +10,8 @@
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import log2
+
 
 @triton.jit
 def _compare_and_swap(
@@ -83,7 +85,7 @@ def argsort(
     _dim: tl.constexpr = len(x.shape) - 1 if dim is None else dim
     tl.static_assert(_dim == len(x.shape) - 1, "only minor dimension is currently supported")
     # iteratively run bitonic merge-sort steps
-    n_dims: tl.constexpr = tl.log2(x.shape[_dim])
+    n_dims: tl.constexpr = log2(x.shape[_dim])
 
     for i in tl.static_range(1, n_dims + 1):
         x, ids = _bitonic_merge(x, ids, i, 2 if i < n_dims else descending, n_dims)

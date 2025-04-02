@@ -52,6 +52,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import exp, log
 from fla.utils import input_guard
 
 
@@ -105,9 +106,9 @@ def grpo_fwd_kernel(
             logits = tl.load(logits_ptr+cols, mask=mask, other=-float('inf')).to(tl.float32)
             m_ij = tl.max(logits)
             new_m_i = tl.maximum(m_i, m_ij)
-            l_i = l_i * tl.exp(m_i - new_m_i) + tl.sum(tl.exp(logits - new_m_i))
+            l_i = l_i * exp(m_i - new_m_i) + tl.sum(exp(logits - new_m_i))
             m_i = new_m_i
-        lse = tl.log(l_i) + m_i
+        lse = log(l_i) + m_i
 
         idx = tl.load(input_ids_ptr)
         x = tl.load(logits_ptr+idx).to(tl.float32)
@@ -115,7 +116,7 @@ def grpo_fwd_kernel(
         ref_logp = tl.load(ref_logp_ptr)
         logp = x - lse
         diff = ref_logp - logp
-        kl = tl.exp(diff) - diff - 1
+        kl = exp(diff) - diff - 1
         loss = kl * beta - advantage
 
         tl.store(loss_ptr, loss.to(loss_ptr.dtype.element_ty))
@@ -179,14 +180,14 @@ def grpo_bwd_kernel(
         ref_logp = tl.load(ref_logp_ptr)
         logp = x - lse
 
-        dlogp = (beta * (-1.0 * tl.exp(ref_logp - logp) + 1)
+        dlogp = (beta * (-1.0 * exp(ref_logp - logp) + 1)
                  - advantage) * dloss
 
         for start_n in tl.range(0, N, BLOCK_SIZE):
             cols = start_n + base_cols
             mask = cols < N
             logits = tl.load(logits_ptr+cols, mask=mask, other=-float('inf')).to(tl.float32)
-            probs = tl.exp(logits - lse)
+            probs = exp(logits - lse)
             dlogits = tl.where(cols == idx, 1-probs, -probs) * dlogp
 
             tl.store(dlogits_ptr+cols, dlogits.to(dlogits_ptr.dtype.element_ty), mask=mask)

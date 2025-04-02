@@ -9,6 +9,7 @@ import triton.language as tl
 
 from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
 from fla.ops.utils import chunk_global_cumsum
+from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -37,7 +38,7 @@ def fused_recurrent_gsa_inference_kernel(
 
     b_s = tl.load(s + i_bg * M + tl.arange(0, M)).to(tl.float32)
     b_g = tl.load(g + i_bg * M + tl.arange(0, M)).to(tl.float32)
-    b_g = tl.exp(b_g)
+    b_g = exp(b_g)
 
     b_ok = tl.zeros([M], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):

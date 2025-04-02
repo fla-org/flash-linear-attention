@@ -24,6 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import exp
 from fla.utils import input_guard
 
 
@@ -75,7 +76,7 @@ def chunk_hgrn_fwd_kernel_h(
         mask_t = mask & ((i_t * BT + i) < T)
         b_x = tl.load(p_x, mask=mask_t, other=0).to(tl.float32)
         b_g = tl.load(p_g, mask=mask_t, other=0).to(tl.float32)
-        b_h = tl.exp(b_g) * b_h + b_x
+        b_h = exp(b_g) * b_h + b_x
         b_gc = b_gc + b_g
         tl.store(p_gc, b_gc.to(p_o.dtype.element_ty), mask=mask_t)
         tl.store(p_o, b_h.to(p_o.dtype.element_ty), mask=mask_t)
@@ -111,7 +112,7 @@ def chunk_hgrn_fwd_kernel_o(
         # [BT, BD]
         b_gc = tl.load(p_gc, boundary_check=(0, 1)).to(tl.float32)
         b_o = tl.load(p_o, boundary_check=(0, 1)).to(tl.float32)
-        b_o = b_o + tl.exp(b_gc) * b_h0[None, :]
+        b_o = b_o + exp(b_gc) * b_h0[None, :]
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -159,7 +160,7 @@ def chunk_hgrn_bwd_kernel_h(
         b_gc = b_gc + b_g
         b_dh = b_dh + b_do
         b_dx = b_dh
-        b_dh = b_dh * tl.exp(b_g)
+        b_dh = b_dh * exp(b_g)
 
         tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), mask=mask)
 
@@ -204,8 +205,8 @@ def chunk_hgrn_bwd_kernel_o(
         b_o = tl.load(p_o, boundary_check=(0, 1)).to(tl.float32)
         b_dx = tl.load(p_dx, boundary_check=(0, 1)).to(tl.float32)
 
-        b_dx = b_dx + tl.exp(b_gc) * b_ht[None, :]
-        b_dg = b_o * b_dx * tl.exp(b_g)
+        b_dx = b_dx + exp(b_gc) * b_ht[None, :]
+        b_dg = b_o * b_dx * exp(b_g)
         tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 

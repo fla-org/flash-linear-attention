@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.exp import safe_exp
+from fla.ops.utils.op import safe_exp
 from fla.utils import check_shared_mem
 
 

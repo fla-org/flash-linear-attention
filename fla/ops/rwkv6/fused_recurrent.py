@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -91,7 +92,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
         b_w = tl.load(p_w, mask=mask_k, other=0).to(tl.float32)
         b_kv = b_k[:, None] * b_v[None, :]
         b_o = tl.sum((b_h + b_kv * b_u[:, None]) * b_q[:, None], 0)
-        b_h = b_h * tl.exp(b_w)[:, None] + b_kv
+        b_h = b_h * exp(b_w)[:, None] + b_kv
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
         p_q += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
         p_k += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
@@ -189,7 +190,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         b_hq = b_h * b_do[None, :]
         b_dq = tl.sum(b_hq + b_kv * b_u[:, None] * b_do[None, :], 1) * scale
         b_dq1 = tl.sum(b_hq, 1)
-        b_h = b_h * tl.exp(b_w)[:, None]
+        b_h = b_h * exp(b_w)[:, None]
         b_h += b_kv
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=mask_k)
         tl.store(p_dq1, b_dq1.to(p_dq1.dtype.element_ty), mask=mask_k)
@@ -293,7 +294,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
 
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=mask_k)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=mask_v)
-        b_dh *= tl.exp(b_w)[:, None]
+        b_dh *= exp(b_w)[:, None]
         b_dh += b_dkv
 
         p_q += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K

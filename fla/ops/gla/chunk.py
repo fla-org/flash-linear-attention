@@ -10,7 +10,7 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.utils import chunk_local_cumsum
-from fla.ops.utils.exp import safe_exp
+from fla.ops.utils.op import exp, safe_exp
 from fla.utils import check_shared_mem, input_guard
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -86,11 +86,11 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         # [BC, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_qg = b_q * tl.exp(b_g - b_gn[None, :]) * scale
+        b_qg = b_q * exp(b_g - b_gn[None, :]) * scale
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_kg = b_k * tl.exp(b_gn[:, None] - b_gk)
+        b_kg = b_k * exp(b_gn[:, None] - b_gk)
         # [BC, BC] using tf32 to improve precision here.
         b_A += tl.dot(b_qg, b_kg)
 
@@ -166,7 +166,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_A = tl.sum(b_q * b_k[None, :] * tl.exp(b_g - b_gk[None, :]), 1)
+        b_A = tl.sum(b_q * b_k[None, :] * exp(b_g - b_gk[None, :]), 1)
         b_A = tl.where(o_i >= j, b_A * scale, 0.)
 
         tl.store(A + o_A + j, b_A, mask=m_A)
@@ -246,7 +246,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
         b_A = tl.zeros([BC], dtype=tl.float32)
         b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_A += tl.sum(b_q * b_k[None, :] * tl.exp(b_g - b_gk[None, :]), 1)
+        b_A += tl.sum(b_q * b_k[None, :] * exp(b_g - b_gk[None, :]), 1)
         b_A = tl.where(o_i >= j, b_A * scale, 0.)
         tl.store(A + o_A + j, b_A, mask=m_A)
         p_k += K if HEAD_FIRST else H*K
@@ -373,7 +373,7 @@ def chunk_gla_fwd_kernel_o(
         # [BT, BK]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         # [BT, BK]
-        b_qg = (b_q * tl.exp(b_g)).to(b_q.dtype)
+        b_qg = (b_q * exp(b_g)).to(b_q.dtype)
         # [BK, BV]
         b_h = tl.load(p_h, boundary_check=(0, 1))
         # works but dkw, owing to divine benevolence
@@ -472,12 +472,12 @@ def chunk_gla_bwd_kernel_intra(
             # [BC, BK]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kg = (b_k * tl.exp(b_gn[None, :] - b_gk))
+            b_kg = (b_k * exp(b_gn[None, :] - b_gk))
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]
             b_dq += tl.dot(b_dA, b_kg)
-        b_dq *= tl.exp(b_g - b_gn[None, :])
+        b_dq *= exp(b_g - b_gn[None, :])
 
     o_i = tl.arange(0, BC)
     m_dA = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
@@ -502,7 +502,7 @@ def chunk_gla_bwd_kernel_intra(
         m_i = o_i[:, None] >= j
         # [BC, BK]
         # (SY 09/17) important to not use bf16 here to have a good precision.
-        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * tl.exp(b_g - b_gkj[None, :]), 0.)
+        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp(b_g - b_gkj[None, :]), 0.)
         p_kj += K if HEAD_FIRST else H*K
         p_gkj += K if HEAD_FIRST else H*K
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
@@ -548,7 +548,7 @@ def chunk_gla_bwd_kernel_intra(
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dk += tl.dot(b_dA, b_qg)
-        b_dk *= tl.exp(b_gn[None, :] - b_gk)
+        b_dk *= exp(b_gn[None, :] - b_gk)
     if HEAD_FIRST:
         o_dA = i_bh * T * BT + (i_t * BT + i_i * BC) * BT + i_i * BC + tl.arange(0, BC)
         p_qj = tl.max_contiguous(tl.multiple_of(q + (i_bh * T + i_t * BT + i_i * BC) * K + o_k, BK), BK)
@@ -567,7 +567,7 @@ def chunk_gla_bwd_kernel_intra(
         b_gqj = tl.load(p_gqj, mask=m_k, other=0).to(tl.float32)
         # [BC, BK]
         m_i = o_i[:, None] <= j
-        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * tl.exp(b_gqj[None, :] - b_gk), 0.)
+        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp(b_gqj[None, :] - b_gk), 0.)
         p_qj += K if HEAD_FIRST else H*K
         p_gqj += K if HEAD_FIRST else H*K
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -707,7 +707,7 @@ def chunk_gla_bwd_kernel_dv(
 
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_gn = tl.exp(tl.load(p_gn, mask=m_k, other=0)[None, :] - b_gk)
+        b_gn = exp(tl.load(p_gn, mask=m_k, other=0)[None, :] - b_gk)
         b_k = (b_k * b_gn).to(b_k.dtype)
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
         # [BT, BV]
@@ -803,11 +803,11 @@ def chunk_gla_bwd_kernel_inter(
         # [BT, BK]
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
-    b_dgk *= tl.exp(b_gn)
+    b_dgk *= exp(b_gn)
     b_dq *= scale
     b_gk = tl.load(p_gk, boundary_check=(0, 1))
-    b_dq = b_dq * tl.exp(b_gk)
-    b_dk = b_dk * tl.exp(b_gn[None, :] - b_gk)
+    b_dq = b_dq * exp(b_gk)
+    b_dk = b_dk * exp(b_gn[None, :] - b_gk)
 
     if HEAD_FIRST:
         p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))

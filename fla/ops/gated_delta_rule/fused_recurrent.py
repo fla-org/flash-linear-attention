@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
+from fla.ops.utils.op import exp
 from fla.utils import input_guard
 
 
@@ -83,7 +84,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
         b_q = b_q * scale
         # [BK, BV]
-        b_h *= tl.exp(b_g)
+        b_h *= exp(b_g)
         # [BV]
         b_v -= tl.sum(b_h * b_k[:, None], 0)
         if IS_BETA_HEADWISE:

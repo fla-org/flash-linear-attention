@@ -3,7 +3,6 @@
 import torch
 from einops import rearrange
 
-
 # S_t = S_t @ (I + alpha_t beta_t^T) + v_t k_t^T
 # q, k, alpha, beta [B, H, L, D_K]
 # v [B, H, L, D_V]

@@ -4,6 +4,8 @@
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import exp, log
+
 
 @triton.autotune(
     configs=[
@@ -36,9 +38,9 @@ def logcumsumexp_fwd_kernel(
         # [S,]
         b_mc = tl.max(b_s, 0)
         b_mc = tl.maximum(b_mp, b_mc)
-        b_zp = b_zp * tl.exp(b_mp - b_mc)
+        b_zp = b_zp * exp(b_mp - b_mc)
         # [BT, S]
-        b_s = tl.exp(b_s - b_mc)
+        b_s = exp(b_s - b_mc)
         b_z = tl.dot(m_s, b_s, allow_tf32=False) + b_zp
         # [S,]
         b_zc = tl.max(b_z, 0)
@@ -46,5 +48,5 @@ def logcumsumexp_fwd_kernel(
         b_zp = b_zc
         # [BT, BS]
         # small eps to prevent underflows
-        b_z = tl.log(tl.where(b_z != 0, b_z, 1e-20)) + b_mc
+        b_z = log(tl.where(b_z != 0, b_z, 1e-20)) + b_mc
         tl.store(p_z, b_z.to(p_z.dtype.element_ty), boundary_check=(0, 1))

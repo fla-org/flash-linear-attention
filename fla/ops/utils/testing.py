@@ -5,7 +5,7 @@ ci_env = os.getenv("CI_ENV") == "1"
 
 
 def get_abs_err(x, y):
-    return (x-y).flatten().abs().max().item()
+    return (x.detach()-y.detach()).flatten().abs().max().item()
 
 
 def get_err_ratio(x, y):
