@@ -11,7 +11,7 @@ from einops import rearrange, reduce
 from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import div, exp, log
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard
 
 
 @triton.heuristics({
@@ -458,12 +458,12 @@ def parallel_fox_fwd(
     G = HQ // H
     BT = chunk_size
     BK = max(16, triton.next_power_of_2(K))
+    assert V <= 256, "V must be less than or equal to 256"
     if check_shared_mem('hopper'):
         BS = min(64, max(16, triton.next_power_of_2(T)))
-        BV = min(256, max(16, triton.next_power_of_2(V)))
     else:
         BS = min(32, max(16, triton.next_power_of_2(T)))
-        BV = min(128, max(16, triton.next_power_of_2(V)))
+    BV = min(256, max(16, triton.next_power_of_2(V)))
     NV = triton.cdiv(V, BV)
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
@@ -606,12 +606,14 @@ def parallel_fox_bwd(
 class ParallelFoxFunction(torch.autograd.Function):
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, g, scale, offsets):
         ctx.dtype = q.dtype
-
-        chunk_size = min(128, max(16, triton.next_power_of_2(q.shape[1])))
+        if check_shared_mem('hopper'):
+            chunk_size = min(128, max(16, triton.next_power_of_2(q.shape[1])))
+        else:
+            chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
         # 2-d indices denoting the offsets of chunks in each sequence
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
         # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
@@ -637,7 +639,7 @@ class ParallelFoxFunction(torch.autograd.Function):
         return o.to(q.dtype)
 
     @staticmethod
-    @contiguous
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, do):
         q, k, v, g, o, lse = ctx.saved_tensors
