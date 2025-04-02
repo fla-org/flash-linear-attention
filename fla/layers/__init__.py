@@ -6,7 +6,7 @@ from .attn import Attention
 from .based import BasedLinearAttention
 from .bitattn import BitAttention
 from .delta_net import DeltaNet
-from .fox import ForgettingAttention
+from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention

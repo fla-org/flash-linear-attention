@@ -15,7 +15,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.fox import ForgettingAttention
+from fla.layers.forgetting_attn import ForgettingAttention
 from fla.models.fox.configuration_fox import FoXConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss

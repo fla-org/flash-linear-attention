@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from fla.ops.fox.parallel import parallel_fox
+from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 from fla.ops.utils.testing import assert_close
-from fla.utils import check_shared_mem, device, is_intel_alchemist
+from fla.utils import device, is_intel_alchemist
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
@@ -19,23 +20,25 @@ if compiled_mode:
     test_d_list = [64, 100, 128, 256]
 else:
     test_b_list = [2]
-    test_t_list = [3, 15, 63, 286, 300, 1024, 2048]
-    test_t_varlen_list = [63, 286, 300, 512]
+    test_t_list = [3, 15, 63, 300, 1024, 2048]
+    test_t_varlen_list = [63, 300, 1024, 512, 2048]
     test_d_list = [64, 128, 256]
 test_hq_list = [8, 16]
 test_h_list = [2]
 
 
-def naive_fox(
+def naive_forgetting_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: float
+    scale: Optional[float] = None
 ):
-    _, T, HQ, _ = q.shape
+    _, T, HQ, D = q.shape
     H = k.shape[2]
     G = HQ // H
+    if scale is None:
+        scale = D ** -0.5
     gc = g.float().cumsum(1)
     mask = torch.tril(torch.ones((T, T), dtype=torch.bool, device=device))
     ref = torch.einsum("bqhd,bkhd->bhqk", q.float() * scale, repeat(k, "b t h d -> b t (h g) d", g=G).float())
@@ -67,8 +70,6 @@ def test_parallel(
     D: int,
     dtype: torch.dtype
 ):
-    if not check_shared_mem('hopper') and D > 128:
-        pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
@@ -79,14 +80,14 @@ def test_parallel(
     do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
     scale = D ** -0.5
 
-    ref = naive_fox(q, k, v, g, scale)
+    ref = naive_forgetting_attn(q, k, v, g, scale)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_dg, g.grad = g.grad.clone(), None
 
-    tri = parallel_fox(q=q, k=k, v=v, g=g, scale=scale)
+    tri = parallel_forgetting_attn(q=q, k=k, v=v, g=g, scale=scale)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -122,8 +123,6 @@ def test_parallel_varlen(
     D: int,
     dtype: torch.dtype,
 ):
-    if not check_shared_mem('hopper') and D > 128:
-        pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
@@ -143,7 +142,7 @@ def test_parallel_varlen(
 
     ref = q.new_empty(1, T, HQ, D)
     for bos, eos in zip(offsets[:-1], offsets[1:]):
-        ref[:, bos:eos] = parallel_fox(
+        ref[:, bos:eos] = naive_forgetting_attn(
             q=q[:, bos:eos],
             k=k[:, bos:eos],
             v=v[:, bos:eos],
@@ -155,7 +154,7 @@ def test_parallel_varlen(
     ref_dv, v.grad = v.grad.clone(), None
     ref_dg, g.grad = g.grad.clone(), None
 
-    tri = parallel_fox(
+    tri = parallel_forgetting_attn(
         q=q,
         k=k,
         v=v,

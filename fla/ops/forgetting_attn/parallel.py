@@ -25,7 +25,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem
     key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
 )
 @triton.jit
-def parallel_fox_fwd_kernel(
+def parallel_forgetting_attn_fwd_kernel(
     q,
     k,
     v,
@@ -144,7 +144,7 @@ def parallel_fox_fwd_kernel(
 
 
 @triton.jit
-def parallel_fox_bwd_kernel_preprocess(
+def parallel_forgetting_attn_bwd_kernel_preprocess(
     o,
     do,
     delta,
@@ -174,7 +174,7 @@ def parallel_fox_bwd_kernel_preprocess(
     key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
 )
 @triton.jit(do_not_specialize=['T'])
-def parallel_fox_bwd_kernel_dq(
+def parallel_forgetting_attn_bwd_kernel_dq(
     q,
     k,
     v,
@@ -306,7 +306,7 @@ def parallel_fox_bwd_kernel_dq(
     key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
 )
 @triton.jit(do_not_specialize=['T'])
-def parallel_fox_bwd_kernel_dkv(
+def parallel_forgetting_attn_bwd_kernel_dkv(
     q,
     k,
     v,
@@ -442,7 +442,7 @@ def parallel_fox_bwd_kernel_dkv(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
-def parallel_fox_fwd(
+def parallel_forgetting_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -470,7 +470,7 @@ def parallel_fox_fwd(
     lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
 
     grid = (NV, NT, B * HQ)
-    parallel_fox_fwd_kernel[grid](
+    parallel_forgetting_attn_fwd_kernel[grid](
         q=q,
         k=k,
         v=v,
@@ -495,13 +495,13 @@ def parallel_fox_fwd(
     return o, lse
 
 
-def parallel_fox_bwd_preprocess(
+def parallel_forgetting_attn_bwd_preprocess(
     o: torch.Tensor,
     do: torch.Tensor
 ):
     V = o.shape[-1]
     delta = torch.empty_like(o[..., 0], dtype=torch.float32)
-    parallel_fox_bwd_kernel_preprocess[(delta.numel(),)](
+    parallel_forgetting_attn_bwd_kernel_preprocess[(delta.numel(),)](
         o=o,
         do=do,
         delta=delta,
@@ -511,7 +511,7 @@ def parallel_fox_bwd_preprocess(
     return delta
 
 
-def parallel_fox_bwd(
+def parallel_forgetting_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -534,7 +534,7 @@ def parallel_fox_bwd(
     NV = triton.cdiv(V, BV)
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
-    delta = parallel_fox_bwd_preprocess(o, do)
+    delta = parallel_forgetting_attn_bwd_preprocess(o, do)
     dq = q.new_empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float)
     dk = q.new_empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float)
     dv = q.new_empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float)
@@ -544,7 +544,7 @@ def parallel_fox_bwd(
     # so we need to make a copy of `dg`
     dg2 = q.new_empty(g.shape, dtype=torch.float)
     grid = (NV, NT, B * HQ)
-    parallel_fox_bwd_kernel_dq[grid](
+    parallel_forgetting_attn_bwd_kernel_dq[grid](
         q=q,
         k=k,
         v=v,
@@ -569,7 +569,7 @@ def parallel_fox_bwd(
         BK=BK,
         BV=BV
     )
-    parallel_fox_bwd_kernel_dkv[grid](
+    parallel_forgetting_attn_bwd_kernel_dkv[grid](
         q=q,
         k=k,
         v=v,
@@ -620,7 +620,7 @@ class ParallelFoxFunction(torch.autograd.Function):
         indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
 
         g = chunk_local_cumsum(g, chunk_size, offsets=offsets, indices=indices, head_first=False)
-        o, lse = parallel_fox_fwd(
+        o, lse = parallel_forgetting_attn_fwd(
             q=q,
             k=k,
             v=v,
@@ -642,7 +642,7 @@ class ParallelFoxFunction(torch.autograd.Function):
     @autocast_custom_bwd
     def backward(ctx, do):
         q, k, v, g, o, lse = ctx.saved_tensors
-        dq, dk, dv, dg = parallel_fox_bwd(
+        dq, dk, dv, dg = parallel_forgetting_attn_bwd(
             q=q,
             k=k,
             v=v,
@@ -659,7 +659,7 @@ class ParallelFoxFunction(torch.autograd.Function):
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), None, None, None, None, None, None, None, None
 
 
-def parallel_fox(
+def parallel_forgetting_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -678,7 +678,7 @@ def parallel_fox(
         v (torch.Tensor):
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         g (torch.Tensor):
-            Forget gates of shape `[B, T, HQ]` if `head_first=False` else `[B, HQ, T]`.
+            Forget gates (in **log space**) of shape `[B, T, HQ]` if `head_first=False` else `[B, HQ, T]`.
         scale (Optional[int]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.

@@ -13,7 +13,7 @@ from einops import rearrange
 from transformers.utils import logging
 
 from fla.modules import RMSNorm
-from fla.ops.fox.parallel import parallel_fox
+from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -85,14 +85,14 @@ class ForgettingAttention(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens', None)
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
         f = F.logsigmoid(self.f_proj(hidden_states).float())
-        if self.qk_norm:
-            q, k = self.q_norm(q), self.k_norm(k)
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+        if self.qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)
 
-        o = parallel_fox(q, k, v, f, cu_seqlens=cu_seqlens)
+        o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
         o = rearrange(o, '... h d -> ... (h d)')
         if self.use_output_gate:
             o = self.g_proj(hidden_states).sigmoid() * o
