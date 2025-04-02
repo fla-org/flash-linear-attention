@@ -9,7 +9,7 @@ from einops import rearrange, repeat
 
 from fla.ops.fox.parallel import parallel_fox
 from fla.ops.utils.testing import assert_close
-from fla.utils import device, is_intel_alchemist
+from fla.utils import check_shared_mem, device, is_intel_alchemist
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
@@ -67,6 +67,8 @@ def test_parallel(
     D: int,
     dtype: torch.dtype
 ):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
@@ -120,6 +122,8 @@ def test_parallel_varlen(
     D: int,
     dtype: torch.dtype,
 ):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shard mem")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
