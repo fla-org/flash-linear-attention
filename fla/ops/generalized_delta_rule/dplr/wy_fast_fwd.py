@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import use_cuda_graph
+from fla.utils import is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
@@ -83,6 +83,7 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     BC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
+    GATHER_SUPPORTED: tl.constexpr = is_gather_supported
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -118,9 +119,18 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     b_A2 = tl.where(tl.arange(0, BC)[:, None] > tl.arange(0, BC)[None, :], b_A2, 0)
 
     for i in range(1, BC):
+        if GATHER_SUPPORTED:
+            row_idx = tl.full([1, BC], i, dtype=tl.int16)
+            # [1, BK] -> [BK]
+            b_a = tl.sum(tl.gather(b_A, row_idx, axis=0), 0)
+            b_a2 = tl.sum(tl.gather(b_A2, row_idx, axis=0), 0)
+        else:
+            mask = tl.arange(0, BC) == i
+            b_a = tl.sum(tl.where(mask[:, None], b_A, 0), 0)
+            b_a2 = tl.sum(tl.where(mask[:, None], b_A2, 0), 0)
         mask = tl.arange(0, BC) == i
-        b_a = tl.sum(tl.where(mask[:, None], b_A, 0), 0)
-        b_a2 = tl.sum(tl.where(mask[:, None], b_A2, 0), 0)
+        # b_a = tl.sum(tl.where(mask[:, None], b_A, 0), 0)
+        # b_a2 = tl.sum(tl.where(mask[:, None], b_A2, 0), 0)
         b_a = b_a + tl.sum(b_a[:, None] * b_A, 0) * (tl.arange(0, BC) < i)
         b_a2 = b_a2 + tl.sum(b_a2[:, None] * b_A2, 0) * (tl.arange(0, BC) < i)
         b_A = tl.where(mask[:, None], b_a, b_A)
@@ -131,7 +141,7 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     b_A += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
     b_A2 += tl.arange(0, BC)[:, None] == tl.arange(0, BC)[None, :]
     b_A3 = tl.dot(tl.dot(b_A2, b_A3), b_A)
-    tl.debug_barrier()
+    # tl.debug_barrier()
     tl.store(p_A_inv1, b_A.to(p_A_inv1.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_A_inv2, b_A2.to(p_A_inv2.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_A_inv3, b_A3.to(p_A_inv3.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
