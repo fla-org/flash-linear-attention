@@ -140,7 +140,8 @@ def test_parallel_varlen(
         q=q,
         k=k,
         v=v,
-        g=g
+        g=g,
+        cu_seqlens=offsets
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
