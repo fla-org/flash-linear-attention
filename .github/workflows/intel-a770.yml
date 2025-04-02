@@ -81,6 +81,7 @@ jobs:
           COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=1 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest tests/ --capture=no
 
+      # skip full pytest because it takes too long
       - name: Run full pytest on test files
         continue-on-error: true
         if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')

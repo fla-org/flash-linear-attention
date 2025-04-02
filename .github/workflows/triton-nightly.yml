@@ -33,29 +33,11 @@ jobs:
           echo "Current runner: $RUNNER_NAME"
           docker container prune -f
 
-      - name: Cache Triton repository
-        uses: actions/cache@v4
-        id: cache-triton
-        with:
-            path: triton
-            key: ${{ runner.os }}-fla-triton-${{ hashFiles('.github/workflows/triton-nightly.yml') }}
-            restore-keys: |
-                ${{ runner.os }}-triton-
-
       - name: Checkout Triton
-        if: steps.cache-triton.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
            repository: triton-lang/triton
            path: triton
-
-      - name: Update Triton repository
-        if: steps.cache-triton.outputs.cache-hit == 'true'
-        working-directory: triton
-        run:
-            git fetch --all
-            git checkout main --force
-            git reset --hard origin/main
 
 
       # The LATEST_DATE here should be kept in sync with the one in Patch setup.py
