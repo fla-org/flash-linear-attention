@@ -63,8 +63,8 @@ class ForgettingAttention(nn.Module):
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         if qk_norm:
-            self.q_norm = RMSNorm(self.hidden_size)
-            self.k_norm = RMSNorm(self.kv_dim)
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
 
     def forward(
         self,
