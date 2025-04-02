@@ -19,7 +19,7 @@ ci_env = os.getenv("CI_ENV") == "1"
 @pytest.mark.parametrize("D", [1024, 2048])
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("reduction", ["batchmean"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason="Intel Triton Failure"
