@@ -22,21 +22,6 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Setup python
-        run: |
-          pip uninstall -y flash-linear-attention
-          pip install --upgrade pytest setuptools wheel ninja
-          pip install --upgrade torch pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
-          pip install --no-use-pep517 .
-
-      - name: Check GPU status
-        run: |
-          python scripts/check_gpu.py
-          if [ $? -ne 0 ]; then
-            echo "GPU is occupied. Stopping the workflow."
-            exit 1
-          fi
-
       - name: Get changed files
         if: |
           github.event_name == 'pull_request' ||
@@ -53,6 +38,23 @@ jobs:
           # Run the Python script to find dependent test files
           TEST_FILES=$(python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
+
+      - name: Setup python
+        if: steps.find-dependent-tests.outputs.test_files
+        run: |
+          pip uninstall -y flash-linear-attention
+          pip install --upgrade pytest setuptools wheel ninja
+          pip install --upgrade torch pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
+          pip install --no-use-pep517 .
+
+      - name: Check GPU status
+        if: steps.find-dependent-tests.outputs.test_files
+        run: |
+          python scripts/check_gpu.py
+          if [ $? -ne 0 ]; then
+            echo "GPU is occupied. Stopping the workflow."
+            exit 1
+          fi
 
       - name: Test compiling on changed test files
         if: steps.find-dependent-tests.outputs.test_files
