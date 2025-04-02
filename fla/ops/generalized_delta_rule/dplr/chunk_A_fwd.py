@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.exp import exp
+from fla.ops.utils.op import exp
 from fla.utils import is_gather_supported, use_cuda_graph
 
 

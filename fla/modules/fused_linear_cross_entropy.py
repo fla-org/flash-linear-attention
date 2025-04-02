@@ -15,6 +15,7 @@ from torch.distributed.tensor import DeviceMesh, DTensor, Replicate, Shard, dist
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.ops.utils import logsumexp_fwd
+from fla.ops.utils.op import exp
 from fla.utils import input_guard
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
@@ -118,7 +119,7 @@ def cross_entropy_kernel(
         if label_smoothing > 0:
             # scale X beforehand to avoid overflow
             b_z += tl.sum(tl.where(o_v < V, -eps * b_logits, 0.0))
-        b_p = (tl.exp(b_logits - b_lse) - eps) * logit_scale
+        b_p = (exp(b_logits - b_lse) - eps) * logit_scale
         if reduction == "mean":
             b_p = b_p / total
         tl.store(logits + o_v, b_p, mask=o_v < V)

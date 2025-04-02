@@ -7,6 +7,7 @@ concurrency:
 on:
   pull_request:
     branches: [ '*' ]
+    types: [opened, synchronize, reopened, closed]
   push:
     branches:
       - main
@@ -15,29 +16,13 @@ on:
 
 jobs:
   test:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: 'nvidia-h100'
     env:
       CI_ENV: 1
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
-
-      - name: Setup python
-        run: |
-          pip install --upgrade pytest setuptools wheel ninja
-          pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
-          pip uninstall -y flash-linear-attention triton
-          MAX_JOBS=4 pip install --upgrade flash-attn --no-build-isolation
-          pip install -U --index-url http://pypi.fla-org.com/simple/ triton-nightly --upgrade --trusted-host pypi.fla-org.com
-          pip install --no-use-pep517 .
-
-      - name: Check GPU status
-        run: |
-          python scripts/check_gpu.py
-          if [ $? -ne 0 ]; then
-            echo "GPU is occupied. Stopping the workflow."
-            exit 1
-          fi
 
       - name: Get changed files
         if: |
@@ -47,14 +32,33 @@ jobs:
         uses: tj-actions/changed-files@v46.0.3
 
       - name: Find dependent test files
-        id: find-dependent-tests
         if: |
           github.event_name == 'pull_request' ||
           (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+        id: find-dependent-tests
         run: |
           # Run the Python script to find dependent test files
           TEST_FILES=$(python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
+
+      - name: Setup python
+        if: steps.find-dependent-tests.outputs.test_files
+        run: |
+          pip install --upgrade pytest setuptools wheel ninja
+          pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+          pip uninstall -y flash-linear-attention triton
+          MAX_JOBS=4 pip install --upgrade flash-attn --no-build-isolation
+          pip install -U --index-url http://pypi.fla-org.com/simple/ triton-nightly --upgrade --trusted-host pypi.fla-org.com
+          pip install --no-use-pep517 .
+
+      - name: Check GPU status
+        if: steps.find-dependent-tests.outputs.test_files
+        run: |
+          python scripts/check_gpu.py
+          if [ $? -ne 0 ]; then
+            echo "GPU is occupied. Stopping the workflow."
+            exit 1
+          fi
 
       - name: Test compiling on changed test files
         if: steps.find-dependent-tests.outputs.test_files

@@ -11,7 +11,7 @@ from einops import reduce
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.utils import chunk_local_cumsum, softmax_bwd, softmax_fwd
-from fla.ops.utils.exp import safe_exp
+from fla.ops.utils.op import exp, safe_exp
 from fla.utils import input_guard
 
 
@@ -102,7 +102,7 @@ def chunk_gsa_fwd_k_kernel_inter(
         p_A = tl.make_block_ptr(A + (bos * HQ + i_hq) * BT, (T, BT), (HQ*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     # [BT, BV]
     b_g = tl.load(p_g, boundary_check=(0, 1))
-    b_o = b_o * tl.exp(b_g)
+    b_o = b_o * exp(b_g)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
     # [BT, BT]
@@ -174,13 +174,13 @@ def chunk_gsa_fwd_k_kernel_intra(
         # [BC, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
-        b_vg = (b_v * tl.exp(b_gn[None, :] - b_gv)).to(b_v.dtype)
+        b_vg = (b_v * exp(b_gn[None, :] - b_gv)).to(b_v.dtype)
         # [BC, BC]
         b_A = tl.load(p_A, boundary_check=(0, 1))
         b_o += tl.dot(b_A, b_vg)
     # [BC, BV]
     b_g = tl.load(p_g, boundary_check=(0, 1))
-    b_o *= tl.exp(b_g - b_gn[None, :])
+    b_o *= exp(b_g - b_gn[None, :])
 
     o_i = tl.arange(0, BC)
     if HEAD_FIRST:
@@ -201,7 +201,7 @@ def chunk_gsa_fwd_k_kernel_intra(
         b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
         b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
         # [BC, BV]
-        b_vg = b_v[None, :] * tl.exp(b_g - b_gv[None, :])
+        b_vg = b_v[None, :] * exp(b_g - b_gv[None, :])
         # avoid 0 * inf = inf
         b_o += tl.where(o_i[:, None] >= j, b_A[:, None] * b_vg, 0.)
     if HEAD_FIRST:
@@ -289,11 +289,11 @@ def chunk_gsa_bwd_k_kernel_dA(
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * tl.exp(b_g - b_gn[None, :]) * scale).to(b_do.dtype)
+        b_do = (b_do * exp(b_g - b_gn[None, :]) * scale).to(b_do.dtype)
         # [BV, BC]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
-        b_vg = (b_v * tl.exp(b_gn[:, None] - b_gv)).to(b_v.dtype)
+        b_vg = (b_v * exp(b_gn[:, None] - b_gv)).to(b_v.dtype)
         # [BC, BC]
         b_dA = tl.dot(b_do, b_vg)
     elif i_i == i_j:
@@ -320,7 +320,7 @@ def chunk_gsa_bwd_k_kernel_dA(
             b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
             b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
             # [BC,]
-            b_dAj = tl.sum(b_do * b_v[None, :] * tl.exp(b_g - b_gv[None, :]), 1)
+            b_dAj = tl.sum(b_do * b_v[None, :] * exp(b_g - b_gv[None, :]), 1)
             b_dA = tl.where((o_i == j)[None, :], b_dAj[:, None], b_dA)
 
             p_v += (1 if HEAD_FIRST else H) * V
@@ -441,16 +441,16 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         # [BT, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_gv = tl.exp(b_gn[None, :] - b_g)
+        b_gv = exp(b_gn[None, :] - b_g)
         # [BV, BK]
         b_h = tl.load(p_h, boundary_check=(0, 1))
         # [BT, BV]
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * tl.exp(b_g) * scale).to(b_do.dtype)
+        b_do = (b_do * exp(b_g) * scale).to(b_do.dtype)
         # [BK, BV]
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
         # [BV]
-        b_dg = tl.sum(tl.trans(b_h) * b_dh, 0) * tl.exp(b_gn)
+        b_dg = tl.sum(tl.trans(b_h) * b_dh, 0) * exp(b_gn)
 
         b_dh = b_dh.to(b_k.dtype)
         # [BT, BK]
@@ -557,7 +557,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         b_A = tl.load(p_A, boundary_check=(0, 1))
         # [BC, BV]
         b_dv += tl.dot(b_A, b_do.to(b_A.dtype))
-    b_dv *= tl.exp(b_gn[None, :] - b_gv)
+    b_dv *= exp(b_gn[None, :] - b_gv)
 
     o_i = tl.arange(0, BC)
     o_c = i_i * BC + tl.arange(0, BC)
@@ -579,7 +579,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         b_do = tl.load(p_do, mask=m_v, other=0)
         # [BC, BV]
         m_i = o_i[:, None] <= j
-        b_dv += tl.where(m_i, tl.exp(b_g[None, :] - b_gv) * b_A[:, None] * b_do[None, :], 0.)
+        b_dv += tl.where(m_i, exp(b_g[None, :] - b_gv) * b_A[:, None] * b_do[None, :], 0.)
 
         p_g += (1 if HEAD_FIRST else H) * V
         p_A += (1 if HEAD_FIRST else HQ) * BT

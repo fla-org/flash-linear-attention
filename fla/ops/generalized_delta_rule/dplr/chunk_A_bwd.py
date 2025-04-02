@@ -7,8 +7,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.exp import exp
+from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem, is_gather_supported, use_cuda_graph
+
 
 
 @triton.heuristics({
