@@ -9,6 +9,7 @@ import triton.language as tl
 from einops import rearrange, reduce
 
 from fla.ops.common.utils import prepare_chunk_indices
+from fla.ops.utils.op import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
 
@@ -83,9 +84,9 @@ def parallel_attn_fwd_kernel(
 
         # [BT, BS]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        b_r = tl.exp(b_mp - b_m)
+        b_r = exp(b_mp - b_m)
         # [BT, BS]
-        b_p = tl.exp(b_s - b_m[:, None])
+        b_p = exp(b_s - b_m[:, None])
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [BT, BV]
@@ -111,9 +112,9 @@ def parallel_attn_fwd_kernel(
 
         # [BT]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        b_r = tl.exp(b_mp - b_m)
+        b_r = exp(b_mp - b_m)
         # [BT, BS]
-        b_p = tl.exp(b_s - b_m[:, None])
+        b_p = exp(b_s - b_m[:, None])
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [BT, BV]
@@ -121,7 +122,7 @@ def parallel_attn_fwd_kernel(
 
         b_mp = b_m
     b_o = b_o / b_acc[:, None]
-    b_m += tl.log(b_acc)
+    b_m += log(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
 
@@ -220,7 +221,7 @@ def parallel_attn_bwd_kernel_dq(
 
         # [BT, BS]
         b_s = tl.dot(b_q, b_k)
-        b_p = tl.exp(b_s - b_lse[:, None])
+        b_p = exp(b_s - b_lse[:, None])
 
         # [BT, BV] @ [BV, BS] -> [BT, BS]
         b_dp = tl.dot(b_do, b_v)
@@ -242,7 +243,7 @@ def parallel_attn_bwd_kernel_dq(
 
         # [BT, BS]
         b_s = tl.dot(b_q, b_k)
-        b_p = tl.exp(b_s - b_lse[:, None])
+        b_p = exp(b_s - b_lse[:, None])
         b_p = tl.where(o_q[:, None] >= o_k[None, :], b_p, 0)
 
         # [BT, BV] @ [BV, BS] -> [BT, BS]
@@ -336,7 +337,7 @@ def parallel_attn_bwd_kernel_dkv(
         b_delta = tl.load(p_delta, boundary_check=(0,))
         # [BT, BS]
         b_s = tl.dot(b_k, tl.trans(b_q))
-        b_p = tl.exp(b_s - b_lse[None, :])
+        b_p = exp(b_s - b_lse[None, :])
         b_p = tl.where(o_k[:, None] <= o_q[None, :], b_p, 0)
         # [BT, BS] @ [BS, BV] -> [BT, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
@@ -365,7 +366,7 @@ def parallel_attn_bwd_kernel_dkv(
         b_delta = tl.load(p_delta, boundary_check=(0,))
         # [BT, BS]
         b_s = tl.dot(b_k, tl.trans(b_q))
-        b_p = tl.exp(b_s - b_lse[None, :])
+        b_p = exp(b_s - b_lse[None, :])
         # [BT, BS] @ [BS, BV] -> [BT, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
         # [BT, BV] @ [BV, BS] -> [BT, BS]

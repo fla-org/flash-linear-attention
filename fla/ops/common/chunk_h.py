@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
+from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem
 
 BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -108,9 +109,9 @@ def chunk_fwd_kernel_h(
             else:
                 b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
                 p_g = g + bos*H + (i_t * BT + tl.arange(0, BT)) * H + i_h
-            b_h *= tl.exp(b_g_last)
+            b_h *= exp(b_g_last)
             b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
-            b_v = (b_v * tl.exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
+            b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         # vector decay, h = Diag(gk) @ h
         if USE_GK:
@@ -123,10 +124,10 @@ def chunk_fwd_kernel_h(
                 p_gk_last = gk + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
 
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
-            b_h *= tl.exp(b_gk_last)[:, None]
+            b_h *= exp(b_gk_last)[:, None]
 
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_k = (b_k * tl.exp(b_gk_last[:, None] - b_gk)).to(b_k.dtype)
+            b_k = (b_k * exp(b_gk_last[:, None] - b_gk)).to(b_k.dtype)
 
         # vector decay, h = h @ Diag(gv)
         if USE_GV:
@@ -139,10 +140,10 @@ def chunk_fwd_kernel_h(
                 p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
 
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
-            b_h *= tl.exp(b_gv_last)[None, :]
+            b_h *= exp(b_gv_last)[None, :]
 
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
-            b_v = (b_v * tl.exp(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
+            b_v = (b_v * exp(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
 
         b_h += tl.dot(b_k, b_v)
 
@@ -252,9 +253,9 @@ def chunk_bwd_kernel_dh(
                 p_g = g + (bos + i_t * BT + tl.arange(0, BT)) * H + i_h
                 b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
             b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
-            b_q = (b_q * tl.exp(b_g)[None, :]).to(b_q.dtype)
+            b_q = (b_q * exp(b_g)[None, :]).to(b_q.dtype)
 
-            b_dh *= tl.exp(b_g_last)
+            b_dh *= exp(b_g_last)
 
         if USE_GK:
             if HEAD_FIRST:
@@ -266,9 +267,9 @@ def chunk_bwd_kernel_dh(
                 p_gk_last = gk + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
 
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_q = (b_q * tl.exp(b_gk)).to(b_q.dtype)
+            b_q = (b_q * exp(b_gk)).to(b_q.dtype)
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
-            b_dh *= tl.exp(b_gk_last)[:, None]
+            b_dh *= exp(b_gk_last)[:, None]
 
         if USE_GV:
             if HEAD_FIRST:
@@ -280,10 +281,10 @@ def chunk_bwd_kernel_dh(
                 p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
 
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
-            b_do = (b_do * tl.exp(b_gv)).to(b_do.dtype)
+            b_do = (b_do * exp(b_gv)).to(b_do.dtype)
 
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
-            b_dh *= tl.exp(b_gv_last)[None, :]
+            b_dh *= exp(b_gv_last)[None, :]
 
         b_dh += tl.dot(b_q, b_do)
 

@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.exp import safe_exp
+from fla.ops.utils.op import exp, safe_exp
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -97,7 +97,7 @@ def chunk_fwd_kernel_o(
         g += (i_bh * T) if HEAD_FIRST else (bos * H + i_h)
         p_g = tl.make_block_ptr(g, (T,), (s_g,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
-        b_o = b_o * tl.exp(b_g)[:, None]
+        b_o = b_o * exp(b_g)[:, None]
         b_A = b_A * safe_exp(b_g[:, None] - b_g[None, :])
 
     o_i = tl.arange(0, BT)
@@ -243,17 +243,17 @@ def chunk_bwd_kernel_dqkwg(
         p_g = tl.make_block_ptr(g, (T,), (s_g,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * s_g)
-        b_dg_last *= tl.exp(b_g_last)
+        b_dg_last *= exp(b_g_last)
 
         if USE_DW:
             p_w = tl.make_block_ptr(w, (T, K), (s_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             p_dw = tl.make_block_ptr(dw, (T, K), (s_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
-            b_dw = b_dw * tl.exp(b_g)[:, None]
+            b_dw = b_dw * exp(b_g)[:, None]
             tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
             b_dg -= tl.sum(b_w * b_dw, axis=1)
 
-        b_dq = b_dq * tl.exp(b_g)[:, None] * scale
+        b_dq = b_dq * exp(b_g)[:, None] * scale
         b_dg += tl.sum(b_dq * b_q, axis=1)
 
         b_dk = b_dk * safe_exp(-b_g + b_g_last)[:, None]

@@ -12,6 +12,7 @@ from einops import rearrange
 from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_lens, prepare_token_indices
 from fla.ops.nsa.utils import _bitonic_merge
 from fla.ops.utils import mean_pooling
+from fla.ops.utils.op import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
 try:
@@ -105,9 +106,9 @@ def parallel_nsa_compression_fwd_kernel(
 
         # [G]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        b_r = tl.exp(b_mp - b_m)
+        b_r = exp(b_mp - b_m)
         # [G, BC]
-        b_p = tl.exp(b_s - b_m[:, None])
+        b_p = exp(b_s - b_m[:, None])
         # [G]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
 
@@ -119,7 +120,7 @@ def parallel_nsa_compression_fwd_kernel(
         b_lse = tl.zeros([G], dtype=tl.float32)
     else:
         b_o = b_o / b_acc[:, None]
-        b_lse = b_m + tl.log(b_acc)
+        b_lse = b_m + log(b_acc)
 
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
     if i_v == 0:
@@ -216,7 +217,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
 
         # [G, BC]
         b_s = tl.dot(b_q, b_k)
-        b_p = tl.exp(b_s - b_lse[:, None])
+        b_p = exp(b_s - b_lse[:, None])
         b_p = tl.where((o_c < NC)[None, :], b_p, 0)
 
         # [G, BV] @ [BV, BC] -> [G, BC]
@@ -310,7 +311,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
         b_delta = tl.load(p_delta)
         # [BC, G]
         b_s = tl.dot(b_k, tl.trans(b_q))
-        b_p = tl.exp(b_s - b_lse[None, :])
+        b_p = exp(b_s - b_lse[None, :])
         b_p = tl.where((i >= max(0, (o_c + 1) * BS - 1))[:, None], b_p, 0)
         # [BC, G] @ [G, BV] -> [BC, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
@@ -403,9 +404,9 @@ def parallel_nsa_kernel_topk(
 
             # [G]
             b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-            b_r = tl.exp(b_mp - b_m)
+            b_r = exp(b_mp - b_m)
             # [G, BC]
-            b_p = tl.exp(b_s - b_m[:, None])
+            b_p = exp(b_s - b_m[:, None])
             # [G]
             b_acc = b_acc * b_r + tl.sum(b_p, 1)
 
@@ -413,7 +414,7 @@ def parallel_nsa_kernel_topk(
         if NC == 0:
             b_lse = tl.zeros([G], dtype=tl.float32)
         else:
-            b_lse = b_m + tl.log(b_acc)
+            b_lse = b_m + log(b_acc)
 
     ################################
     # 2. topk selection
@@ -432,7 +433,7 @@ def parallel_nsa_kernel_topk(
         b_s = tl.dot(b_q, b_k)
         b_s = tl.where((i_t // BS > o_c)[None, :], b_s, float('-inf'))
         # [G, BC]
-        b_p = tl.where((i_t // BS == o_c)[None, :], float(1.0), tl.exp(b_s - b_lse[:, None]))
+        b_p = tl.where((i_t // BS == o_c)[None, :], float(1.0), exp(b_s - b_lse[:, None]))
         # the importance scores of the current block
         # [BC]
         b_i, b_ip = tl.sum(b_p, 0), b_i
@@ -540,9 +541,9 @@ def parallel_nsa_fwd_kernel(
 
             # [G]
             b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-            b_r = tl.exp(b_mp - b_m)
+            b_r = exp(b_mp - b_m)
             # [G, BS]
-            b_p = tl.exp(b_s - b_m[:, None])
+            b_p = exp(b_s - b_m[:, None])
             # [G]
             b_acc = b_acc * b_r + tl.sum(b_p, 1)
             # [G, BV]
@@ -550,7 +551,7 @@ def parallel_nsa_fwd_kernel(
 
             b_mp = b_m
     b_o = b_o / b_acc[:, None]
-    b_m += tl.log(b_acc)
+    b_m += log(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_lse, b_m.to(p_lse.dtype.element_ty))
 
@@ -697,7 +698,7 @@ def parallel_nsa_bwd_kernel_dq(
 
             # [G, BS]
             b_s = tl.dot(b_q, b_k)
-            b_p = tl.exp(b_s - b_lse[:, None])
+            b_p = exp(b_s - b_lse[:, None])
             b_p = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_p, 0)
 
             # [G, BV] @ [BV, BS] -> [G, BS]
@@ -787,7 +788,7 @@ def parallel_nsa_bwd_kernel_dkv(
             b_delta = tl.load(p_delta)
             # [BS, G]
             b_s = tl.dot(b_k, tl.trans(b_q))
-            b_p = tl.exp(b_s - b_lse[None, :])
+            b_p = exp(b_s - b_lse[None, :])
             b_p = tl.where((i >= (i_s * BS + tl.arange(0, BS)))[:, None], b_p, 0)
             # [BS, G] @ [G, BV] -> [BS, BV]
             b_dv += tl.dot(b_p.to(b_do.dtype), b_do)

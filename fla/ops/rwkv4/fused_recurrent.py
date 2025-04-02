@@ -9,6 +9,8 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd.function import Function, FunctionCtx, once_differentiable
 
+from fla.ops.utils.op import exp
+
 
 def get_block_size_c(chans: int) -> int:
     if chans < 32:
@@ -90,15 +92,15 @@ def fused_recurrent_rwkv4_forward_kernel(
 
         ukt = u + kt
         tau = tl.maximum(ukt, eps)
-        e1a = tl.exp(eps - tau)
-        e2a = tl.exp(ukt - tau)
+        e1a = exp(eps - tau)
+        e2a = exp(ukt - tau)
         wkv = (e1a * alpha + e2a * vt) / (e1a * beta + e2a)
         tl.store(wkv_ptr + t * wkv_s_t + cs * wkv_s_c, wkv, mask=cmask)
 
         w_eps = w + eps
         eps = tl.maximum(w_eps, kt)
-        e1b = tl.exp(w_eps - eps)
-        e2b = tl.exp(kt - eps)
+        e1b = exp(w_eps - eps)
+        e2b = exp(kt - eps)
         alpha = e1b * alpha + e2b * vt
         beta = e1b * beta + e2b
         tl.store(alpha_out_ptr + t * state_out_s_t + cs * state_out_s_c, alpha, mask=cmask)
@@ -284,10 +286,10 @@ def fused_recurrent_rwkv4_backward_kernel(
 
         ukt = u + kt
         tau = tl.maximum(ukt, eps_prev)
-        e1 = tl.exp(eps_prev - tau)
-        e2 = tl.exp(ukt - tau)
+        e1 = exp(eps_prev - tau)
+        e2 = exp(ukt - tau)
 
-        euke = tl.exp(ukt + eps_prev - 2 * tau)
+        euke = exp(ukt + eps_prev - 2 * tau)
 
         denom = e1 * beta_prev + e2
         denom_sq = denom * denom
@@ -305,8 +307,8 @@ def fused_recurrent_rwkv4_backward_kernel(
         geps_wkv_denom = e1 * beta_prev + e2
         geps_wkv = gwkvt * euke * (alpha_prev - vt * beta_prev) / (geps_wkv_denom * geps_wkv_denom)
 
-        e1 = tl.exp(w + eps_prev - eps_curr)
-        e2 = tl.exp(kt - eps_curr)
+        e1 = exp(w + eps_prev - eps_curr)
+        e2 = exp(kt - eps_curr)
 
         # Backpropagates alpha gradients.
         galpha_we = galpha * e1 * alpha_prev

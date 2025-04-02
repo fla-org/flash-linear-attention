@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_offsets
+from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem, is_nvidia_hopper, use_cuda_graph
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
@@ -106,17 +107,17 @@ def chunk_gated_delta_rule_fwd_kernel_h(
             b_g = tl.load(p_g, boundary_check=(0, )) if USE_G else None
             # [BK, BC]
             b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_k = (b_k * tl.exp(b_g_last - b_g)[None, :]).to(b_k.dtype) if USE_G else b_k
+            b_k = (b_k * exp(b_g_last - b_g)[None, :]).to(b_k.dtype) if USE_G else b_k
             # [BC, BK]
             b_d = tl.load(p_d, boundary_check=(0, 1))
-            b_d = (b_d * tl.exp(b_g)[:, None]).to(b_d.dtype) if USE_G else b_d
+            b_d = (b_d * exp(b_g)[:, None]).to(b_d.dtype) if USE_G else b_d
             # [BC, BV]
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_v2 = b_v - tl.dot(b_d, b_h.to(b_d.dtype))
             # [BK, BV]
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
             b_hc += tl.dot(b_k, b_v2.to(b_k.dtype), allow_tf32=False)
-        b_h *= tl.exp(b_g_last) if USE_G else 1
+        b_h *= exp(b_g_last) if USE_G else 1
         b_h += b_hc
 
     if STORE_FINAL_STATE:
@@ -222,12 +223,12 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
             b_g = tl.load(p_g, boundary_check=(0,)) if USE_G else None
             # [BK, BT]
             b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_q = (b_q * scale * tl.exp(b_g)[None, :]).to(b_q.dtype) if USE_G else (b_q * scale).to(b_q.dtype)
+            b_q = (b_q * scale * exp(b_g)[None, :]).to(b_q.dtype) if USE_G else (b_q * scale).to(b_q.dtype)
             # [BT, BK]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_d = tl.load(p_d, boundary_check=(0, 1))
-            b_k = (b_k * tl.exp(bg_last - b_g)[:, None]).to(b_k.dtype) if USE_G else b_k
-            b_d = (b_d * tl.exp(b_g)[None, :]).to(b_d.dtype) if USE_G else b_d
+            b_k = (b_k * exp(bg_last - b_g)[:, None]).to(b_k.dtype) if USE_G else b_k
+            b_d = (b_d * exp(b_g)[None, :]).to(b_d.dtype) if USE_G else b_d
             # [BT, V]
             b_do = tl.load(p_do, boundary_check=(0, 1))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
@@ -236,7 +237,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu(
             # [BK, BV]
             b_dh_tmp += tl.dot(b_q, b_do.to(b_q.dtype), allow_tf32=False)
             b_dh_tmp -= tl.dot(b_d, b_dv2.to(b_q.dtype), allow_tf32=False)
-        b_dh *= tl.exp(bg_last) if USE_G else 1
+        b_dh *= exp(bg_last) if USE_G else 1
         b_dh += b_dh_tmp
 
     if USE_INITIAL_STATE:

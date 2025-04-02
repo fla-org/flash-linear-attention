@@ -9,6 +9,7 @@ import triton.language as tl
 
 from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_bwd_dv, chunk_gla_fwd_o_gk
+from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, use_cuda_graph
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -177,11 +178,11 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
         # [BC, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_gq = tl.where(m_i[:, None] & m_k, tl.load(p_gq, boundary_check=(0, 1)), float('-inf'))
-        b_qg = b_q * tl.exp(b_gq - b_gn[None, :]) * scale
+        b_qg = b_q * exp(b_gq - b_gn[None, :]) * scale
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_kg = b_k * tl.exp(b_gn[:, None] - b_gk)
+        b_kg = b_k * exp(b_gn[:, None] - b_gk)
         # [BC, BC] using tf32 to improve precision here.
         b_A += tl.dot(b_qg, b_kg)
 
@@ -266,7 +267,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
         b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
         b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_A = tl.sum(b_q * b_kj[None, :] * tl.exp(b_g - b_gk[None, :]), 1)
+        b_A = tl.sum(b_q * b_kj[None, :] * exp(b_g - b_gk[None, :]), 1)
         b_A = tl.where(o_i > j, b_A * scale, 0.)
         b_A = tl.where(o_i != j, b_A, tl.sum(b_qj * b_kj * b_u * scale))
         tl.store(A + o_A + j, b_A, mask=m_A)
@@ -355,7 +356,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
         b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
         b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_A = tl.sum(b_q * b_kj[None, :] * tl.exp(b_g - b_gk[None, :]), 1)
+        b_A = tl.sum(b_q * b_kj[None, :] * exp(b_g - b_gk[None, :]), 1)
         b_A = tl.where(o_i > j, b_A * scale, 0.)
         b_A = tl.where(o_i != j, b_A, tl.sum(b_qj * b_kj * b_u * scale))
         tl.store(A + o_A + j, b_A, mask=m_A)
@@ -509,9 +510,9 @@ def chunk_rwkv6_bwd_kernel_dh(
             p_gk_last = gi + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
 
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_q = (b_q * tl.exp(b_gk) * scale).to(b_q.dtype)
+        b_q = (b_q * exp(b_gk) * scale).to(b_q.dtype)
         b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
-        b_dh *= tl.exp(b_gk_last)[:, None]
+        b_dh *= exp(b_gk_last)[:, None]
         b_dh += tl.dot(b_q, b_do)
 
     if STORE_INITIAL_STATE_GRADIENT:
@@ -592,12 +593,12 @@ def chunk_rwkv6_bwd_kernel_intra(
             # [BC, BK]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kg = b_k * tl.exp(b_gn[None, :] - b_gk)
+            b_kg = b_k * exp(b_gn[None, :] - b_gk)
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]
             b_dq += tl.dot(b_dA, b_kg)
-        b_dq *= tl.exp(b_ge - b_gn[None, :])
+        b_dq *= exp(b_ge - b_gn[None, :])
 
     o_i = tl.arange(0, BC)
     m_dA = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
@@ -622,7 +623,7 @@ def chunk_rwkv6_bwd_kernel_intra(
         m_i = o_i[:, None] > j
         # [BC, BK]
         # (SY 09/17) important to not use bf16 here to have a good precision.
-        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * tl.exp(b_ge - b_gkj[None, :]), 0.)
+        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp(b_ge - b_gkj[None, :]), 0.)
         p_kj += K if HEAD_FIRST else H*K
         p_gkj += K if HEAD_FIRST else H*K
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
@@ -663,13 +664,13 @@ def chunk_rwkv6_bwd_kernel_intra(
             # [BC, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_gq = tl.where(m_j[:, None] & m_k, tl.load(p_gq, boundary_check=(0, 1)), float('-inf'))
-            b_qg = b_q * tl.exp(b_gq - b_gn[None, :])
+            b_qg = b_q * exp(b_gq - b_gn[None, :])
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dk += tl.dot(b_dA, b_qg)
-        b_dk *= tl.exp(b_gn[None, :] - b_gk)
+        b_dk *= exp(b_gn[None, :] - b_gk)
     if HEAD_FIRST:
         o_dA = i_bh * T*BT + (i_t * BT + i_i * BC) * BT + i_i * BC + tl.arange(0, BC)
         p_qj = tl.max_contiguous(tl.multiple_of(q + (i_bh * T + i_t * BT + i_i * BC) * K + o_k, BK), BK)
@@ -688,7 +689,7 @@ def chunk_rwkv6_bwd_kernel_intra(
         b_gqj = tl.load(p_gqj, mask=m_k, other=0).to(tl.float32)
         # [BC, BK]
         m_i = o_i[:, None] < j
-        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * tl.exp(b_gqj[None, :] - b_gk), 0.)
+        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp(b_gqj[None, :] - b_gk), 0.)
         p_qj += K if HEAD_FIRST else H*K
         p_gqj += K if HEAD_FIRST else H*K
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -789,12 +790,12 @@ def chunk_rwkv6_bwd_kernel_inter(
         # [BT, BK]
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
-    b_dgk *= tl.exp(b_gn)
+    b_dgk *= exp(b_gn)
     b_dq *= scale
     b_gk = tl.load(p_gk, boundary_check=(0, 1))
     b_gi = tl.load(p_gi, boundary_check=(0, 1))
-    b_dq = b_dq * tl.exp(b_gk)
-    b_dk = b_dk * tl.exp(b_gn[None, :] - b_gi)
+    b_dq = b_dq * exp(b_gk)
+    b_dk = b_dk * exp(b_gn[None, :] - b_gi)
 
     o_i = tl.arange(0, BT)
     if HEAD_FIRST:

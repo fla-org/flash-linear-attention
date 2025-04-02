@@ -9,6 +9,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import exp, log
 from fla.utils import input_guard
 
 # `all_gather_into_tensor` and `reduce_scatter_tensor` are new placeholders for
@@ -53,7 +54,7 @@ def cross_entropy_fwd_kernel(
     max_logits = tl.max(logits, 0)
     if HAS_SMOOTHING:
         sum_logits = tl.sum(tl.where(col_offsets < n_cols, logits, 0.0), 0)
-    lse = tl.log(tl.sum(tl.exp(logits - max_logits), 0)) + max_logits
+    lse = log(tl.sum(exp(logits - max_logits), 0)) + max_logits
     tl.store(lse_ptr + col_block_idx * n_rows + row_idx, lse)
     if label_idx == ignore_index:
         loss = 0.0
@@ -125,7 +126,7 @@ def cross_entropy_bwd_kernel(
         tl.float32
     ) * logit_scale
     lse = tl.load(lse_ptr + row_idx)
-    probs = tl.exp(logits - lse)
+    probs = exp(logits - lse)
     probs += 2.0 * lse_square_scale * lse * probs
     label_idx -= class_start_idx
     if HAS_SMOOTHING:
