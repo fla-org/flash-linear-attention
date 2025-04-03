@@ -1,4 +1,7 @@
-from typing import Optional, Tuple
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+from typing import Optional
 
 import torch
 import triton
@@ -68,19 +71,22 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 
 def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
-    beta: torch.Tensor,  # scale factor
+    beta: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
+    r"""
+    Compute beta * k * k^T
+    """
     if head_first:
         B, H, T, K = k.shape
     else:
         B, T, H, K = k.shape
     BT = chunk_size
     BK = min(triton.next_power_of_2(K), 64)
-    indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     A = torch.empty(B, *((H, T) if head_first else (T, H)), BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
