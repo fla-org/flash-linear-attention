@@ -61,7 +61,7 @@ jobs:
       - name: Test compiling on changed test files
         if: steps.find-dependent-tests.outputs.test_files
         run: |
-          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=1 SKIP_TEST_CHUNK_VARLEN=1 \
+          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} --capture=no
 
       - name: Run pytest on test files
@@ -82,7 +82,7 @@ jobs:
       - name: Test full compiling on all test files
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
-          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=1 SKIP_TEST_CHUNK_VARLEN=1 \
+          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest tests/ --capture=no
 
       - name: Run full pytest on test files
