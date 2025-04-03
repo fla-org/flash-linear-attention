@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, gather
 from fla.utils import is_gather_supported, use_cuda_graph
 
 
@@ -246,9 +246,9 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
         if GATHER_SUPPORTED:
             row_idx = tl.full([1, BK], j, dtype=tl.int16)
             # [1, BK]
-            b_k_j = tl.gather(b_k, row_idx, axis=0)
-            b_gk_j = tl.gather(b_gi, row_idx, axis=0)
-            b_b_j = tl.gather(b_b, row_idx, axis=0)
+            b_k_j = gather(b_k, row_idx, axis=0)
+            b_gk_j = gather(b_gi, row_idx, axis=0)
+            b_b_j = gather(b_b, row_idx, axis=0)
         else:
             mask = tl.arange(0, BC) == j
             b_k_j = tl.sum(tl.where(mask[:, None], b_k, 0), 0)[None, :]
