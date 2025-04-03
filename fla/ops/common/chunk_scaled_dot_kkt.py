@@ -8,6 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_indices
+from fla.utils import check_shared_mem
+
+BK_LIST = [32, 64, 128] if check_shared_mem('ada') else [32, 64]
 
 
 @triton.heuristics({
@@ -16,7 +19,7 @@ from fla.ops.common.utils import prepare_chunk_indices
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
-        for BK in [32, 64, 128]
+        for BK in BK_LIST
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
