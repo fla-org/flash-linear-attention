@@ -170,12 +170,6 @@ is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
 is_gather_supported = hasattr(triton.language, 'gather')
 
 
-if not is_gather_supported:
-    def gather(*args, **kwargs):
-        pass
-    triton.language.gather = gather
-
-
 def get_all_max_shared_mem():
     try:
         return [

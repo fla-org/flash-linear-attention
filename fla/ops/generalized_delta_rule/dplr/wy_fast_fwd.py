@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import gather
 from fla.utils import is_gather_supported, use_cuda_graph
 
 
@@ -122,8 +123,8 @@ def fwd_prepare_wy_repr_kernel_chunk64(
         if GATHER_SUPPORTED:
             row_idx = tl.full([1, BC], i, dtype=tl.int16)
             # [1, BK] -> [BK]
-            b_a = tl.sum(tl.gather(b_A, row_idx, axis=0), 0)
-            b_a2 = tl.sum(tl.gather(b_A2, row_idx, axis=0), 0)
+            b_a = tl.sum(gather(b_A, row_idx, axis=0), 0)
+            b_a2 = tl.sum(gather(b_A2, row_idx, axis=0), 0)
         else:
             mask = tl.arange(0, BC) == i
             b_a = tl.sum(tl.where(mask[:, None], b_A, 0), 0)

@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, gather
 from fla.utils import check_shared_mem, is_gather_supported, use_cuda_graph
 
 
@@ -207,23 +207,23 @@ def chunk_dplr_bwd_kernel_intra(
             col_idx = tl.full([BC, 1], j, dtype=tl.int16)
             row_idx_bc = tl.full([1, BC], j, dtype=tl.int16)
             # [1, BK]
-            b_kj = tl.gather(b_k, row_idx, axis=0)
-            b_bj = tl.gather(b_b, row_idx, axis=0)
-            b_gij = tl.gather(b_gi, row_idx, axis=0)
-            b_gej = tl.gather(b_ge, row_idx, axis=0)
-            b_qj = tl.gather(b_q, row_idx, axis=0)
-            b_aj = tl.gather(b_a, row_idx, axis=0)
+            b_kj = gather(b_k, row_idx, axis=0)
+            b_bj = gather(b_b, row_idx, axis=0)
+            b_gij = gather(b_gi, row_idx, axis=0)
+            b_gej = gather(b_ge, row_idx, axis=0)
+            b_qj = gather(b_q, row_idx, axis=0)
+            b_aj = gather(b_a, row_idx, axis=0)
             # [BC, 1]
-            b_dAqk_j = tl.gather(b_dAqk, col_idx, axis=1)
-            b_dAab_j = tl.gather(b_dAab, col_idx, axis=1)
-            b_dAqb_j = tl.gather(b_dAqb, col_idx, axis=1)
-            b_dAak_j = tl.gather(b_dAak, col_idx, axis=1)
+            b_dAqk_j = gather(b_dAqk, col_idx, axis=1)
+            b_dAab_j = gather(b_dAab, col_idx, axis=1)
+            b_dAqb_j = gather(b_dAqb, col_idx, axis=1)
+            b_dAak_j = gather(b_dAak, col_idx, axis=1)
             # [1, BC] -> [BC, 1]
-            b_dA_qk_j = tl.sum(tl.gather(b_dAqk, row_idx_bc, axis=0), 0)[:, None]
-            b_dA_qk_j = tl.sum(tl.gather(b_dAqk, row_idx_bc, axis=0), 0)[:, None]
-            b_dA_ab_j = tl.sum(tl.gather(b_dAab, row_idx_bc, axis=0), 0)[:, None]
-            b_dA_qb_j = tl.sum(tl.gather(b_dAqb, row_idx_bc, axis=0), 0)[:, None]
-            b_dA_ak_j = tl.sum(tl.gather(b_dAak, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_qk_j = tl.sum(gather(b_dAqk, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_qk_j = tl.sum(gather(b_dAqk, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_ab_j = tl.sum(gather(b_dAab, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_qb_j = tl.sum(gather(b_dAqb, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_ak_j = tl.sum(gather(b_dAak, row_idx_bc, axis=0), 0)[:, None]
         else:
             mask_idx = tl.arange(0, BC) == j
             b_kj = tl.sum(tl.where(mask_idx[:, None], b_k, 0), 0)[None, :]
