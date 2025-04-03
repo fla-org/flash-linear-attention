@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.utils import check_shared_mem, use_cuda_graph
 
-BK_LIST = [64, 128] if check_shared_mem() else [16, 32]
+BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
