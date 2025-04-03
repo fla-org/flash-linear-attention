@@ -15,11 +15,11 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.fox import ForgettingAttention
-from fla.models.fox.configuration_fox import FoXConfig
+from fla.layers.forgetting_attn import ForgettingAttention
+from fla.models.forgetting_transformer.configuration_forgetting_transformer import ForgettingTransformerConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules import GatedMLP as FoXMLP
+from fla.modules import GatedMLP as ForgettingTransformerMLP
 from fla.modules import RMSNorm
 
 if TYPE_CHECKING:
@@ -29,9 +29,9 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-class FoXBlock(nn.Module):
+class ForgettingTransformerBlock(nn.Module):
 
-    def __init__(self, config: FoXConfig, layer_idx: int):
+    def __init__(self, config: ForgettingTransformerConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
@@ -50,7 +50,7 @@ class FoXBlock(nn.Module):
         )
 
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.mlp = FoXMLP(
+        self.mlp = ForgettingTransformerMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -98,12 +98,12 @@ class FoXBlock(nn.Module):
         return outputs
 
 
-class FoXPreTrainedModel(PreTrainedModel):
+class ForgettingTransformerPreTrainedModel(PreTrainedModel):
 
-    config_class = FoXConfig
+    config_class = ForgettingTransformerConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
-    _no_split_modules = ['FoXBlock']
+    _no_split_modules = ['ForgettingTransformerBlock']
     _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
@@ -139,7 +139,7 @@ class FoXPreTrainedModel(PreTrainedModel):
             elif hasattr(module, 'down_proj'):
                 p = module.down_proj.weight
             if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per FoX Block
+                # Special Scaled Initialization --> There are 2 Layer Norms per ForgettingTransformer Block
                 # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                 # We need to reinit p since this code could be called multiple times
                 # Having just p *= scale would repeatedly scale it down
@@ -148,18 +148,21 @@ class FoXPreTrainedModel(PreTrainedModel):
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class FoXModel(FoXPreTrainedModel):
+class ForgettingTransformerModel(ForgettingTransformerPreTrainedModel):
 
     def __init__(
         self,
-        config: FoXConfig
-    ) -> FoXModel:
+        config: ForgettingTransformerConfig
+    ) -> ForgettingTransformerModel:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([FoXBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([
+            ForgettingTransformerBlock(config, layer_idx)
+            for layer_idx in range(config.num_hidden_layers)
+        ])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -186,7 +189,8 @@ class FoXModel(FoXPreTrainedModel):
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if output_attentions:
             warnings.warn(
-                "`FoXModel` does not support output attention weights now, so `output_attentions` is set to `False`."
+                "`ForgettingTransformerModel` does not support output attention weights now, "
+                "so `output_attentions` is set to `False`."
             )
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -269,13 +273,13 @@ class FoXModel(FoXPreTrainedModel):
         )
 
 
-class FoXForCausalLM(FoXPreTrainedModel, GenerationMixin):
+class ForgettingTransformerForCausalLM(ForgettingTransformerModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = FoXModel(config)
+        self.model = ForgettingTransformerModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None

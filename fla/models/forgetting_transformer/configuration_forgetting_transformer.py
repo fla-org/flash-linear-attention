@@ -5,9 +5,9 @@ from typing import Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class FoXConfig(PretrainedConfig):
+class ForgettingTransformerConfig(PretrainedConfig):
 
-    model_type = 'fox'
+    model_type = 'forgetting_transformer'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(

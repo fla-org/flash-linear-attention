@@ -68,7 +68,7 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 | 2025 | ICLR    | Gated DeltaNet | [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464)                                                    |                       [official](https://github.com/NVlabs/GatedDeltaNet)                       |      [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gated_delta_rule)      |
 | 2025 |         | RWKV7          | [RWKV-7 "Goose" with Expressive Dynamic State Evolution](https://arxiv.org/abs/2503.14456)                                                    |                [official](https://github.com/BlinkDL/RWKV-LM/tree/main/RWKV-v7)                 |           [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/rwkv7)            |
 | 2025 |         | NSA            | [Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention](https://arxiv.org/abs/2502.11089)                         |                                                                                                 |            [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/nsa)             |
-| 2025 |         | FoX            | [Forgetting Transformer: Softmax Attention with a Forget Gate](https://arxiv.org/abs/2503.02130)                                              |                [official](https://github.com/zhixuan-lin/forgetting-transformer)                |            [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/fox)             |
+| 2025 |         | FoX            | [Forgetting Transformer: Softmax Attention with a Forget Gate](https://arxiv.org/abs/2503.02130)                                              |                [official](https://github.com/zhixuan-lin/forgetting-transformer)                |      [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/forgetting_attn)       |
 
 ## Installation
 
@@ -84,12 +84,12 @@ The following requirements should be satisfied
 
 You can install `fla` with pip:
 ```sh
-pip install flash-linear-attention
+pip install --no-use-pep517 flash-linear-attention
 ```
 As `fla` is actively developed now, for the latest features and updates, an alternative way is to install the package from source
 ```sh
 # uninstall `fla` first to ensure a successful upgrade
-pip uninstall flash-linear-attention && pip install -U git+https://github.com/fla-org/flash-linear-attention
+pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention
 ```
 or manage `fla` with submodules
 ```sh
