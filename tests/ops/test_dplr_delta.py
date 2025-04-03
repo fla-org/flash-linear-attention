@@ -395,7 +395,10 @@ def test_chunk(
         assert_close(" dg", ref_dg, tri_dg, 0.008)
     assert_close(" dh0", ref_dh0, tri_dh0, 0.008)
 
+
 test_chunk(2, 64, 2, 64, 1.0, 0.25, torch.bfloat16, False, False)
+
+
 @pytest.mark.parametrize("N", test_b_list)
 @pytest.mark.parametrize("T", test_t_varlen_list)
 @pytest.mark.parametrize("H", test_h_list)
