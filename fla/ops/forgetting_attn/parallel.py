@@ -423,7 +423,7 @@ def parallel_forgetting_attn_bwd_kernel_dkv(
         b_gn = tl.load(g + (bos + min(i_s + BS, T) - 1) * HQ + i_hq).to(tl.float32)
         b_gp = tl.load(g + (bos + i_s - 1) * HQ + i_hq).to(tl.float32) if i_s % BT > 0 else 0.
         # [BT, BS]
-        b_s = tl.dot(b_k, tl.trans(b_q)) + (b_gp - b_gk)[:, None] + (b_gq - b_lse)[None, :]
+        b_s = tl.dot(b_k, tl.trans(b_q)) - (b_gk + b_gp)[:, None] + (b_gq - b_lse)[None, :]
         b_p = exp(b_s)
         # [BT, BS] @ [BS, BV] -> [BT, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
@@ -501,7 +501,7 @@ def parallel_forgetting_attn_bwd_preprocess(
     do: torch.Tensor
 ):
     V = o.shape[-1]
-    delta = torch.empty_like(o[..., 0], dtype=torch.float32)
+    delta = torch.empty_like(o[..., 0], dtype=torch.float)
     parallel_forgetting_attn_bwd_kernel_preprocess[(delta.numel(),)](
         o=o,
         do=do,
@@ -536,7 +536,7 @@ def parallel_forgetting_attn_bwd(
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     delta = parallel_forgetting_attn_bwd_preprocess(o, do)
-    dq = q.new_empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float)
+    dq = q.new_empty(B, T, HQ, K, dtype=q.dtype)
     dk = q.new_empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float)
     dv = q.new_empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float)
     dg = q.new_empty(g.shape, dtype=torch.float)
