@@ -10,7 +10,7 @@ from einops import rearrange, repeat
 
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 from fla.ops.utils.testing import assert_close
-from fla.utils import device, is_intel_alchemist
+from fla.utils import check_shared_mem, device, is_intel_alchemist
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
@@ -70,6 +70,9 @@ def test_parallel(
     D: int,
     dtype: torch.dtype
 ):
+    if not check_shared_mem('hopper') and D > 128:
+        # maybe we can enable this test on Triton 3.3.0
+        pytest.skip("Skipping test because global shared memory is not available")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
@@ -123,6 +126,9 @@ def test_parallel_varlen(
     D: int,
     dtype: torch.dtype,
 ):
+    if not check_shared_mem('hopper') and D > 128:
+        # maybe we can enable this test on Triton 3.3.0
+        pytest.skip("Skipping test because global shared memory is not available")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
