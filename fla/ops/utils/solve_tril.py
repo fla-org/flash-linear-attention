@@ -103,14 +103,14 @@ def merge_16x16_to_32x32_inverse_kernel(
         bos, eos = i_b * T, i_b * T + T
 
     if HEAD_FIRST:
-        Ad += (i_bh * T * 16)
         A += (i_bh * T * 32)
+        Ad += (i_bh * T * 16)
         Ai += (i_bh * T * 32)
         stride_16 = 16
         stride_32 = 32
     else:
-        Ad += (bos*H + i_h) * 16
         A += (bos*H + i_h) * 32
+        Ad += (bos*H + i_h) * 16
         Ai += (bos*H + i_h) * 32
         stride_16 = 16 * H
         stride_32 = 32 * H

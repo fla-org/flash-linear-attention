@@ -15,11 +15,12 @@ from fla.ops.common.utils import prepare_chunk_indices
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
+        for BK in [32, 64, 128]
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'BT', 'BK', 'USE_OFFSETS'],
+    key=['H', 'K', 'BT', 'USE_OFFSETS'],
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_scaled_dot_kkt_fwd_kernel(
@@ -44,6 +45,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+    o_t = tl.arange(0, BT)
 
     if HEAD_FIRST:
         p_beta = tl.make_block_ptr(beta + i_bh * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
@@ -61,7 +63,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         b_kb = b_k * b_beta[:, None]
         b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
 
-    b_A = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_A, 0)
+    b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
     if HEAD_FIRST:
         p_A = tl.make_block_ptr(A + i_bh * T*BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     else:
@@ -106,7 +108,6 @@ def chunk_scaled_dot_kkt_fwd(
     else:
         B, T, H, K = k.shape
     BT = chunk_size
-    BK = min(triton.next_power_of_2(K), 64)
     indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     A = torch.empty(B, *((H, T) if head_first else (T, H)), BT, device=k.device, dtype=output_dtype)
@@ -120,7 +121,6 @@ def chunk_scaled_dot_kkt_fwd(
         H=H,
         K=K,
         BT=BT,
-        BK=BK,
         HEAD_FIRST=head_first
     )
     return A
