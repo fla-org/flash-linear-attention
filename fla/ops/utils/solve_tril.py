@@ -268,7 +268,7 @@ def solve_tril(A, cu_seqlens=None, head_first=True, output_dtype=torch.float32):
         A_inv = torch.zeros(B, T, H, BT, device=A.device, dtype=output_dtype)
     merge_fn = merge_16x16_to_32x32_inverse_kernel if BT == 32 else merge_16x16_to_64x64_inverse_kernel
     indices2 = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    NT = len(indices2) if cu_seqlens is not None else triton.cdiv(T,BT)
+    NT = len(indices2) if cu_seqlens is not None else triton.cdiv(T, BT)
     merge_fn[NT, B * H](
         A=A,
         A_inv_diag=A_inv_diag,
