@@ -298,9 +298,9 @@ def test_chunk(
     assert_close(" dk", ref_dk, tri_dk, 0.008)
     assert_close(" dv", ref_dv, tri_dv, 0.008)
     assert_close(" db", ref_dbeta, tri_dbeta, 0.02)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
     if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:
-        assert_close("dg", ref_dg, tri_dg, 0.02)
+        assert_close(" dg", ref_dg, tri_dg, 0.02)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 
 
 @pytest.mark.parametrize("N", test_b_list)
