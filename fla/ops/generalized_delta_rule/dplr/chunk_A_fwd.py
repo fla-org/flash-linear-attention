@@ -168,7 +168,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     NC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    GATHER_SUPPORTED: tl.constexpr = is_gather_supported,
+    GATHER_SUPPORTED: tl.constexpr
 ):
     i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -318,6 +318,7 @@ def chunk_fwd_intra_dplr_fn(
         qg=qg, kg=kg, ag=ag, bg=bg,
         offsets=offsets, indices=indices,
         scale=scale,
-        T=T, H=H, K=K, BT=BT, BC=BC, BK=BK, HEAD_FIRST=head_first, NC=NC
+        T=T, H=H, K=K, BT=BT, BC=BC, BK=BK, HEAD_FIRST=head_first, NC=NC,
+        GATHER_SUPPORTED=is_gather_supported
     )
     return Aab, Aqk, Aak, Aqb, qg, kg, ag, bg

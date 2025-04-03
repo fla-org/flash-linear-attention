@@ -11,7 +11,6 @@ from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem, is_gather_supported, use_cuda_graph
 
 
-
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None
 })
@@ -58,7 +57,7 @@ def chunk_dplr_bwd_kernel_intra(
     NC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    GATHER_SUPPORTED: tl.constexpr = is_gather_supported
+    GATHER_SUPPORTED: tl.constexpr
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -424,7 +423,8 @@ def chunk_dplr_bwd_dqk_intra(
         BC=BC,
         BK=BK,
         NC=NC,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=head_first,
+        GATHER_SUPPORTED=is_gather_supported
     )
 
     def grid2(meta): return (NT, triton.cdiv(K, meta['BK']), B * H)
