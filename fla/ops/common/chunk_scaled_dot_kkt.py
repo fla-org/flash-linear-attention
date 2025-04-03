@@ -78,7 +78,28 @@ def chunk_scaled_dot_kkt_fwd(
     output_dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:
     r"""
-    Compute beta * k * k^T
+    Compute beta * K * K^T.
+
+    Args:
+        k (torch.Tensor):
+            The key tensor of shape `[B, T, H, K]` if not `head_first` else `[B, H, T, K]`.
+        beta (torch.Tensor):
+            The beta tensor of shape `[B, T, H]` if not `head_first` else `[B, H, T]`.
+        cu_seqlens (torch.LongTensor):
+            The cumulative sequence lengths of the input tensor.
+            Default: None
+        head_first (bool):
+            If False, the input/output tensor is in the shape of `[B, T, H, K]`.
+            If True, the input/output tensor is in the shape of `[B, H, T, K]`.
+            Default: False
+        chunk_size (int):
+            The chunk size. Default: 64.
+        output_dtype (torch.dtype):
+            The dtype of the output tensor. Default: `torch.float32`
+
+    Returns:
+        beta * K * K^T of shape `[B, T, H, BT]` if not `head_first` else `[B, H, T, BT]`,
+        where `BT` is the chunk size.
     """
     if head_first:
         B, H, T, K = k.shape

@@ -256,7 +256,21 @@ def solve_tril(
     Compute the inverse of the lower triangular matrix
     A should be strictly lower triangular, i.e., A.triu() == 0.
 
-    Return: (I + A)^-1
+    Args:
+        A (torch.Tensor):
+            [B, T, H, K] if head_first else [B, H, T, K]
+        cu_seqlens (torch.Tensor):
+            The cumulative sequence lengths of the input tensor.
+            Default: None.
+        head_first (bool):
+            If False, the input/output tensor is in the shape of [B, T, H, K].
+            If True, the input/output tensor is in the shape of [B, H, T, K].
+            Default: False
+        output_dtype (torch.dtype):
+            The dtype of the output tensor. Default: `torch.float`
+
+    Returns:
+        (I + A)^-1 with the same shape as A
     """
     assert A.shape[-1] in [16, 32, 64]
     assert A.dtype == torch.float, "A should be float32."

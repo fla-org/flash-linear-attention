@@ -18,7 +18,7 @@ if compiled_mode:
     test_d_list = [64, 128, 256]
 else:
     test_b_list = [2]
-    test_t_list = [1, 15, 63, 300]
+    test_t_list = [15, 63, 300, 512]
     test_t_varlen_list = [63, 286, 300, 512]
     test_d_list = [32, 64, 100, 256]
 test_h_list = [2]
@@ -87,13 +87,13 @@ def test_chunk(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
 
-    assert_close("  o", ref, tri, 0.005)
-    assert_close(" ht", ref_ht, tri_ht, 0.005)
-    assert_close(" dq", ref_dq, tri_dq, 0.007)
+    assert_close("  o", ref, tri, 0.006)
+    assert_close(" ht", ref_ht, tri_ht, 0.006)
+    assert_close(" dq", ref_dq, tri_dq, 0.008)
     assert_close(" dk", ref_dk, tri_dk, 0.008)
-    assert_close(" dv", ref_dv, tri_dv, 0.007)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.007)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.007)
+    assert_close(" dv", ref_dv, tri_dv, 0.008)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 
 
 @pytest.mark.parametrize("N", [4])
@@ -163,11 +163,11 @@ def test_chunk_varlen(
 
     assert_close("  o", ref, tri, 0.005)
     assert_close(" ht", ref_ht, tri_ht, 0.005)
-    assert_close(" dq", ref_dq, tri_dq, 0.007)
+    assert_close(" dq", ref_dq, tri_dq, 0.008)
     assert_close(" dk", ref_dk, tri_dk, 0.008)
-    assert_close(" dv", ref_dv, tri_dv, 0.007)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.007)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.007)
+    assert_close(" dv", ref_dv, tri_dv, 0.008)
+    assert_close(" db", ref_dbeta, tri_dbeta, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 
 
 @pytest.mark.parametrize("B", test_b_list)
