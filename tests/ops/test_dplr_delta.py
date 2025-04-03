@@ -9,7 +9,7 @@ from einops import rearrange
 
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
 from fla.ops.utils.testing import assert_close
-from fla.utils import device, device_platform
+from fla.utils import device
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
@@ -314,10 +314,6 @@ def test_fused_recurrent_fwd(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure"
-)
 def test_chunk(
     B: int,
     T: int,
@@ -405,10 +401,6 @@ def test_chunk(
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure"
 )
 def test_chunk_varlen(
     N: int,
