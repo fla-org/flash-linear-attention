@@ -44,9 +44,9 @@ jobs:
       - name: Setup python
         if: steps.find-dependent-tests.outputs.test_files
         run: |
-          pip install --upgrade pytest setuptools wheel ninja
+          pip install -U pytest setuptools wheel ninja
           pip uninstall -y flash-linear-attention triton
-          MAX_JOBS=4 pip install --upgrade flash-attn --no-build-isolation
+          MAX_JOBS=4 pip install -U flash-attn --no-build-isolation
           pip install --no-use-pep517 .
 
       - name: Check GPU status

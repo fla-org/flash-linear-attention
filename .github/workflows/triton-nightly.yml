@@ -45,7 +45,7 @@ jobs:
         name: Check latest version
         working-directory: triton
         run: |
-          export PACKAGE_DATE=$(python3 -m pip install --user --index-url https://pypi.fla-org.com/simple/ --dry-run --upgrade triton-nightly --force-reinstall |& grep -oP '(?<=\.dev)[0-9]{12}(?=[^0-9]|$)')
+          export PACKAGE_DATE=$(python3 -m pip install --user --index-url https://pypi.fla-org.com/simple/ --dry-run -U triton-nightly --force-reinstall |& grep -oP '(?<=\.dev)[0-9]{12}(?=[^0-9]|$)')
           export LATEST_DATE=$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%d%H%M' --format="%cd")
           if [[ "$PACKAGE_DATE" -ge "$LATEST_DATE" ]]; then
               echo "new_commit=false" >> "$GITHUB_OUTPUT"
@@ -80,7 +80,7 @@ jobs:
         working-directory: triton
         run: |
           # Make sure cibuildwheel is updated to latest, this will enable latest python builds
-          python3 -m pip install cibuildwheel wheel --upgrade --user
+          python3 -m pip install cibuildwheel wheel -U --user
           # Pass MAX_JOBS=16 because, at time of writing, the VM "only" has 64GB
           # of RAM and OOMs while building if we give it the default number of
           # workers (2 * NUM_CPUs).
@@ -135,7 +135,7 @@ jobs:
             rm -rf tmp_pkg &&
             echo "Processed: $whl → $NEW_WHL_NAME"
           done
-          python3 -m pip install twine pkginfo --upgrade
+          python3 -m pip install twine pkginfo -U
           python3 -m twine upload \
             --repository-url http://pypi-upload.fla-org.com/ \
             --username fla \
