@@ -79,7 +79,7 @@ def solve_tril_16x16_kernel(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['H'],
+    key=['H', 'BT', 'HEAD_FIRST', 'USE_OFFSETS'],
 )
 @triton.jit(do_not_specialize=['T'])
 def merge_16x16_to_32x32_inverse_kernel(
@@ -90,6 +90,7 @@ def merge_16x16_to_32x32_inverse_kernel(
     indices,
     T,
     H: tl.constexpr,
+    BT: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
     USE_OFFSETS: tl.constexpr
 ):
@@ -140,7 +141,7 @@ def merge_16x16_to_32x32_inverse_kernel(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['H', 'K', 'BT', 'BK', 'BC', 'HEAD_FIRST', 'USE_OFFSETS'],
+    key=['H', 'BT', 'HEAD_FIRST', 'USE_OFFSETS'],
 )
 @triton.jit(do_not_specialize=['T'])
 def merge_16x16_to_64x64_inverse_kernel(
@@ -151,6 +152,7 @@ def merge_16x16_to_64x64_inverse_kernel(
     indices,
     T,
     H: tl.constexpr,
+    BT: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
     USE_OFFSETS: tl.constexpr
 ):
@@ -184,8 +186,8 @@ def merge_16x16_to_64x64_inverse_kernel(
     p_A_41 = tl.make_block_ptr(A, (T, 64), (stride_64, 1), (i_t * 64 + 48, 0), (16, 16), (1, 0))
     p_Ad_11 = tl.make_block_ptr(Ad, (T, 16), (stride_16, 1), (i_t * 64, 0), (16, 16), (1, 0))
     p_Ad_22 = tl.make_block_ptr(Ad, (T, 16), (stride_16, 1), (i_t * 64 + 16, 0), (16, 16), (1, 0))
-    p_Ai_33 = tl.make_block_ptr(Ad, (T, 16), (stride_16, 1), (i_t * 64 + 32, 0), (16, 16), (1, 0))
-    p_Ai_44 = tl.make_block_ptr(Ad, (T, 16), (stride_16, 1), (i_t * 64 + 48, 0), (16, 16), (1, 0))
+    p_Ad_33 = tl.make_block_ptr(Ad, (T, 16), (stride_16, 1), (i_t * 64 + 32, 0), (16, 16), (1, 0))
+    p_Ad_44 = tl.make_block_ptr(Ad, (T, 16), (stride_16, 1), (i_t * 64 + 48, 0), (16, 16), (1, 0))
 
     A_21 = tl.load(p_A_21, boundary_check=(0, 1))
     A_32 = tl.load(p_A_32, boundary_check=(0, 1))
@@ -196,8 +198,8 @@ def merge_16x16_to_64x64_inverse_kernel(
 
     Ai_11 = tl.load(p_Ad_11, boundary_check=(0, 1))
     Ai_22 = tl.load(p_Ad_22, boundary_check=(0, 1))
-    Ai_33 = tl.load(p_Ai_33, boundary_check=(0, 1))
-    Ai_44 = tl.load(p_Ai_44, boundary_check=(0, 1))
+    Ai_33 = tl.load(p_Ad_33, boundary_check=(0, 1))
+    Ai_44 = tl.load(p_Ad_44, boundary_check=(0, 1))
 
     Ai_21 = -tl.dot(tl.dot(Ai_22, A_21, input_precision='ieee'), Ai_11, input_precision='ieee')
     Ai_32 = -tl.dot(tl.dot(Ai_33, A_32, input_precision='ieee'), Ai_22, input_precision='ieee')
@@ -312,6 +314,7 @@ def solve_tril(
         indices=indices,
         T=T,
         H=H,
+        BT=BT,
         HEAD_FIRST=head_first,
         USE_OFFSETS=cu_seqlens is not None
     )
