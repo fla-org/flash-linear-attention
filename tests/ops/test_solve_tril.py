@@ -56,8 +56,8 @@ def test_solve_tril(B, T, H, chunk_size, head_first):
 @pytest.mark.parametrize("cu_seqlens", test_t_varlen_list)
 @pytest.mark.parametrize("chunk_size", [64, 32, 16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
 )
 def test_solve_tril_varlen(H, cu_seqlens, chunk_size):
     T = cu_seqlens[-1]
