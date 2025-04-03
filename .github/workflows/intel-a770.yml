@@ -45,8 +45,8 @@ jobs:
         if: steps.find-dependent-tests.outputs.test_files
         run: |
           pip uninstall -y flash-linear-attention
-          pip install --upgrade pytest setuptools wheel ninja
-          pip install --upgrade torch pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
+          pip install -U pytest setuptools wheel ninja
+          pip install -U torch pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
           pip install --no-use-pep517 .
 
       - name: Check GPU status
