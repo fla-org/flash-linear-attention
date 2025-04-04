@@ -8,6 +8,7 @@ from .bitattn import BitAttention
 from .delta_net import DeltaNet
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
+from .gated_deltaproduct import GatedDeltaProduct
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
 from .hgrn import HGRNAttention
@@ -28,6 +29,7 @@ __all__ = [
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
+    'GatedDeltaProduct',
     'GatedLinearAttention',
     'GatedSlotAttention',
     'HGRNAttention',
