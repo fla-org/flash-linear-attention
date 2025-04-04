@@ -14,7 +14,7 @@ from fla.utils import device, device_platform
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
-    test_t_list = [64]
+    test_t_list = [4096]
     test_t_varlen_list = test_t_list
     test_d_list = [64, 128, 256]
     test_gate_list = [1.0]
