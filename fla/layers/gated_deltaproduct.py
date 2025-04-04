@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 from fla.modules import FusedRMSNormSwishGate, RMSNorm, ShortConvolution
-from fla.modules.l2norm import l2_norm
 from fla.ops.delta_rule import chunk_delta_rule
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule,
@@ -105,9 +105,6 @@ class GatedDeltaProduct(nn.Module):
             layer_idx: int | None = None,
             norm_eps: float = 1e-5,
             allow_neg_eigval: bool = False,
-            use_linear_projs: bool = True,
-            skip_householder_values: bool = False,
-            use_beta_conv: bool = False,
             **kwargs,
     ) -> None:
         super().__init__()
@@ -129,9 +126,7 @@ class GatedDeltaProduct(nn.Module):
         self.head_qk_dim = head_dim
         self.head_v_dim = int(head_dim * self.expand_v)
         self.layer_idx = layer_idx
-        self.skip_householder_values = skip_householder_values
         self.silu = nn.SiLU()
-        assert use_beta_conv is False, "use_beta_conv is not supported in FusedGatedDeltaProduct."
         assert mode in ["chunk", "fused_recurrent"], f"Not supported mode `{mode}`."
         # Create multiple projection layers for each householder transformation
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)

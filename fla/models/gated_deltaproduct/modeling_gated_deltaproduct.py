@@ -115,18 +115,13 @@ class GatedDeltaProductBlock(nn.Module):
                 head_dim=config.head_dim,
                 num_heads=config.num_heads,
                 use_gate=config.use_gate,
-                use_decay_gate=config.use_decay_gate,
                 use_short_conv=config.use_short_conv,
                 conv_size=config.conv_size,
                 norm_first=config.norm_first,
                 norm_eps=config.norm_eps,
                 allow_neg_eigval=config.allow_neg_eigval,
                 num_householder=config.num_householder,
-                use_linear_projs=config.use_linear_projs,
                 layer_idx=layer_idx,
-                use_beta_conv1d=config.use_beta_conv1d,
-                beta_conv1d_size=config.beta_conv1d_size,
-                skip_householder_values=config.skip_householder_values,
                 use_beta_conv=config.use_beta_conv
             )
         if not config.norm_first:

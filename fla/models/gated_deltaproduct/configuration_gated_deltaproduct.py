@@ -15,7 +15,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         hidden_size: int = 2048,
         expand_v: int = 2,
         use_gate: bool = True,
-        use_decay_gate: bool = False,
+        use_forget_gate: bool = False,
         use_short_conv: bool = True,
         conv_size: int = 4,
         head_dim: int = 256,
@@ -38,17 +38,13 @@ class GatedDeltaProductConfig(PretrainedConfig):
         vocab_size: int = 32000,
         allow_neg_eigval: bool = False,
         num_householder: int = 1,
-        use_linear_projs: bool = True,
-        use_fast_model: bool = False,
-        skip_householder_values: bool = False,
-        use_beta_conv: bool = False,
         **kwargs,
     ):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
         self.expand_v = expand_v
         self.use_gate = use_gate
-        self.use_decay_gate = use_decay_gate
+        self.use_forget_gate = use_forget_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.head_dim = head_dim
@@ -68,12 +64,6 @@ class GatedDeltaProductConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.allow_neg_eigval = allow_neg_eigval
         self.num_householder = num_householder
-        self.use_linear_projs = use_linear_projs
-        self.use_fast_model = use_fast_model
-        self.use_beta_conv1d = use_beta_conv1d
-        self.beta_conv1d_size = beta_conv1d_size
-        self.skip_householder_values = skip_householder_values
-        self.use_beta_conv = use_beta_conv
 
         if attn is not None:
             if not isinstance(attn, Dict):
