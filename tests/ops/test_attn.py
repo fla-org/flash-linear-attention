@@ -17,7 +17,7 @@ except Exception:
     HAS_FLASH = False
 
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [2]
     test_t_list = [2048]

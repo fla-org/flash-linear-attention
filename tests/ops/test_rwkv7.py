@@ -10,7 +10,7 @@ from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.utils.testing import assert_close
 from fla.utils import device, is_intel_alchemist
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 
 
 @pytest.mark.parametrize("B", [2])

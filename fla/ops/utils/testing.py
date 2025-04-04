@@ -1,7 +1,7 @@
 import os
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
-ci_env = os.getenv("CI_ENV") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
+FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 
 
 def get_abs_err(x, y):
@@ -18,7 +18,7 @@ def assert_close(prefix, ref, tri, ratio, warning=False):
     msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
     print(msg)
     error_rate = get_err_ratio(ref, tri)
-    if warning or str(prefix).strip().lower() == "dh0" or (ci_env and error_rate < 0.01):
+    if warning or str(prefix).strip().lower() == "dh0" or (FLA_CI_ENV and error_rate < 0.01):
         if error_rate > ratio:
             import warnings
             warnings.warn(msg)

@@ -10,8 +10,8 @@ from fla.modules import FusedKLDivLoss
 from fla.ops.utils.testing import assert_close
 from fla.utils import device, device_platform
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
-ci_env = os.getenv("CI_ENV") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
+FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 
 
 @pytest.mark.parametrize("B", [2])

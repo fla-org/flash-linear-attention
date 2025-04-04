@@ -11,7 +11,7 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gat
 from fla.ops.utils.testing import assert_close
 from fla.utils import device, is_nvidia_hopper
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
     test_t_list = [4096]

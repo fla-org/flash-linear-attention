@@ -11,7 +11,7 @@ from fla.ops.ttt.naive import chunk_ttt_linear_ref
 from fla.ops.utils.testing import assert_close
 from fla.utils import check_shared_mem, device
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
     test_t_list = [4096]

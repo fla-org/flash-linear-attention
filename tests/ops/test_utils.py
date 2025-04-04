@@ -8,7 +8,7 @@ import torch
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum, mean_pooling
 from fla.utils import device
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
     test_t_list = [4096]

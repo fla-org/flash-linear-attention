@@ -11,7 +11,7 @@ from fla.ops.gla.naive import naive_recurrent_gla
 from fla.ops.utils.testing import assert_close
 from fla.utils import device, device_platform
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
     test_t_list = [4096]
