@@ -98,13 +98,13 @@ class GatedDeltaProduct(nn.Module):
             num_householder: int = 2,  # New parameter for number of householder transformations
             mode: str = "chunk",
             use_gate: bool = True,
-            use_decay_gate: bool = True,
+            use_forget_gate: bool = True, # when true Gated DeltaProduct, when false DeltaProduct
             use_short_conv: bool = True,
             conv_size: int = 4,
             conv_bias: bool = False,
             layer_idx: int | None = None,
             norm_eps: float = 1e-5,
-            allow_neg_eigval: bool = False,
+            allow_neg_eigval: bool = False, # when true (Gated) DeltaProduct [-1, 1], when false (Gated) DeltaProduct [0, 1]
             **kwargs,
     ) -> None:
         super().__init__()
@@ -120,7 +120,7 @@ class GatedDeltaProduct(nn.Module):
         self.num_heads = num_heads
         self.num_householder = num_householder
         self.allow_neg_eigval = allow_neg_eigval
-        self.use_decay_gate = use_decay_gate
+        self.use_forget_gate = use_forget_gate
         self.key_dim = self.num_heads * self.head_dim
         self.value_dim = int(self.key_dim * self.expand_v)
         self.head_qk_dim = head_dim
@@ -181,7 +181,7 @@ class GatedDeltaProduct(nn.Module):
                 ]
             )
 
-        if self.use_decay_gate:
+        if self.use_forget_gate:
             self.a_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
             A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
             A_log = torch.log(A)
@@ -322,7 +322,7 @@ class GatedDeltaProduct(nn.Module):
         offsets = kwargs.get("offsets")
 
         if mode == "chunk":
-            if self.use_decay_gate:
+            if self.use_forget_gate:
                 g = -self.A_log.float().exp() * F.softplus(
                     self.a_proj(hidden_states).float() + self.dt_bias
                 )

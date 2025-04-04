@@ -15,7 +15,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         hidden_size: int = 2048,
         expand_v: int = 2,
         use_gate: bool = True,
-        use_forget_gate: bool = False,
+        use_forget_gate: bool = False, # when true Gated DeltaProduct, when false DeltaProduct
         use_short_conv: bool = True,
         conv_size: int = 4,
         head_dim: int = 256,
@@ -36,7 +36,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         initializer_range: float = 0.006,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
-        allow_neg_eigval: bool = False,
+        allow_neg_eigval: bool = False, # when true (Gated) DeltaProduct [-1, 1], when false (Gated) DeltaProduct [0, 1]
         num_householder: int = 1,
         **kwargs,
     ):
