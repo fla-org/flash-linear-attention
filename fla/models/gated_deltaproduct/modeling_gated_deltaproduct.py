@@ -11,10 +11,7 @@ import torch.nn as nn
 import torch.utils.checkpoint
 from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-)
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
@@ -23,11 +20,7 @@ from fla.layers.attn import Attention
 from fla.layers.gated_deltaproduct import GatedDeltaProduct
 from fla.models.gated_deltaproduct.configuration_gated_deltaproduct import GatedDeltaProductConfig
 from fla.models.utils import Cache
-from fla.modules import (
-    FusedCrossEntropyLoss,
-    FusedLinearCrossEntropyLoss,
-    RMSNorm,
-)
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.activations import swiglu_linear
 from fla.modules.layernorm import rms_norm_linear
 
