@@ -62,7 +62,7 @@ jobs:
         if: steps.find-dependent-tests.outputs.test_files
         run: |
           FLA_COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
-            pytest ${{ steps.find-dependent-tests.outputs.test_files }} --capture=no
+            pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run pytest on test files
         continue-on-error: true
@@ -83,7 +83,7 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           FLA_COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
-            pytest tests/ --capture=no
+            pytest tests/
 
       - name: Run full pytest on test files
         continue-on-error: true
