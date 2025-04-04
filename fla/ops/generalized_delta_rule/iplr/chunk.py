@@ -101,8 +101,8 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
             b_d = tl.load(p_d, boundary_check=(0, 1))
             b_b = tl.load(p_b, boundary_check=(0, 1))
             b_v2 = tl.dot(b_d, b_h.to(b_d.dtype)) + tl.load(p_u, boundary_check=(0, 1))
-            b_hc += tl.dot(b_k, b_v)
-            b_hc += tl.dot(b_b, b_v2.to(b_k.dtype))
+            b_hc += tl.dot(b_k.to(tl.float32), b_v.to(tl.float32))
+            b_hc += tl.dot(b_b.to(tl.float32), b_v2.to(tl.float32))
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
         b_h += b_hc
 
