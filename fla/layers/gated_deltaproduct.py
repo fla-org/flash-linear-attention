@@ -10,9 +10,7 @@ from einops import rearrange
 
 from fla.modules import FusedRMSNormSwishGate, RMSNorm, ShortConvolution
 from fla.ops.delta_rule import chunk_delta_rule
-from fla.ops.gated_delta_rule import (
-    chunk_gated_delta_rule,
-)
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
