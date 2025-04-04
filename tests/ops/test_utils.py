@@ -90,7 +90,7 @@ def test_global_cumsum_varlen(
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
     ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(offsets[:-1], offsets[1:])], 1).to(dtype)
     tri = chunk_global_cumsum(s, dtype, offsets=offsets, head_first=False)
-    torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2,atol=3e-5)
+    torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
 @pytest.mark.parametrize("B", test_b_list)
@@ -115,12 +115,12 @@ def test_global_reversed_cumsum(
     s = torch.randn(B, H, T, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, dtype=dtype).to(device)
     ref = reversed_cumsum(s, dim=(2 if head_first else 1)).to(dtype)
     tri = chunk_global_cumsum(s, dtype, reverse=True, head_first=head_first)
-    torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2,atol=3e-5)
+    torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
     s = torch.randn(B, H, T, D, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, D, dtype=dtype).to(device)
     ref = reversed_cumsum(s, dim=(2 if head_first else 1)).to(dtype)
     tri = chunk_global_cumsum(s, dtype, reverse=True, head_first=head_first)
-    torch.testing.assert_close(ref, tri.to(ref.dtype),rtol=1.6e-2, atol=3e-5)
+    torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
 @pytest.mark.parametrize("B", test_b_list)
@@ -148,7 +148,7 @@ def test_global_reversed_cumsum_varlen(
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(offsets[:-1], offsets[1:])], 1).to(dtype)
     tri = chunk_global_cumsum(s, dtype, reverse=True, offsets=offsets, head_first=False)
-    torch.testing.assert_close(ref, tri.to(ref.dtype),rtol=1.6e-2, atol=3e-5)
+    torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
     ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(offsets[:-1], offsets[1:])], 1).to(dtype)
