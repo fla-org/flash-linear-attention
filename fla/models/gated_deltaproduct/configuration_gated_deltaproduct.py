@@ -36,7 +36,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
         use_forget_gate: bool = False,  # when true Gated DeltaProduct, when false DeltaProduct
-        allow_neg_eigval: bool = False, # when true (Gated) DeltaProduct [-1, 1], when false (Gated) DeltaProduct [0, 1]
+        allow_neg_eigval: bool = False,  # when true (Gated) DeltaProduct [-1, 1], when false (Gated) DeltaProduct [0, 1]
         num_householder: int = 1,
         **kwargs,
     ):

@@ -75,7 +75,7 @@ class GatedDeltaProduct(nn.Module):
             conv_bias: bool = False,
             layer_idx: int | None = None,
             norm_eps: float = 1e-5,
-            allow_neg_eigval: bool = False, # when true (Gated) DeltaProduct [-1, 1], when false (Gated) DeltaProduct [0, 1]
+            allow_neg_eigval: bool = False,  # when true (Gated) DeltaProduct [-1, 1], when false (Gated) DeltaProduct [0, 1]
             **kwargs,
     ) -> None:
         super().__init__()
