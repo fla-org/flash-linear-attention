@@ -28,35 +28,6 @@ def sum_norm(x):
     return (x / x.sum(-1, keepdim=True)).to(x)
 
 
-class NonLinearProjection(nn.Module):
-    """
-    Non-linear projection using MLP with a hidden layer and normalization
-    """
-
-    def __init__(
-            self,
-            input_dim: int,
-            output_dim: int,
-            hidden_factor: float = 4.0,
-            activation: nn.Module = nn.SiLU(),
-            norm_eps: float = 1e-5,
-    ):
-        super().__init__()
-        hidden_dim = int(input_dim * hidden_factor)
-
-        self.layer1 = nn.Linear(input_dim, hidden_dim, bias=True)
-        self.norm = RMSNorm(hidden_dim, eps=norm_eps)
-        self.activation = activation
-        self.layer2 = nn.Linear(hidden_dim, output_dim, bias=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.layer1(x)
-        x = self.norm(x)
-        x = self.activation(x)
-        x = self.layer2(x)
-        return x
-
-
 def interleave_multiple_sequences(*sequences):
     """
     Interleave multiple sequences together.
@@ -98,7 +69,7 @@ class GatedDeltaProduct(nn.Module):
             num_householder: int = 2,  # New parameter for number of householder transformations
             mode: str = "chunk",
             use_gate: bool = True,
-            use_forget_gate: bool = True, # when true Gated DeltaProduct, when false DeltaProduct
+            use_forget_gate: bool = True,  # when true Gated DeltaProduct, when false DeltaProduct
             use_short_conv: bool = True,
             conv_size: int = 4,
             conv_bias: bool = False,
@@ -300,16 +271,11 @@ class GatedDeltaProduct(nn.Module):
         else:
             q = self.silu(self.q_proj(hidden_states))
         q = interleave_multiple_sequences(
-            [torch.ones_like(q)] * (self.num_householder - 1) + [q]
+            [torch.zeros_like(q)] * (self.num_householder - 1) + [q]
         )
         # Interleave all sequences
         k = interleave_multiple_sequences(ks)
-        if self.skip_householder_values:
-            v = interleave_multiple_sequences(
-                [vs[0]] + [torch.zeros_like(vs[0])] * (self.num_householder - 1)
-            )
-        else:
-            v = interleave_multiple_sequences(vs)
+        v = interleave_multiple_sequences(vs)
         beta = interleave_multiple_sequences(betas)
 
         q, k, v = (

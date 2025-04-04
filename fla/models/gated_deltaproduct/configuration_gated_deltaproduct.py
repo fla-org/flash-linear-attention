@@ -15,7 +15,6 @@ class GatedDeltaProductConfig(PretrainedConfig):
         hidden_size: int = 2048,
         expand_v: int = 2,
         use_gate: bool = True,
-        use_forget_gate: bool = False, # when true Gated DeltaProduct, when false DeltaProduct
         use_short_conv: bool = True,
         conv_size: int = 4,
         head_dim: int = 256,
@@ -36,6 +35,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         initializer_range: float = 0.006,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
+        use_forget_gate: bool = False,  # when true Gated DeltaProduct, when false DeltaProduct
         allow_neg_eigval: bool = False, # when true (Gated) DeltaProduct [-1, 1], when false (Gated) DeltaProduct [0, 1]
         num_householder: int = 1,
         **kwargs,
@@ -44,7 +44,6 @@ class GatedDeltaProductConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.expand_v = expand_v
         self.use_gate = use_gate
-        self.use_forget_gate = use_forget_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.head_dim = head_dim
@@ -62,8 +61,11 @@ class GatedDeltaProductConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
+
+        # DeltaProduct specific
         self.allow_neg_eigval = allow_neg_eigval
         self.num_householder = num_householder
+        self.use_forget_gate = use_forget_gate
 
         if attn is not None:
             if not isinstance(attn, Dict):
