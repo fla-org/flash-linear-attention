@@ -11,10 +11,10 @@ from fla.ops.utils.solve_tril import solve_tril
 from fla.ops.utils.testing import assert_close
 from fla.utils import device, device_platform
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
-    test_t_list = [64]
+    test_t_list = [4096]
     test_t_varlen_list = [[0, 64, 128, 256, 512]]
 else:
     test_b_list = [2]

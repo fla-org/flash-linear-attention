@@ -10,17 +10,17 @@ import torch.nn.functional as F
 from fla.ops.titans.naive import chunk_titans_linear_ref
 from fla.utils import device
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
-    test_t_list = [64]
+    test_t_list = [4096]
     test_t_varlen_list = test_t_list
     test_d_list = [64, 128, 256]
 else:
     test_b_list = [2]
     test_t_list = [1, 15, 63, 300]
     test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [32, 64, 100, 256]
+    test_d_list = [64, 32, 100, 256]
 test_h_list = [2]
 
 

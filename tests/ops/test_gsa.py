@@ -11,10 +11,10 @@ from fla.ops.gsa.naive import naive_recurrent_gsa
 from fla.ops.utils.testing import assert_close
 from fla.utils import check_shared_mem, device, device_platform
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
-    test_t_list = [64]
+    test_t_list = [4096]
     test_t_varlen_list = test_t_list
     test_d_list = [64, 128, 256]
     test_m_list = [32, 64, 128]

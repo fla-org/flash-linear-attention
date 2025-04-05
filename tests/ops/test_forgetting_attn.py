@@ -12,7 +12,7 @@ from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 from fla.ops.utils.testing import assert_close
 from fla.utils import check_shared_mem, device, is_intel_alchemist
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
+compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
     test_b_list = [1]
     test_t_list = [1024]

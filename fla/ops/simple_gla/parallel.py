@@ -9,10 +9,18 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import safe_exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, is_intel_alchemist
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    check_shared_mem,
+    input_guard,
+    is_intel_alchemist,
+    is_nvidia_hopper
+)
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
 triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
+NUM_WARPS = [2, 4, 8] if is_nvidia_hopper else [2, 4, 8, 16]
 
 
 @triton.heuristics({
@@ -361,7 +369,7 @@ def parallel_simple_gla_bwd_kernel_dkv(
 @triton.autotune(
     configs=[
         triton.Config(triton_config, num_warps=num_warps)
-        for num_warps in [2, 4, 8, 16]
+        for num_warps in NUM_WARPS
     ],
     key=['BT', 'BS', 'BK', 'BV', 'USE_G'],
 )
