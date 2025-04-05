@@ -486,7 +486,7 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
             if shift_labels is None:
                 labels = labels.to(hidden_states.device)
                 shift_labels = torch.cat((
-                    labels[..., 1:], 
+                    labels[..., 1:],
                     torch.full_like(labels[:, :1], criterion.ignore_index)
                     ), dim=1
                 )
