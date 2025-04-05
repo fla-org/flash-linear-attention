@@ -33,7 +33,7 @@ conda install nvidia/label/cuda-12.6.3::cuda-nvcc
 pip install packaging psutil ninja
 pip install flash-attn --no-deps --no-cache-dir --no-build-isolation
 
-# Optional: Verify flash-attentioninstallation
+# Optional: Verify flash-attention installation
 pip install pytest
 pytest tests/ops/test_attn.py
 ```
