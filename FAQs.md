@@ -2,7 +2,7 @@
 
 ## Recommended Setup Approach
 
-> [!IMPORTANT] 
+> [!IMPORTANT]
 > Triton nightly builds often depend on the latest PyTorch nightly versions. To prevent conflicts with existing installations, we strongly recommend creating a fresh conda environment. This isolates the installation from any existing PyTorch/Triton versions that might cause compatibility issues.
 
 ## Common Issues and Solutions
