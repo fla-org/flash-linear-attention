@@ -98,6 +98,12 @@ git submodule add https://github.com/fla-org/flash-linear-attention.git 3rdparty
 ln -s 3rdparty/flash-linear-attention/fla fla
 ```
 
+If you have installed `triton-nightly` and `torch` pre version, please use the following command:
+```sh
+pip install einops ninja datasets transformers numpy
+pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
+```
+
 ## Usage
 
 ### Token Mixing
