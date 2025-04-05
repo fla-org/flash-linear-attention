@@ -97,7 +97,14 @@ jobs:
 
           # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
           # With this install, it gets clang 16.0.6.
-          export CIBW_BEFORE_ALL="dnf install clang lld -y"
+          if [[ "${{ runner.name }}" == "intel-a770" ]]; then
+            export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
+                  -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
+                  -i.bak \
+                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
+          else:
+            export CIBW_BEFORE_ALL="dnf install clang lld -y"
+          fi
 
           if [[ ${{ matrix.config.arch }} == 'x86_64' ]]; then
             export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
