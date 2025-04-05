@@ -18,7 +18,7 @@ This issue was fixed in [PR #4492](https://github.com/triton-lang/triton/pull/44
 
 ```sh
 # Create fresh environment (strongly recommended!!!)
-conda create -n triton-nightly python=3.12 
+conda create -n triton-nightly python=3.12
 conda activate triton-nightly
 
 # Install PyTorch nightly (required for Triton nightly compatibility)
