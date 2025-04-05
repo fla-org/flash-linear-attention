@@ -9,7 +9,7 @@ from einops import rearrange
 
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.utils.testing import assert_close
-from fla.utils import device, is_nvidia_hopper
+from fla.utils import device
 
 compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
@@ -22,7 +22,7 @@ else:
     test_b_list = [2]
     test_t_list = [1, 15, 63, 300]
     test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [32, 64, 100, 256]
+    test_d_list = [64, 32, 100, 256]
     test_gate_list = [1, 0.1, 10]
 test_h_list = [2]
 
@@ -242,8 +242,6 @@ def test_chunk(
     head_first: bool,
     gate_logit_normalizer: float
 ):
-    if is_nvidia_hopper and not compiled_mode and D == 32:
-        pytest.skip(reason="workaround the magic problem, testing 32 and then 64 will cause an error on hopper")
     if head_first:
         q = torch.randn(B, H, T, D, dtype=dtype)
         k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)

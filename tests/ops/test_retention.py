@@ -15,12 +15,12 @@ if compiled_mode:
     test_b_list = [1]
     test_t_list = [4096]
     test_t_varlen_list = test_t_list
-    test_d_list = [32, 64, 100]
+    test_d_list = [64, 32, 100]
 else:
     test_b_list = [2]
     test_t_list = [1, 15, 63, 300]
     test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [32, 64, 100]
+    test_d_list = [64, 32, 100]
 test_h_list = [2]
 
 
