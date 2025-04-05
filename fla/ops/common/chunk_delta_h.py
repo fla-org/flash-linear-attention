@@ -116,7 +116,8 @@ def chunk_gated_delta_rule_fwd_kernel_h(
             b_v2 = b_v - tl.dot(b_d, b_h.to(b_d.dtype))
             # [BK, BV]
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
-            b_hc += tl.dot(b_k, b_v2.to(b_k.dtype), allow_tf32=False)
+            # Use tf32 here to enhance numerical stability
+            b_hc += tl.dot(b_k.to(tl.float32), b_v2.to(tl.float32))
         b_h *= exp(b_g_last) if USE_G else 1
         b_h += b_hc
 
