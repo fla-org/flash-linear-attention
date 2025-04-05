@@ -7,6 +7,7 @@ from fla.layers import (
     BitAttention,
     DeltaNet,
     GatedDeltaNet,
+    GatedDeltaProduct,
     GatedLinearAttention,
     GatedSlotAttention,
     HGRN2Attention,
@@ -28,6 +29,9 @@ from fla.models import (
     DeltaNetModel,
     GatedDeltaNetForCausalLM,
     GatedDeltaNetModel,
+    GatedDeltaProductConfig,
+    GatedDeltaProductForCausalLM,
+    GatedDeltaProductModel,
     GLAForCausalLM,
     GLAModel,
     GSAForCausalLM,
@@ -98,7 +102,11 @@ __all__ = [
     'RWKV7ForCausalLM',
     'RWKV7Model',
     'TransformerForCausalLM',
-    'TransformerModel'
+    'TransformerModel',
+    'GatedDeltaProduct',
+    'GatedDeltaProductConfig',
+    'GatedDeltaProductForCausalLM',
+    'GatedDeltaProductModel',
 ]
 
 __version__ = '0.1.2'

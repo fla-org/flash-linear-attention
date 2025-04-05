@@ -12,7 +12,7 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.modules import RMSNorm
+from fla.modules import GroupNorm
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 
 if TYPE_CHECKING:
@@ -63,8 +63,16 @@ class ForgettingAttention(nn.Module):
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         if qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            self.q_norm = GroupNorm(
+                num_groups=self.num_heads,
+                hidden_size=self.hidden_size,
+                is_rms_norm=True,
+            )
+            self.k_norm = GroupNorm(
+                num_groups=self.num_kv_heads,
+                hidden_size=self.kv_dim,
+                is_rms_norm=True,
+            )
 
     def forward(
         self,
@@ -85,12 +93,12 @@ class ForgettingAttention(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens', None)
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
         f = F.logsigmoid(self.f_proj(hidden_states).float())
+        if self.qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
-        if self.qk_norm:
-            q, k = self.q_norm(q), self.k_norm(k)
 
         o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
         o = rearrange(o, '... h d -> ... (h d)')
