@@ -276,9 +276,10 @@ def fused_chunk_linear_attn(
     v: torch.Tensor,
     scale: Optional[float] = None,
     initial_state: torch.Tensor = None,
+    z_state: torch.Tensor = None,
     output_final_state: bool = False,
     normalize: bool = True,
-    head_first: bool = True
+    head_first: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -293,6 +294,8 @@ def fused_chunk_linear_attn(
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[B, H, K, V]`. Default: `None`.
+        z_state (Optional[torch.Tensor]):
+            Z state of shape `[B, H, K, 1]`. This is only needed when normalization is enabled. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
         normalize (bool):
@@ -311,8 +314,16 @@ def fused_chunk_linear_attn(
     if not head_first:
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
     o, final_state = FusedChunkLinearAttentionFunction.apply(q, k, v, scale, initial_state, output_final_state)
+    
     if normalize:
-        o = normalize_output(q * scale, k, o)
+        if z_state is None:
+            k_shape = list(k.shape)
+            k_shape[-2 ]= 1
+            z_state = k.new_zeros(k_shape)
+        o, z_state = normalize_output(q * scale, k, o, z_state)
     if not head_first:
         o = o.transpose(1, 2)
+    
+    if normalize:
+        return o, (final_state, z_state)
     return o, final_state
