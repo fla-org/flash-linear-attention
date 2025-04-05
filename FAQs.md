@@ -2,7 +2,8 @@
 
 ## Recommended Setup Approach
 
-**Important:** Triton nightly builds often depend on the latest PyTorch nightly versions. To prevent conflicts with existing installations, we strongly recommend creating a fresh conda environment. This isolates the installation from any existing PyTorch/Triton versions that might cause compatibility issues.
+[!IMPORTANT] 
+Triton nightly builds often depend on the latest PyTorch nightly versions. To prevent conflicts with existing installations, we strongly recommend creating a fresh conda environment. This isolates the installation from any existing PyTorch/Triton versions that might cause compatibility issues.
 
 ## Common Issues and Solutions
 
@@ -27,6 +28,10 @@ pip install -U --pre torch --index-url https://download.pytorch.org/whl/nightly/
 # Install Triton nightly
 pip uninstall triton pytorch-triton -y
 pip install -U triton-nightly --index-url http://pypi.fla-org.com/simple --trusted-host pypi.fla-org.com
+
+# Instal flash-linear-attention
+pip install einops ninja datasets transformers numpy
+pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 
 # Optional: Install flash-attention
 conda install nvidia/label/cuda-12.6.3::cuda-nvcc
