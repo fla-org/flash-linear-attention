@@ -11,15 +11,15 @@ on:
 jobs:
 
   Build-Wheels:
-    timeout-minutes: 120
+    timeout-minutes: ${{ matrix.config.arch == 'aarch64' && 720 || 120 }}
     runs-on: ${{ matrix.config.runs_on }}
 
     strategy:
       fail-fast: false
       matrix:
         config:
-        - {runs_on: ['self-hosted', 'docker'], arch: 'x86_64'}
-        # - {runs_on: 'ubuntu-22.04-arm', arch: 'aarch64'}
+        - {runs_on: ['self-hosted', 'x64-docker'], arch: 'x86_64'}
+        - {runs_on: ['self-hosted', 'aarch64-docker'], arch: 'aarch64'}
 
 
     steps:
@@ -68,11 +68,17 @@ jobs:
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
         working-directory: triton
         run: |
-            # Replace the URL using sed
-            sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' python/setup.py
+          if [ -f "python/setup.py" ]; then
+            file_path="python/setup.py"
+          elif [ -f "setup.py" ]; then
+            file_path="setup.py"
+          else
+            echo "Error: Neither python/setup.py nor setup.py found"
+            exit 1
+          fi
 
-            # Verify the change (optional)
-            grep "llvm.fla-org.com" python/setup.py || (echo "URL replacement failed"; exit 1)
+          sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' "$file_path"
+          grep "llvm.fla-org.com" "$file_path" || (echo "URL replacement failed"; exit 1)
 
 
       - name: Build wheels
@@ -90,6 +96,12 @@ jobs:
                     SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} \
                     ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
                     HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
+          elif [[ "${{ runner.name }}" == "pi" ]]; then
+            export CIBW_ENVIRONMENT="MAX_JOBS=4 \
+                      TRITON_BUILD_WITH_CLANG_LLD=1 \
+                      SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} \
+                      ALL_PROXY=${{ secrets.PI_PROXY_ENV }} \
+                      HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
           else
             export CIBW_ENVIRONMENT="MAX_JOBS=4 \
                     TRITON_BUILD_WITH_CLANG_LLD=1"
@@ -97,7 +109,14 @@ jobs:
 
           # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
           # With this install, it gets clang 16.0.6.
-          export CIBW_BEFORE_ALL="dnf install clang lld -y"
+          if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" ]]; then
+            export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
+                  -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
+                  -i.bak \
+                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
+          else
+            export CIBW_BEFORE_ALL="dnf install clang lld -y"
+          fi
 
           if [[ ${{ matrix.config.arch }} == 'x86_64' ]]; then
             export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
@@ -109,7 +128,14 @@ jobs:
           export CIBW_SKIP="cp{35,36,37,38,39}-*"
           export CIBW_FREE_THREADED_SUPPORT=1
           rm -rf ./wheelhouse* || :
-          python3 -m cibuildwheel python --output-dir wheelhouse
+          if [ -f "python/setup.py" ]; then
+            python3 -m cibuildwheel python --output-dir wheelhouse
+          elif [ -f "setup.py" ]; then
+            python3 -m cibuildwheel . --output-dir wheelhouse
+          else
+            echo "Error: Neither python/setup.py nor setup.py found"
+            exit 1
+          fi
 
 
       - name: Publish wheels to fla
