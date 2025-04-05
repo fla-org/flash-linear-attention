@@ -11,7 +11,7 @@ on:
 jobs:
 
   Build-Wheels:
-    timeout-minutes: 120
+    timeout-minutes: ${{ matrix.config.arch == 'aarch64' && 360 || 120 }}
     runs-on: ${{ matrix.config.runs_on }}
 
     strategy:
@@ -19,7 +19,7 @@ jobs:
       matrix:
         config:
         - {runs_on: ['self-hosted', 'docker'], arch: 'x86_64'}
-        # - {runs_on: 'ubuntu-22.04-arm', arch: 'aarch64'}
+        - {runs_on: ['self-hosted', 'docker'], arch: 'aarch64'}
 
 
     steps:
@@ -90,6 +90,12 @@ jobs:
                     SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} \
                     ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
                     HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
+          elif [[ "${{ runner.name }}" == "pi" ]]; then
+            export CIBW_ENVIRONMENT="MAX_JOBS=4 \
+                      TRITON_BUILD_WITH_CLANG_LLD=1 \
+                      SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} \
+                      ALL_PROXY=${{ secrets.PI_PROXY_ENV }} \
+                      HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
           else
             export CIBW_ENVIRONMENT="MAX_JOBS=4 \
                     TRITON_BUILD_WITH_CLANG_LLD=1"
@@ -97,12 +103,12 @@ jobs:
 
           # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
           # With this install, it gets clang 16.0.6.
-          if [[ "${{ runner.name }}" == "intel-a770" ]]; then
+          if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" ]]; then
             export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
                   -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
                   -i.bak \
                   /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
-          else:
+          else
             export CIBW_BEFORE_ALL="dnf install clang lld -y"
           fi
 
