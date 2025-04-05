@@ -70,8 +70,8 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         if qk_norm:
-            self.q_norm = RMSNorm(self.hidden_size)
-            self.k_norm = RMSNorm(self.kv_dim)
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
@@ -94,12 +94,13 @@ class Attention(nn.Module):
         batch_size, q_len, _ = hidden_states.size()
 
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-        if self.qk_norm:
-            q, k = self.q_norm(q), self.k_norm(k)
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+
+        if self.qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)
 
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens', None)
