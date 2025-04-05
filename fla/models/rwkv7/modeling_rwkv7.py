@@ -194,6 +194,15 @@ class RWKV7PreTrainedModel(PreTrainedModel):
         rescale_prenorm_residual: bool = True,
         num_residuals_per_layer: int = 2,
     ):
+        warnings.warn(
+            "RWKV-7 employs a carefully designed initialization strategy tailored to its architecture. "
+            "The detailed initialization scheme is currently not implemented here but can be found in the "
+            "official code repository. We emphasize that using the recommended initialization is essential "
+            "for replicating the results in RWKV-7 paper. Deviations from the prescribed initialization "
+            "may lead to performance degradation.\n"
+            "Alternatively, please generate initial weights from the official RWKV code repository, and "
+            "convert the PyTorch checkpoint into FLA supported format."
+        )
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
@@ -429,6 +438,7 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
         inputs_embeds: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
         labels: Optional[torch.LongTensor] = None,
+        shift_labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -458,9 +468,10 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
         loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
+        has_labels = (labels is not None) or (shift_labels is not None)
+        if not (fuse_linear_and_cross_entropy and has_labels):
             logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
-        if labels is not None:
+        if has_labels:
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss()
@@ -470,13 +481,22 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
                     criterion = nn.CrossEntropyLoss()
             else:
                 criterion = self.criterion
-            # Enable model parallelism
-            labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
+
+            # shift_labels: See https://github.com/huggingface/transformers/pull/36607/files.
+            if shift_labels is None:
+                labels = labels.to(hidden_states.device)
+                shift_labels = torch.cat((
+                    labels[..., 1:], 
+                    torch.full_like(labels[:, :1], criterion.ignore_index)
+                    ), dim=1
+                )
             else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+                shift_labels = shift_labels.to(hidden_states.device)
+
+            if fuse_linear_and_cross_entropy:
+                loss = criterion(hidden_states, shift_labels, self.lm_head.weight, self.lm_head.bias)
+            else:
+                loss = criterion(logits.view(shift_labels.numel(), -1), shift_labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]
