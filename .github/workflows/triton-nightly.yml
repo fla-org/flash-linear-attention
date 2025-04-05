@@ -76,7 +76,7 @@ jobs:
             echo "Error: Neither python/setup.py nor setup.py found"
             exit 1
           fi
-      
+
           sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' "$file_path"
           grep "llvm.fla-org.com" "$file_path" || (echo "URL replacement failed"; exit 1)
 
