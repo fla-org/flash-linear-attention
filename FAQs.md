@@ -1,36 +1,54 @@
-# FAQs
+# Triton FAQs and Common Issues
 
-## MMA->MMA Assertion Error on H100
+## Recommended Setup Approach
 
+**Important:** Triton nightly builds often depend on the latest PyTorch nightly versions. To prevent conflicts with existing installations, we strongly recommend creating a fresh conda environment. This isolates the installation from any existing PyTorch/Triton versions that might cause compatibility issues.
+
+## Common Issues and Solutions
+
+### 1. MMA Assertion Error on H100
+
+**Error:**
 ```py
 Assertion `!(srcMmaLayout && dstMmaLayout && !srcMmaLayout.isAmpere()) && "mma -> mma layout conversion is only supported on Ampere"' failed.
 ```
 
-This issue has been fixed in [PR #4492](https://github.com/triton-lang/triton/pull/4492).
-It is recommended to use the nightly version of triton (built by fla:).
+**Solution:**
+This issue was fixed in [PR #4492](https://github.com/triton-lang/triton/pull/4492). Install the nightly version:
 
 ```sh
-pip uninstall triton torch -y
+# Create fresh environment (strongly recommended!!!)
+conda create -n triton-nightly python=3.12 
+conda activate triton-nightly
+
+# Install PyTorch nightly (required for Triton nightly compatibility)
 pip install -U --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
-pip uninstall triton -y
-pip install -U triton-nightly --index-url https://pypi.fla-org.com/simple
+
+# Install Triton nightly
+pip uninstall triton pytorch-triton -y
+pip install -U triton-nightly --index-url http://pypi.fla-org.com/simple --trusted-host pypi.fla-org.com
+
+# Optional: Install flash-attention
+conda install nvidia/label/cuda-12.6.3::cuda-nvcc
+pip install packaging psutil ninja
+pip install flash-attn --no-deps --no-cache-dir --no-build-isolation
+
+# Optional: Verify flash-attentioninstallation
+pip install pytest
+pytest tests/ops/test_attn.py
 ```
 
-## AttributeError: 'NoneType' object has no attribute 'start'
+### 2. AttributeError: 'NoneType' object has no attribute 'start'
 
-This is a known triton issue [triton-lang/triton#5224](https://github.com/triton-lang/triton/issues/5224).
-Upgrading python to 3.10 or higher could solve the question.
+**Solution:**
+This is a known issue ([triton-lang/triton#5224](https://github.com/triton-lang/triton/issues/5224)). Upgrade to Python 3.10+.
 
+### 3. H100 LinearLayout Assertion Error
 
-## On H100: mlir::triton::LinearLayout::reshapeOuts(llvm::ArrayRef<std::pair<mlir::StringAttr, int> >) const: Assertion `getTotalOutDimSize() == std::accumulate( newOutDims.begin(), newOutDims.end(), 1, [&](int32_t acc, auto &outDim) { return acc * outDim.second; })' failed.
-
-This is a known triton issue [triton-lang/triton#5609](https://github.com/triton-lang/triton/issues/5609).
-
-Use the nightly version of triton
-```sh
-pip uninstall triton torch -y
-pip install -U --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
-pip uninstall triton -y
-pip install -U triton-nightly --index-url https://pypi.fla-org.com/simple
+**Error:**
 ```
-or build it from scratch.
+mlir::triton::LinearLayout::reshapeOuts(...) failed.
+```
+
+**Solution:**
+This is a known issue ([triton-lang/triton#5609](https://github.com/triton-lang/triton/issues/5609)). Follow the same installation steps as in Issue #1 above.
