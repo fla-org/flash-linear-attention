@@ -484,14 +484,8 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
 
             # shift_labels: See https://github.com/huggingface/transformers/pull/36607/files.
             if shift_labels is None:
-                labels = labels.to(hidden_states.device)
-                shift_labels = torch.cat((
-                    labels[..., 1:],
-                    torch.full_like(labels[:, :1], criterion.ignore_index)
-                    ), dim=1
-                )
-            else:
-                shift_labels = shift_labels.to(hidden_states.device)
+                shift_labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
+            shift_labels = shift_labels.to(hidden_states.device)
 
             if fuse_linear_and_cross_entropy:
                 loss = criterion(hidden_states, shift_labels, self.lm_head.weight, self.lm_head.bias)
