@@ -217,7 +217,8 @@ class MultiScaleRetention(nn.Module):
                 seqlen_offset = seqlen_offset + attention_mask.sum(-1) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)
 
-        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen)
+        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+
         if self.num_kv_groups > 1:
             k = repeat(k, 'b t h d -> b t (h g) d', g=self.num_kv_groups)
             v = repeat(v, 'b t (h d) -> b t (h g) d', d=self.head_v_dim, g=self.num_kv_groups)

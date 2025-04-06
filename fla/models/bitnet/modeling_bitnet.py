@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
-from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -36,7 +35,8 @@ class BitNetMLP(nn.Module):
         hidden_size: int,
         hidden_ratio: Optional[int] = None,
         intermediate_size: Optional[int] = None,
-        hidden_act: str = 'swish'
+        hidden_act: str = 'swish',
+        fuse_swiglu: bool = True
     ) -> BitNetMLP:
         super().__init__()
 
@@ -50,19 +50,23 @@ class BitNetMLP(nn.Module):
             intermediate_size = 256 * ((intermediate_size + 256 - 1) // 256)
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
+        self.hidden_act = hidden_act
+        self.fuse_swiglu = fuse_swiglu
 
-        self.gate_proj = FusedBitLinear(self.hidden_size, self.intermediate_size * 2, bias=False)
-        self.down_proj = FusedBitLinear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[hidden_act]
+        if hidden_act != 'swish':
+            raise ValueError(f'Unsupported hidden_act: {hidden_act}')
+
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
     def forward(
         self,
         x: torch.Tensor,
-        **kwargs: Unpack[Any],
+        **kwargs: Unpack[Any]
     ) -> torch.Tensor:
-        gate, y = self.gate_proj(x).chunk(2, -1)
-        z = self.down_proj(swiglu(gate, y))
-        return z
+        gate, y = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(swiglu(gate, y))
 
 
 class BitNetBlock(nn.Module):

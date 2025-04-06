@@ -130,8 +130,8 @@ class LightNetAttention(nn.Module):
                 mask=conv_mask,
                 cache=conv_state_k,
                 output_final_state=use_cache,
-
-                cu_seqlens=cu_seqlens)
+                cu_seqlens=cu_seqlens
+            )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 mask=conv_mask,
@@ -153,6 +153,9 @@ class LightNetAttention(nn.Module):
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_i_dim)
         # TODO: this 2 steps took huge amount of time, which should be optimized
         z = k.float().logcumsumexp(1)
+
+        if cu_seqlens is not None:
+            raise NotImplementedError("LightNet does not support variable-length sequences for now.")
         k, g = torch.exp(k - z).to(k.dtype), (torch.cat((z[:, :1], z[:, :-1]), 1) - z).to(k.dtype)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None

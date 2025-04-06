@@ -57,6 +57,7 @@ class LinearAttentionConfig(PretrainedConfig):
         self.norm_q = norm_q
         self.norm_k = norm_k
         self.norm_feature_map = norm_feature_map
+        self.hidden_act = hidden_act
         self.max_position_embeddings = max_position_embeddings
         self.elementwise_affine = elementwise_affine
         self.norm_eps = norm_eps

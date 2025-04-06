@@ -109,14 +109,17 @@ class BitAttention(nn.Module):
         q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
-            k, v = past_key_values.update(
+            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
             )['attn_state']
-            k = rearrange(k, '... (h d) -> ... h d', h=self.num_kv_heads)
-            v = rearrange(v, '... (h d) -> ... h d', h=self.num_kv_heads)
+            if cache_has_content:
+                k, v = k_cached, v_cached
+                k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
+                v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -152,7 +155,7 @@ class BitAttention(nn.Module):
                 causal=True,
                 window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
-        o = o.reshape(batch_size, q_len, self.hidden_size)
+        o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
         if not output_attentions:
@@ -161,11 +164,12 @@ class BitAttention(nn.Module):
         return o, attentions, past_key_values
 
     def _upad_input(self, q, k, v, attention_mask, q_len):
-        seqlens = attention_mask.sum(-1, dtype=torch.int32)
-        indices_k = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
+        cache_mask = attention_mask[:, -seq_len:]
+        seqlens = cache_mask.sum(-1, dtype=torch.int32)
+        indices_k = torch.nonzero(cache_mask.flatten(), as_tuple=False).flatten()
         max_seqlen_k = seqlens.max().item()
         cu_seqlens_k = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
 
         k = index_first_axis(k.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
         v = index_first_axis(v.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
