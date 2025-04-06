@@ -92,11 +92,9 @@ class Attention(nn.Module):
 
         batch_size, q_len, _ = hidden_states.size()
 
-        q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-
-        q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
-        k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
-        v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
+        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
 
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
