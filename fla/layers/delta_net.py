@@ -115,7 +115,6 @@ class DeltaNet(nn.Module):
         self.head_v_dim = self.value_dim // num_heads
         self.layer_idx = layer_idx
 
-        self.silu = nn.SiLU()
         if mode == 'fused_chunk':
             raise NotImplementedError("fused_chunk_delta_rule is now deprecated. Please use `chunk_delta_rule` instead.")
         assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
@@ -213,8 +212,8 @@ class DeltaNet(nn.Module):
             q = self.q_proj(hidden_states)
             k = self.k_proj(hidden_states)
             if self.qk_activation == 'silu':
-                q, k = self.silu(q), self.silu(k)
-            v = self.silu(self.v_proj(hidden_states))
+                q, k = F.silu(q), F.silu(k)
+            v = F.silu(self.v_proj(hidden_states))
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
@@ -223,9 +222,7 @@ class DeltaNet(nn.Module):
                 q, k = q.relu(), k.relu()
             elif self.qk_activation == 'elu':
                 q, k = elu_p1(q), elu_p1(k)
-            elif self.qk_activation == 'identity':
-                pass
-            else:
+            elif self.qk_activation != 'identity':
                 raise NotImplementedError
 
         if self.qk_norm == 'sum':
