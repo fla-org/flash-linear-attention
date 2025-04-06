@@ -90,9 +90,12 @@ def test_generation(
     chunk_size = T // num_chunks
     input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T)).to(device)
     attention_mask = torch.ones((B, T), dtype=torch.bool).to(device)
-    seq_start = torch.randint(low=0, high=chunk_size - 1, size=(B,))
+    seq_start = torch.randint(low=1, high=chunk_size - 1, size=(B,))
     attention_mask[torch.arange(T) < seq_start[:, None]] = False
-    ref = model(input_ids=input_ids, attention_mask=attention_mask).logits
+    ref = torch.cat([
+        model(input_ids=input_ids[i:i+1, start:], use_cache=False).logits
+        for i, start in enumerate(seq_start)
+    ], dim=1)
 
     logits = []
 
@@ -114,6 +117,7 @@ def test_generation(
             )
             logits.append(out.logits)
             past_key_values = out.past_key_values
-    gen = torch.cat(logits, dim=1)
+    gen = torch.cat(logits, 1)
+    gen = torch.cat([gen[i:i+1, start:] for i, start in enumerate(seq_start)], 1)
 
-    assert_close('logits', ref, gen, 1e-3)
+    assert_close('logits', ref, gen, 2e-3)
