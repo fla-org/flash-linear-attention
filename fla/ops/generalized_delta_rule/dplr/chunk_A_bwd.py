@@ -7,8 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, use_cuda_graph
+from fla.ops.utils.op import exp, gather
+from fla.utils import check_shared_mem, is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
@@ -56,7 +56,8 @@ def chunk_dplr_bwd_kernel_intra(
     BK: tl.constexpr,
     NC: tl.constexpr,
     USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
+    GATHER_SUPPORTED: tl.constexpr
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -201,37 +202,63 @@ def chunk_dplr_bwd_kernel_intra(
     # intra chunk gradient calculation
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # trick to index the block
-        mask_idx = tl.arange(0, BC) == j
-        b_gij = tl.sum(tl.where(mask_idx[:, None], b_gi, 0), 0)
-        b_gej = tl.sum(tl.where(mask_idx[:, None], b_ge, 0), 0)
-        b_kj = tl.sum(tl.where(mask_idx[:, None], b_k, 0), 0)
-        b_bj = tl.sum(tl.where(mask_idx[:, None], b_b, 0), 0)
-        b_dAqk_j = tl.sum(tl.where(mask_idx[None, :], b_dAqk, 0), 1)
-        b_dAab_j = tl.sum(tl.where(mask_idx[None, :], b_dAab, 0), 1)
-        b_dAqb_j = tl.sum(tl.where(mask_idx[None, :], b_dAqb, 0), 1)
-        b_dAak_j = tl.sum(tl.where(mask_idx[None, :], b_dAak, 0), 1)
+        if GATHER_SUPPORTED:
+            row_idx = tl.full([1, BK], j, dtype=tl.int16)
+            col_idx = tl.full([BC, 1], j, dtype=tl.int16)
+            row_idx_bc = tl.full([1, BC], j, dtype=tl.int16)
+            # [1, BK]
+            b_kj = gather(b_k, row_idx, axis=0)
+            b_bj = gather(b_b, row_idx, axis=0)
+            b_gij = gather(b_gi, row_idx, axis=0)
+            b_gej = gather(b_ge, row_idx, axis=0)
+            b_qj = gather(b_q, row_idx, axis=0)
+            b_aj = gather(b_a, row_idx, axis=0)
+            # [BC, 1]
+            b_dAqk_j = gather(b_dAqk, col_idx, axis=1)
+            b_dAab_j = gather(b_dAab, col_idx, axis=1)
+            b_dAqb_j = gather(b_dAqb, col_idx, axis=1)
+            b_dAak_j = gather(b_dAak, col_idx, axis=1)
+            # [1, BC] -> [BC, 1]
+            b_dA_qk_j = tl.sum(gather(b_dAqk, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_qk_j = tl.sum(gather(b_dAqk, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_ab_j = tl.sum(gather(b_dAab, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_qb_j = tl.sum(gather(b_dAqb, row_idx_bc, axis=0), 0)[:, None]
+            b_dA_ak_j = tl.sum(gather(b_dAak, row_idx_bc, axis=0), 0)[:, None]
+        else:
+            mask_idx = tl.arange(0, BC) == j
+            b_kj = tl.sum(tl.where(mask_idx[:, None], b_k, 0), 0)[None, :]
+            b_bj = tl.sum(tl.where(mask_idx[:, None], b_b, 0), 0)[None, :]
+            b_gij = tl.sum(tl.where(mask_idx[:, None], b_gi, 0), 0)[None, :]
+            b_gej = tl.sum(tl.where(mask_idx[:, None], b_ge, 0), 0)[None, :]
+            b_dAqk_j = tl.sum(tl.where(mask_idx[None, :], b_dAqk, 0), 1)[:, None]
+            b_dAab_j = tl.sum(tl.where(mask_idx[None, :], b_dAab, 0), 1)[:, None]
+            b_dAqb_j = tl.sum(tl.where(mask_idx[None, :], b_dAqb, 0), 1)[:, None]
+            b_dAak_j = tl.sum(tl.where(mask_idx[None, :], b_dAak, 0), 1)[:, None]
+            b_dA_qk_j = tl.sum(tl.where(mask_idx[:, None], b_dAqk, 0), 0)[:, None]
+            b_dA_ab_j = tl.sum(tl.where(mask_idx[:, None], b_dAab, 0), 0)[:, None]
+            b_dA_qb_j = tl.sum(tl.where(mask_idx[:, None], b_dAqb, 0), 0)[:, None]
+            b_dA_ak_j = tl.sum(tl.where(mask_idx[:, None], b_dAak, 0), 0)[:, None]
+            # [1, BK] b_qj, b_aj
+            b_qj = tl.sum(tl.where(mask_idx[:, None], b_q, 0), 0)[None, :]
+            b_aj = tl.sum(tl.where(mask_idx[:, None], b_a, 0), 0)[None, :]
+        # tl.static_print(b_kj)
         m_e = o_i[:, None] > j
         m_i = o_i[:, None] >= j
-        tmp1 = exp(b_gi - b_gij[None, :])
-        tmp2 = exp(b_ge - b_gij[None, :])
-        b_dq += tl.where(m_i, b_dAqk_j[:, None] * b_kj[None, :] * tmp1, 0.)
-        b_dq += tl.where(m_i, b_dAqb_j[:, None] * b_bj[None, :] * tmp1, 0.)
-        b_da += tl.where(m_e, b_dAab_j[:, None] * b_bj[None, :] * tmp2, 0.)
-        b_da += tl.where(m_e, b_dAak_j[:, None] * b_kj[None, :] * tmp2, 0.)
-        b_dA_qk_j = tl.sum(tl.where(mask_idx[:, None], b_dAqk, 0), 0)
-        b_dA_ab_j = tl.sum(tl.where(mask_idx[:, None], b_dAab, 0), 0)
-        b_dA_qb_j = tl.sum(tl.where(mask_idx[:, None], b_dAqb, 0), 0)
-        b_dA_ak_j = tl.sum(tl.where(mask_idx[:, None], b_dAak, 0), 0)
-        b_qj = tl.sum(tl.where(mask_idx[:, None], b_q, 0), 0)
-        b_aj = tl.sum(tl.where(mask_idx[:, None], b_a, 0), 0)
+        tmp1 = exp(b_gi - b_gij)
+        tmp2 = exp(b_ge - b_gij)
+        b_dq += tl.where(m_i, b_dAqk_j * b_kj * tmp1, 0.)
+        b_dq += tl.where(m_i, b_dAqb_j * b_bj * tmp1, 0.)
+        b_da += tl.where(m_e, b_dAab_j * b_bj * tmp2, 0.)
+        b_da += tl.where(m_e, b_dAak_j * b_kj * tmp2, 0.)
+
         m_i = o_i[:, None] <= j
         m_e = o_i[:, None] < j
-        tmp1 = exp(b_gij[None, :] - b_gi)
-        tmp2 = exp(b_gej[None, :] - b_gi)
-        b_dk += tl.where(m_i, b_dA_qk_j[:, None] * b_qj[None, :] * tmp1, 0.)
-        b_dk += tl.where(m_e, b_dA_ak_j[:, None] * b_aj[None, :] * tmp2, 0.)
-        b_db += tl.where(m_i, b_dA_qb_j[:, None] * b_qj[None, :] * tmp1, 0.)
-        b_db += tl.where(m_e, b_dA_ab_j[:, None] * b_aj[None, :] * tmp2, 0.)
+        tmp1 = exp(b_gij - b_gi)
+        tmp2 = exp(b_gej - b_gi)
+        b_dk += tl.where(m_i, b_dA_qk_j * b_qj * tmp1, 0.)
+        b_dk += tl.where(m_e, b_dA_ak_j * b_aj * tmp2, 0.)
+        b_db += tl.where(m_i, b_dA_qb_j * b_qj * tmp1, 0.)
+        b_db += tl.where(m_e, b_dA_ab_j * b_aj * tmp2, 0.)
     # post processing
     p_dq = tl.make_block_ptr(dq, (T, K), (stride_qk, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
     p_dk = tl.make_block_ptr(dk, (T, K), (stride_qk, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
@@ -396,7 +423,8 @@ def chunk_dplr_bwd_dqk_intra(
         BC=BC,
         BK=BK,
         NC=NC,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=head_first,
+        GATHER_SUPPORTED=is_gather_supported
     )
 
     def grid2(meta): return (NT, triton.cdiv(K, meta['BK']), B * H)

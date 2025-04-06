@@ -7,6 +7,7 @@ from einops import rearrange
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
+from fla.modules.layernorm import GroupNormRef
 from fla.utils import device
 
 
@@ -51,11 +52,17 @@ def test_layernorm(B: int, H: int, T: int, D: int, elementwise_affine: bool, bia
 @pytest.mark.parametrize("T", [512])
 @pytest.mark.parametrize("D", [64, 128, 512, 1024, 2048])
 @pytest.mark.parametrize("G", [1, 4])
-def test_groupnorm(B: int, T: int, D: int, G: int):
+@pytest.mark.parametrize("is_rms_norm", [True, False])
+def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
     torch.manual_seed(42)
     x = torch.randn(B, T, D).to(device).requires_grad_(True).bfloat16()
-    ref = nn.GroupNorm(G, D).to(device).bfloat16()
-    tri = GroupNorm(G, D, bias=True).to(device).bfloat16()
+    if is_rms_norm:
+        ref = GroupNormRef(
+            num_groups=G, hidden_size=D, bias=True, is_rms_norm=True
+        ).to(device).bfloat16()
+    else:
+        ref = nn.GroupNorm(G, D).to(device).bfloat16()
+    tri = GroupNorm(G, D, bias=True, is_rms_norm=is_rms_norm).to(device).bfloat16()
     nn.init.normal_(ref.weight)
     nn.init.normal_(ref.bias)
     tri.weight.data.copy_(ref.weight.data)
@@ -140,11 +147,18 @@ def test_layernorm_linear(N: int, D: int):
 @pytest.mark.parametrize("N", [1, 16, 128])
 @pytest.mark.parametrize("D", [64, 128, 512])
 @pytest.mark.parametrize("G", [1, 4])
-def test_groupnorm_linear(N: int, D: int, G: int):
+@pytest.mark.parametrize("is_rms_norm", [True, False])
+def test_groupnorm_linear(N: int, D: int, G: int, is_rms_norm: bool):
     torch.manual_seed(1)
     x = torch.randn(N, D).to(device).requires_grad_(True)
-    ref = nn.Sequential(nn.GroupNorm(G, D), nn.Linear(D, D)).to(device)
-    tri = GroupNormLinear(G, D, bias=True).to(device)
+    if is_rms_norm:
+        ref = nn.Sequential(
+            GroupNormRef(num_groups=G, hidden_size=D, bias=True, is_rms_norm=True),
+            nn.Linear(D, D)
+        ).to(device)
+    else:
+        ref = nn.Sequential(nn.GroupNorm(G, D), nn.Linear(D, D)).to(device)
+    tri = GroupNormLinear(G, D, bias=True, is_rms_norm=is_rms_norm).to(device)
     nn.init.normal_(ref[0].weight)
     nn.init.normal_(ref[0].bias)
     nn.init.normal_(ref[1].weight, mean=0.0, std=0.01)

@@ -167,6 +167,7 @@ use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1'
 
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
 is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
+is_gather_supported = hasattr(triton.language, 'gather')
 
 
 def get_all_max_shared_mem():
@@ -182,8 +183,8 @@ def get_all_max_shared_mem():
 
 class Backend(Enum):
     ADA = 101376       # RTX 4090
-    AMPERE = 131072    # A100
-    HOPPER = 233472    # H100
+    AMPERE = 166912    # A100
+    HOPPER = 232448    # H100
     DEFAULT = 102400   # Default
 
     @classmethod

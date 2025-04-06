@@ -44,11 +44,9 @@ jobs:
       - name: Setup python
         if: steps.find-dependent-tests.outputs.test_files
         run: |
-          pip install --upgrade pytest setuptools wheel ninja
-          pip install --upgrade --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
-          pip uninstall -y flash-linear-attention triton
-          MAX_JOBS=4 pip install --upgrade flash-attn --no-build-isolation
-          pip install -U --index-url http://pypi.fla-org.com/simple/ triton-nightly --upgrade --trusted-host pypi.fla-org.com
+          pip install -U pytest setuptools wheel ninja
+          pip uninstall -y flash-linear-attention
+          MAX_JOBS=4 pip install -U flash-attn --no-build-isolation
           pip install --no-use-pep517 .
 
       - name: Check GPU status
@@ -63,7 +61,7 @@ jobs:
       - name: Test compiling on changed test files
         if: steps.find-dependent-tests.outputs.test_files
         run: |
-          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=1 SKIP_TEST_CHUNK_VARLEN=1 \
+          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} --capture=no
 
       - name: Run pytest on test files
@@ -84,7 +82,7 @@ jobs:
       - name: Test full compiling on all test files
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
-          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=1 SKIP_TEST_CHUNK_VARLEN=1 \
+          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest tests/ --capture=no
 
       - name: Run full pytest on test files

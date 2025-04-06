@@ -491,8 +491,8 @@ class LayerNormGatedLinearFunction(torch.autograd.Function):
         y, mean, rstd, residual_out = layer_norm_gated_fwd(
             x=x,
             g=g,
-            norm_weight=norm_weight,
-            norm_bias=norm_bias,
+            weight=norm_weight,
+            bias=norm_bias,
             eps=eps,
             residual=residual,
             residual_dtype=residual_dtype,

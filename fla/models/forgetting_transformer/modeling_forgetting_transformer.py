@@ -273,7 +273,7 @@ class ForgettingTransformerModel(ForgettingTransformerPreTrainedModel):
         )
 
 
-class ForgettingTransformerForCausalLM(ForgettingTransformerModel, GenerationMixin):
+class ForgettingTransformerForCausalLM(ForgettingTransformerPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 

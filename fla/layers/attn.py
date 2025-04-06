@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
+from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
 
 if TYPE_CHECKING:
@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
 except ImportError:
     warnings.warn(
         "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
@@ -70,8 +69,8 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         if qk_norm:
-            self.q_norm = RMSNorm(self.hidden_size)
-            self.k_norm = RMSNorm(self.kv_dim)
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
@@ -93,13 +92,12 @@ class Attention(nn.Module):
 
         batch_size, q_len, _ = hidden_states.size()
 
-        q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
+        q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+        v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
+
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
-
-        q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
-        k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
-        v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens', None)
@@ -136,8 +134,8 @@ class Attention(nn.Module):
 
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
-            q, k, v, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(q, k, v, attention_mask, q_len)
-            cu_seqlens_q, cu_seqlens_k = cu_seq_lens
+            q, k, v, indices_q, cu_seqlens, max_seq_lens = unpad_input(q, k, v, attention_mask, q_len)
+            cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
             o = flash_attn_varlen_func(
                 q, k, v,
@@ -172,31 +170,3 @@ class Attention(nn.Module):
             attentions = None
 
         return o, attentions, past_key_values
-
-    def _upad_input(self, q, k, v, attention_mask, q_len):
-        batch_size, seq_len, num_key_value_heads, head_dim = k.shape
-        cache_mask = attention_mask[:, -seq_len:]
-        seqlens = cache_mask.sum(-1, dtype=torch.int32)
-        indices_k = torch.nonzero(cache_mask.flatten(), as_tuple=False).flatten()
-        max_seqlen_k = seqlens.max().item()
-        cu_seqlens_k = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-
-        k = index_first_axis(k.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
-        v = index_first_axis(v.reshape(batch_size * seq_len, num_key_value_heads, head_dim), indices_k)
-        if q_len == seq_len:
-            q = index_first_axis(q.reshape(batch_size * seq_len, self.num_heads, head_dim), indices_k)
-            cu_seqlens_q = cu_seqlens_k
-            max_seqlen_q = max_seqlen_k
-            indices_q = indices_k
-        elif q_len == 1:
-            max_seqlen_q = 1
-            # There is a memcpy here, that is very bad.
-            cu_seqlens_q = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
-            indices_q = cu_seqlens_q[:-1]
-            q = q.squeeze(1)
-        else:
-            # The -q_len: slice assumes left padding.
-            attention_mask = attention_mask[:, -q_len:]
-            q, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, attention_mask)
-
-        return q, k, v, indices_q, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k)

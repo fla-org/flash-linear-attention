@@ -1,4 +1,7 @@
-from typing import Optional, Tuple
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+from typing import Optional
 
 import torch
 import triton
@@ -12,11 +15,12 @@ from fla.ops.common.utils import prepare_chunk_indices
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
+        for BK in [32, 64, 128]
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'BT', 'BK', 'USE_OFFSETS'],
+    key=['H', 'K', 'BT', 'USE_OFFSETS'],
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_scaled_dot_kkt_fwd_kernel(
@@ -41,6 +45,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+    o_t = tl.arange(0, BT)
 
     if HEAD_FIRST:
         p_beta = tl.make_block_ptr(beta + i_bh * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
@@ -58,7 +63,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         b_kb = b_k * b_beta[:, None]
         b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
 
-    b_A = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_A, 0)
+    b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
     if HEAD_FIRST:
         p_A = tl.make_block_ptr(A + i_bh * T*BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     else:
@@ -68,19 +73,42 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 
 def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
-    beta: torch.Tensor,  # scale factor
+    beta: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
+    r"""
+    Compute beta * K * K^T.
+
+    Args:
+        k (torch.Tensor):
+            The key tensor of shape `[B, T, H, K]` if not `head_first` else `[B, H, T, K]`.
+        beta (torch.Tensor):
+            The beta tensor of shape `[B, T, H]` if not `head_first` else `[B, H, T]`.
+        cu_seqlens (torch.LongTensor):
+            The cumulative sequence lengths of the input tensor.
+            Default: None
+        head_first (bool):
+            If False, the input/output tensor is in the shape of `[B, T, H, K]`.
+            If True, the input/output tensor is in the shape of `[B, H, T, K]`.
+            Default: False
+        chunk_size (int):
+            The chunk size. Default: 64.
+        output_dtype (torch.dtype):
+            The dtype of the output tensor. Default: `torch.float32`
+
+    Returns:
+        beta * K * K^T of shape `[B, T, H, BT]` if not `head_first` else `[B, H, T, BT]`,
+        where `BT` is the chunk size.
+    """
     if head_first:
         B, H, T, K = k.shape
     else:
         B, T, H, K = k.shape
     BT = chunk_size
-    BK = min(triton.next_power_of_2(K), 64)
-    indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     A = torch.empty(B, *((H, T) if head_first else (T, H)), BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
@@ -93,7 +121,6 @@ def chunk_scaled_dot_kkt_fwd(
         H=H,
         K=K,
         BT=BT,
-        BK=BK,
         HEAD_FIRST=head_first
     )
     return A

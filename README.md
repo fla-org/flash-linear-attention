@@ -28,7 +28,7 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 * [Acknowledgments](#acknowledgments)
 
 ## News
-
+- **$\texttt{[2025-04]}$:** 🎉 Add DeltaProduct implementation to `fla` ([paper](https://arxiv.org/abs/2502.10297)).
 - **$\texttt{[2025-04]}$:** 🎉 Add FoX implementation to `fla` ([paper](https://arxiv.org/abs/2503.02130)).
 - **$\texttt{[2025-03]}$:** We have changed the default `initializer_range` to the magic 🐳 0.006, leading to great improvements across all models.
 - **$\texttt{[2025-02]}$:** 🐳 Add NSA implementations to `fla`. See kernels [here](fla/ops/nsa).
@@ -51,7 +51,7 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 Roughly sorted according to the timeline supported in `fla`. The recommended training mode is `chunk` when available.
 
 | Year | Venue   | Model          | Paper                                                                                                                                         |                                              Code                                               |                                               `fla` impl                                               |
-| :--- | :------ | :------------- | :-------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------: | :----------------------------------------------------------------------------------------------------: |
+|:-----| :------ |:---------------|:----------------------------------------------------------------------------------------------------------------------------------------------| :---------------------------------------------------------------------------------------------: |:------------------------------------------------------------------------------------------------------:|
 | 2023 |         | RetNet         | [Retentive network: a successor to transformer for large language models](https://arxiv.org/abs/2307.08621)                                   |                  [official](https://github.com/microsoft/torchscale/tree/main)                  | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/multiscale_retention.py) |
 | 2024 | ICML    | GLA            | [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635)                                      |                  [official](https://github.com/berlino/gated_linear_attention)                  |         [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/gla.py)          |
 | 2024 | ICML    | Based          | [Simple linear attention language models balance the recall-throughput tradeoff](https://arxiv.org/abs/2402.18668)                            |                        [official](https://github.com/HazyResearch/based)                        |        [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/based.py)         |
@@ -69,6 +69,7 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 | 2025 |         | RWKV7          | [RWKV-7 "Goose" with Expressive Dynamic State Evolution](https://arxiv.org/abs/2503.14456)                                                    |                [official](https://github.com/BlinkDL/RWKV-LM/tree/main/RWKV-v7)                 |           [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/rwkv7)            |
 | 2025 |         | NSA            | [Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention](https://arxiv.org/abs/2502.11089)                         |                                                                                                 |            [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/nsa)             |
 | 2025 |         | FoX            | [Forgetting Transformer: Softmax Attention with a Forget Gate](https://arxiv.org/abs/2503.02130)                                              |                [official](https://github.com/zhixuan-lin/forgetting-transformer)                |      [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/forgetting_attn)       |
+| 2025 |         | DeltaProduct   | [DeltaProduct: Improving State-Tracking in Linear RNNs via Householder Products](https://arxiv.org/abs/2502.10297)   |    |  [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/layers/gated_deltaproduct.py)  |
 
 ## Installation
 
@@ -84,17 +85,23 @@ The following requirements should be satisfied
 
 You can install `fla` with pip:
 ```sh
-pip install flash-linear-attention
+pip install --no-use-pep517 flash-linear-attention
 ```
 As `fla` is actively developed now, for the latest features and updates, an alternative way is to install the package from source
 ```sh
 # uninstall `fla` first to ensure a successful upgrade
-pip uninstall flash-linear-attention && pip install -U git+https://github.com/fla-org/flash-linear-attention
+pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention
 ```
 or manage `fla` with submodules
 ```sh
 git submodule add https://github.com/fla-org/flash-linear-attention.git 3rdparty/flash-linear-attention
 ln -s 3rdparty/flash-linear-attention/fla fla
+```
+
+If you have installed `triton-nightly` and `torch` pre version, please use the following command:
+```sh
+pip install einops ninja datasets transformers numpy
+pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 ```
 
 ## Usage

@@ -27,10 +27,11 @@ except BaseException:
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``
-        line_vals=['rwkv6', 'rwkv7',  'gla', 'rwkv6_bwd', 'rwkv7_bwd', 'gla_bwd', 'retention_bwd', 'flash', 'flash_bwd'],
-        # label name for the lines
-        line_names=['rwkv6', 'rwkv7',  'gla', 'rwkv6_bwd', 'rwkv7_bwd', 'gla_bwd', 'retention_bwd', 'flash', 'flash_bwd'],
         # line styles
+        line_vals=['rwkv6', 'rwkv7', 'gla', 'flash', 'rwkv6_bwd', 'rwkv7_bwd', 'gla_bwd', 'retention_bwd', 'flash_bwd'],
+        # label name for the lines
+        line_names=['rwkv6', 'rwkv7', 'gla', 'flash', 'rwkv6_bwd', 'rwkv7_bwd', 'gla_bwd', 'retention_bwd', 'flash_bwd'],
+        # # line styles
         styles=[
             ('green', '-'),      # rwkv6
             ('blue', '--'),      # rwkv7
