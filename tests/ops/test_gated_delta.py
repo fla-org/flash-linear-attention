@@ -9,7 +9,7 @@ from einops import rearrange
 
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.utils.testing import assert_close
-from fla.utils import device, is_nvidia_hopper
+from fla.utils import device, is_intel_alchemist, is_nvidia_hopper
 
 compiled_mode = os.getenv("COMPILER_MODE") == "1"
 if compiled_mode:
@@ -244,6 +244,8 @@ def test_chunk(
 ):
     if is_nvidia_hopper and not compiled_mode and D == 32:
         pytest.skip(reason="workaround the magic problem, testing 32 and then 64 will cause an error on hopper")
+    if is_intel_alchemist and D > 128:
+        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
     if head_first:
         q = torch.randn(B, H, T, D, dtype=dtype)
         k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
@@ -321,6 +323,8 @@ def test_chunk_varlen(
     scale: float,
     dtype: torch.dtype,
 ):
+    if is_intel_alchemist and D > 128:
+        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
