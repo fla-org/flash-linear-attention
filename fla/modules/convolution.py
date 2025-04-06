@@ -231,7 +231,7 @@ class ShortConvolution(nn.Conv1d):
             cache = x.new_zeros(N, D, W)
         # during the decoding phase, we assume the batch is composed of sequences of length 1
         if cache is not None and B * T == N:
-            return self.step(x, cache)
+            return self.step(x, cache, cu_seqlens)
 
         if cache is not None:
             if cu_seqlens is not None:
@@ -268,10 +268,11 @@ class ShortConvolution(nn.Conv1d):
     def step(
         self,
         x: torch.Tensor,
-        cache: torch.Tensor
+        cache: torch.Tensor,
+        cu_seqlens: Optional[torch.LongTensor] = None
     ):
         shape = x.shape
-        x = x.squeeze(1)
+        x = x.squeeze(0) if cu_seqlens is not None else x.squeeze(1)
         if self.use_fast_conv1d:
             x = causal_conv1d_update(
                 x=x,
