@@ -72,7 +72,7 @@ def test_model(
     dtype: torch.dtype
 ):
     if config_class in [
-        ABCConfig, BitNetConfig, LinearAttentionConfig, LightNetConfig,
+        ABCConfig, LinearAttentionConfig, LightNetConfig,
         Mamba2Config, MambaConfig, SambaConfig, GatedDeltaProductConfig
     ]:
         pytest.skip("Variable length not supported yet")
