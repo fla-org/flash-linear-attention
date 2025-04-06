@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import RMSNorm, ShortConvolution
 from fla.modules.activations import swish
 from fla.modules.layernorm import rms_norm_linear
@@ -43,10 +44,10 @@ class HGRN2Attention(nn.Module):
         self.mode = mode
         self.hidden_size = hidden_size
 
-        if expand_ratio is None and num_heads is not None:
-            expand_ratio = hidden_size // num_heads
-        elif expand_ratio is not None and num_heads is None:
+        if expand_ratio is not None:
             num_heads = hidden_size // expand_ratio
+        elif expand_ratio is None and num_heads is not None:
+            expand_ratio = hidden_size // num_heads
         elif expand_ratio is None and num_heads is None:
             raise RuntimeError("One of `expand_ratio` or `num_heads` should be provided.")
         self.num_heads = num_heads
@@ -97,7 +98,7 @@ class HGRN2Attention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        # launching the triton kernel for just one token will actually be slower
+        batch_size, q_len, _ = hidden_states.shape
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
         last_state = None
@@ -105,28 +106,28 @@ class HGRN2Attention(nn.Module):
             last_state = past_key_values[self.layer_idx]
 
         cu_seqlens = kwargs.get('cu_seqlens', None)
+        if attention_mask is not None:
+            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
+            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+
         if self.use_short_conv:
             conv_state_q, conv_state_f, conv_state_i = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_f, conv_state_i = last_state['conv_state']
-            conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
             q, conv_state_q = self.q_conv1d(
                 x=self.q_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
             )
             f, conv_state_f = self.f_conv1d(
                 x=self.f_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_f,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
             )
             i, conv_state_i = self.i_conv1d(
                 x=self.i_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_i,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
@@ -135,10 +136,6 @@ class HGRN2Attention(nn.Module):
             q = self.q_proj(hidden_states)
             f = self.f_proj(hidden_states)
             i = self.i_proj(hidden_states)
-
-        # dealing with left-padding
-        if attention_mask is not None:
-            i = i.mul_(attention_mask[:, -i.shape[-2]:, None])
 
         q = swish(q)
 
@@ -196,16 +193,12 @@ class HGRN2Attention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_f, conv_state_i) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[1]
+                offset=q_len
             )
 
         o = rearrange(o, '... h d -> ... (h d)')
         o = rms_norm_linear(o, self.g_norm.weight, self.g_norm.bias, self.o_proj.weight, self.o_proj.bias)
-        return o, None, past_key_values
+        if attention_mask is not None:
+            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
 
-    def state_size(self, **kwargs) -> int:
-        state_size = self.forget_dim * self.head_i_dim
-        for module in self.children():
-            if isinstance(module, ShortConvolution):
-                state_size += module.state_size
-        return state_size
+        return o, None, past_key_values

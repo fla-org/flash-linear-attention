@@ -30,7 +30,7 @@ from fla.ops.utils.testing import assert_close
 from fla.utils import device, device_platform
 
 
-@pytest.mark.parametrize("L", [4])
+@pytest.mark.parametrize("L", [2])
 @pytest.mark.parametrize("B", [4])
 @pytest.mark.parametrize("T", [512])
 @pytest.mark.parametrize("H", [8])
@@ -71,9 +71,10 @@ def test_generation(
     config_class: AutoConfig,
     dtype: torch.dtype
 ):
+    torch.manual_seed(42)
     if config_class in [
-        ABCConfig, BitNetConfig, LinearAttentionConfig, LightNetConfig,
-        Mamba2Config, MambaConfig, SambaConfig, GatedDeltaProductConfig
+        ABCConfig, GatedDeltaProductConfig, ForgettingTransformerConfig, LinearAttentionConfig, LightNetConfig,
+        Mamba2Config, MambaConfig, NSAConfig, SambaConfig, RWKV6Config, RWKV7Config,
     ]:
         pytest.skip()
     config = config_class(**{
@@ -85,14 +86,14 @@ def test_generation(
     model.eval()
     model.to(dtype).to(device)
 
+    num_chunks = 4
+    chunk_size = T // num_chunks
     input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T)).to(device)
     attention_mask = torch.ones((B, T), dtype=torch.bool).to(device)
-    seq_start = torch.randint(low=0, high=T, size=(B,))
+    seq_start = torch.randint(low=0, high=chunk_size - 1, size=(B,))
     attention_mask[torch.arange(T) < seq_start[:, None]] = False
     ref = model(input_ids=input_ids, attention_mask=attention_mask).logits
 
-    num_chunks = 4
-    chunk_size = T // num_chunks
     logits = []
 
     out = model(

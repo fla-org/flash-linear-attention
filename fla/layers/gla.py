@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.activations import ACT2FN
 from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
@@ -170,7 +171,7 @@ class GatedLinearAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        # launching the triton kernel for just one token will actually be slower
+        batch_size, q_len, _ = hidden_states.shape
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
         last_state = None
@@ -178,28 +179,28 @@ class GatedLinearAttention(nn.Module):
             last_state = past_key_values[self.layer_idx]
 
         cu_seqlens = kwargs.get('cu_seqlens', None)
+        if attention_mask is not None:
+            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
+            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
             q, conv_state_q = self.q_conv1d(
                 x=self.q_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_v,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
@@ -212,16 +213,13 @@ class GatedLinearAttention(nn.Module):
 
         if self.feature_map_fn is not None:
             q, k = map(self.feature_map_fn, (q, k))
-        # dealing with left-padding
-        if attention_mask is not None:
-            v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
-        q = rearrange(q, 'b t (h d) -> b t h d', d=self.head_k_dim)
+        q = rearrange(q, '... (h d) -> ... h d', d=self.head_k_dim)
         if self.num_kv_groups > 1:
-            k, gk = (repeat(x, 'b t (h d) -> b t (h g) d', g=self.num_kv_groups, d=self.head_k_dim) for x in (k, gk))
-            v = repeat(v, 'b t (h d) -> b t (h g) d', g=self.num_kv_groups, d=self.head_v_dim)
+            k, gk = (repeat(x, '... (h d) -> ... (h g) d', g=self.num_kv_groups, d=self.head_k_dim) for x in (k, gk))
+            v = repeat(v, '... (h d) -> ... (h g) d', g=self.num_kv_groups, d=self.head_v_dim)
         else:
-            k, gk = (rearrange(x, 'b t (h d) -> b t h d', d=self.head_k_dim) for x in (k, gk))
-            v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
+            k, gk = (rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim) for x in (k, gk))
+            v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
         gk = F.logsigmoid(gk) / self.gate_logit_normalizer
 
         if self.clamp_min is not None:
@@ -268,27 +266,22 @@ class GatedLinearAttention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[1]
+                offset=q_len
             )
 
         if self.use_output_gate:
             g = self.g_proj(hidden_states)
             if self.fuse_norm_and_gate:
-                g = rearrange(g, 'b t (h d) -> b t h d', d=self.head_v_dim)
+                g = rearrange(g, '... (h d) -> ... h d', d=self.head_v_dim)
                 o = self.g_norm_swish_gate(o, g)
-                o = rearrange(o, 'b t h d -> b t (h d)')
+                o = rearrange(o, '... h d -> ... (h d)')
             else:
-                o = rearrange(self.g_norm(o), 'b t h d -> b t (h d)')
+                o = rearrange(self.g_norm(o), '... h d -> ... (h d)')
                 o = o * self.gate_fn(g)
         else:
-            o = rearrange(self.g_norm(o), 'b t h d -> b t (h d)')
+            o = rearrange(self.g_norm(o), '... h d -> ... (h d)')
         o = self.o_proj(o)
+        if attention_mask is not None:
+            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
 
         return o, None, past_key_values
-
-    def state_size(self, **kwargs) -> int:
-        state_size = self.key_dim * self.head_v_dim
-        for module in self.children():
-            if isinstance(module, ShortConvolution):
-                state_size += module.state_size
-        return state_size
