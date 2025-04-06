@@ -56,7 +56,7 @@ def find_dependent_tests(changed_file, test_dir, search_dir):
 
     # Check if the changed file is a test file itself
     is_test_file = abs_test_dir in abs_changed_file.parents
-    
+
     # Extract definitions from the changed file
     definitions = extract_definitions(abs_changed_file)
     if not definitions and not is_test_file:
