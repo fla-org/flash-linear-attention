@@ -12,7 +12,7 @@ class HGRNConfig(PretrainedConfig):
 
     def __init__(
         self,
-        attn_mode: str = "chunk",
+        attn_mode: str = "fused_recurrent",
         hidden_size: int = 2048,
         num_hidden_layers: int = 24,
         expand_ratio: Optional[int] = 1,

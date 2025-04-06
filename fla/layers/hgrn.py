@@ -128,10 +128,22 @@ class HGRNAttention(nn.Module):
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
-            o, recurrent_state = chunk_hgrn(i, f, recurrent_state, use_cache)
+            if cu_seqlens is not None:
+                raise NotImplementedError("Chunk mode does not support variable-length sequences.")
+            o, recurrent_state = chunk_hgrn(
+                x=i,
+                g=f,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+            )
         elif mode == 'fused_recurrent':
-            o, recurrent_state = fused_recurrent_hgrn(i, f, recurrent_state, use_cache,
-                                                      cu_seqlens=cu_seqlens)
+            o, recurrent_state = fused_recurrent_hgrn(
+                x=i,
+                g=f,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens
+            )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
