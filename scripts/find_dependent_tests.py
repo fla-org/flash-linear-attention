@@ -49,17 +49,29 @@ def find_files_using_definitions(definitions, directory):
 
 def find_dependent_tests(changed_file, test_dir, search_dir):
     """Find test files that call any of the definitions in the changed file or files that use these definitions."""
+    # Convert all paths to absolute paths for consistent comparison
+    abs_test_dir = Path(test_dir).resolve()
+    abs_search_dir = Path(search_dir).resolve()
+    abs_changed_file = Path(changed_file).resolve()
+
+    # Check if the changed file is a test file itself
+    is_test_file = abs_test_dir in abs_changed_file.parents
+    
     # Extract definitions from the changed file
-    definitions = extract_definitions(changed_file)
-    if not definitions:
+    definitions = extract_definitions(abs_changed_file)
+    if not definitions and not is_test_file:
         return set()
 
+    # If it's a test file, just return itself
+    if is_test_file:
+        return {str(abs_changed_file)}
+
     # Find files that use these definitions
-    dependent_files = find_files_using_definitions(definitions, search_dir)
+    dependent_files = find_files_using_definitions(definitions, abs_search_dir)
 
     # Find test files that call these definitions or are dependent on the dependent files
     test_files = set()
-    for test_file in Path(test_dir).rglob("test_*.py"):
+    for test_file in abs_test_dir.rglob("test_*.py"):
         if find_calls_in_file(test_file, definitions):
             test_files.add(str(test_file))
         else:
@@ -67,7 +79,6 @@ def find_dependent_tests(changed_file, test_dir, search_dir):
                 if find_calls_in_file(test_file, extract_definitions(dependent_file)):
                     test_files.add(str(test_file))
                     break
-
     return test_files
 
 
