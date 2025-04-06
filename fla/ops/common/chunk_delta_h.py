@@ -291,9 +291,9 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         stride_h = H*K*V
         stride_k = H*K
     if USE_INITIAL_STATE:
-        dh0 = dh0 + i_nh * K*V
+        dh0 += i_nh * K*V
     if USE_FINAL_STATE_GRADIENT:
-        dht = dht + i_nh * K*V
+        dht += i_nh * K*V
 
     if USE_FINAL_STATE_GRADIENT:
         p_dht1 = tl.make_block_ptr(dht, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
@@ -402,16 +402,16 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dh4 += tl.dot(b_q4, b_do.to(b_q.dtype))-tl.dot(b_d4, b_dv.to(b_d.dtype))
 
     if USE_INITIAL_STATE:
-        p_dh0 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
+        p_dh0 = tl.make_block_ptr(dh0, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
         tl.store(p_dh0, b_dh1.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
         if K > 64:
-            p_dh1 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (64, i_v * BV), (64, BV), (1, 0))
+            p_dh1 = tl.make_block_ptr(dh0, (K, V), (V, 1), (64, i_v * BV), (64, BV), (1, 0))
             tl.store(p_dh1, b_dh2.to(p_dh1.dtype.element_ty), boundary_check=(0, 1))
         if K > 128:
-            p_dh2 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (128, i_v * BV), (64, BV), (1, 0))
+            p_dh2 = tl.make_block_ptr(dh0, (K, V), (V, 1), (128, i_v * BV), (64, BV), (1, 0))
             tl.store(p_dh2, b_dh3.to(p_dh2.dtype.element_ty), boundary_check=(0, 1))
         if K > 192:
-            p_dh3 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (192, i_v * BV), (64, BV), (1, 0))
+            p_dh3 = tl.make_block_ptr(dh0, (K, V), (V, 1), (192, i_v * BV), (64, BV), (1, 0))
             tl.store(p_dh3, b_dh4.to(p_dh3.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -499,13 +499,12 @@ def chunk_gated_delta_rule_bwd_dhu(
         B, T, H, K, V = *q.shape, do.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     BT = 64
+    assert K <= 256, "current kernel does not support head dimension being larger than 256."
+
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
-
-    BT = 64
-    assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
     if head_first:
         dh = q.new_empty(B, H, NT, K, V)
