@@ -18,7 +18,7 @@ def assert_close(prefix, ref, tri, ratio, warning=False):
     msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
     print(msg)
     error_rate = get_err_ratio(ref, tri)
-    if warning or str(prefix).strip().lower() == "dh0" or (ci_env and error_rate < 0.01):
+    if warning or (ci_env and error_rate < 0.01):
         if error_rate > ratio:
             import warnings
             warnings.warn(msg)
