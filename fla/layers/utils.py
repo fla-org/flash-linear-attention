@@ -72,7 +72,7 @@ index_put_first_axis = IndexPutFirstAxis.apply
 
 
 @tensor_cache
-def _get_unpad_data(
+def get_unpad_data(
     attention_mask: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """
@@ -103,7 +103,7 @@ def unpad_input(
     k: torch.Tensor,
     v: torch.Tensor,
     attention_mask: torch.Tensor,
-    query_length: int,
+    q_len: int,
 ):
     """
     Unpads query, key, and values tensors, using a single dimension for all tokens
@@ -112,14 +112,14 @@ def unpad_input(
 
     Arguments:
         q (`torch.Tensor`):
-            Query state with padding. Shape: [batch_size, query_length, ...].
+            Query state with padding. Shape: [batch_size, q_len, ...].
         k (`torch.Tensor`):
-            Key state with padding. Shape: [batch_size, kv_seq_len, ...].
+            Key state with padding. Shape: [batch_size, seq_len, ...].
         v (`torch.Tensor`):
-            Value state with padding. Shape: [batch_size, kv_seq_len, ...].
+            Value state with padding. Shape: [batch_size, seq_len, ...].
         attention_mask (`torch.Tensor`):
             Boolean or int tensor of shape [batch_size, sequence_length], 1 means valid and 0 means not valid.
-        query_length (`int`):
+        q_len (`int`):
             Target length.
 
     Return:
@@ -139,25 +139,25 @@ def unpad_input(
             Maximum sequence length in batch (`max_seqlen_in_batch_q` for the target sequence
             i.e. query, `max_seqlen_in_batch_k` for the source sequence i.e. key/value).
     """
-    indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
-    batch_size, kv_seq_len, *_ = k.shape
+    indices_k, cu_seqlens_k, max_seqlen_in_batch_k = get_unpad_data(attention_mask)
+    batch_size, seq_len, *_ = k.shape
 
     k = index_first_axis(rearrange(k, "b s ... -> (b s) ..."), indices_k)
     v = index_first_axis(rearrange(v, "b s ... -> (b s) ..."), indices_k)
 
-    if query_length == kv_seq_len:
+    if q_len == seq_len:
         q = index_first_axis(rearrange(q, "b s ... -> (b s) ..."), indices_k)
         cu_seqlens_q = cu_seqlens_k
         max_seqlen_in_batch_q = max_seqlen_in_batch_k
         indices_q = indices_k
-    elif query_length == 1:
+    elif q_len == 1:
         max_seqlen_in_batch_q = 1
         cu_seqlens_q = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
         indices_q = cu_seqlens_q[:-1]
         q = q.squeeze(1)
     else:
         # The -q_len: slice assumes left padding.
-        indices_q, cu_seqlens_q, max_seqlen_in_batch_q = _get_unpad_data(attention_mask[:, -query_length:])
+        indices_q, cu_seqlens_q, max_seqlen_in_batch_q = get_unpad_data(attention_mask[:, -q_len:])
         q = index_first_axis(rearrange(q, "b s ... -> (b s) ..."), indices_q)
 
     return (
