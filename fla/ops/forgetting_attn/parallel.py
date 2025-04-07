@@ -620,7 +620,7 @@ class ParallelForgettingAttentionFunction(torch.autograd.Function):
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
         indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
 
-        g = chunk_local_cumsum(g, chunk_size, offsets=offsets, indices=indices, head_first=False)
+        g = chunk_local_cumsum(g, chunk_size, offsets=offsets, indices=indices)
         o, lse = parallel_forgetting_attn_fwd(
             q=q,
             k=k,

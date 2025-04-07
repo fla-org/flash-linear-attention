@@ -266,7 +266,7 @@ def fused_recurrent_gated_delta_rule(
         >>> o, ht = fused_gated_recurrent_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
-            output_final_state=True,
+            output_final_state=True
         )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))

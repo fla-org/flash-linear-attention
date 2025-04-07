@@ -1209,19 +1209,21 @@ def chunk_gsa(
         >>> s = torch.randn(B, T, H, M, device='cuda')
         >>> g = F.logsigmoid(torch.randn(B, T, H, M, device='cuda'))
         >>> h0 = (torch.randn(B, H, K, M, device='cuda'), torch.randn(B, H, M, V, device='cuda'))
-        >>> o, (hk, hv) = chunk_gsa(q, k, v, s, g,
-                                    initial_state=h0,
-                                    output_final_state=True,
-                                    head_first=False)
+        >>> o, (hk, hv) = chunk_gsa(
+            q, k, v, s, g,
+            initial_state=h0,
+            output_final_state=True
+        )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, s, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, s, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, (hk_var, hv_var) = chunk_gsa(q, k, v, s, g,
-                                                initial_state=h0,
-                                                output_final_state=True,
-                                                cu_seqlens=cu_seqlens,
-                                                head_first=False)
+        >>> o_var, (hk_var, hv_var) = chunk_gsa(
+            q, k, v, s, g,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert hk.allclose(hk_var)
         >>> assert hv.allclose(hv_var)

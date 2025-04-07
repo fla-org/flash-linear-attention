@@ -333,8 +333,7 @@ def chunk_gated_delta_rule(
         >>> o, ht = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
-            output_final_state=True,
-            head_first=False
+            output_final_state=True
         )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
@@ -344,8 +343,7 @@ def chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            head_first=False
+            cu_seqlens=cu_seqlens
         )
     """
     assert q.dtype == k.dtype == v.dtype

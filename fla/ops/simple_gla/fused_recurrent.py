@@ -70,7 +70,7 @@ def fused_recurrent_simple_gla(
         >>> o, ht = fused_recurrent_simple_gla(
             q, k, v, g,
             initial_state=h0,
-            output_final_state=True,
+            output_final_state=True
         )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, g))
@@ -80,7 +80,7 @@ def fused_recurrent_simple_gla(
             q, k, v, g,
             initial_state=h0,
             output_final_state=True,
-            cu_seqlens=cu_seqlens,
+            cu_seqlens=cu_seqlens
         )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)

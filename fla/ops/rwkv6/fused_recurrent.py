@@ -666,19 +666,21 @@ def fused_recurrent_rwkv6(
         >>> g = F.logsigmoid(torch.randn(B, T, H, K, device='cuda'))
         >>> u = torch.randn(H, K, device='cuda')
         >>> h0 = torch.randn(B, H, K, V, device='cuda')
-        >>> o, ht = fused_recurrent_rwkv6(q, k, v, g, u,
-                                          initial_state=h0,
-                                          output_final_state=True,
-                                          head_first=False)
+        >>> o, ht = fused_recurrent_rwkv6(
+            q, k, v, g, u,
+            initial_state=h0,
+            output_final_state=True
+        )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = fused_recurrent_rwkv6(q, k, v, g, u,
-                                                  initial_state=h0,
-                                                  output_final_state=True,
-                                                  cu_seqlens=cu_seqlens,
-                                                  head_first=False)
+        >>> o_var, ht_var = fused_recurrent_rwkv6(
+            q, k, v, g, u,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
