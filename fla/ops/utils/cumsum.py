@@ -373,9 +373,11 @@ def chunk_global_cumsum(
     elif len(s.shape) == 4:
         return chunk_global_cumsum_vector(s, dtype, reverse, offsets, head_first, output_dtype)
     else:
-        raise ValueError(f"Unsupported input shape {s.shape}. "
-                         f"which should be [B, H, T]/[B, H, T, D] if `head_first=True` "
-                         f"or [B, T, H]/[B, T, H, D] otherwise")
+        raise ValueError(
+            f"Unsupported input shape {s.shape}. "
+            f"which should be [B, T, H]/[B, T, H, D] if `head_first=False` "
+            f"or [B, H, T]/[B, H, T, D] otherwise"
+        )
 
 
 @input_guard
@@ -397,6 +399,6 @@ def chunk_local_cumsum(
     else:
         raise ValueError(
             f"Unsupported input shape {g.shape}. "
-            f"which should be (B, H, T, dim) if `head_first=True` "
-            f"or (batch_size, num_heads, seq_len) otherwise"
+            f"which should be (B, T, H, D) if `head_first=False` "
+            f"or (B, H, T, D) otherwise"
         )
