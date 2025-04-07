@@ -301,7 +301,7 @@ def fused_recurrent_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -359,7 +359,7 @@ def fused_recurrent_delta_rule_bwd(
     scale: float,
     initial_state: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -438,7 +438,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True,
+        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = False
     ):
         q_orig = q
@@ -501,7 +501,7 @@ def fused_recurrent_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""

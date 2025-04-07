@@ -394,7 +394,7 @@ def fused_recurrent_rwkv6_fwd(
     output_final_state: bool = False,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -445,7 +445,7 @@ def fused_recurrent_rwkv6_bwd(
     initial_state: Optional[torch.Tensor] = None,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -558,7 +558,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         output_final_state: bool = False,
         reverse: bool = False,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True
+        head_first: bool = False
     ):
         o, ht = fused_recurrent_rwkv6_fwd(
             q=q,
@@ -614,19 +614,19 @@ def fused_recurrent_rwkv6(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         r (torch.Tensor):
-            reception of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            reception of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
             Alias: q, query in linear attention.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         w (torch.Tensor):
-            data-dependent decays of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]` in log space! Alias: g.
+            data-dependent decays of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]` in log space! Alias: g.
         u (torch.Tensor):
             bonus of shape `[H, K]`
         scale (Optional[int]):
@@ -645,11 +645,11 @@ def fused_recurrent_rwkv6(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (Optional[torch.Tensor]):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
 
@@ -684,13 +684,19 @@ def fused_recurrent_rwkv6(
     """
     if cu_seqlens is not None:
         if r.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = FusedRecurrentRWKV6Function.apply(

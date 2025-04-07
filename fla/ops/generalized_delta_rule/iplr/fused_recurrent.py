@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import triton
@@ -406,7 +406,7 @@ def fused_recurrent_iplr_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    offsets: torch.Tensor = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -430,22 +430,30 @@ def fused_recurrent_iplr_delta_rule(
             Initial state of shape `[B, H, K, V]`. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
-        offsets (Optional[torch.Tensor]):
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
 
     """
-    if offsets is not None:
+    if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
-        if initial_state is not None and initial_state.shape[0] != len(offsets) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(offsets) - 1} rather than {initial_state.shape[0]}.")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = q.shape[-1] ** -0.5
     else:
         assert scale > 0, "scale must be positive"
     o, final_state = FusedRecurrentIPLRDeltaRuleFunction.apply(
-        q, k, v, a, b, scale, initial_state, output_final_state, offsets, head_first)
+        q, k, v, a, b, scale, initial_state, output_final_state, cu_seqlens, head_first)
     return o, final_state

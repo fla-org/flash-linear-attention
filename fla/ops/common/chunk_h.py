@@ -302,7 +302,7 @@ def chunk_fwd_h(
     h0: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
     states_in_fp32: bool = False
@@ -364,7 +364,7 @@ def chunk_bwd_dh(
     dht: torch.Tensor,
     scale: float,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
     states_in_fp32: bool = False

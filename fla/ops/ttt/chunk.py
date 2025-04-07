@@ -726,7 +726,7 @@ def chunk_ttt_linear_fwd_h(
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_first:
@@ -798,7 +798,7 @@ def chunk_ttt_linear_fwd_o(
     scale: Optional[float] = None,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:
@@ -853,7 +853,7 @@ def chunk_ttt_linear_bwd_h(
     initial_state_bias: Optional[torch.Tensor] = None,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_first:
@@ -923,7 +923,7 @@ def chunk_ttt_linear_bwd_dv_local(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 16
 ) -> torch.Tensor:
     if head_first:
@@ -979,7 +979,7 @@ def chunk_ttt_linear_bwd_norm(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 16
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # torch implementation of `dkh, dw, db, dk, dv` for LN^2
@@ -1075,7 +1075,7 @@ def chunk_ttt_linear_bwd_norm_ref(
     eps: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 16
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # torch implementation of `dkh, dw, db, dk, dv` for LN^2
@@ -1175,7 +1175,7 @@ def chunk_ttt_linear_bwd_dqke(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
@@ -1238,7 +1238,7 @@ def chunk_ttt_linear_fwd(
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     BT: int = 16
 ):
     h, hb, v_new, final_state, final_state_bias = chunk_ttt_linear_fwd_h(
@@ -1289,7 +1289,7 @@ def chunk_ttt_linear_bwd(
     initial_state_bias: torch.Tensor = None,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     h, v_new, x, y, rstd = chunk_ttt_linear_bwd_h(
         k=k,
@@ -1463,7 +1463,7 @@ def chunk_ttt_linear(
     initial_state_bias: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
 ):
     r"""
     Args:
@@ -1495,7 +1495,8 @@ def chunk_ttt_linear(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
+
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, H, T, V]`
@@ -1508,13 +1509,19 @@ def chunk_ttt_linear(
         eta = torch.full_like(q[:, :, :, :1], eta)
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     else:

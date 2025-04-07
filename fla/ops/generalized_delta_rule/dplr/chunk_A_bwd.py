@@ -369,7 +369,7 @@ def chunk_dplr_bwd_dqk_intra(
     dgk_last: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     scale: float = 1.0,
     chunk_size: int = 64,
 ):

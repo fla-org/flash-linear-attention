@@ -616,7 +616,7 @@ def chunk_gsa_fwd_v(
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     _, A, h, ht, o = chunk_gla_fwd(
@@ -646,7 +646,7 @@ def chunk_gsa_fwd_k(
     scale: float = 1.,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if head_first:
@@ -735,7 +735,7 @@ def chunk_gsa_bwd_v(
     scale: float = 1.,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     dq, dk, dv, dg, dh0 = chunk_gla_bwd(
@@ -772,7 +772,7 @@ def chunk_gsa_bwd_k(
     scale: float = 1.,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     if head_first:
@@ -924,7 +924,7 @@ def chunk_gsa_fwd(
     scale: float = 1.,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     hk0, hv0 = None, None
@@ -980,7 +980,7 @@ def chunk_gsa_bwd(
     dht: Tuple[torch.Tensor, torch.Tensor],
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     hk0, hv0 = None, None
@@ -1056,7 +1056,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         output_final_state: bool,
         checkpoint_level: int,
         offsets: Optional[torch.LongTensor],
-        head_first: bool = True
+        head_first: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         T = q.shape[2] if head_first else q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
@@ -1155,12 +1155,12 @@ def chunk_gsa(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, HQ, T, K]` if `head_first=True` else `[B, T, HQ, K]`.
+            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
             GQA is performed if `H` is not equal to `HQ`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         s (torch.Tensor):
             slot representations of shape `[B, H, T, M]` if `head_first=True` else `[B, T, H, M]`.
         g (torch.Tensor):
@@ -1187,11 +1187,11 @@ def chunk_gsa(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (Tuple[torch.Tensor]):
             Final state tuple having tensors of shape `[N, H, K, M]` and `[N, H, M, V]` if `output_final_state=True`.
             `None` otherwise.
@@ -1228,13 +1228,19 @@ def chunk_gsa(
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
         if initial_state is not None and initial_state[0].shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}."
+            )
     assert checkpoint_level in [0, 1, 2]
     if g is None:
         # TODO: this 3 steps took huge amount of time, ought to be optimized

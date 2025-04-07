@@ -83,7 +83,7 @@ def chunk_ttt_linear_ref(
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = True,
+    head_first: bool = False,
 ):
     assert q.dtype == k.dtype == v.dtype
     assert k.shape[-1] == v.shape[-1], "The key and value dimension must be the same."

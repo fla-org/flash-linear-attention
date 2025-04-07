@@ -229,7 +229,7 @@ def chunk_local_cumsum_scalar(
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     if head_first:
@@ -263,7 +263,7 @@ def chunk_local_cumsum_vector(
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     if head_first:
@@ -300,7 +300,7 @@ def chunk_global_cumsum_scalar(
     dtype: Optional[torch.dtype] = None,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     dtype = dtype or s.dtype
@@ -330,7 +330,7 @@ def chunk_global_cumsum_vector(
     dtype: Optional[torch.dtype] = None,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     dtype = dtype or s.dtype
@@ -363,7 +363,7 @@ def chunk_global_cumsum(
     dtype: Optional[torch.dtype] = None,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     if offsets is not None:
@@ -385,7 +385,7 @@ def chunk_local_cumsum(
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     if offsets is not None:
@@ -395,6 +395,8 @@ def chunk_local_cumsum(
     elif len(g.shape) == 4:
         return chunk_local_cumsum_vector(g, chunk_size, reverse, offsets, indices, head_first, output_dtype)
     else:
-        raise ValueError(f"Unsupported input shape {g.shape}. "
-                         f"which should be (B, H, T, dim) if `head_first=True` "
-                         f"or (batch_size, num_heads, seq_len) otherwise")
+        raise ValueError(
+            f"Unsupported input shape {g.shape}. "
+            f"which should be (B, H, T, dim) if `head_first=True` "
+            f"or (batch_size, num_heads, seq_len) otherwise"
+        )

@@ -462,7 +462,7 @@ def chunk_fwd_o(
     scale: Optional[float] = None,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:
@@ -506,7 +506,7 @@ def chunk_bwd_dv(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:
@@ -559,7 +559,7 @@ def chunk_bwd_dv_local(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:
@@ -615,7 +615,7 @@ def chunk_bwd_dqkwg(
     indices: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     scale: float = 1.0,
-    head_first: bool = True,
+    head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     if head_first:

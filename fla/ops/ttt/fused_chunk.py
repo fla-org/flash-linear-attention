@@ -474,7 +474,7 @@ def fused_chunk_ttt_linear_bwd_h(
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     assert offsets is None, "bwd of varlen is not implemented yet."
     if head_first:
@@ -547,7 +547,7 @@ def fused_chunk_ttt_linear_bwd_dh(
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     assert offsets is None, "bwd of varlen is not implemented yet."
     if head_first:
@@ -618,7 +618,7 @@ def fused_chunk_ttt_linear_fwd(
     initial_state_bias: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     BT: int = 16
 ):
     if head_first:
@@ -677,7 +677,7 @@ def fused_chunk_ttt_linear_bwd(
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     assert offsets is None, "bwd of varlen is not implemented yet."
     dq, h, v2, x, y, rstd = fused_chunk_ttt_linear_bwd_h(
@@ -817,7 +817,7 @@ def fused_chunk_ttt_linear(
     initial_state_bias: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
 ):
     r"""
     Args:
@@ -849,7 +849,7 @@ def fused_chunk_ttt_linear(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -865,13 +865,19 @@ def fused_chunk_ttt_linear(
         eta = torch.full_like(q[:, :, :, :1], eta)
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     else:

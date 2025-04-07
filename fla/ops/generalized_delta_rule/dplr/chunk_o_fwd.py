@@ -106,7 +106,7 @@ def chunk_dplr_fwd_o(
     h: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:

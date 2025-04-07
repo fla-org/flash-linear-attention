@@ -488,7 +488,7 @@ def chunk_fwd_h(
     states_in_fp32: bool = False,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_first:
@@ -569,7 +569,7 @@ def chunk_bwd_dh(
     states_in_fp32: bool = False,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_first:

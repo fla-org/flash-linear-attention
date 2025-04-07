@@ -424,9 +424,9 @@ def chunk_gated_delta_rule_fwd_h(
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
-    save_new_value: bool = True
+    save_new_value: bool = True,
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_first:
         B, H, T, K, V = *k.shape, u.shape[-1]
@@ -490,8 +490,8 @@ def chunk_gated_delta_rule_bwd_dhu(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
-    chunk_size: int = 64  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if head_first:
         B, H, T, K, V = *q.shape, do.shape[-1]

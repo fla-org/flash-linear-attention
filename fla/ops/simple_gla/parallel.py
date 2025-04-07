@@ -484,7 +484,7 @@ def parallel_simple_gla_fwd(
     scale: float,
     output_attentions: bool = False,
     chunk_size: int = 128,
-    head_first: bool = True,
+    head_first: bool = False,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
 ):
@@ -552,7 +552,7 @@ def parallel_simple_gla_bwd(
     do: torch.Tensor,
     scale: float,
     chunk_size: int = 128,
-    head_first: bool = True,
+    head_first: bool = False,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
 ):
@@ -679,18 +679,18 @@ def parallel_simple_gla(
     scale: Optional[float] = None,
     output_attentions: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
         g (torch.Tensor):
-            Forget gates of shape `[B, H, T]` if `head_first=True` else `[B, T, H]`.
+            Forget gates of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
             Compared to GLA, the gating is head-wise instead of elementwise.
         scale (Optional[int]):
             Scale factor for attention scores.
@@ -698,14 +698,14 @@ def parallel_simple_gla(
         output_attentions (bool):
             Whether to output the materialized attention scores of shape [B, H, T, T]. Default: `False`.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `True`.
+            Whether the inputs are in the head-first format. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`
     """

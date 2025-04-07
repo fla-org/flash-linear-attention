@@ -238,7 +238,7 @@ def fwd_prepare_wy_repr(
     A_ab: torch.Tensor,
     offsets: Optional[torch.LongTensor],
     indices: Optional[torch.LongTensor],
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if head_first:

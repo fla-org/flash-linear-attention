@@ -498,7 +498,7 @@ def chunk_fwd_h(
     offsets: Optional[torch.LongTensor] = None,
     split_offsets: Optional[torch.LongTensor] = None,
     split_indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     split_size: int = 256,
     states_in_fp32: bool = True
@@ -590,7 +590,7 @@ def chunk_bwd_dh(
     offsets: Optional[torch.Tensor] = None,
     split_offsets: Optional[torch.Tensor] = None,
     split_indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     split_size: int = 256,
     states_in_fp32: bool = True

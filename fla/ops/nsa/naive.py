@@ -14,18 +14,18 @@ def naive_nsa(
     indices: torch.LongTensor,
     block_size: int = 64,
     scale: Optional[float] = None,
-    head_first: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = False
 ) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, HQ, T, K]` if `head_first=True` else `[B, T, HQ, K]`.
+            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         indices (torch.LongTensor):
             Block indices of shape `[B, T, H, S]` if `head_first=True` else `[B, T, H, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
@@ -34,21 +34,23 @@ def naive_nsa(
         scale (Optional[int]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        head_first (Optional[bool]):
+            Whether the inputs are in the head-first format. Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, HQ, T, V]` if `head_first=True` else `[B, T, HQ, V]`.
+            Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
     if head_first:
         q, k, v, indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, indices))
 

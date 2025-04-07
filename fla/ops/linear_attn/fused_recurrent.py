@@ -237,7 +237,7 @@ def fused_recurrent_linear_attn(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     normalize: bool = False,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = q.shape[-1] ** -0.5

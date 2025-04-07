@@ -309,7 +309,7 @@ def chunk_dplr_bwd_dv(
     dh: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:
@@ -359,7 +359,7 @@ def chunk_dplr_bwd_o(
     indices: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     scale: float = 1.0,
-    head_first: bool = True,
+    head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     if head_first:
@@ -420,7 +420,7 @@ def chunk_dplr_bwd_dAu(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:

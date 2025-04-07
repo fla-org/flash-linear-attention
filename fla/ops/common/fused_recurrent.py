@@ -332,7 +332,7 @@ def fused_recurrent_fwd(
     output_final_state: bool = False,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -393,7 +393,7 @@ def fused_recurrent_bwd(
     initial_state: Optional[torch.Tensor] = None,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -487,7 +487,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         output_final_state: bool = False,
         reverse: bool = False,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True
+        head_first: bool = False
     ):
         o, ht = fused_recurrent_fwd(
             q=q,
@@ -555,7 +555,7 @@ def fused_recurrent(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     if scale is None:
         scale = k.shape[-1] ** -0.5

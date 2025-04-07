@@ -282,7 +282,7 @@ def chunk_fwd_intra_dplr_fn(
     chunk_size: int,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
 ):
     if head_first:
         B, H, T, K = k.shape

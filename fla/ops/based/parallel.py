@@ -395,7 +395,7 @@ def parallel_based(
     v: torch.Tensor,
     scale: Optional[float] = None,
     use_norm: bool = True,
-    head_first: bool = True
+    head_first: bool = False
 ):
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if scale is None:
