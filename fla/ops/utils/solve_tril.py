@@ -12,7 +12,7 @@ from fla.utils import input_guard
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -31,12 +31,12 @@ def solve_tril_16x16_kernel(
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -71,7 +71,7 @@ def solve_tril_16x16_kernel(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -79,7 +79,7 @@ def solve_tril_16x16_kernel(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['H', 'BT', 'HEAD_FIRST', 'USE_OFFSETS'],
+    key=['H', 'BT', 'HEAD_FIRST', 'IS_VARLEN'],
 )
 @triton.jit(do_not_specialize=['T'])
 def merge_16x16_to_32x32_inverse_kernel(
@@ -92,11 +92,11 @@ def merge_16x16_to_32x32_inverse_kernel(
     H: tl.constexpr,
     BT: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -133,7 +133,7 @@ def merge_16x16_to_32x32_inverse_kernel(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -141,7 +141,7 @@ def merge_16x16_to_32x32_inverse_kernel(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['H', 'BT', 'HEAD_FIRST', 'USE_OFFSETS'],
+    key=['H', 'BT', 'HEAD_FIRST', 'IS_VARLEN'],
 )
 @triton.jit(do_not_specialize=['T'])
 def merge_16x16_to_64x64_inverse_kernel(
@@ -154,11 +154,11 @@ def merge_16x16_to_64x64_inverse_kernel(
     H: tl.constexpr,
     BT: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -316,6 +316,5 @@ def solve_tril(
         H=H,
         BT=BT,
         HEAD_FIRST=head_first,
-        USE_OFFSETS=cu_seqlens is not None
     )
     return Ai

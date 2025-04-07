@@ -13,7 +13,7 @@ from fla.utils import input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -45,14 +45,14 @@ def fused_recurrent_fwd_kernel(
     BV: tl.constexpr,  # BLOCK SIZE along the V dimension
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     # indices
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -115,7 +115,7 @@ def fused_recurrent_fwd_kernel(
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_DHT': lambda args: args['dht'] is not None,
     'USE_DH0': lambda args: args['dh0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -157,7 +157,7 @@ def fused_recurrent_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state h0
     USE_DH0: tl.constexpr,  # whether to use dh0
     USE_DHT: tl.constexpr,  # whether to use dht
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
@@ -166,7 +166,7 @@ def fused_recurrent_bwd_kernel(
     db += i_v * B * H * K * T
     dq += i_v * B * H * K * T
     da += i_v * B * H * K * T
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = eos - bos
     else:

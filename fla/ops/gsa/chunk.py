@@ -16,7 +16,7 @@ from fla.utils import input_guard
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -48,14 +48,14 @@ def chunk_gsa_fwd_k_kernel_inter(
     BK: tl.constexpr,
     BV: tl.constexpr,
     NG: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_bg = i_bh // NG
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -112,7 +112,7 @@ def chunk_gsa_fwd_k_kernel_inter(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_fwd_k_kernel_intra(
@@ -131,7 +131,7 @@ def chunk_gsa_fwd_k_kernel_intra(
     BV: tl.constexpr,
     NC: tl.constexpr,
     NG: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -139,7 +139,7 @@ def chunk_gsa_fwd_k_kernel_intra(
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i = i_c // NC, i_c % NC
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -213,7 +213,7 @@ def chunk_gsa_fwd_k_kernel_intra(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -241,7 +241,7 @@ def chunk_gsa_bwd_k_kernel_dA(
     BV: tl.constexpr,
     NC: tl.constexpr,
     NG: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -249,7 +249,7 @@ def chunk_gsa_bwd_k_kernel_dA(
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         all = T
@@ -330,7 +330,7 @@ def chunk_gsa_bwd_k_kernel_dA(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -369,14 +369,14 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
     BK: tl.constexpr,
     BV: tl.constexpr,
     NG: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_bg = i_bh // NG
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -487,7 +487,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_intra_dvg(
@@ -509,7 +509,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     BV: tl.constexpr,
     NC: tl.constexpr,
     NG: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -517,7 +517,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // NG
     i_t, i_i = i_c // NC, i_c % NC
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos

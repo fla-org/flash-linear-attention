@@ -13,7 +13,7 @@ from fla.ops.utils.op import exp
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -51,7 +51,7 @@ def chunk_fwd_kernel_h_split(
     USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     # handle one split at a time
@@ -60,7 +60,7 @@ def chunk_fwd_kernel_h_split(
     # i_s: local split index inside a sequence
     i_k, i_v, i_sh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_ss, i_h = i_sh // H, i_sh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -152,7 +152,7 @@ def chunk_fwd_kernel_h_split(
 
 @triton.heuristics({
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -186,12 +186,12 @@ def chunk_fwd_kernel_h_reduction(
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NS = tl.cdiv(T, S)
@@ -252,7 +252,7 @@ def chunk_fwd_kernel_h_reduction(
 @triton.heuristics({
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -293,7 +293,7 @@ def chunk_bwd_kernel_dh_split(
     USE_GV: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     # handle one split at a time
@@ -302,7 +302,7 @@ def chunk_bwd_kernel_dh_split(
     # i_s: local split index inside a sequence
     i_k, i_v, i_sh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_ss, i_hq = i_sh // HQ, i_sh % HQ
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -390,7 +390,7 @@ def chunk_bwd_kernel_dh_split(
 
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -426,13 +426,13 @@ def chunk_bwd_kernel_dh_reduction(
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_ng, i_h = i_nh // NG, i_hq // NG
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NS = tl.cdiv(T, S)

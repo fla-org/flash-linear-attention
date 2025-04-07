@@ -18,7 +18,7 @@ triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
 @triton.heuristics({
     'NV': lambda args: triton.cdiv(args['V'], args['BV']),
     'OUTPUT_ATTENTIONS': lambda args: args['attn'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_G': lambda args: args['g'] is not None
 })
 @triton.autotune(
@@ -52,16 +52,16 @@ def parallel_simple_gla_fwd_kernel(
     NV: tl.constexpr,
     OUTPUT_ATTENTIONS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr
 ):
-    tl.static_assert(not (USE_OFFSETS and HEAD_FIRST), "USE_OFFSETS and HEAD_FIRST cannot be True at the same time")
+    tl.static_assert(not (IS_VARLEN and HEAD_FIRST), "IS_VARLEN and HEAD_FIRST cannot be True at the same time")
     i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H
     o += i_k * B * T * H * V
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -355,7 +355,7 @@ def parallel_simple_gla_bwd_kernel_dkv(
 
 @triton.heuristics({
     'NV': lambda args: triton.cdiv(args['V'], args['BV']),
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_G': lambda args: args['g'] is not None
 })
 @triton.autotune(
@@ -389,11 +389,10 @@ def parallel_simple_gla_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     NV: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
     USE_G: tl.constexpr
 ):
-    tl.static_assert(not (USE_OFFSETS and HEAD_FIRST), "USE_OFFSETS and HEAD_FIRST cannot be True at the same time")
     i_kv, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_k, i_v = i_kv // NV, i_kv % NV
     i_b, i_h = i_bh // H, i_bh % H
@@ -403,7 +402,7 @@ def parallel_simple_gla_bwd_kernel(
     if USE_G:
         dg += i_kv * B * H * T
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
