@@ -9,7 +9,7 @@ from einops import rearrange
 
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.utils.testing import assert_close
-from fla.utils import device
+from fla.utils import device, is_intel_alchemist
 
 compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
 if compiled_mode:
@@ -242,6 +242,8 @@ def test_chunk(
     head_first: bool,
     gate_logit_normalizer: float
 ):
+    if is_intel_alchemist and D > 128:
+        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
     if head_first:
         q = torch.randn(B, H, T, D, dtype=dtype)
         k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
@@ -319,6 +321,8 @@ def test_chunk_varlen(
     scale: float,
     dtype: torch.dtype,
 ):
+    if is_intel_alchemist and D > 128:
+        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments

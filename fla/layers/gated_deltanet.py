@@ -11,6 +11,7 @@ import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 
+from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
@@ -197,7 +198,9 @@ class GatedDeltaNet(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        batch_size, q_len, _ = hidden_states.shape
+        # change to inference mode.
+        mode = 'fused_recurrent' if q_len <= 64 else self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
@@ -206,28 +209,28 @@ class GatedDeltaNet(nn.Module):
             last_state = past_key_values[self.layer_idx]
 
         cu_seqlens = kwargs.get('cu_seqlens', None)
+        if attention_mask is not None:
+            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
+            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
             q, conv_state_q = self.q_conv1d(
                 x=self.q_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
-                mask=conv_mask,
                 cache=conv_state_v,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens
@@ -237,15 +240,10 @@ class GatedDeltaNet(nn.Module):
             k = F.silu(self.k_proj(hidden_states))
             v = F.silu(self.v_proj(hidden_states))
 
-        q, k = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_k_dim), (q, k))
-        v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
+        q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
+        v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
-
-        # dealing with padding
-        if attention_mask is not None:
-            beta = beta.mul(attention_mask[:, -beta.shape[-2]:, None])
-            g = g.mul(attention_mask[:, -g.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
@@ -274,12 +272,15 @@ class GatedDeltaNet(nn.Module):
                 head_first=False,
                 use_qk_l2norm_in_kernel=True
             )
+        else:
+            raise NotImplementedError(f"Not supported mode `{mode}`.")
+
         if past_key_values is not None:
             past_key_values.update(
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[1]
+                offset=q_len
             )
 
         if self.use_gate:
@@ -289,5 +290,7 @@ class GatedDeltaNet(nn.Module):
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
+        if attention_mask is not None:
+            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
 
         return o, None, past_key_values
