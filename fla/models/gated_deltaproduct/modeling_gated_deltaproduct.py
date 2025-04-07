@@ -116,7 +116,6 @@ class GatedDeltaProductBlock(nn.Module):
                 allow_neg_eigval=config.allow_neg_eigval,
                 num_householder=config.num_householder,
                 layer_idx=layer_idx,
-                use_beta_conv=config.use_beta_conv
             )
         if not config.norm_first:
             self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
