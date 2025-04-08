@@ -544,7 +544,6 @@ def parallel_attn_bwd(
     scale: float = None,
     chunk_size: int = 128,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -554,8 +553,10 @@ def parallel_attn_bwd(
     BS = min(32, BS) if check_shared_mem('ampere') else min(16, BS)  # SY:H100 should at least use BS=64 to use WGMMA
     BK = max(16, triton.next_power_of_2(K))
     BV = max(16, triton.next_power_of_2(V))
-    NV = triton.cdiv(V, BV)
+
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    NV = triton.cdiv(V, BV)
 
     delta = parallel_attn_bwd_preprocess(o, do)
 
@@ -671,7 +672,6 @@ class ParallelAttentionFunction(torch.autograd.Function):
             scale=ctx.scale,
             chunk_size=ctx.chunk_size,
             offsets=ctx.cu_seqlens,
-            indices=ctx.indices
         )
         if dg is not None:
             dg = chunk_global_cumsum(dg, offsets=ctx.cu_seqlens, reverse=True)

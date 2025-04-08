@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_chunk_offsets
+from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem, use_cuda_graph
 
@@ -52,7 +52,6 @@ def chunk_dplr_fwd_kernel_h(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
@@ -73,29 +72,18 @@ def chunk_dplr_fwd_kernel_h(
         b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
 
     for i_t in range(NT):
-        if HEAD_FIRST:
-            p_h = tl.make_block_ptr(h + (i_nh * NT + i_t) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        else:
-            p_h = tl.make_block_ptr(h + ((boh + i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+        p_h = tl.make_block_ptr(h + ((boh + i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
 
         b_hc = tl.zeros([BK, BV], dtype=tl.float32)
         # since we need to make all DK in the SRAM. we face serve SRAM memory burden. By subchunking we allievate such burden
         for i_c in range(tl.cdiv(min(BT, T - i_t * BT), BC)):
-            if HEAD_FIRST:
-                p_kg = tl.make_block_ptr(kg + i_nh * T*K, (K, T), (1, K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-                p_bg = tl.make_block_ptr(bg + i_nh * T*K, (K, T), (1, K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-                p_w = tl.make_block_ptr(w + i_nh * T*K, (T, K), (K, 1), (i_t * BT + i_c * BC, i_k * BK), (BC, BK), (1, 0))
-                p_v = tl.make_block_ptr(v + i_nh * T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-                p_u = tl.make_block_ptr(u + i_nh * T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-                p_v_new = tl.make_block_ptr(v_new+i_nh*T*V, (T, V), (V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-            else:
-                p_kg = tl.make_block_ptr(kg+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-                p_bg = tl.make_block_ptr(bg+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
-                p_w = tl.make_block_ptr(w+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_c * BC, i_k * BK), (BC, BK), (1, 0))
-                p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-                p_u = tl.make_block_ptr(u+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
-                p_v_new = tl.make_block_ptr(v_new+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC, i_v * BV), (BC, BV), (1, 0))
+            p_kg = tl.make_block_ptr(kg+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
+            p_bg = tl.make_block_ptr(bg+(bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_c * BC), (BK, BC), (0, 1))
+            p_w = tl.make_block_ptr(w+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_c * BC, i_k * BK), (BC, BK), (1, 0))
+            p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
+            p_u = tl.make_block_ptr(u+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_c * BC, i_v * BV), (BC, BV), (1, 0))
+            p_v_new = tl.make_block_ptr(v_new+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT+i_c*BC, i_v * BV), (BC, BV), (1, 0))
             # [BK, BC]
             b_kg = tl.load(p_kg, boundary_check=(0, 1))
             b_v = tl.load(p_v, boundary_check=(0, 1))
@@ -107,11 +95,8 @@ def chunk_dplr_fwd_kernel_h(
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
 
         last_idx = min((i_t + 1) * BT, T) - 1
-        if HEAD_FIRST:
-            b_g_last = tl.load(gk + i_nh * T * K + last_idx * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
-        else:
-            b_g_last = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
-                               tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
+        b_g_last = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                           tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
         b_h *= exp(b_g_last[:, None])
         b_h += b_hc
 
@@ -130,19 +115,15 @@ def chunk_dplr_fwd_h(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *kg.shape, u.shape[-1]
-    else:
-        B, T, H, K, V = *kg.shape, u.shape[-1]
+    B, T, H, K, V = *kg.shape, u.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
+        indices = prepare_chunk_indices(offsets, BT)
         N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
@@ -163,10 +144,7 @@ def chunk_dplr_fwd_h(
     NV = triton.cdiv(V, BV)
     assert NK == 1, 'NK > 1 is not supported because it involves time-consuming synchronization'
 
-    if head_first:
-        h = kg.new_empty(B, H, NT, K, V)
-    else:
-        h = kg.new_empty(B, NT, H, K, V)
+    h = kg.new_empty(B, NT, H, K, V)
     final_state = kg.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u)
     grid = (NK, NV, N * H)
@@ -192,6 +170,5 @@ def chunk_dplr_fwd_h(
         BK=BK,
         BV=BV,
         NT=NT,
-        HEAD_FIRST=head_first
     )
     return h, v_new, final_state

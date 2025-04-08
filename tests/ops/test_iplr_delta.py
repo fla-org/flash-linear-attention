@@ -23,7 +23,7 @@ else:
     test_b_list = [2]
     test_t_list = [1, 15, 63, 300]
     test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [64, 32, 100, 256]
+    test_d_list = [32, 64, 100, 256]
     test_gate_list = [1, 0.1, 10]
 test_h_list = [2]
 
@@ -151,7 +151,7 @@ def recurrence_iplr_delta_rule_ref(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -212,7 +212,7 @@ def test_chunk(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("head_first", [True, False])
 def test_recurrent(
     B: int,
@@ -273,4 +273,4 @@ def test_recurrent(
     assert_close(" dv", dv, v.grad, 0.003)
     assert_close(" da", da, a.grad, 0.003)
     assert_close(" db", db, b.grad, 0.003)
-    assert_close(" dh0", dh0, h0.grad, 0.003)
+    assert_close("dh0", dh0, h0.grad, 0.003)

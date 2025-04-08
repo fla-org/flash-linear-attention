@@ -29,7 +29,7 @@ test_h_list = [2]
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -128,7 +128,7 @@ def test_chunk(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -227,7 +227,7 @@ def test_fused_chunk_fwd(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"

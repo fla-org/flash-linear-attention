@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.utils.op import gather
 from fla.utils import is_gather_supported, use_cuda_graph
 
@@ -33,7 +34,6 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     BT: tl.constexpr,
     BC: tl.constexpr,  # placeholder, do not delete
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -43,12 +43,8 @@ def fwd_prepare_wy_repr_kernel_chunk32(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-    if HEAD_FIRST:
-        p_Aab = tl.make_block_ptr(A_ab + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        p_Aab_inv = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    else:
-        p_Aab = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        p_Aab_inv = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_Aab = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_Aab_inv = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_A_ab = tl.load(p_Aab, boundary_check=(0, 1))
     b_A_ab = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_A_ab, 0)
     for i in range(1, BT):
@@ -83,7 +79,6 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     BT: tl.constexpr,
     BC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr = is_gather_supported
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -95,23 +90,13 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    if HEAD_FIRST:
-
-        p_A1 = tl.make_block_ptr(A_ab + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
-        p_A2 = tl.make_block_ptr(A_ab + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
-        p_A3 = tl.make_block_ptr(A_ab + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
-        p_A_inv1 = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
-        p_A_inv2 = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
-        p_A_inv3 = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
-        p_A_inv4 = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, BC), (BC, BC), (1, 0))
-    else:
-        p_A1 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
-        p_A2 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
-        p_A3 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
-        p_A_inv1 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
-        p_A_inv2 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
-        p_A_inv3 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
-        p_A_inv4 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, BC), (BC, BC), (1, 0))
+    p_A1 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
+    p_A2 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
+    p_A3 = tl.make_block_ptr(A_ab + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
+    p_A_inv1 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BC, BC), (1, 0))
+    p_A_inv2 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, BC), (BC, BC), (1, 0))
+    p_A_inv3 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT + BC, 0), (BC, BC), (1, 0))
+    p_A_inv4 = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, BC), (BC, BC), (1, 0))
 
     b_A = tl.load(p_A1, boundary_check=(0, 1))
     b_A2 = tl.load(p_A2, boundary_check=(0, 1))
@@ -180,7 +165,6 @@ def fwd_wu_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -191,12 +175,8 @@ def fwd_wu_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    if HEAD_FIRST:
-        p_A_ab_inv = tl.make_block_ptr(A_ab_inv + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        p_A_ak = tl.make_block_ptr(A_ak + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    else:
-        p_A_ab_inv = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        p_A_ak = tl.make_block_ptr(A_ak + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_A_ab_inv = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_A_ak = tl.make_block_ptr(A_ak + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_Aab_inv = tl.load(p_A_ab_inv, boundary_check=(0, 1))
     b_Aak = tl.load(p_A_ak, boundary_check=(0, 1))
     o_s = tl.arange(0, BT)
@@ -209,70 +189,18 @@ def fwd_wu_kernel(
     b_Aab_inv = b_Aab_inv.to(ag.dtype.element_ty, fp_downcast_rounding="rtne")
 
     for i_k in range(tl.cdiv(K, BK)):
-        if HEAD_FIRST:
-            p_ag = tl.make_block_ptr(ag + i_bh * T * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_w = tl.make_block_ptr(w + i_bh * T * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        else:
-            p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_ag = tl.make_block_ptr(ag + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_ag = tl.load(p_ag, boundary_check=(0, 1))
         b_w = tl.dot(b_Aab_inv, b_ag)  # both bf16 or fp16
         tl.store(p_w, b_w.to(p_w.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
     for i_v in range(tl.cdiv(V, BV)):
-        if HEAD_FIRST:
-            p_v = tl.make_block_ptr(v + i_bh * T * V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_u = tl.make_block_ptr(u + i_bh * T * V, (T, V), (V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        else:
-            p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_u = tl.dot(b_Aak, b_v)  # both bf16 or fp16
         tl.store(p_u, b_u.to(p_u.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-
-
-def fwd_prepare_wy_repr(
-    ag: torch.Tensor,
-    v: torch.Tensor,
-    A_ak: torch.Tensor,
-    A_ab: torch.Tensor,
-    offsets: Optional[torch.LongTensor],
-    indices: Optional[torch.LongTensor],
-    head_first: bool = False,
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K = ag.shape
-    else:
-        B, T, H, K = ag.shape
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
-    BC = min(BT, 32)
-    fwd_fn = fwd_prepare_wy_repr_kernel_chunk64 if BT == 64 else fwd_prepare_wy_repr_kernel_chunk32
-    A_ab_inv = torch.empty_like(A_ab)
-    fwd_fn[(NT, B * H)](
-        A_ab=A_ab,
-        A_ab_inv=A_ab_inv,
-        offsets=offsets,
-        indices=indices,
-        T=T,
-        H=H,
-        BT=BT,
-        BC=BC,
-        HEAD_FIRST=head_first
-    )
-    w, u = fwd_wu(
-        ag=ag,
-        v=v,
-        A_ak=A_ak,
-        A_ab_inv=A_ab_inv,
-        offsets=offsets,
-        indices=indices,
-        head_first=head_first,
-        chunk_size=BT
-    )
-    return w, u, A_ab_inv
 
 
 def fwd_wu(
@@ -281,23 +209,19 @@ def fwd_wu(
     A_ak: torch.Tensor,
     A_ab_inv: torch.Tensor,
     offsets: Optional[torch.LongTensor],
-    indices: Optional[torch.LongTensor],
-    head_first: bool,
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *ag.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *ag.shape, v.shape[-1]
+    B, T, H, K, V = *ag.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     BK = min(triton.next_power_of_2(K), 64)
     BV = min(triton.next_power_of_2(V), 64)
 
     u = torch.empty_like(v)
     w = torch.empty_like(ag)
-    fwd_wu_kernel[(NT, B*H)](
+    fwd_wu_kernel[(NT, B * H)](
         ag=ag,
         v=v,
         A_ak=A_ak,
@@ -313,6 +237,42 @@ def fwd_wu(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
     )
     return w, u
+
+
+def fwd_prepare_wy_repr(
+    ag: torch.Tensor,
+    v: torch.Tensor,
+    A_ak: torch.Tensor,
+    A_ab: torch.Tensor,
+    offsets: Optional[torch.LongTensor],
+    chunk_size: int = 64
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, T, H, _ = ag.shape
+    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
+    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    BC = min(BT, 32)
+    fwd_fn = fwd_prepare_wy_repr_kernel_chunk64 if BT == 64 else fwd_prepare_wy_repr_kernel_chunk32
+    A_ab_inv = torch.empty_like(A_ab)
+    fwd_fn[(NT, B * H)](
+        A_ab=A_ab,
+        A_ab_inv=A_ab_inv,
+        offsets=offsets,
+        indices=indices,
+        T=T,
+        H=H,
+        BT=BT,
+        BC=BC,
+    )
+    w, u = fwd_wu(
+        ag=ag,
+        v=v,
+        A_ak=A_ak,
+        A_ab_inv=A_ab_inv,
+        offsets=offsets,
+        chunk_size=BT
+    )
+    return w, u, A_ab_inv

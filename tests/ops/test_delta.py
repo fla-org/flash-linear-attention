@@ -183,7 +183,7 @@ def test_chunk_varlen(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason="Intel Triton Failure"

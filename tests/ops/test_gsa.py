@@ -427,14 +427,14 @@ def test_inference(
     tri = torch.empty_like(ref)
     for i in range(T):
         o, ht = fused_recurrent_gsa(
-            q[:, :, i:i+1],
-            k[:, :, i:i+1],
-            v[:, :, i:i+1],
-            s[:, :, i:i+1],
-            g[:, :, i:i+1],
+            q[:, :, i:i+1].transpose(1, 2),
+            k[:, :, i:i+1].transpose(1, 2),
+            v[:, :, i:i+1].transpose(1, 2),
+            s[:, :, i:i+1].transpose(1, 2),
+            g[:, :, i:i+1].transpose(1, 2),
             initial_state=h0,
             output_final_state=True
         )
-        tri[:, :, i] = o.squeeze(2)
+        tri[:, :, i] = o.squeeze(1)
         assert_close(f"o{i}", ref[:, :, i], tri[:, :, i], 0.005)
         h0 = ht

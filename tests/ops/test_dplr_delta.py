@@ -21,7 +21,7 @@ else:
     test_b_list = [2]
     test_t_list = [1, 15, 63, 300]
     test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [64, 32, 100, 256]
+    test_d_list = [32, 64, 100, 256]
     test_gate_list = [1, 0.1, 10]
 test_h_list = [2]
 
@@ -90,12 +90,7 @@ def chunk_dplr_delta_rule_ref(
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
     if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        a = a.transpose(1, 2)
-        b = b.transpose(1, 2)
-        gk = gk.transpose(1, 2)
+        q, k, v, a, b, gk = map(lambda x: rearrange(x, 'b t h ... -> b h t ...'), (q, k, v, a, b, gk))
     T = q.shape[-2]
     pad_len = (BT - (T % BT)) % BT
 
@@ -165,7 +160,7 @@ def chunk_dplr_delta_rule_ref(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -233,7 +228,7 @@ def test_recurrent_forward(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("compile", [False, True])
 @pytest.mark.skipif(
@@ -306,7 +301,7 @@ def test_fused_recurrent_fwd(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("scale", [0.25])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.parametrize("compile", [False, True])
 @pytest.mark.skipif(
@@ -343,7 +338,7 @@ def test_chunk(
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
-    gk = torch.nn.functional.logsigmoid(gk) / gate_logit_normalizer
+    gk = F.logsigmoid(gk) / gate_logit_normalizer
 
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
@@ -392,7 +387,7 @@ def test_chunk(
     assert_close(" db", ref_db, tri_db, 0.008)
     if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:  # otherwise it is meaningless
         assert_close(" dg", ref_dg, tri_dg, 0.008)
-    assert_close(" dh0", ref_dh0, tri_dh0, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 
 
 @pytest.mark.parametrize("N", test_b_list)
@@ -400,7 +395,7 @@ def test_chunk(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
@@ -422,7 +417,7 @@ def test_chunk_varlen(
     # randomly split the sequence into N segments
     offsets = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
@@ -487,4 +482,4 @@ def test_chunk_varlen(
     assert_close(" da", ref_da, tri_da, 0.008)
     assert_close(" db", ref_db, tri_db, 0.008)
     assert_close(" dg", ref_dg, tri_dg, 0.008)
-    assert_close(" dh0", ref_dh0, tri_dh0, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.008)

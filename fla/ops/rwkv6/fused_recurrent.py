@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
+from einops import rearrange
 
 from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
@@ -46,7 +48,6 @@ def fused_recurrent_rwkv6_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -60,18 +61,11 @@ def fused_recurrent_rwkv6_fwd_kernel(
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    if HEAD_FIRST:
-        p_q = q + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_k = k + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_v = v + i_nh * T*V + ((T-1) * V if REVERSE else 0) + o_v
-        p_w = w + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_o = o + (i_k * B*H + i_nh) * T*V + ((T-1) * V if REVERSE else 0) + o_v
-    else:
-        p_q = q + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-        p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_o = o + ((i_k * all + bos) + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_q = q + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_o = o + ((i_k * all + bos) + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
     p_u = u + i_h * K + o_k
 
     mask_k = o_k < K
@@ -94,11 +88,11 @@ def fused_recurrent_rwkv6_fwd_kernel(
         b_o = tl.sum((b_h + b_kv * b_u[:, None]) * b_q[:, None], 0)
         b_h = b_h * exp(b_w)[:, None] + b_kv
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
-        p_q += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_k += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_v += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_w += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_o += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
+        p_q += (-1 if REVERSE else 1) * H*K
+        p_k += (-1 if REVERSE else 1) * H*K
+        p_v += (-1 if REVERSE else 1) * H*V
+        p_w += (-1 if REVERSE else 1) * H*K
+        p_o += (-1 if REVERSE else 1) * H*V
 
     if STORE_FINAL_STATE:
         p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -139,7 +133,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     REVERSE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -153,20 +146,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    if HEAD_FIRST:
-        p_k = k + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_v = v + i_nh * T*V + ((T-1) * V if REVERSE else 0) + o_v
-        p_w = w + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_do = do + i_nh * T*V + ((T-1) * V if REVERSE else 0) + o_v
-        p_dq = dq + (i_v * B*H + i_nh) * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_dq1 = dq1 + (i_v * B*H + i_nh) * T*K + ((T-1) * K if REVERSE else 0) + o_k
-    else:
-        p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-        p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_do = do + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-        p_dq = dq + ((i_v * all + bos) + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_dq1 = dq1 + ((i_v * all + bos) + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_do = do + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_dq = dq + ((i_v * all + bos) + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_dq1 = dq1 + ((i_v * all + bos) + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
     p_u = u + i_h * K + o_k
 
     mask_k = o_k < K
@@ -195,12 +180,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=mask_k)
         tl.store(p_dq1, b_dq1.to(p_dq1.dtype.element_ty), mask=mask_k)
 
-        p_k += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_v += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_w += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_do += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_dq += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_dq1 += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
+        p_k += (-1 if REVERSE else 1) * H*K
+        p_v += (-1 if REVERSE else 1) * H*V
+        p_w += (-1 if REVERSE else 1) * H*K
+        p_do += (-1 if REVERSE else 1) * H*V
+        p_dq += (-1 if REVERSE else 1) * H*K
+        p_dq1 += (-1 if REVERSE else 1) * H*K
 
 
 @triton.heuristics({
@@ -239,7 +224,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     REVERSE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -253,24 +237,14 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    if HEAD_FIRST:
-        p_q = q + i_nh * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_k = k + i_nh * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_v = v + i_nh * T*V + ((T-1) * V if not REVERSE else 0) + o_v
-        p_w = w + i_nh * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_do = do + i_nh * T*V + ((T-1) * V if not REVERSE else 0) + o_v
-        p_dk = dk + (i_v * B*H + i_nh) * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_dk1 = dk1 + (i_v * B*H + i_nh) * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_dv = dv + (i_k * B*H + i_nh) * T*V + ((T-1) * V if not REVERSE else 0) + o_v
-    else:
-        p_q = q + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_k = k + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_v = v + (bos + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
-        p_w = w + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_do = do + (bos + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
-        p_dk = dk + ((i_v * all + bos) + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_dk1 = dk1 + ((i_v * all + bos) + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_dv = dv + ((i_k * all + bos) + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
+    p_q = q + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
+    p_w = w + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_do = do + (bos + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
+    p_dk = dk + ((i_v * all + bos) + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_dk1 = dk1 + ((i_v * all + bos) + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_dv = dv + ((i_k * all + bos) + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
     p_u = u + i_h * K + o_k
 
     mask_k = o_k < K
@@ -297,14 +271,14 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         b_dh *= exp(b_w)[:, None]
         b_dh += b_dkv
 
-        p_q += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_k += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_v += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_w += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_do += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_dk += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_dk1 += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_dv += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * V
+        p_q += (-1 if not REVERSE else 1) * H*K
+        p_k += (-1 if not REVERSE else 1) * H*K
+        p_v += (-1 if not REVERSE else 1) * H*V
+        p_w += (-1 if not REVERSE else 1) * H*K
+        p_do += (-1 if not REVERSE else 1) * H*V
+        p_dk += (-1 if not REVERSE else 1) * H*K
+        p_dk1 += (-1 if not REVERSE else 1) * H*K
+        p_dv += (-1 if not REVERSE else 1) * H*V
 
     if USE_INITIAL_STATE:
         p_dh0 = dh0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -338,7 +312,6 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     BT: tl.constexpr,
     BK: tl.constexpr,
     REVERSE: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
     i_k, i_nh = tl.program_id(0), tl.program_id(1)
@@ -357,18 +330,11 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
 
     i_t = 0 if not REVERSE else NT - 1
     for _ in range(NT):
-        if HEAD_FIRST:
-            p_q = tl.make_block_ptr(q + i_nh * T*K, (T, K), (K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-            p_dq = tl.make_block_ptr(dq + i_nh * T*K, (T, K), (K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k + i_nh * T*K, (T-1, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dk = tl.make_block_ptr(dk + i_nh * T*K, (T-1, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dw = tl.make_block_ptr(dw + i_nh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        else:
-            p_q = tl.make_block_ptr(q + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-            p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_q = tl.make_block_ptr(q + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
+        p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         # [BT, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
         b_dq = tl.load(p_dq, boundary_check=(0, 1)).to(tl.float32)
@@ -394,12 +360,8 @@ def fused_recurrent_rwkv6_fwd(
     output_final_state: bool = False,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = False
 ):
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if offsets is None else len(offsets) - 1
     BK, BV = min(triton.next_power_of_2(K), 32), min(triton.next_power_of_2(V), 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -428,7 +390,6 @@ def fused_recurrent_rwkv6_fwd(
         BK=BK,
         BV=BV,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     o = o.sum(0)
     return o, ht
@@ -445,12 +406,8 @@ def fused_recurrent_rwkv6_bwd(
     initial_state: Optional[torch.Tensor] = None,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = False
 ):
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if offsets is None else len(offsets) - 1
 
     BK, BV = min(triton.next_power_of_2(K), 16), min(triton.next_power_of_2(V), 64)
@@ -479,7 +436,6 @@ def fused_recurrent_rwkv6_bwd(
         BK=BK,
         BV=BV,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     dq = dq.sum(0)
     dq1 = dq1.sum(0)
@@ -514,7 +470,6 @@ def fused_recurrent_rwkv6_bwd(
         BK=BK,
         BV=BV,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     dk = dk.sum(0)
     dk1 = dk1.sum(0)
@@ -534,10 +489,9 @@ def fused_recurrent_rwkv6_bwd(
         H=H,
         K=K,
         REVERSE=not reverse,
-        HEAD_FIRST=head_first
     )
     du = (do.float() * v).sum(-1, True, dtype=torch.float) * q * k * scale
-    du = du.sum((0, 2)) if head_first else du.sum((0, 1))
+    du = du.sum((0, 1))
     return dq, dk, dv, dw, du, dh0
 
 
@@ -558,7 +512,6 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         output_final_state: bool = False,
         reverse: bool = False,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = False
     ):
         o, ht = fused_recurrent_rwkv6_fwd(
             q=q,
@@ -571,13 +524,11 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             output_final_state=output_final_state,
             reverse=reverse,
             offsets=offsets,
-            head_first=head_first
         )
         ctx.save_for_backward(q, k, v, w, u, initial_state)
         ctx.scale = scale
         ctx.reverse = reverse
         ctx.offsets = offsets
-        ctx.head_first = head_first
         return o.to(v), ht
 
     @staticmethod
@@ -597,10 +548,9 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             initial_state=initial_state,
             reverse=ctx.reverse,
             offsets=ctx.offsets,
-            head_first=ctx.head_first
         )
         dh0 = dh0.to(initial_state) if dh0 is not None else dh0
-        return dq.to(q), dk.to(k), dv.to(v), dw.to(w), du.to(u), None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dw.to(w), du.to(u), None, dh0, None, None, None
 
 
 def fused_recurrent_rwkv6(
@@ -684,6 +634,19 @@ def fused_recurrent_rwkv6(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
+    if head_first:
+        warnings.warn(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        r, k, v, w = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (r, k, v, w))
+    if not head_first and r.shape[1] < r.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(
@@ -712,6 +675,7 @@ def fused_recurrent_rwkv6(
         output_final_state,
         reverse,
         cu_seqlens,
-        head_first
     )
+    if head_first:
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state
