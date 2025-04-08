@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.utils import prepare_chunk_indices
 from fla.utils import check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -228,7 +229,6 @@ def chunk_local_cumsum_scalar(
     chunk_size: int,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    indices: Optional[torch.Tensor] = None,
     head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
@@ -240,6 +240,7 @@ def chunk_local_cumsum_scalar(
         B = len(offsets) - 1
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
     BT = chunk_size
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
@@ -262,7 +263,6 @@ def chunk_local_cumsum_vector(
     chunk_size: int,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    indices: Optional[torch.Tensor] = None,
     head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
@@ -271,6 +271,7 @@ def chunk_local_cumsum_vector(
     else:
         B, T, H, S = g.shape
     BT = chunk_size
+    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
@@ -386,16 +387,16 @@ def chunk_local_cumsum(
     chunk_size: int,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    indices: Optional[torch.Tensor] = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: Optional[torch.dtype] = torch.float,
+    **kwargs
 ) -> torch.Tensor:
     if offsets is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when offsets are provided"
     if len(g.shape) == 3:
-        return chunk_local_cumsum_scalar(g, chunk_size, reverse, offsets, indices, head_first, output_dtype)
+        return chunk_local_cumsum_scalar(g, chunk_size, reverse, offsets, head_first, output_dtype)
     elif len(g.shape) == 4:
-        return chunk_local_cumsum_vector(g, chunk_size, reverse, offsets, indices, head_first, output_dtype)
+        return chunk_local_cumsum_vector(g, chunk_size, reverse, offsets, head_first, output_dtype)
     else:
         raise ValueError(
             f"Unsupported input shape {g.shape}. "

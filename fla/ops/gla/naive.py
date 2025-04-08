@@ -18,7 +18,7 @@ def naive_recurrent_gla(
     output_final_state: bool = False
 ):
     dtype = q.dtype
-    q, k, v, gk = map(lambda x: x.float(), (q, k, v, gk))
+    q, k, v, gk = map(lambda x: x.transpose(1, 2).float(), (q, k, v, gk))
     B, H, T, K, V = *q.shape, v.shape[-1]
     o = torch.zeros_like(v)
     scale = K ** -0.5
@@ -38,4 +38,4 @@ def naive_recurrent_gla(
 
     if not output_final_state:
         h = None
-    return o.to(dtype), h
+    return o.transpose(1, 2).to(dtype), h
