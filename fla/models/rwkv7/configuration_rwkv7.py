@@ -39,6 +39,7 @@ class RWKV7Config(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
         value_dim: Optional[Union[int, List[int]]] = None,
+        wkv_precision: Optional[str] = "bfloat16",
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -83,6 +84,7 @@ class RWKV7Config(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
+        self.wkv_precision = wkv_precision
 
         if attn is not None:
             if not isinstance(attn, Dict):

@@ -36,6 +36,7 @@ class RWKV7Attention(nn.Module):
         layer_idx: int = None,
         fuse_norm: bool = False,
         value_dim: int = None,
+        wkv_precision: str = 'bfloat16',
         **kwargs
     ) -> RWKV7Attention:
         super().__init__()
@@ -98,6 +99,15 @@ class RWKV7Attention(nn.Module):
                 affine=elementwise_affine
             )
 
+        if wkv_precision == 'bfloat16':
+            self.precision = torch.bfloat16
+        elif wkv_precision == 'float16':
+            self.precision = torch.float16
+        elif wkv_precision == 'float32':
+            self.precision = torch.float32
+        else:
+            raise ValueError(f"""Unsupported wkv_precision `{wkv_precision}`.
+                              Supported values are `bfloat16`, `float16`, and `float32`.""")
         self.apply(self._initialize_weights)
 
     def _initialize_weights(self, module: nn.Module):
@@ -199,7 +209,8 @@ class RWKV7Attention(nn.Module):
             initial_state=recurrent_state,
             output_final_state=use_cache,
             cu_seqlens=cu_seqlens,
-            head_first=False
+            head_first=False,
+            input_precision=self.precision,
         )
 
         if past_key_values is not None:
