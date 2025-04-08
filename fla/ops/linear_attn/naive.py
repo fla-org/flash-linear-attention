@@ -35,4 +35,3 @@ def naive_chunk_linear_attn(
     if normalize:
         o = normalize_output(q * scale, k, o)
     return rearrange(o, 'b h n c d -> b (n c) h d')
-    return rearrange(o, 'b h n c d -> b (n c) h d')
