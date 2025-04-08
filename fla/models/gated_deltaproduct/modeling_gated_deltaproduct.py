@@ -118,10 +118,10 @@ class GatedDeltaProductBlock(nn.Module):
                 num_householder=config.num_householder,
                 layer_idx=layer_idx
             )
-        
+
         if not config.norm_first:
             self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
-            
+
         self.mlp = GatedDeltaProductMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
@@ -221,7 +221,10 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([GatedDeltaProductBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([
+            GatedDeltaProductBlock(config, layer_idx)
+            for layer_idx in range(config.num_hidden_layers)
+        ])
         self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -237,7 +240,7 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,  
+        attention_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = None,
@@ -249,7 +252,7 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
         if output_attentions:
             warnings.warn("`GatedDeltaProductModel` does not `output_attentions` now, setting it to `False`.", stacklevel=2)
             output_attentions = False
-            
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
@@ -422,7 +425,7 @@ class GatedDeltaProductForCausalLM(GatedDeltaProductPreTrainedModel, GenerationM
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         kwargs.pop("num_items_in_batch", None)
-        
+
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -434,7 +437,7 @@ class GatedDeltaProductForCausalLM(GatedDeltaProductPreTrainedModel, GenerationM
             return_dict=return_dict,
             **kwargs
         )
-        
+
         hidden_states = outputs[0]
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
