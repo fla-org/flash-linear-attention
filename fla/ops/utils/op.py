@@ -32,6 +32,8 @@ def safe_exp(x):
 if not is_gather_supported:
     @triton.jit
     def gather(src, index, axis, _builder=None):
+        # This is a fallback implementation when tl.gather is not supported
+        # In order to pass triton compiler, there is no actual gather operation
         return src
 else:
     gather = tl.gather
