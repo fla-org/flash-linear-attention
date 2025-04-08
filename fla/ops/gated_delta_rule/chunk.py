@@ -348,7 +348,7 @@ def chunk_gated_delta_rule(
     """
     assert q.dtype == k.dtype == v.dtype
     assert q.dtype != torch.float32, "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
-    assert len(beta.shape) == 3, "beta must be of shape [B, H, T] if head_first=True, or [B, T, H] if head_first=False."
+    assert len(beta.shape) == 3, "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -366,12 +366,9 @@ def chunk_gated_delta_rule(
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
     if head_first:
-        q, k, v = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v))
-        beta, g = map(lambda x: rearrange(x, 'b h t -> b t h'), (beta, g))
+        q, k, v, beta, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, beta, g))
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "Scale must be positive."
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
@@ -386,5 +383,5 @@ def chunk_gated_delta_rule(
         use_qk_l2norm_in_kernel
     )
     if head_first:
-        o = rearrange(o, 'b t h v -> b h t v')
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

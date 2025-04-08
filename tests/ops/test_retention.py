@@ -29,7 +29,7 @@ test_h_list = [2]
 @pytest.mark.parametrize("K", test_d_list)
 @pytest.mark.parametrize("expand_ratio", [1, 2])
 @pytest.mark.parametrize("head_first", [True, False])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -83,7 +83,7 @@ def test_chunk(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("K", test_d_list)
 @pytest.mark.parametrize("expand_ratio", [1, 2])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
@@ -103,7 +103,7 @@ def test_chunk_varlen(
     # randomly split the sequence into N segments
     offsets = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
