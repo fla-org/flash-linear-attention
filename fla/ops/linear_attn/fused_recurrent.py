@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -11,36 +12,36 @@ from fla.ops.linear_attn.utils import normalize_output
 from fla.utils import input_guard
 
 
-@triton.jit
+@triton.heuristics({
+    'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
+    'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
 def fused_recurrent_linear_attn_fwd_kernel(
-    q,  # query [B, H, L, K]
-    k,  # key [B, H, L, V]
-    v,  # value [B, H, L, V]
-    o,  # output [B, H, L, V]
+    q,
+    k,
+    v,
+    o,
     h0,
-    ht,  # final hidden state [B, H, K, V]
-
-    s_k_h,  # stride size: L * K
-    s_v_h,  # stride size: L * V
-
+    ht,
     scale,
-    B,  # batch size
-    H,  # H
-    T,  # T
-    K: tl.constexpr,  # K
-    V: tl.constexpr,  # V
-    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
+    T,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
 ):
     # indices
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
-    p_q = q + i_bh * s_k_h + i_k * BK + tl.arange(0, BK)
-    p_k = k + i_bh * s_k_h + i_k * BK + tl.arange(0, BK)
-    p_v = v + i_bh * s_v_h + i_v * BV + tl.arange(0, BV)
-    p_o = o + (i_bh + i_k * B * H) * s_v_h + i_v * BV + tl.arange(0, BV)
+    p_q = q + i_bh * T*K + i_k * BK + tl.arange(0, BK)
+    p_k = k + i_bh * T*K + i_k * BK + tl.arange(0, BK)
+    p_v = v + i_bh * T*V + i_v * BV + tl.arange(0, BV)
+    p_o = o + (i_bh + i_k * B * H) * T*V + i_v * BV + tl.arange(0, BV)
 
     mask_bk = (i_k * BK + tl.arange(0, BK)) < K
     mask_bv = (i_v * BV + tl.arange(0, BV)) < V
@@ -72,40 +73,37 @@ def fused_recurrent_linear_attn_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_kv)
 
 
-# Similar to Algorithm1 of https://arxiv.org/abs/2006.16236
-@triton.jit
+@triton.heuristics({
+    'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
+})
+@triton.jit(do_not_specialize=['T'])
 def fused_recurrent_linear_attn_bwd_kernel(
-    q,  # query [B, H, L, K]
-    k,  # key [B, H, L, V]
-    v,  # value [B, H, L, V]
-
-    do,  # gradient of output [B, H, L, V]
-    dq,  # gradient of query [NV, B, H, L, K]
-    dk,  # gradient of key [NV, B, H, L, K]
-    dv,  # gradient of value [NK, B, H, L, V]
-    h0,  # initial hidden state initialization [B, H, K, V]
-
-    s_k_h,  # stride size: L * K
-    s_v_h,  # stride size: L * V
-    scale,  # K ** -0.5
-
-    B,  # B
-    H,  # H
-    T,  # T
-    K: tl.constexpr,  # K
-    V: tl.constexpr,  # V
-    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
-    BV: tl.constexpr,  # BLOCK SIZE along the V dimension
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
+    q,
+    k,
+    v,
+    do,
+    dq,
+    dk,
+    dv,
+    h0,
+    scale,
+    T,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
 ):
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
-    p_q = q + i_bh * s_k_h + i_k * BK + tl.arange(0, BK)
-    p_k = k + i_bh * s_k_h + i_k * BK + tl.arange(0, BK)
-    p_v = v + i_bh * s_v_h + i_v * BV + tl.arange(0, BV)
-    p_do = do + i_bh * s_v_h + i_v * BV + tl.arange(0, BV)
+    p_q = q + i_bh * T*K + i_k * BK + tl.arange(0, BK)
+    p_k = k + i_bh * T*K + i_k * BK + tl.arange(0, BK)
+    p_v = v + i_bh * T*V + i_v * BV + tl.arange(0, BV)
+    p_do = do + i_bh * T*V + i_v * BV + tl.arange(0, BV)
 
-    p_dq = dq + (i_bh + i_v * B * H) * s_k_h + i_k * BK + tl.arange(0, BK)
+    p_dq = dq + (i_bh + i_v * B * H) * T*K + i_k * BK + tl.arange(0, BK)
     mask_bk = i_k * BK + tl.arange(0, BK) < K
     mask_bv = i_v * BV + tl.arange(0, BV) < V
 
@@ -134,12 +132,12 @@ def fused_recurrent_linear_attn_bwd_kernel(
     # sync threads
     tl.debug_barrier()
 
-    p_q = q + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (T - 1) * K
-    p_k = k + i_bh * s_k_h + i_k * BK + tl.arange(0, BK) + (T - 1) * K
-    p_do = do + i_bh * s_v_h + i_v * BV + tl.arange(0, BV) + (T - 1) * V
-    p_v = v + i_bh * s_v_h + i_v * BV + tl.arange(0, BV) + (T - 1) * V
-    p_dk = dk + (i_bh + i_v * B * H) * s_k_h + i_k * BK + tl.arange(0, BK) + (T - 1) * K
-    p_dv = dv + (i_bh + i_k * B * H) * s_v_h + i_v * BV + tl.arange(0, BV) + (T - 1) * V
+    p_q = q + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (T - 1) * K
+    p_k = k + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (T - 1) * K
+    p_do = do + i_bh * T*V + i_v * BV + tl.arange(0, BV) + (T - 1) * V
+    p_v = v + i_bh * T*V + i_v * BV + tl.arange(0, BV) + (T - 1) * V
+    p_dk = dk + (i_bh + i_v * B * H) * T*K + i_k * BK + tl.arange(0, BK) + (T - 1) * K
+    p_dv = dv + (i_bh + i_k * B * H) * T*V + i_v * BV + tl.arange(0, BV) + (T - 1) * V
     d_h = tl.zeros([BK, BV], dtype=tl.float32)
 
     for _ in range(T):
@@ -172,22 +170,26 @@ class FusedRecurrentLinearAttentionFunction(torch.autograd.Function):
 
         BK, BV = min(K, 32), min(V, 32)
         NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-        num_warps = 1
-        num_stages = 1
 
         o = q.new_empty(NK, B, H, T, V)
         final_state = q.new_empty(B, H, K, V) if output_final_state else None
 
         grid = (NV, NK, B * H)
         fused_recurrent_linear_attn_fwd_kernel[grid](
-            q, k, v, o, initial_state, final_state,
-            q.stride(1),
-            v.stride(1), scale,
-            B=B, H=H, T=T, K=K, V=V, BK=BK, BV=BV,
-            USE_INITIAL_STATE=initial_state is not None,
-            STORE_FINAL_STATE=final_state is not None,
-            num_warps=num_warps,
-            num_stages=num_stages
+            q,
+            k,
+            v,
+            o,
+            initial_state,
+            final_state,
+            scale,
+            T=T,
+            B=B,
+            H=H,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
         )
 
         o = o.sum(0)
@@ -205,8 +207,6 @@ class FusedRecurrentLinearAttentionFunction(torch.autograd.Function):
 
         BK, BV = min(K, 32), min(V, 32)
         NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-        num_warps = 1
-        num_stages = 1
 
         dq = q.new_empty(NV, B, H, T, K)
         dk = q.new_empty(NV, B, H, T, K)
@@ -214,14 +214,22 @@ class FusedRecurrentLinearAttentionFunction(torch.autograd.Function):
         grid = (NV, NK, B * H)
 
         fused_recurrent_linear_attn_bwd_kernel[grid](
-            q, k, v, do, dq, dk, dv, initial_state,
-            q.stride(1),
-            v.stride(1),
+            q,
+            k,
+            v,
+            do,
+            dq,
+            dk,
+            dv,
+            initial_state,
             scale,
-            B=B, H=H, T=T, K=K, V=V, BK=BK, BV=BV,
-            USE_INITIAL_STATE=initial_state is not None,
-            num_warps=num_warps,
-            num_stages=num_stages
+            T=T,
+            B=B,
+            H=H,
+            K=K,
+            V=V,
+            BK=BK,
+            BV=BV,
         )
         dq = dq.sum(0)
         dk = dk.sum(0)
@@ -241,9 +249,28 @@ def fused_recurrent_linear_attn(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = q.shape[-1] ** -0.5
+    if head_first:
+        warnings.warn(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
     if not head_first:
+        if q.shape[1] < q.shape[2]:
+            warnings.warn(
+                f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+                "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+                "when head_first=False was specified. "
+                "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            )
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
-    o, final_state = FusedRecurrentLinearAttentionFunction.apply(q, k, v, scale, initial_state, output_final_state)
+    o, final_state = FusedRecurrentLinearAttentionFunction.apply(
+        q,
+        k,
+        v,
+        scale,
+        initial_state,
+        output_final_state
+    )
     if normalize:
         o = normalize_output(q * scale, k, o)
     if not head_first:

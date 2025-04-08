@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Yu Zhang, Songlin Yang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -49,7 +50,20 @@ def chunk_linear_attn(
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
-
+    if head_first:
+        warnings.warn(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
+    if not head_first:
+        if q.shape[1] < q.shape[2]:
+            warnings.warn(
+                f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+                "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+                "when head_first=False was specified. "
+                "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            )
     o, final_state = chunk_simple_gla(
         q=q,
         k=k,
@@ -57,9 +71,10 @@ def chunk_linear_attn(
         scale=scale,
         g=None,
         initial_state=initial_state,
-        output_final_state=output_final_state,
-        head_first=head_first
+        output_final_state=output_final_state
     )
     if normalize:
         o = normalize_output(q * scale, k, o)
+    if head_first:
+        o = o.transpose(1, 2)
     return o, final_state
