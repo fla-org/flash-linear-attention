@@ -19,7 +19,8 @@ def chunk_rwkv7(
     initial_state: torch.Tensor = None,
     output_final_state: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    head_first: bool = False,
+    input_precision: Optional[torch.dtype] = torch.bfloat16,
 ):
     """
     Args:
@@ -61,5 +62,6 @@ def chunk_rwkv7(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        head_first=head_first
+        head_first=head_first,
+        input_precision=input_precision
     )
