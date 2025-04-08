@@ -24,17 +24,32 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
+      - name: Check skip keyword in LATEST commit (Push only)
+        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
+        id: check_skip
+        run: |
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          echo "Latest commit message: $COMMIT_MSG"
+          if [[ "$COMMIT_MSG" =~ $$skip[ _-]?test$$ ]]; then
+            echo "::notice::Tests skipped by commit message"
+            echo "skip_tests=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Get changed files
         if: |
-          github.event_name == 'pull_request' ||
-          (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+          (github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))) &&
+          (steps.check_skip.outputs.skip_tests != 'true' || github.event_name != 'push')
         id: changed-files
         uses: tj-actions/changed-files@v46.0.3
 
       - name: Find dependent test files
         if: |
-          github.event_name == 'pull_request' ||
-          (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))
+          (github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))) &&
+          (steps.check_skip.outputs.skip_tests != 'true' || github.event_name != 'push')
         id: find-dependent-tests
         run: |
           # Run the Python script to find dependent test files
@@ -42,15 +57,15 @@ jobs:
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
       - name: Setup python
-        if: steps.find-dependent-tests.outputs.test_files
+        if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           pip uninstall -y flash-linear-attention
-          pip install -U pytest setuptools wheel ninja
-          pip install -U torch pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
+          pip install -U pytest setuptools wheel ninja torch triton
+          MAX_JOBS=4 pip install -U flash-attn --no-build-isolation
           pip install --no-use-pep517 .
 
       - name: Check GPU status
-        if: steps.find-dependent-tests.outputs.test_files
+        if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           python scripts/check_gpu.py
           if [ $? -ne 0 ]; then
@@ -59,20 +74,20 @@ jobs:
           fi
 
       - name: Test compiling on changed test files
-        if: steps.find-dependent-tests.outputs.test_files
+        if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} --capture=no
 
       - name: Run pytest on test files
         continue-on-error: true
-        if: steps.find-dependent-tests.outputs.test_files
+        if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run pytest on varlen test files
-        if: steps.find-dependent-tests.outputs.test_files
+        if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         continue-on-error: true
         run: |
           COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
@@ -80,7 +95,7 @@ jobs:
             echo "Varlen tests failed (non-critical)"
 
       - name: Test full compiling on all test files
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest tests/ --capture=no
@@ -88,14 +103,14 @@ jobs:
       # skip full pytest because it takes too long
       - name: Run full pytest on test files
         continue-on-error: true
-        if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run full pytest on varlen test files
         continue-on-error: true
-        if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} || \
