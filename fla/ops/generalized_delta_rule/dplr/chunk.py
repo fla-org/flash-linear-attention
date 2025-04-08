@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional
 
 import torch
@@ -363,8 +364,12 @@ def chunk_dplr_delta_rule(
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """
     # use pytorch fast path here, if q, k, v are already in input_precision, nothing to do
+    if input_precision == torch.float32:
+        warnings.warn(
+            """ChunkDeltaRuleFunction does not support float32. Please use bfloat16.
+            If you want to use float32, please solve the issue by yourself."""
+        )
     q, k, v = q.to(input_precision), k.to(input_precision), v.to(input_precision)
-    # assert q.dtype != torch.float32, "ChunkDeltaRuleFunction does not support float32. Please use bfloat16."
     # gk = gk.float()
 
     if cu_seqlens is not None:
