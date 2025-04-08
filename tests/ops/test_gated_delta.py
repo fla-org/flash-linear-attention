@@ -8,9 +8,8 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
+from fla.ops.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device, is_intel_alchemist
-
 
 if COMPILER_MODE:
     test_b_list = [1]

@@ -6,8 +6,8 @@ import pytest
 import torch
 
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum, mean_pooling
+from fla.ops.utils.testing import COMPILER_MODE
 from fla.utils import device
-
 
 if COMPILER_MODE:
     test_b_list = [1]

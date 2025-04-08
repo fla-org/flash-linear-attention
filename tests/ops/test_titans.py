@@ -8,8 +8,8 @@ import torch.nn.functional as F
 
 # from fla.ops.titans.fused_chunk import fused_chunk_titans_linear
 from fla.ops.titans.naive import chunk_titans_linear_ref
+from fla.ops.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device
-
 
 if COMPILER_MODE:
     test_b_list = [1]
@@ -22,27 +22,6 @@ else:
     test_t_varlen_list = [63, 286, 300, 512]
     test_d_list = [64, 32, 100, 256]
 test_h_list = [2]
-
-
-def get_abs_err(x, y):
-    return (x - y).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x - y).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
-    return err / (base + 1e-15)
-
-
-def assert_close(prefix, ref, tri, ratio, warning=False):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
-    if warning or str(prefix).strip().lower() == "dh0":
-        if get_err_ratio(ref, tri) > ratio:
-            import warnings
-            warnings.warn(msg)
-    else:
-        assert get_err_ratio(ref, tri) < ratio, msg
 
 
 def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):

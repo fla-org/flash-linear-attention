@@ -1,17 +1,12 @@
 # -*- coding: utf-8 -*-
 
-import os
-
 import pytest
 import torch
 import torch.nn.functional as F
 
 from fla.modules import FusedKLDivLoss
-from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
+from fla.ops.utils.testing import assert_close
 from fla.utils import device, device_platform
-
-
-
 
 
 @pytest.mark.parametrize("B", [2])

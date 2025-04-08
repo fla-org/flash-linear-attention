@@ -9,9 +9,8 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
-from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
+from fla.ops.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import check_shared_mem, device, is_intel_alchemist
-
 
 if COMPILER_MODE:
     test_b_list = [1]

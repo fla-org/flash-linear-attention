@@ -7,7 +7,7 @@ import torch
 
 from fla.ops.attn.parallel import parallel_attn
 from fla.ops.common.utils import prepare_lens
-from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
+from fla.ops.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import check_shared_mem, device
 
 try:
@@ -15,7 +15,6 @@ try:
     HAS_FLASH = True
 except Exception:
     HAS_FLASH = False
-
 
 
 if COMPILER_MODE:

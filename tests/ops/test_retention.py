@@ -7,9 +7,8 @@ import torch
 
 from fla.ops.retention import chunk_retention, fused_recurrent_retention, parallel_retention
 from fla.ops.retention.naive import naive_retention
-from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
+from fla.ops.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device
-
 
 if COMPILER_MODE:
     test_b_list = [1]

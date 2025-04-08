@@ -7,8 +7,8 @@ import torch
 
 from fla.ops.based import fused_chunk_based, parallel_based
 from fla.ops.based.naive import naive_parallel_based
+from fla.ops.utils.testing import COMPILER_MODE
 from fla.utils import device
-
 
 if COMPILER_MODE:
     test_b_list = [1]
