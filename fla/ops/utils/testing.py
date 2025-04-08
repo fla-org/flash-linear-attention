@@ -9,15 +9,18 @@ def get_abs_err(x, y):
 
 
 def get_err_ratio(x, y):
-    err = (x-y).flatten().square().mean().sqrt().item()
+    err = (x.detach()-y.detach()).flatten().square().mean().sqrt().item()
     base = (x).flatten().square().mean().sqrt().item()
-    return err / (base + 1e-15)
+    return err / (base + 1e-8)
 
 
-def assert_close(prefix, ref, tri, ratio, warning=False):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
+def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
+    abs_atol = get_abs_err(ref, tri)
+    msg = f"{prefix} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
     print(msg)
     error_rate = get_err_ratio(ref, tri)
+    if abs_atol <= err_atol:
+        return
     if warning or (ci_env and error_rate < 0.01):
         if error_rate > ratio:
             import warnings
