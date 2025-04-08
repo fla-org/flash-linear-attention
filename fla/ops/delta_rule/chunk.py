@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional
 
 import torch
@@ -10,7 +11,6 @@ from einops import rearrange
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
-from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.delta_rule.wy_fast import bwd_prepare_wy_repr, fwd_prepare_wy_repr, fwd_recompute_w_u
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -24,11 +24,9 @@ def chunk_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ):
-    T = q.shape[2] if head_first else q.shape[1]
+    T = q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     # obtain WY representation. u is actually the new v.
     w, u, A = fwd_prepare_wy_repr(
@@ -36,8 +34,6 @@ def chunk_delta_rule_fwd(
         v=v,
         beta=beta,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
 
@@ -49,8 +45,6 @@ def chunk_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     o = chunk_fwd_o(
@@ -61,8 +55,6 @@ def chunk_delta_rule_fwd(
         g=None,
         scale=scale,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     return o, A, final_state
@@ -79,11 +71,9 @@ def chunk_delta_rule_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ):
-    T = q.shape[2] if head_first else q.shape[1]
+    T = q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     w, u = fwd_recompute_w_u(
         k=k,
@@ -91,8 +81,6 @@ def chunk_delta_rule_bwd(
         beta=beta,
         A=A,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
@@ -103,8 +91,6 @@ def chunk_delta_rule_bwd(
         initial_state=initial_state,
         output_final_state=False,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dv = chunk_bwd_dv_local(
@@ -115,8 +101,6 @@ def chunk_delta_rule_bwd(
         dh=None,
         scale=scale,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -130,8 +114,6 @@ def chunk_delta_rule_bwd(
         dv=dv,
         scale=scale,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dq, dk, dw, _ = chunk_bwd_dqkwg(
@@ -146,8 +128,6 @@ def chunk_delta_rule_bwd(
         g=None,
         scale=scale,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dk2, dv, db = bwd_prepare_wy_repr(
@@ -158,8 +138,6 @@ def chunk_delta_rule_bwd(
         dw=dw,
         du=dv,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dk.add_(dk2)
@@ -181,10 +159,9 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = True
     ):
-        T = q.shape[2] if head_first else q.shape[1]
+        T = q.shape[1]
         chunk_size = min(64, max(triton.next_power_of_2(T), 16))
 
         q_orig = q
@@ -193,12 +170,6 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
-
-        # 2-d indices denoting the offsets of chunks in each sequence
-        # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
-        # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
-        # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
 
         o, A, final_state = chunk_delta_rule_fwd(
             q=q,
@@ -209,16 +180,12 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             offsets=offsets,
-            indices=indices,
-            head_first=head_first,
             chunk_size=chunk_size
         )
         ctx.save_for_backward(q_orig, k_orig, v, beta, A, initial_state)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.offsets = offsets
-        ctx.indices = indices
-        ctx.head_first = head_first
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
 
@@ -247,14 +214,12 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             offsets=ctx.offsets,
-            indices=ctx.indices,
-            head_first=ctx.head_first,
             chunk_size=ctx.chunk_size
         )
         if use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q_orig, dq)
             dk = l2norm_bwd(k_orig, dk)
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None, None, None
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -337,6 +302,19 @@ def chunk_delta_rule(
     assert q.dtype != torch.float32, "ChunkDeltaRuleFunction does not support float32. Please use bfloat16."
     assert len(beta.shape) == 3, "beta must be of shape (batch size, num of head, seq len)."
 
+    if head_first:
+        warnings.warn(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v, beta = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, beta))
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -352,9 +330,6 @@ def chunk_delta_rule(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
-    if head_first:
-        q, k, v = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v))
-        beta = rearrange(beta, 'b h t -> b t h')
     scale = k.shape[-1] ** -0.5 if scale is None else scale
     o, final_state = ChunkDeltaRuleFunction.apply(
         q,
@@ -365,7 +340,6 @@ def chunk_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
-        False,
         use_qk_l2norm_in_kernel
     )
     if head_first:

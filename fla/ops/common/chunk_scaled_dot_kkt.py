@@ -75,7 +75,6 @@ def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
     beta: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
-    head_first: bool = False,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:
@@ -84,33 +83,25 @@ def chunk_scaled_dot_kkt_fwd(
 
     Args:
         k (torch.Tensor):
-            The key tensor of shape `[B, T, H, K]` if not `head_first` else `[B, H, T, K]`.
+            The key tensor of shape `[B, T, H, K]`.
         beta (torch.Tensor):
-            The beta tensor of shape `[B, T, H]` if not `head_first` else `[B, H, T]`.
+            The beta tensor of shape `[B, T, H]`.
         cu_seqlens (torch.LongTensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
-        head_first (bool):
-            If False, the input/output tensor is in the shape of `[B, T, H, K]`.
-            If True, the input/output tensor is in the shape of `[B, H, T, K]`.
-            Default: False
         chunk_size (int):
             The chunk size. Default: 64.
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float32`
 
     Returns:
-        beta * K * K^T of shape `[B, T, H, BT]` if not `head_first` else `[B, H, T, BT]`,
-        where `BT` is the chunk size.
+        beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
     """
-    if head_first:
-        B, H, T, K = k.shape
-    else:
-        B, T, H, K = k.shape
+    B, T, H, K = k.shape
     BT = chunk_size
     indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
-    A = torch.empty(B, *((H, T) if head_first else (T, H)), BT, device=k.device, dtype=output_dtype)
+    A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
         k=k,
         beta=beta,
@@ -121,6 +112,6 @@ def chunk_scaled_dot_kkt_fwd(
         H=H,
         K=K,
         BT=BT,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     return A

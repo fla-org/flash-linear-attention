@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
@@ -216,22 +217,18 @@ def fwd_prepare_wy_repr(
     v: torch.Tensor,
     beta: torch.Tensor,
     offsets: Optional[torch.LongTensor],
-    indices: Optional[torch.LongTensor],
-    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
         cu_seqlens=offsets,
-        head_first=head_first,
         chunk_size=chunk_size,
         output_dtype=torch.float32
     )
     A = solve_tril(
         A=A,
         cu_seqlens=offsets,
-        head_first=head_first,
         output_dtype=k.dtype
     )
 
@@ -241,8 +238,6 @@ def fwd_prepare_wy_repr(
         beta=beta,
         A=A,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=chunk_size
     )
     return w, u, A
@@ -254,18 +249,15 @@ def fwd_recompute_w_u(
     beta: torch.Tensor,
     A: torch.Tensor,
     offsets: Optional[torch.LongTensor],
-    indices: Optional[torch.LongTensor],
-    head_first: bool,
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(triton.next_power_of_2(K), CONST_TILING)
     BV = min(triton.next_power_of_2(V), CONST_TILING)
+
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     u = torch.empty_like(v)
@@ -286,7 +278,7 @@ def fwd_recompute_w_u(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     return w, u
 
@@ -299,18 +291,15 @@ def bwd_prepare_wy_repr(
     dw: torch.Tensor,
     du: torch.Tensor,
     offsets: Optional[torch.LongTensor],
-    indices: Optional[torch.LongTensor],
-    head_first: bool,
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(triton.next_power_of_2(K), CONST_TILING)
     BV = min(triton.next_power_of_2(V), CONST_TILING)
+
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     dk = torch.empty_like(k)
@@ -335,6 +324,6 @@ def bwd_prepare_wy_repr(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     return dk, dv, dbeta
