@@ -51,5 +51,5 @@ def parallel_forgetting_attn(
         q, k, v, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, g))
     o = parallel_attn(q, k, v, g, scale, cu_seqlens)
     if head_first:
-        o = rearrange(o, 'b t h d -> b h t d')
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o

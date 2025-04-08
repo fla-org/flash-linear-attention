@@ -723,12 +723,10 @@ def parallel_attn(
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v))
-    if g is not None:
-        assert (g <= 0).all(), "g must be non-positive"
-        if head_first:
-            g = g.transpose(1, 2)
+        q, k, v = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v))
+        if g is not None:
+            g = rearrange(g, 'b h t ... -> b t h ...')
     o = ParallelAttentionFunction.apply(q, k, v, g, scale, cu_seqlens)
     if head_first:
-        o = rearrange(o, 'b t h d -> b h t d')
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o

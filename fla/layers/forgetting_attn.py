@@ -116,10 +116,11 @@ class ForgettingAttention(nn.Module):
         if attention_mask is not None:
             q, (k, v, g), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v, g), attention_mask, q_len, keepdim=True)
             _, cu_seqlens_k = cu_seqlens
+            cu_seqlens = cu_seqlens_k
             max_seqlen_q, max_seqlen_k = max_seq_lens
             if max_seqlen_q != max_seqlen_k:
                 assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
-                o = attn_decoding_one_step(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens_k)
+                o = attn_decoding_one_step(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
             else:
                 o = parallel_forgetting_attn(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
         else:
