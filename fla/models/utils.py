@@ -43,10 +43,9 @@ class Cache(transformers.cache_utils.Cache):
     def update(
         self,
         recurrent_state: torch.Tensor = None,
-        attn_state: Tuple[torch.Tensor, torch.Tensor] = None,
+        attn_state: Tuple[torch.Tensor] = None,
         conv_state: Tuple[torch.Tensor] = None,
         ffn_state: torch.Tensor = None,
-        forget_gate_state: torch.Tensor = None,
         layer_idx: int = 0,
         offset: Optional[int] = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
@@ -57,7 +56,7 @@ class Cache(transformers.cache_utils.Cache):
         Args:
             recurrent_state (`torch.Tensor`, `optional`):
                 The new recurrent state to cache.
-            attn_state (`Tuple[torch.Tensor, torch.Tensor]`, `optional`):
+            attn_state (`Tuple[torch.Tensor]`, `optional`):
                 The new attention key/value states to cache.
             conv_state (`Tuple[torch.Tensor]`, `optional`):
                 The new convolution state to cache.
@@ -76,22 +75,22 @@ class Cache(transformers.cache_utils.Cache):
         if layer_idx == 0:
             self._seen_tokens += offset
 
+        if cache_kwargs is None:
+            cache_kwargs = {}
         if attn_state is not None:
-            input_size = attn_state[0].shape[-2]
+            input_size = attn_state[0].shape[1]
             window_size = cache_kwargs.get('window_size', None)
-            if not isinstance(attn_state, Tuple) or len(attn_state) != 2:
-                raise ValueError("`attn_state` must be a tuple of two tensors for key/value states")
+            if not isinstance(attn_state, Tuple):
+                raise ValueError("`attn_state` must be a tuple of tensors for key/value states")
         if len(self.states) <= layer_idx:
             if attn_state is not None:
                 if window_size is not None and input_size > window_size:
-                    attn_state = (attn_state[0][..., -window_size:, :].contiguous(),
-                                  attn_state[1][..., -window_size:, :].contiguous())
+                    attn_state = [state[:, -window_size:].contiguous() for state in attn_state]
             state = dict(
                 recurrent_state=recurrent_state,
                 attn_state=attn_state,
                 conv_state=conv_state,
-                ffn_state=ffn_state,
-                forget_gate_state=forget_gate_state
+                ffn_state=ffn_state
             )
             self.states.append(state)
         else:
@@ -99,27 +98,24 @@ class Cache(transformers.cache_utils.Cache):
             if recurrent_state is not None:
                 state['recurrent_state'] = recurrent_state
             if attn_state is not None:
-                key_state, value_state = state['attn_state']
-                if window_size is not None and key_state.shape[-2] == window_size:
-                    # DO NOT allocate new memory if the cache is full
-                    # roll the key/value states to the left by `input_size`
-                    key_state = key_state.roll(-input_size, -2)
-                    value_state = value_state.roll(-input_size, -2)
-                    # replace the last `input_size` tokens with the new key/value states
-                    key_state[..., -input_size:, :] = attn_state[0]
-                    value_state[..., -input_size:, :] = attn_state[1]
-                    attn_state = (key_state, value_state)
+                if window_size is not None and state['attn_state'][0].shape[1] == window_size:
+                    for i, (old_state, new_state) in enumerate(zip(state['attn_state'], attn_state)):
+                        # DO NOT allocate new memory if the cache is full
+                        # roll the key/value states to the left by `input_size`
+                        old_state = old_state.roll(-input_size, 1)
+                        # replace the last `input_size` tokens with the new key/value states
+                        old_state[:, -input_size:] = new_state
+                        state['attn_state'][i] = old_state
                 else:
-                    attn_state = (torch.cat([key_state, attn_state[0]], -2),
-                                  torch.cat([value_state, attn_state[1]], -2),)
+                    attn_state = [
+                        torch.cat([old_state, new_state], 1)
+                        for old_state, new_state in zip(state['attn_state'], attn_state)
+                    ]
                 state['attn_state'] = attn_state
             if conv_state is not None:
                 state['conv_state'] = conv_state
             if ffn_state is not None:
                 state['ffn_state'] = ffn_state
-            if forget_gate_state is not None:
-                old_forget_state = state['forget_gate_state']
-                state['forget_gate_state'] = torch.cat([old_forget_state, forget_gate_state], -2)
 
         return state
 

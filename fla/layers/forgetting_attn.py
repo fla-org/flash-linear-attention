@@ -104,14 +104,12 @@ class ForgettingAttention(nn.Module):
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
             state = past_key_values.update(
-                attn_state=(k, v),
-                forget_gate_state=(f),
+                attn_state=(k, v, f),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
             )
-            k_cache, v_cache = state['attn_state']
-            f_cache = state['forget_gate_state']
+            k_cache, v_cache, f_cache = state['attn_state']
         else:
             cache_has_content = False
 
