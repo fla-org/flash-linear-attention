@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.utils import prepare_chunk_indices
@@ -851,16 +849,20 @@ def chunk_gla_fwd_intra_gk(
     g: torch.Tensor,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
-    B, T, H, K = k.shape
+    if head_first:
+        B, H, T, K = k.shape
+    else:
+        B, T, H, K = k.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     BC = min(16, BT)
     NC = triton.cdiv(BT, BC)
 
-    A = q.new_empty(B, T, H, BT, dtype=torch.float)
+    A = q.new_empty(B, *((H, T) if head_first else (T, H)), BT, dtype=torch.float)
     grid = (NT, NC * NC, B * H)
     chunk_gla_fwd_A_kernel_intra_sub_inter[grid](
         q,
@@ -876,7 +878,7 @@ def chunk_gla_fwd_intra_gk(
         BT=BT,
         BC=BC,
         NC=NC,
-        HEAD_FIRST=False
+        HEAD_FIRST=head_first
     )
 
     grid = (NT, NC, B * H)
@@ -897,13 +899,13 @@ def chunk_gla_fwd_intra_gk(
             BT=BT,
             BC=BC,
             BK=BK,
-            HEAD_FIRST=False
+            HEAD_FIRST=head_first
         )
     # split then merge
     else:
         BK = min(128, triton.next_power_of_2(K))
         NK = triton.cdiv(K, BK)
-        A_intra = q.new_empty(NK, B, T, H, BC, dtype=torch.float)
+        A_intra = q.new_empty(NK, B, *((H, T) if head_first else (T, H)), BC, dtype=torch.float)
 
         grid = (NK, NT * NC, B * H)
         chunk_gla_fwd_A_kernel_intra_sub_intra_split[grid](
@@ -922,7 +924,7 @@ def chunk_gla_fwd_intra_gk(
             BC=BC,
             BK=BK,
             NC=NC,
-            HEAD_FIRST=False
+            HEAD_FIRST=head_first
         )
 
         grid = (NT, NC, B * H)
@@ -937,7 +939,7 @@ def chunk_gla_fwd_intra_gk(
             BT=BT,
             BC=BC,
             NK=NK,
-            HEAD_FIRST=False
+            HEAD_FIRST=head_first
         )
     return A
 
@@ -950,11 +952,15 @@ def chunk_gla_fwd_o_gk(
     h: torch.Tensor,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
-    B, T, H, K, V = *q.shape, v.shape[-1]
+    if head_first:
+        B, H, T, K, V = *q.shape, v.shape[-1]
+    else:
+        B, T, H, K, V = *q.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     o = torch.empty_like(v)
@@ -974,7 +980,7 @@ def chunk_gla_fwd_o_gk(
         K=K,
         V=V,
         BT=BT,
-        HEAD_FIRST=False
+        HEAD_FIRST=head_first
     )
     return o
 
@@ -984,15 +990,19 @@ def chunk_gla_bwd_dA(
     do: torch.Tensor,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
-    B, T, H, V = v.shape
+    if head_first:
+        B, H, T, V = v.shape
+    else:
+        B, T, H, V = v.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     BV = min(64, triton.next_power_of_2(V))
 
-    dA = v.new_empty(B, T, H, BT, dtype=torch.float)
+    dA = v.new_empty(B, *((H, T) if head_first else (T, H)), BT, dtype=torch.float)
     grid = (NT, B * H)
     chunk_gla_bwd_kernel_dA[grid](
         v,
@@ -1006,7 +1016,7 @@ def chunk_gla_bwd_dA(
         V=V,
         BT=BT,
         BV=BV,
-        HEAD_FIRST=False
+        HEAD_FIRST=head_first
     )
     return dA
 
@@ -1018,11 +1028,15 @@ def chunk_gla_bwd_dv(
     do: torch.Tensor,
     dh: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
-    B, T, H, K, V = *k.shape, do.shape[-1]
+    if head_first:
+        B, H, T, K, V = *k.shape, do.shape[-1]
+    else:
+        B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     dv = torch.empty_like(do)
@@ -1041,7 +1055,7 @@ def chunk_gla_bwd_dv(
         K=K,
         V=V,
         BT=BT,
-        HEAD_FIRST=False
+        HEAD_FIRST=head_first
     )
     return dv
 
@@ -1052,14 +1066,18 @@ def chunk_gla_bwd_dqk_intra(
     g: torch.Tensor,
     dA: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
-    B, T, H, K = q.shape
+    if head_first:
+        B, H, T, K = q.shape
+    else:
+        B, T, H, K = q.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
+    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
 
@@ -1082,7 +1100,7 @@ def chunk_gla_bwd_dqk_intra(
         BC=BC,
         BK=BK,
         NC=NC,
-        HEAD_FIRST=False
+        HEAD_FIRST=head_first
     )
     return dq, dk
 
@@ -1099,11 +1117,15 @@ def chunk_gla_bwd_dqkg(
     dk: torch.Tensor,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    if head_first:
+        B, H, T, K, V = *k.shape, v.shape[-1]
+    else:
+        B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     dg = torch.empty_like(g)
@@ -1132,7 +1154,7 @@ def chunk_gla_bwd_dqkg(
         K=K,
         V=V,
         BT=BT,
-        HEAD_FIRST=False
+        HEAD_FIRST=head_first
     )
     return dq2, dk2, dg
 
@@ -1147,10 +1169,14 @@ def chunk_gla_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    T = q.shape[2] if head_first else q.shape[1]
+    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     if g_cumsum is None:
-        g_cumsum = chunk_local_cumsum(g, chunk_size, offsets=offsets)
+        g_cumsum = chunk_local_cumsum(g, BT, offsets=offsets, indices=indices, head_first=head_first)
 
     h, ht = chunk_fwd_h(
         k=k,
@@ -1162,7 +1188,8 @@ def chunk_gla_fwd(
         output_final_state=output_final_state,
         states_in_fp32=False,
         offsets=offsets,
-        chunk_size=chunk_size
+        head_first=head_first,
+        chunk_size=BT
     )
 
     # the intra A is kept in fp32
@@ -1173,7 +1200,9 @@ def chunk_gla_fwd(
         g=g_cumsum,
         scale=scale,
         offsets=offsets,
-        chunk_size=chunk_size
+        indices=indices,
+        head_first=head_first,
+        chunk_size=BT
     )
     o = chunk_gla_fwd_o_gk(
         q=q,
@@ -1183,7 +1212,9 @@ def chunk_gla_fwd(
         h=h,
         scale=scale,
         offsets=offsets,
-        chunk_size=chunk_size
+        indices=indices,
+        head_first=head_first,
+        chunk_size=BT
     )
     return g_cumsum, A, h, ht, o
 
@@ -1201,12 +1232,14 @@ def chunk_gla_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
+    indices: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
-    T = q.shape[1]
+    T = q.shape[2] if head_first else q.shape[1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     if g_cumsum is None:
-        g_cumsum = chunk_local_cumsum(g, BT, offsets=offsets)
+        g_cumsum = chunk_local_cumsum(g, BT, offsets=offsets, indices=indices, head_first=head_first)
 
     if h is None:
         h, _ = chunk_fwd_h(
@@ -1218,6 +1251,7 @@ def chunk_gla_bwd(
             h0=initial_state,
             output_final_state=False,
             offsets=offsets,
+            head_first=head_first,
             chunk_size=BT,
             states_in_fp32=True
         )
@@ -1233,6 +1267,7 @@ def chunk_gla_bwd(
         dht=dht,
         scale=scale,
         offsets=offsets,
+        head_first=head_first,
         chunk_size=BT,
         states_in_fp32=True
     )
@@ -1244,6 +1279,8 @@ def chunk_gla_bwd(
         do=do,
         dh=dh,
         offsets=offsets,
+        indices=indices,
+        head_first=head_first,
         chunk_size=BT
     )
 
@@ -1253,6 +1290,8 @@ def chunk_gla_bwd(
         do=do,
         scale=scale,
         offsets=offsets,
+        indices=indices,
+        head_first=head_first,
         chunk_size=BT
     )
     dq, dk = chunk_gla_bwd_dqk_intra(
@@ -1261,6 +1300,8 @@ def chunk_gla_bwd(
         g=g_cumsum,
         dA=dA,
         offsets=offsets,
+        indices=indices,
+        head_first=head_first,
         chunk_size=BT
     )
     dq, dk, dg = chunk_gla_bwd_dqkg(
@@ -1275,6 +1316,8 @@ def chunk_gla_bwd(
         dk=dk,
         scale=scale,
         offsets=offsets,
+        indices=indices,
+        head_first=head_first,
         chunk_size=BT
     )
     return dq, dk, dv, dg, dh0
@@ -1293,11 +1336,17 @@ class ChunkGLAFunction(torch.autograd.Function):
         scale,
         initial_state,
         output_final_state,
-        offsets
+        offsets,
+        head_first
     ):
-        T = q.shape[1]
+        T = q.shape[2] if head_first else q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
 
+        # 2-d indices denoting the offsets of chunks in each sequence
+        # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
+        # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
+        # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
+        indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
         g_cumsum, A, h, ht, o = chunk_gla_fwd(
             q=q,
             k=k,
@@ -1308,6 +1357,8 @@ class ChunkGLAFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             offsets=offsets,
+            indices=indices,
+            head_first=head_first,
             chunk_size=chunk_size
         )
         # recompute g_cumsum in bwd pass
@@ -1319,13 +1370,15 @@ class ChunkGLAFunction(torch.autograd.Function):
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.offsets = offsets
+        ctx.indices = indices
+        ctx.head_first = head_first
         return o, ht
 
     @staticmethod
     @input_guard
     def backward(ctx, do, dht):
         q, k, v, g, g_cumsum, initial_state, A = ctx.saved_tensors
-        chunk_size, scale, offsets = ctx.chunk_size, ctx.scale, ctx.offsets
+        chunk_size, scale, offsets, indices, head_first = ctx.chunk_size, ctx.scale, ctx.offsets, ctx.indices, ctx.head_first
         dq, dk, dv, dg, dh0 = chunk_gla_bwd(
             q=q,
             k=k,
@@ -1339,9 +1392,11 @@ class ChunkGLAFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             offsets=offsets,
+            indices=indices,
+            head_first=head_first,
             chunk_size=chunk_size
         )
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None, None
 
 
 @torch.compiler.disable
@@ -1418,19 +1473,6 @@ def chunk_gla(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
-    if head_first:
-        warnings.warn(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-        q, k, v, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, g))
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -1448,16 +1490,5 @@ def chunk_gla(
             )
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    o, final_state = ChunkGLAFunction.apply(
-        q,
-        k,
-        v,
-        g,
-        scale,
-        initial_state,
-        output_final_state,
-        cu_seqlens,
-    )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
+    o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, cu_seqlens, head_first)
     return o, final_state
