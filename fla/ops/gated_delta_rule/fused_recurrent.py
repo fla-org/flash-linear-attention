@@ -15,7 +15,7 @@ from fla.utils import input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
@@ -40,11 +40,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
@@ -266,7 +266,7 @@ def fused_recurrent_gated_delta_rule(
         >>> o, ht = fused_gated_recurrent_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
-            output_final_state=True,
+            output_final_state=True
         )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))

@@ -14,7 +14,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -36,12 +36,12 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BC: tl.constexpr,  # dummy placeholder
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -76,7 +76,7 @@ def fwd_prepare_wy_repr_kernel_chunk32(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -98,12 +98,12 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BC: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -169,7 +169,7 @@ def fwd_prepare_wy_repr_kernel_chunk64(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -195,12 +195,12 @@ def fwd_wu_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -253,7 +253,7 @@ def fwd_prepare_wy_repr(
     k: torch.Tensor,
     offsets: Optional[torch.LongTensor],
     indices: Optional[torch.LongTensor],
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if head_first:

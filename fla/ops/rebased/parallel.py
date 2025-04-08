@@ -447,7 +447,7 @@ def parallel_rebased(
     use_scale: bool = True,
     use_normalize: bool = True,
     return_both: bool = False,
-    head_first: bool = True
+    head_first: bool = False
 ):
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if use_scale:

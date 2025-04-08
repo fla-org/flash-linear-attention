@@ -16,9 +16,9 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
     'SAVE_NEW_VALUE': lambda args: args['v_new'] is not None
 })
 @triton.autotune(
@@ -28,7 +28,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
         for BV in [16, 32, 64]
     ],
-    key=['H', 'K', 'V', 'BT', 'BV', 'USE_G', 'SAVE_NEW_VALUE'],
+    key=['H', 'K', 'V', 'BT', 'USE_G'],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -53,13 +53,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -207,7 +207,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     'USE_G': lambda args: args['g'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -243,12 +243,12 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -424,9 +424,9 @@ def chunk_gated_delta_rule_fwd_h(
     output_final_state: bool = False,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
-    save_new_value: bool = True
+    save_new_value: bool = True,
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_first:
         B, H, T, K, V = *k.shape, u.shape[-1]
@@ -451,8 +451,21 @@ def chunk_gated_delta_rule_fwd_h(
         k_new = torch.empty_like(k).fill_(float('-inf'))
         w_new = torch.empty_like(w).fill_(float('-inf'))
         def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
-        proprocess_qkw[grid](None, k, w, g, None, k_new, w_new, offsets, T, H, K, BT,
-                             USE_OFFSETS=offsets is not None, HEAD_FIRST=head_first)
+        proprocess_qkw[grid](
+            q=None,
+            k=k,
+            w=w,
+            g=g,
+            q_new=None,
+            k_new=k_new,
+            w_new=w_new,
+            offsets=offsets,
+            T=T,
+            H=H,
+            K=K,
+            BT=BT,
+            HEAD_FIRST=head_first
+        )
 
     v_new = torch.empty_like(u) if save_new_value else None
     def grid(meta): return (triton.cdiv(V, meta['BV']), N*H)
@@ -490,8 +503,8 @@ def chunk_gated_delta_rule_bwd_dhu(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
-    chunk_size: int = 64  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if head_first:
         B, H, T, K, V = *q.shape, do.shape[-1]
@@ -560,7 +573,7 @@ def chunk_gated_delta_rule_bwd_dhu(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_Q': lambda args: args['q'] is not None,
 })
 @triton.autotune(
@@ -575,14 +588,27 @@ def chunk_gated_delta_rule_bwd_dhu(
 )
 @triton.jit(do_not_specialize=['T'])
 def proprocess_qkw(
-    q, k, w, g, q_new, k_new, w_new, offsets,
-    T, H: tl.constexpr, K: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr,
-    USE_OFFSETS: tl.constexpr, HEAD_FIRST: tl.constexpr, USE_Q: tl.constexpr
+    q,
+    k,
+    w,
+    g,
+    q_new,
+    k_new,
+    w_new,
+    offsets,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    HEAD_FIRST: tl.constexpr,
+    USE_Q: tl.constexpr
 ):
     i_k, i_nh, i_t = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
     else:

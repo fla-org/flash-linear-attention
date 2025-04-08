@@ -17,7 +17,7 @@ BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -54,12 +54,12 @@ def chunk_fwd_kernel_h(
     USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -155,7 +155,7 @@ def chunk_fwd_kernel_h(
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -195,14 +195,14 @@ def chunk_bwd_kernel_dh(
     USE_GV: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_bg = i_nh // NG
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -302,7 +302,7 @@ def chunk_fwd_h(
     h0: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
     states_in_fp32: bool = False
@@ -364,7 +364,7 @@ def chunk_bwd_dh(
     dht: torch.Tensor,
     scale: float,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
     states_in_fp32: bool = False

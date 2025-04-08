@@ -12,7 +12,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -34,11 +34,11 @@ def mean_pooling_fwd_kernel(
     BT: tl.constexpr,
     BD: tl.constexpr,
     NT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -59,7 +59,7 @@ def mean_pooling_fwd_kernel(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -81,11 +81,11 @@ def mean_pooling_bwd_kernel(
     BT: tl.constexpr,
     BD: tl.constexpr,
     NT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)

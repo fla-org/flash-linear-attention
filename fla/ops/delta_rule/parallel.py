@@ -305,18 +305,18 @@ def parallel_delta_rule(
     beta: torch.Tensor,
     scale: float = None,
     output_attentions: bool = False,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         beta (torch.Tensor):
-            betas of shape `[B, H, T]` if `head_first=True` else `[B, T, H]`.
+            betas of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
         scale (Optional[int]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -328,7 +328,7 @@ def parallel_delta_rule(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """

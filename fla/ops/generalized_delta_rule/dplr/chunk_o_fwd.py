@@ -13,7 +13,7 @@ BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -44,13 +44,13 @@ def chunk_dplr_fwd_kernel_o(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -106,7 +106,7 @@ def chunk_dplr_fwd_o(
     h: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:

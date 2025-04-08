@@ -14,7 +14,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -45,12 +45,12 @@ def fused_recurrent_rwkv6_fwd_kernel(
     REVERSE: tl.constexpr,  # whether to reverse the recurrence
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
@@ -107,7 +107,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -138,12 +138,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     BV: tl.constexpr,
     REVERSE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
@@ -205,7 +205,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -238,12 +238,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     BV: tl.constexpr,
     REVERSE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
@@ -312,7 +312,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -339,11 +339,11 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     BK: tl.constexpr,
     REVERSE: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_k, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
     else:
         bos, eos = i_n * T, i_n * T + T
@@ -394,7 +394,7 @@ def fused_recurrent_rwkv6_fwd(
     output_final_state: bool = False,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -445,7 +445,7 @@ def fused_recurrent_rwkv6_bwd(
     initial_state: Optional[torch.Tensor] = None,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -558,7 +558,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         output_final_state: bool = False,
         reverse: bool = False,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True
+        head_first: bool = False
     ):
         o, ht = fused_recurrent_rwkv6_fwd(
             q=q,
@@ -614,19 +614,19 @@ def fused_recurrent_rwkv6(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         r (torch.Tensor):
-            reception of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            reception of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
             Alias: q, query in linear attention.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         w (torch.Tensor):
-            data-dependent decays of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]` in log space! Alias: g.
+            data-dependent decays of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]` in log space! Alias: g.
         u (torch.Tensor):
             bonus of shape `[H, K]`
         scale (Optional[int]):
@@ -645,11 +645,11 @@ def fused_recurrent_rwkv6(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (Optional[torch.Tensor]):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
 
@@ -666,31 +666,39 @@ def fused_recurrent_rwkv6(
         >>> g = F.logsigmoid(torch.randn(B, T, H, K, device='cuda'))
         >>> u = torch.randn(H, K, device='cuda')
         >>> h0 = torch.randn(B, H, K, V, device='cuda')
-        >>> o, ht = fused_recurrent_rwkv6(q, k, v, g, u,
-                                          initial_state=h0,
-                                          output_final_state=True,
-                                          head_first=False)
+        >>> o, ht = fused_recurrent_rwkv6(
+            q, k, v, g, u,
+            initial_state=h0,
+            output_final_state=True
+        )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = fused_recurrent_rwkv6(q, k, v, g, u,
-                                                  initial_state=h0,
-                                                  output_final_state=True,
-                                                  cu_seqlens=cu_seqlens,
-                                                  head_first=False)
+        >>> o_var, ht_var = fused_recurrent_rwkv6(
+            q, k, v, g, u,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
     if cu_seqlens is not None:
         if r.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = FusedRecurrentRWKV6Function.apply(

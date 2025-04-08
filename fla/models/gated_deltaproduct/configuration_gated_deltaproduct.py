@@ -24,7 +24,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         intermediate_size: Optional[int] = None,
         hidden_act: str = "swish",
         num_hidden_layers: int = 21,
-        norm_first: bool = False,
+        norm_first: bool = True,
         norm_eps: float = 1e-6,
         attn: Optional[Dict] = None,
         use_cache: bool = True,

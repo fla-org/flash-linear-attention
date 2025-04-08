@@ -359,7 +359,7 @@ def fused_chunk_based(
     v: torch.Tensor,
     scale: Optional[float] = None,
     use_norm: bool = True,
-    head_first: bool = True
+    head_first: bool = False
 ):
     assert q.shape[-1] <= 16, 'only support feature dimension up to 16.'
     if scale is None:

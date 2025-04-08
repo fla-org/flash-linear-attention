@@ -14,7 +14,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -49,13 +49,13 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     REVERSE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -128,7 +128,7 @@ def fused_recurrent_dplr_delta_rule_fwd(
     output_final_state: bool = False,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ):
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -264,13 +264,19 @@ def fused_recurrent_dplr_delta_rule(
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = q.shape[-1] ** -0.5
     else:

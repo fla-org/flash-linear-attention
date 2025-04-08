@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import triton
@@ -13,7 +13,7 @@ from fla.utils import input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -45,14 +45,14 @@ def fused_recurrent_fwd_kernel(
     BV: tl.constexpr,  # BLOCK SIZE along the V dimension
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     # indices
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -115,7 +115,7 @@ def fused_recurrent_fwd_kernel(
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_DHT': lambda args: args['dht'] is not None,
     'USE_DH0': lambda args: args['dh0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -157,7 +157,7 @@ def fused_recurrent_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state h0
     USE_DH0: tl.constexpr,  # whether to use dh0
     USE_DHT: tl.constexpr,  # whether to use dht
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
@@ -166,7 +166,7 @@ def fused_recurrent_bwd_kernel(
     db += i_v * B * H * K * T
     dq += i_v * B * H * K * T
     da += i_v * B * H * K * T
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -406,7 +406,7 @@ def fused_recurrent_iplr_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    offsets: torch.Tensor = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -430,22 +430,30 @@ def fused_recurrent_iplr_delta_rule(
             Initial state of shape `[B, H, K, V]`. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
-        offsets (Optional[torch.Tensor]):
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
 
     """
-    if offsets is not None:
+    if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
-        if initial_state is not None and initial_state.shape[0] != len(offsets) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(offsets) - 1} rather than {initial_state.shape[0]}.")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = q.shape[-1] ** -0.5
     else:
         assert scale > 0, "scale must be positive"
     o, final_state = FusedRecurrentIPLRDeltaRuleFunction.apply(
-        q, k, v, a, b, scale, initial_state, output_final_state, offsets, head_first)
+        q, k, v, a, b, scale, initial_state, output_final_state, cu_seqlens, head_first)
     return o, final_state

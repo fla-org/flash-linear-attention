@@ -15,7 +15,7 @@ from fla.utils import input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_delta_rule_fwd_kernel(
@@ -39,12 +39,12 @@ def fused_recurrent_delta_rule_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_BETA_HEADWISE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
@@ -114,7 +114,7 @@ def fused_recurrent_delta_rule_fwd_kernel(
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_delta_rule_bwd_kernel(
@@ -143,12 +143,12 @@ def fused_recurrent_delta_rule_bwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar
     USE_INITIAL_STATE: tl.constexpr,  # whether to use dh0
     USE_FINAL_STATE_GRADIENT: tl.constexpr,  # whether to use dht
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
@@ -301,7 +301,7 @@ def fused_recurrent_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -359,7 +359,7 @@ def fused_recurrent_delta_rule_bwd(
     scale: float,
     initial_state: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if head_first:
         B, H, T, K, V = *k.shape, v.shape[-1]
@@ -438,7 +438,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True,
+        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = False
     ):
         q_orig = q
@@ -501,7 +501,7 @@ def fused_recurrent_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""

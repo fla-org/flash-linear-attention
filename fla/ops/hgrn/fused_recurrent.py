@@ -14,7 +14,7 @@ from fla.utils import input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -37,10 +37,10 @@ def fused_recurrent_hgrn_fwd_kernel(
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_d, i_n = tl.program_id(0), tl.program_id(1)
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
@@ -75,7 +75,7 @@ def fused_recurrent_hgrn_fwd_kernel(
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -101,10 +101,10 @@ def fused_recurrent_hgrn_bwd_kernel(
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_d, i_n = tl.program_id(0), tl.program_id(1)
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
         T = eos - bos
     else:

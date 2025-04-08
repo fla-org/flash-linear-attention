@@ -17,13 +17,10 @@ def fused_recurrent_retention(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        n_heads = q.shape[1]
-    else:
-        n_heads = q.shape[2]
-    s = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(n_heads), dtype=torch.float))).log()
+    H = q.shape[1] if head_first else q.shape[2]
+    s = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(H), dtype=torch.float))).log()
     if head_first:
         g = s[None, :, None].expand(q.shape[0], q.shape[1], q.shape[2]).contiguous()
     else:

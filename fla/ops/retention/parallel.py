@@ -15,16 +15,16 @@ def parallel_retention(
     scale: Optional[float] = None,
     output_attentions: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
         scale (Optional[int]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -34,11 +34,11 @@ def parallel_retention(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `True`.
+            Whether the inputs are in the head-first format. Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`
     """

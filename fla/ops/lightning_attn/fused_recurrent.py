@@ -19,16 +19,16 @@ def fused_recurrent_lightning_attn(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         layer_idx (int):
             The index of the current layer.
         num_layers (int):
@@ -47,11 +47,11 @@ def fused_recurrent_lightning_attn(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """

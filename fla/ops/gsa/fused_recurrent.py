@@ -93,7 +93,7 @@ def fused_recurrent_gsa_inference(
     initial_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     output_final_state: bool = False,
     scale: float = 1.,
-    head_first: bool = True
+    head_first: bool = False
 ) -> torch.Tensor:
     if head_first:
         B, H, T, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
@@ -150,7 +150,7 @@ def fused_recurrent_gsa_fwd(
     scale: float = 1.,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
     if head_first:
         B, H, T, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
@@ -250,7 +250,7 @@ def fused_recurrent_gsa_bwd(
     scale: float = 1.,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor]:
     if head_first:
         B, H, T, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
@@ -384,7 +384,7 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         output_final_state: bool = False,
         reverse: bool = False,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True
+        head_first: bool = False
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
         T = q.shape[2] if head_first else q.shape[1]
         if T == 1 and not q.requires_grad:
@@ -466,16 +466,16 @@ def fused_recurrent_gsa(
     output_final_state: Optional[bool] = False,
     reverse: Optional[bool] = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         s (torch.Tensor):
             slot representations of shape `[B, H, T, M]` if `head_first=True` else `[B, T, H, M]`.
         g (torch.Tensor):
@@ -497,11 +497,11 @@ def fused_recurrent_gsa(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (Tuple[torch.Tensor]):
             Final state tuple having tensors of shape `[N, H, K, M]` and `[N, H, M, V]`.
 
@@ -518,32 +518,40 @@ def fused_recurrent_gsa(
         >>> s = torch.randn(B, T, H, M, device='cuda')
         >>> g = F.logsigmoid(torch.randn(B, T, H, M, device='cuda'))
         >>> h0 = (torch.randn(B, H, K, M, device='cuda'), torch.randn(B, H, M, V, device='cuda'))
-        >>> o, (hk, hv) = fused_recurrent_gsa(q, k, v, s, g,
-                                              initial_state=h0,
-                                              output_final_state=True,
-                                              head_first=False)
+        >>> o, (hk, hv) = fused_recurrent_gsa(
+            q, k, v, s, g,
+            initial_state=h0,
+            output_final_state=True
+        )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, s, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, s, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, (hk_var, hv_var) = fused_recurrent_gsa(q, k, v, s, g,
-                                                          initial_state=h0,
-                                                          output_final_state=True,
-                                                          cu_seqlens=cu_seqlens,
-                                                          head_first=False)
+        >>> o_var, (hk_var, hv_var) = fused_recurrent_gsa(
+            q, k, v, s, g,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert hk.allclose(hk_var)
         >>> assert hv.allclose(hv_var)
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
         if initial_state is not None and initial_state[0].shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if initial_state is None:

@@ -26,7 +26,7 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     g = chunk_local_cumsum(g, chunk_size, offsets=offsets, indices=indices, head_first=head_first)
@@ -85,7 +85,7 @@ def chunk_gated_delta_rule_bwd(
     dht: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     T = q.shape[2] if head_first else q.shape[1]
@@ -193,7 +193,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True,
+        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = False
     ):
         chunk_size = 64
@@ -333,8 +333,7 @@ def chunk_gated_delta_rule(
         >>> o, ht = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
-            output_final_state=True,
-            head_first=False
+            output_final_state=True
         )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
@@ -344,8 +343,7 @@ def chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            head_first=False
+            cu_seqlens=cu_seqlens
         )
     """
     assert q.dtype == k.dtype == v.dtype

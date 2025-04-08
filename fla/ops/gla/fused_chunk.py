@@ -616,7 +616,7 @@ def fused_chunk_gla(
     scale: int = -1,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if scale == -1:
         scale = q.shape[-1] ** -0.5

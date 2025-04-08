@@ -16,7 +16,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -47,13 +47,13 @@ def chunk_fwd_kernel_o(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -115,7 +115,7 @@ def chunk_fwd_kernel_o(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_G': lambda args: args['g'] is not None,
     'USE_DW': lambda args: args['dw'] is not None
 })
@@ -155,14 +155,14 @@ def chunk_bwd_kernel_dqkwg(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_DW: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     if USE_G:
         dg += i_k * B * H * T
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -287,7 +287,7 @@ def chunk_bwd_kernel_dqkwg(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_G': lambda args: args['g'] is not None,
 })
 @triton.autotune(
@@ -317,12 +317,12 @@ def chunk_bwd_kernel_dv(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -377,7 +377,7 @@ def chunk_bwd_kernel_dv(
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -405,12 +405,12 @@ def chunk_bwd_kernel_dv_local(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -462,7 +462,7 @@ def chunk_fwd_o(
     scale: Optional[float] = None,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:
@@ -506,7 +506,7 @@ def chunk_bwd_dv(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:
@@ -559,7 +559,7 @@ def chunk_bwd_dv_local(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
     if head_first:
@@ -615,7 +615,7 @@ def chunk_bwd_dqkwg(
     indices: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     scale: float = 1.0,
-    head_first: bool = True,
+    head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     if head_first:

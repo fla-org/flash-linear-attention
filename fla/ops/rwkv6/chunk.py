@@ -17,7 +17,7 @@ BV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -42,11 +42,11 @@ def chunk_rwkv6_fwd_cumsum_kernel(
     BT: tl.constexpr,
     BS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -78,7 +78,7 @@ def chunk_rwkv6_fwd_cumsum(
     chunk_size: int,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> torch.Tensor:
     if head_first:
         B, H, T, S = g.shape
@@ -106,7 +106,7 @@ def chunk_rwkv6_fwd_cumsum(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -135,13 +135,13 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_t, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     i_i, i_j = i_c // NC, i_c % NC
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -194,7 +194,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -223,13 +223,13 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BK: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     i_j = i_i
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -277,7 +277,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -308,14 +308,14 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_tc // NC, i_tc % NC
     i_j = i_i
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         all = T
@@ -366,7 +366,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -390,12 +390,12 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
     BT: tl.constexpr,
     BC: tl.constexpr,
     NK: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_t, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         all = T
@@ -424,7 +424,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -460,14 +460,14 @@ def chunk_rwkv6_bwd_kernel_dh(
     NG: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_bg = i_nh // NG
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -521,7 +521,7 @@ def chunk_rwkv6_bwd_kernel_dh(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -549,13 +549,13 @@ def chunk_rwkv6_bwd_kernel_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_c // NC, i_c % NC
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
     else:
@@ -696,7 +696,7 @@ def chunk_rwkv6_bwd_kernel_intra(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -736,13 +736,13 @@ def chunk_rwkv6_bwd_kernel_inter(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
@@ -852,7 +852,7 @@ def chunk_rwkv6_fwd_intra(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     if head_first:
@@ -963,7 +963,7 @@ def chunk_rwkv6_bwd_dh(
     scale: float,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64,
     states_in_fp32: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1021,7 +1021,7 @@ def chunk_rwkv6_bwd_dqk_intra(
     dA: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     if head_first:
@@ -1077,7 +1077,7 @@ def chunk_rwkv6_bwd_dqkgu(
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     if head_first:
@@ -1134,7 +1134,7 @@ def chunk_rwkv6_fwd(
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     gi, ge = chunk_rwkv6_fwd_cumsum(g, chunk_size=chunk_size, offsets=offsets, indices=indices, head_first=head_first)
@@ -1194,7 +1194,7 @@ def chunk_rwkv6_bwd(
     dht: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     gi, ge = chunk_rwkv6_fwd_cumsum(g, chunk_size=chunk_size, offsets=offsets, indices=indices, head_first=head_first)
@@ -1374,18 +1374,18 @@ def chunk_rwkv6(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         g (torch.Tensor):
-            Forget gates of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]` applied to keys.
+            Forget gates of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]` applied to keys.
         u (torch.Tensor):
             bonus representations of shape `[H]`.
         scale (Optional[int]):
@@ -1402,11 +1402,11 @@ def chunk_rwkv6(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (Optional[torch.Tensor]):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
 
@@ -1423,31 +1423,39 @@ def chunk_rwkv6(
         >>> g = F.logsigmoid(torch.randn(B, T, H, K, device='cuda'))
         >>> u = torch.randn(H, K, device='cuda')
         >>> h0 = torch.randn(B, H, K, V, device='cuda')
-        >>> o, ht = chunk_rwkv6(q, k, v, g, u,
-                                initial_state=h0,
-                                output_final_state=True,
-                                head_first=False)
+        >>> o, ht = chunk_rwkv6(
+            q, k, v, g, u,
+            initial_state=h0,
+            output_final_state=True
+        )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = chunk_rwkv6(q, k, v, g, u,
-                                        initial_state=h0,
-                                        output_final_state=True,
-                                        cu_seqlens=cu_seqlens,
-                                        head_first=False)
+        >>> o_var, ht_var = chunk_rwkv6(
+            q, k, v, g, u,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode"
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = q.shape[-1] ** -0.5
     o, final_state = ChunkRWKV6Function.apply(

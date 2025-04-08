@@ -13,7 +13,7 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -32,12 +32,12 @@ def chunk_local_cumsum_scalar_kernel(
     H: tl.constexpr,
     BT: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     REVERSE: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -60,7 +60,7 @@ def chunk_local_cumsum_scalar_kernel(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -82,12 +82,12 @@ def chunk_local_cumsum_vector_kernel(
     BT: tl.constexpr,
     BS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     REVERSE: tl.constexpr
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -113,7 +113,7 @@ def chunk_local_cumsum_vector_kernel(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None
 })
 @triton.autotune(
     configs=[
@@ -134,12 +134,12 @@ def chunk_global_cumsum_scalar_kernel(
     H: tl.constexpr,
     BT: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     REVERSE: tl.constexpr
 ):
     i_bh = tl.program_id(0)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_b).to(tl.int32), tl.load(offsets + i_b + 1).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -167,7 +167,7 @@ def chunk_global_cumsum_scalar_kernel(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -188,12 +188,12 @@ def chunk_global_cumsum_vector_kernel(
     BT: tl.constexpr,
     BS: tl.constexpr,
     HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     REVERSE: tl.constexpr
 ):
     i_s, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_b).to(tl.int32), tl.load(offsets + i_b + 1).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -229,7 +229,7 @@ def chunk_local_cumsum_scalar(
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     if head_first:
@@ -263,7 +263,7 @@ def chunk_local_cumsum_vector(
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     if head_first:
@@ -300,7 +300,7 @@ def chunk_global_cumsum_scalar(
     dtype: Optional[torch.dtype] = None,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     dtype = dtype or s.dtype
@@ -330,7 +330,7 @@ def chunk_global_cumsum_vector(
     dtype: Optional[torch.dtype] = None,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     dtype = dtype or s.dtype
@@ -363,7 +363,7 @@ def chunk_global_cumsum(
     dtype: Optional[torch.dtype] = None,
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     if offsets is not None:
@@ -373,9 +373,11 @@ def chunk_global_cumsum(
     elif len(s.shape) == 4:
         return chunk_global_cumsum_vector(s, dtype, reverse, offsets, head_first, output_dtype)
     else:
-        raise ValueError(f"Unsupported input shape {s.shape}. "
-                         f"which should be [B, H, T]/[B, H, T, D] if `head_first=True` "
-                         f"or [B, T, H]/[B, T, H, D] otherwise")
+        raise ValueError(
+            f"Unsupported input shape {s.shape}. "
+            f"which should be [B, T, H]/[B, T, H, D] if `head_first=False` "
+            f"or [B, H, T]/[B, H, T, D] otherwise"
+        )
 
 
 @input_guard
@@ -385,7 +387,7 @@ def chunk_local_cumsum(
     reverse: bool = False,
     offsets: Optional[torch.Tensor] = None,
     indices: Optional[torch.Tensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     output_dtype: Optional[torch.dtype] = torch.float
 ) -> torch.Tensor:
     if offsets is not None:
@@ -395,6 +397,8 @@ def chunk_local_cumsum(
     elif len(g.shape) == 4:
         return chunk_local_cumsum_vector(g, chunk_size, reverse, offsets, indices, head_first, output_dtype)
     else:
-        raise ValueError(f"Unsupported input shape {g.shape}. "
-                         f"which should be (B, H, T, dim) if `head_first=True` "
-                         f"or (batch_size, num_heads, seq_len) otherwise")
+        raise ValueError(
+            f"Unsupported input shape {g.shape}. "
+            f"which should be (B, T, H, D) if `head_first=False` "
+            f"or (B, H, T, D) otherwise"
+        )

@@ -15,7 +15,7 @@ from fla.utils import check_shared_mem, use_cuda_graph
 @triton.heuristics({
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -50,12 +50,12 @@ def chunk_dplr_bwd_kernel_dhu(
     BV: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
     HEAD_FIRST: tl.constexpr
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
+    if IS_VARLEN:
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
@@ -131,7 +131,7 @@ def chunk_dplr_bwd_dhu(
     dv: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if head_first:

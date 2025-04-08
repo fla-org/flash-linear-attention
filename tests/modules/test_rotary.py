@@ -53,14 +53,22 @@ def test_rotary_with_offsets(B: int, T: int, H: int, G: int, D: int, dtype: torc
     tri_dq = torch.autograd.grad(tri_q.sum(), q, retain_graph=True)[0]
     tri_dk = torch.autograd.grad(tri_k.sum(), k, retain_graph=True)[0]
 
-    ref_q = torch.cat([rotary_embedding_ref(q[i:i+1].float(),
-                                            rotary._cos_cached[offset:offset+T],
-                                            rotary._sin_cached[offset:offset+T])
-                       for i, offset in enumerate(seqlen_offset.tolist())]).to(dtype=dtype)
-    ref_k = torch.cat([rotary_embedding_ref(k[i:i+1].float(),
-                                            rotary._cos_cached[offset:offset+T],
-                                            rotary._sin_cached[offset:offset+T])
-                       for i, offset in enumerate(seqlen_offset.tolist())]).to(dtype=dtype)
+    ref_q = torch.cat([
+        rotary_embedding_ref(
+            q[i:i+1].float(),
+            rotary._cos_cached[offset:offset+T],
+            rotary._sin_cached[offset:offset+T]
+        )
+        for i, offset in enumerate(seqlen_offset.tolist())
+    ]).to(dtype=dtype)
+    ref_k = torch.cat([
+        rotary_embedding_ref(
+            k[i:i+1].float(),
+            rotary._cos_cached[offset:offset+T],
+            rotary._sin_cached[offset:offset+T]
+        )
+        for i, offset in enumerate(seqlen_offset.tolist())
+    ]).to(dtype=dtype)
     ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
     ref_dk = torch.autograd.grad(ref_k.sum(), k, retain_graph=True)[0]
 
@@ -85,25 +93,28 @@ def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtyp
         torch.arange(1, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
-    max_seqlen = cu_seqlens[-1].item()
     rotary = RotaryEmbedding(D).to(device)
 
-    tri_q, tri_k = rotary(q, k, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    tri_q, tri_k = rotary(q, k, cu_seqlens=cu_seqlens)
     tri_dq = torch.autograd.grad(tri_q.sum(), q, retain_graph=True)[0]
     tri_dk = torch.autograd.grad(tri_k.sum(), k, retain_graph=True)[0]
 
-    ref_q = torch.cat(
-        [rotary_embedding_ref(q[0, start:end].float(),
-                              rotary._cos_cached[:end-start],
-                              rotary._sin_cached[:end-start])
-         for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist())]
-    ).to(dtype=dtype).unsqueeze(0)
-    ref_k = torch.cat(
-        [rotary_embedding_ref(k[0, start:end].float(),
-                              rotary._cos_cached[:end-start],
-                              rotary._sin_cached[:end-start])
-         for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist())]
-    ).to(dtype=dtype).unsqueeze(0)
+    ref_q = torch.cat([
+        rotary_embedding_ref(
+            q[0, start:end].float(),
+            rotary._cos_cached[:end-start],
+            rotary._sin_cached[:end-start]
+        )
+        for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist())
+    ]).to(dtype=dtype).unsqueeze(0)
+    ref_k = torch.cat([
+        rotary_embedding_ref(
+            k[0, start:end].float(),
+            rotary._cos_cached[:end-start],
+            rotary._sin_cached[:end-start]
+        )
+        for start, end in zip(cu_seqlens.tolist(), cu_seqlens[1:].tolist())
+    ]).to(dtype=dtype).unsqueeze(0)
     ref_dq = torch.autograd.grad(ref_q.sum(), q, retain_graph=True)[0]
     ref_dk = torch.autograd.grad(ref_k.sum(), k, retain_graph=True)[0]
 

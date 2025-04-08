@@ -25,7 +25,7 @@ def chunk_delta_rule_fwd(
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     T = q.shape[2] if head_first else q.shape[1]
@@ -80,7 +80,7 @@ def chunk_delta_rule_bwd(
     dht: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
     indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
     chunk_size: int = 64
 ):
     T = q.shape[2] if head_first else q.shape[1]
@@ -181,7 +181,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True,
+        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = True
     ):
         T = q.shape[2] if head_first else q.shape[1]
