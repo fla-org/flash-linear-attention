@@ -30,7 +30,8 @@ def safe_exp(x):
 
 
 if not is_gather_supported:
-    def gather(*args, **kwargs):
-        pass
+    @triton.jit
+    def gather(src, index, axis, _builder=None):
+        return src
 else:
     gather = tl.gather
