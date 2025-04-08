@@ -221,8 +221,10 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([GatedDeltaProductBlock(config, layer_idx)
-                                    for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([
+            GatedDeltaProductBlock(config, layer_idx)
+            for layer_idx in range(config.num_hidden_layers)
+        ])
         self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
