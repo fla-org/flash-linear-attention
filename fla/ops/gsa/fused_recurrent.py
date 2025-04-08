@@ -477,7 +477,7 @@ def fused_recurrent_gsa(
         v (torch.Tensor):
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         s (torch.Tensor):
-            slot representations of shape `[B, H, T, M]` if `head_first=True` else `[B, T, H, M]`.
+            slot representations of shape `[B, T, H, M]` if `head_first=False` else `[B, H, T, M]`.
         g (torch.Tensor):
             Forget gates of shape `[B, H, T, M]` applied to keys.
         scale (Optional[int]):

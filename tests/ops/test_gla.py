@@ -49,10 +49,10 @@ def test_fused_recurrent(
 ):
     torch.manual_seed(42)
 
-    q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-    k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-    v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-    g = F.logsigmoid(torch.randn((B, H, T, D), dtype=dtype, device=device)).requires_grad_()
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device=device)).requires_grad_()
     h0 = torch.randn(B, H, D, D, device=device).requires_grad_()
 
     do = torch.randn_like(v)
@@ -136,7 +136,15 @@ def test_chunk(
     do = torch.randn_like(v)
     dht = torch.zeros((B, H, D, D), dtype=dtype, device=device)
 
-    tri, tri_ht = chunk_gla(q, k, v, g, initial_state=h0, output_final_state=True, head_first=head_first)
+    tri, tri_ht = chunk_gla(
+        q,
+        k,
+        v,
+        g,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first
+    )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -144,8 +152,24 @@ def test_chunk(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    ref, ref_ht = fused_recurrent_gla(q, k, v, g, initial_state=h0, output_final_state=True, head_first=head_first)
-    ref, _ = fused_recurrent_gla(q, k, v, g, initial_state=h0, output_final_state=False, head_first=head_first)
+    ref, ref_ht = fused_recurrent_gla(
+        q,
+        k,
+        v,
+        g,
+        initial_state=h0,
+        output_final_state=True,
+        head_first=head_first
+    )
+    ref, _ = fused_recurrent_gla(
+        q,
+        k,
+        v,
+        g,
+        initial_state=h0,
+        output_final_state=False,
+        head_first=head_first
+    )
     (ref * do).sum().backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -181,9 +205,9 @@ def test_chunk_varlen(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
@@ -198,15 +222,13 @@ def test_chunk_varlen(
         q, k, v, g,
         initial_state=h0,
         output_final_state=True,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens
     )
     ref, _ = fused_recurrent_gla(
         q, k, v, g,
         initial_state=h0,
         output_final_state=False,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens
     )
 
     (ref * do).sum().backward()
@@ -223,8 +245,7 @@ def test_chunk_varlen(
         g,
         initial_state=h0,
         output_final_state=True,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens
     )
     ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None

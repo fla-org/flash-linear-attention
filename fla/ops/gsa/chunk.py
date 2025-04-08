@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-from einops import reduce
+from einops import rearrange, reduce
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
@@ -1150,7 +1150,7 @@ def chunk_gsa(
     output_final_state: Optional[bool] = False,
     checkpoint_level: Optional[int] = 2,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: Optional[bool] = True
+    head_first: Optional[bool] = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -1162,7 +1162,7 @@ def chunk_gsa(
         v (torch.Tensor):
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         s (torch.Tensor):
-            slot representations of shape `[B, H, T, M]` if `head_first=True` else `[B, T, H, M]`.
+            slot representations of shape `[B, T, H, M]` if `head_first=False` else `[B, H, T, M]`.
         g (torch.Tensor):
             Forget gates of shape `[B, H, T, M]` applied to keys.
             If not provided, this function is equivalent to vanilla ABC.
@@ -1266,7 +1266,8 @@ def chunk_gsa(
         hv0,
         output_final_state,
         checkpoint_level,
-        cu_seqlens,
-        head_first
+        cu_seqlens
     )
+    if head_first:
+        o = rearrange(o, 'b h t ... -> b t h ...')
     return o, final_state

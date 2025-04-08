@@ -302,29 +302,22 @@ def chunk_fwd_h(
     h0: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
     states_in_fp32: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BS = BT if split_size is None else min(split_size, max(16, triton.next_power_of_2(T)))
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if offsets is None:
-        split_offsets, N, NS = None, B, triton.cdiv(T, BS)
+        N, NS, split_offsets = B, triton.cdiv(T, BS), None
     else:
         split_offsets = prepare_chunk_offsets(offsets, BS)
-        N, NS = len(offsets) - 1, split_offsets[-1]
+        N, NS = len(offsets) - 1, split_offsets[-1].item()
 
-    if head_first:
-        h = k.new_empty(B, H, NS, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
-    else:
-        h = k.new_empty(B, NS, H, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
+    h = k.new_empty(B, NS, H, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
     chunk_fwd_kernel_h[grid](
@@ -347,7 +340,7 @@ def chunk_fwd_h(
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     return h, ht
 
@@ -364,33 +357,25 @@ def chunk_bwd_dh(
     dht: torch.Tensor,
     scale: float,
     offsets: Optional[torch.Tensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
     states_in_fp32: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-        HQ = q.shape[1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
-        HQ = q.shape[2]
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    HQ = q.shape[2]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BS = BT if split_size is None else min(split_size, max(16, triton.next_power_of_2(T)))
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
     # N: the actual number of sequences in the batch with either equal or variable lengths
     # NG: number of groups in GQA
     if offsets is None:
-        split_offsets, N, NS = None, B, triton.cdiv(T, BS)
+        N, NS, split_offsets = B, triton.cdiv(T, BS), None
     else:
         split_offsets = prepare_chunk_offsets(offsets, BS)
-        N, NS = len(offsets) - 1, split_offsets[-1]
+        N, NS = len(offsets) - 1, split_offsets[-1].item()
     NG = HQ // H
 
-    if head_first:
-        dh = k.new_empty(B, HQ, NS, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
-    else:
-        dh = k.new_empty(B, NS, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
+    dh = k.new_empty(B, NS, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
     def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
@@ -417,6 +402,6 @@ def chunk_bwd_dh(
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     return dh, dh0

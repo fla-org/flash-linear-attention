@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, safe_exp
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
@@ -461,18 +462,14 @@ def chunk_fwd_o(
     g: Optional[torch.Tensor] = None,  # cumsum of log decay
     scale: Optional[float] = None,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
-    if head_first:
-        B, H, T, K, V = *q.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *q.shape, v.shape[-1]
+    B, T, H, K, V = *q.shape, v.shape[-1]
+    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
+    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     o = torch.empty_like(v)
 
@@ -492,7 +489,7 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     return o
 
@@ -505,15 +502,11 @@ def chunk_bwd_dv(
     dh: torch.Tensor,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
-    if head_first:
-        B, H, T, K, V = *k.shape, do.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, do.shape[-1]
+    B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
@@ -545,7 +538,7 @@ def chunk_bwd_dv(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     return dv
 
@@ -558,15 +551,11 @@ def chunk_bwd_dv_local(
     dh: torch.Tensor,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ) -> torch.Tensor:
-    if head_first:
-        B, H, T, K, V = *k.shape, do.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, do.shape[-1]
+    B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
@@ -596,7 +585,7 @@ def chunk_bwd_dv_local(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     return dv
 
@@ -612,17 +601,13 @@ def chunk_bwd_dqkwg(
     dv: Optional[torch.Tensor] = None,
     w: Optional[torch.Tensor] = None,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     scale: float = 1.0,
-    head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     CONST_TILING = 64 if check_shared_mem() else 32
@@ -660,7 +645,7 @@ def chunk_bwd_dqkwg(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
 
     if dg is not None:

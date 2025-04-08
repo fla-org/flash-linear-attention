@@ -37,7 +37,7 @@ def chunk_simple_gla_ref(
     g: torch.Tensor,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    BT: int = 64,
+    chunk_size: int = 64,
     scale: Optional[float] = None,
     head_first: bool = True
 ):
@@ -50,6 +50,7 @@ def chunk_simple_gla_ref(
         scale = 1.0 / q.shape[-1] ** 0.5
 
     T = q.shape[-2]
+    BT = chunk_size
     pad_len = (BT - (T % BT)) % BT
     if pad_len > 0:
         # Pad all tensors
@@ -59,19 +60,17 @@ def chunk_simple_gla_ref(
         g = F.pad(g, (0, pad_len))
     q, k, v, g = map(lambda x: x.to(torch.float32), [q, k, v, g])
     decay = g
-    chunk_size = BT
-    b, h, l, d_k = q.shape
+    b, h, t, d_k = q.shape
     d_v = v.shape[-1]
     q = q * scale
-    q, k, v, decay = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d',
-                                             c=chunk_size), [q, k, v, decay.unsqueeze(-1)])
+    q, k, v, decay = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size), [q, k, v, decay.unsqueeze(-1)])
     decay = decay.squeeze(-1).cumsum(-1)
     L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
     S = k.new_zeros(b, h, d_k, d_v)
     if initial_state is not None:
         S = initial_state
     o = torch.zeros_like(v)
-    for i in range(0, l // chunk_size):
+    for i in range(0, t // chunk_size):
         q_i, k_i, v_i = q[:, :, i], k[:, :, i], v[:, :, i]
         attn = (q_i @ k_i.transpose(-1, -2) * L_mask[:, :, i])
         o_inter = (q_i * decay[:, :, i, :, None].exp()) @ S
@@ -116,7 +115,7 @@ def parallel_simple_gla_ref(q, k, v, g, scale=None, head_first=True):
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.parametrize("scale", [1, 0.1])
 @pytest.mark.skipif(
@@ -188,7 +187,7 @@ def test_chunk(
 @pytest.mark.parametrize("T", test_t_varlen_list)
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
@@ -264,7 +263,7 @@ def test_chunk_varlen(
 @pytest.mark.parametrize("T", test_t_varlen_list)
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
@@ -335,7 +334,7 @@ def test_parallel_varlen(
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("scale", [0.1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"

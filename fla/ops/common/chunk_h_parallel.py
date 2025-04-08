@@ -11,6 +11,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
 
 
@@ -487,26 +488,18 @@ def chunk_fwd_h(
     output_final_state: bool,
     states_in_fp32: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    indices: Optional[torch.Tensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        if indices is None:
-            indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], BT).tolist()])
-            indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
-        N, NT = len(offsets) - 1, len(indices)
-        chunk_offsets = torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], BT)]).cumsum(-1)
+        indices = prepare_chunk_indices(offsets, BT)
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
 
-    h = k.new_empty(B, H, NT, K, V, dtype=torch.float) if head_first else k.new_empty(B, NT, H, K, V, dtype=torch.float)
+    h = k.new_empty(B, NT, H, K, V, dtype=torch.float)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']), NT, B * H)
     chunk_fwd_kernel_h_parallel[grid](
@@ -528,7 +521,7 @@ def chunk_fwd_h(
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     kvt, ht = ht, (torch.empty_like(ht) if output_final_state else None)
     def grid(meta): return (triton.cdiv(K, meta['BK']), triton.cdiv(V, meta['BV']), N * H)
@@ -549,7 +542,7 @@ def chunk_fwd_h(
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     h = h.to(k.dtype) if not states_in_fp32 else h
     return h, ht
@@ -568,33 +561,21 @@ def chunk_bwd_dh(
     scale: float,
     states_in_fp32: bool = False,
     offsets: Optional[torch.Tensor] = None,
-    indices: Optional[torch.Tensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-        HQ = q.shape[1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
-        HQ = q.shape[2]
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    HQ = q.shape[2]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     # N: the actual number of sequences in the batch with either equal or variable lengths
     # NG: number of groups in GQA
     if offsets is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        if indices is None:
-            indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], BT).tolist()])
-            indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
-        N, NT = len(offsets) - 1, len(indices)
-        chunk_offsets = torch.cat([offsets.new_tensor([0]), triton.cdiv(offsets[1:] - offsets[:-1], BT)]).cumsum(-1)
+        indices = prepare_chunk_indices(offsets, BT)
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
     NG = HQ // H
 
-    if head_first:
-        dh = k.new_empty(B, HQ, NT, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
-    else:
-        dh = k.new_empty(B, NT, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
+    dh = k.new_empty(B, NT, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
     dh0 = torch.empty_like(h0, dtype=torch.float) if h0 is not None else None
 
     def grid(meta): return (triton.cdiv(K, meta['BK']) * triton.cdiv(V, meta['BV']), NT, B * HQ)
@@ -620,7 +601,7 @@ def chunk_bwd_dh(
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
 
     doq0, dh0 = dh0, (torch.empty_like(dh0) if dh0 is not None else None)
@@ -644,7 +625,7 @@ def chunk_bwd_dh(
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=False
     )
     dh = dh.to(q.dtype) if not states_in_fp32 else dh
     return dh, dh0

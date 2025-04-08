@@ -27,7 +27,7 @@ def naive_nsa(
         v (torch.Tensor):
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         indices (torch.LongTensor):
-            Block indices of shape `[B, T, H, S]` if `head_first=True` else `[B, T, H, S]`.
+            Block indices of shape `[B, T, H, S]` if `head_first=False` else `[B, H, T, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
         block_size (int):
             Selected block size. Default: 64.
@@ -52,7 +52,7 @@ def naive_nsa(
                 "Sequences with variable lengths are not supported for head-first mode"
             )
     if head_first:
-        q, k, v, indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, indices))
+        q, k, v, indices = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, indices))
 
     dtype = q.dtype
     G = q.shape[2] // k.shape[2]
@@ -92,5 +92,5 @@ def naive_nsa(
                 o[0][cu_seqlens[i]+i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
 
     if head_first:
-        o = rearrange(o, 'b t h d -> b h t d')
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o.to(dtype)
