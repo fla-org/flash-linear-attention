@@ -9,12 +9,14 @@ import triton.language as tl
 from einops import rearrange, reduce
 
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp, log
+from fla.ops.utils.cumsum import chunk_global_cumsum
+from fla.ops.utils.op import exp, log, safe_exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'USE_G': lambda args: args['g_cumsum'] is not None
 })
 @triton.autotune(
     configs=[
@@ -22,7 +24,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem
         for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
+    key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G'],
 )
 @triton.jit
 def parallel_attn_fwd_kernel(
@@ -30,6 +32,7 @@ def parallel_attn_fwd_kernel(
     k,
     v,
     o,
+    g_cumsum,
     lse,
     scale,
     offsets,
@@ -45,7 +48,8 @@ def parallel_attn_fwd_kernel(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
+    USE_G: tl.constexpr
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -72,6 +76,13 @@ def parallel_attn_fwd_kernel(
 
     b_m = tl.full([BT], float('-inf'), dtype=tl.float32)
     b_acc = tl.zeros([BT], dtype=tl.float32)
+
+    if USE_G:
+        p_g = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+        b_gq = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
+    else:
+        b_gq = None
+
     for i_s in range(0, i_t * BT, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
@@ -82,11 +93,16 @@ def parallel_attn_fwd_kernel(
         # [BT, BS]
         b_s = tl.dot(b_q, b_k)
 
+        if USE_G:
+            p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
+            b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
+            b_s += b_gq[:, None] - b_gk[None, :]
+
         # [BT, BS]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
         b_r = exp(b_mp - b_m)
         # [BT, BS]
-        b_p = exp(b_s - b_m[:, None])
+        b_p = safe_exp(b_s - b_m[:, None])
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [BT, BV]
@@ -110,17 +126,22 @@ def parallel_attn_fwd_kernel(
         b_s = tl.dot(b_q, b_k)
         b_s = tl.where(o_q[:, None] >= o_k[None, :], b_s, float('-inf'))
 
+        if USE_G:
+            p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
+            b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
+            b_s += b_gq[:, None] - b_gk[None, :]
+
         # [BT]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
         b_r = exp(b_mp - b_m)
         # [BT, BS]
-        b_p = exp(b_s - b_m[:, None])
+        b_p = safe_exp(b_s - b_m[:, None])
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [BT, BV]
         b_o = b_o * b_r[:, None] + tl.dot(b_p.to(b_q.dtype), b_v)
-
         b_mp = b_m
+
     b_o = b_o / b_acc[:, None]
     b_m += log(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
@@ -147,7 +168,8 @@ def parallel_attn_bwd_kernel_preprocess(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'USE_G': lambda args: args['g_cumsum'] is not None
 })
 @triton.autotune(
     configs=[
@@ -155,7 +177,7 @@ def parallel_attn_bwd_kernel_preprocess(
         for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
+    key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G'],
 )
 @triton.jit(do_not_specialize=['T'])
 def parallel_attn_bwd_kernel_dq(
@@ -166,6 +188,8 @@ def parallel_attn_bwd_kernel_dq(
     delta,
     do,
     dq,
+    dg_cumsum,
+    g_cumsum,
     scale,
     offsets,
     indices,
@@ -180,7 +204,8 @@ def parallel_attn_bwd_kernel_dq(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
+    USE_G: tl.constexpr
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -211,6 +236,14 @@ def parallel_attn_bwd_kernel_dq(
 
     # [BT, BK]
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
+    if USE_G:
+        b_dg = tl.zeros([BT, ], dtype=tl.float32)
+        p_gq = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+        b_gq = tl.load(p_gq, boundary_check=(0,)).to(tl.float32)
+    else:
+        b_gq = None
+        b_dg = None
+
     for i_s in range(0, i_t * BT, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
@@ -218,16 +251,21 @@ def parallel_attn_bwd_kernel_dq(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BV, BS]
         b_v = tl.load(p_v, boundary_check=(0, 1))
-
         # [BT, BS]
         b_s = tl.dot(b_q, b_k)
-        b_p = exp(b_s - b_lse[:, None])
+        if USE_G:
+            p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
+            b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
+            b_s += b_gq[:, None] - b_gk[None, :]
 
+        b_p = safe_exp(b_s - b_lse[:, None])
         # [BT, BV] @ [BV, BS] -> [BT, BS]
         b_dp = tl.dot(b_do, b_v)
         b_ds = b_p * (b_dp.to(tl.float32) - b_delta[:, None])
         # [BT, BS] @ [BS, BK] -> [BT, BK]
         b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
+        if USE_G:
+            b_dg += tl.sum(b_ds, 1)
 
     # [BT]
     o_q = i_t * BT + tl.arange(0, BT)
@@ -240,10 +278,16 @@ def parallel_attn_bwd_kernel_dq(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BV, BS]
         b_v = tl.load(p_v, boundary_check=(0, 1))
-
         # [BT, BS]
         b_s = tl.dot(b_q, b_k)
-        b_p = exp(b_s - b_lse[:, None])
+
+        if USE_G:
+            p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
+            b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
+            b_s += b_gq[:, None] - b_gk[None, :]
+            b_s = tl.where(o_q[:, None] >= o_k[None, :], b_s, -float('inf'))
+
+        b_p = safe_exp(b_s - b_lse[:, None])  # SY: important to use safe_exp here to avoid NaN.
         b_p = tl.where(o_q[:, None] >= o_k[None, :], b_p, 0)
 
         # [BT, BV] @ [BV, BS] -> [BT, BS]
@@ -251,14 +295,19 @@ def parallel_attn_bwd_kernel_dq(
         b_ds = b_p * (b_dp.to(tl.float32) - b_delta[:, None])
         # [BT, BS] @ [BS, BK] -> [BT, BK]
         b_dq += tl.dot(b_ds.to(b_k.dtype), tl.trans(b_k))
+        if USE_G:
+            b_dg += tl.sum(b_ds, 1)
 
     b_dq *= scale
-
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    if USE_G:
+        p_dg = tl.make_block_ptr(dg_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'USE_G': lambda args: args['g_cumsum'] is not None
 })
 @triton.autotune(
     configs=[
@@ -266,18 +315,20 @@ def parallel_attn_bwd_kernel_dq(
         for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV'],
+    key=['B', 'H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G'],
 )
 @triton.jit(do_not_specialize=['T'])
 def parallel_attn_bwd_kernel_dkv(
     q,
     k,
     v,
+    g_cumsum,
     lse,
     delta,
     do,
     dk,
     dv,
+    dg_cumsum,
     offsets,
     indices,
     scale,
@@ -292,6 +343,7 @@ def parallel_attn_bwd_kernel_dkv(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -319,6 +371,15 @@ def parallel_attn_bwd_kernel_dkv(
     b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
     o_k = i_t * BT + tl.arange(0, BT)
+
+    if USE_G:
+        p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+        b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
+        b_dg = tl.zeros([BT,], dtype=tl.float32)
+    else:
+        b_gk = None
+        b_dg = None
+
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
         p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (BS, BK), (1, 0))
         p_do = tl.make_block_ptr(do + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
@@ -337,7 +398,12 @@ def parallel_attn_bwd_kernel_dkv(
         b_delta = tl.load(p_delta, boundary_check=(0,))
         # [BT, BS]
         b_s = tl.dot(b_k, tl.trans(b_q))
-        b_p = exp(b_s - b_lse[None, :])
+        if USE_G:
+            p_gq = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
+            b_gq = tl.load(p_gq, boundary_check=(0,)).to(tl.float32)
+            b_s += b_gq[None, :] - b_gk[:, None]
+            b_s = tl.where(o_k[:, None] <= o_q[None, :], b_s, -float('inf'))
+        b_p = safe_exp(b_s - b_lse[None, :])
         b_p = tl.where(o_k[:, None] <= o_q[None, :], b_p, 0)
         # [BT, BS] @ [BS, BV] -> [BT, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
@@ -347,6 +413,8 @@ def parallel_attn_bwd_kernel_dkv(
         b_ds = b_p * (b_dp - b_delta[None, :])
         # [BT, BS] @ [BS, BK] -> [BT, BK]
         b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+        if USE_G:
+            b_dg -= tl.sum(b_ds, 1)
 
     for i_s in range((i_t + 1) * BT, tl.cdiv(T, BS) * BS, BS):
         p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (BS, BK), (1, 0))
@@ -366,7 +434,11 @@ def parallel_attn_bwd_kernel_dkv(
         b_delta = tl.load(p_delta, boundary_check=(0,))
         # [BT, BS]
         b_s = tl.dot(b_k, tl.trans(b_q))
-        b_p = exp(b_s - b_lse[None, :])
+        if USE_G:
+            p_gq = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
+            b_gq = tl.load(p_gq, boundary_check=(0,)).to(tl.float32)
+            b_s += b_gq[None, :] - b_gk[:, None]
+        b_p = safe_exp(b_s - b_lse[None, :])
         # [BT, BS] @ [BS, BV] -> [BT, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
         # [BT, BV] @ [BV, BS] -> [BT, BS]
@@ -375,15 +447,21 @@ def parallel_attn_bwd_kernel_dkv(
         b_ds = b_p * (b_dp - b_delta[None, :])
         # [BT, BS] @ [BS, BK] -> [BT, BK]
         b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+        if USE_G:
+            b_dg -= tl.sum(b_ds, 1)
 
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+    if USE_G:
+        p_dg = tl.make_block_ptr(dg_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
 def parallel_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    g_cumsum: torch.Tensor,
     scale: float,
     chunk_size: int = 128,
     offsets: Optional[torch.LongTensor] = None,
@@ -412,13 +490,13 @@ def parallel_attn_fwd(
 
     o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
     lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
-
     grid = (NV, NT, B * HQ)
     parallel_attn_fwd_kernel[grid](
         q=q,
         k=k,
         v=v,
         o=o,
+        g_cumsum=g_cumsum,
         lse=lse,
         scale=scale,
         offsets=offsets,
@@ -459,6 +537,7 @@ def parallel_attn_bwd(
     k: torch.Tensor,
     v: torch.Tensor,
     o: torch.Tensor,
+    g_cumsum: torch.Tensor,
     lse: torch.Tensor,
     do: torch.Tensor,
     scale: float = None,
@@ -471,7 +550,7 @@ def parallel_attn_bwd(
     G = HQ // H
     BT = chunk_size
     BS = max(16, triton.next_power_of_2(T))
-    BS = min(32, BS) if check_shared_mem('ampere') else min(16, BS)
+    BS = min(32, BS) if check_shared_mem('ampere') else min(16, BS)  # SY:H100 should at least use BS=64 to use WGMMA
     BK = max(16, triton.next_power_of_2(K))
     BV = max(16, triton.next_power_of_2(V))
     NV = triton.cdiv(V, BV)
@@ -483,14 +562,21 @@ def parallel_attn_bwd(
     dk = torch.empty(B, T, HQ, K, dtype=k.dtype if H == HQ else torch.float, device=q.device)
     dv = torch.empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float, device=q.device)
     grid = (NV, NT, B * HQ)
+
+    if g_cumsum is not None:
+        dg_cumsum = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)
+        dg_cumsum_k = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)
+
     parallel_attn_bwd_kernel_dq[grid](
         q=q,
         k=k,
         v=v,
+        g_cumsum=g_cumsum,
         lse=lse,
         delta=delta,
         do=do,
         dq=dq,
+        dg_cumsum=dg_cumsum,
         offsets=offsets,
         indices=indices,
         scale=scale,
@@ -510,11 +596,13 @@ def parallel_attn_bwd(
         q=q,
         k=k,
         v=v,
+        g_cumsum=g_cumsum,
         lse=lse,
         delta=delta,
         do=do,
         dk=dk,
         dv=dv,
+        dg_cumsum=dg_cumsum_k,
         offsets=offsets,
         indices=indices,
         scale=scale,
@@ -532,7 +620,9 @@ def parallel_attn_bwd(
     )
     dk = reduce(dk, 'b t (h g) k -> b t h k', g=G, reduction='sum')
     dv = reduce(dv, 'b t (h g) v -> b t h v', g=G, reduction='sum')
-    return dq, dk, dv
+    if g_cumsum is not None:
+        dg_cumsum.add_(dg_cumsum_k)
+    return dq, dk, dv, dg_cumsum
 
 
 @torch.compile
@@ -541,7 +631,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @staticmethod
     @contiguous
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, scale, offsets):
+    def forward(ctx, q, k, v, g, scale, cu_seqlens):
         ctx.dtype = q.dtype
 
         chunk_size = min(128, max(16, triton.next_power_of_2(q.shape[1])))
@@ -549,20 +639,24 @@ class ParallelAttentionFunction(torch.autograd.Function):
         # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
         # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
+        indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+
+        if g is not None:
+            g_cumsum = chunk_global_cumsum(g, g.dtype, offsets=cu_seqlens)
 
         o, lse = parallel_attn_fwd(
             q=q,
             k=k,
             v=v,
+            g_cumsum=g_cumsum,
             scale=scale,
             chunk_size=chunk_size,
-            offsets=offsets,
+            offsets=cu_seqlens,
             indices=indices
         )
-        ctx.save_for_backward(q, k, v, o, lse)
+        ctx.save_for_backward(q, k, v, o, g_cumsum, lse)
         ctx.chunk_size = chunk_size
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         ctx.indices = indices
         ctx.scale = scale
         return o.to(q.dtype)
@@ -571,26 +665,31 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @contiguous
     @autocast_custom_bwd
     def backward(ctx, do):
-        q, k, v, o, lse = ctx.saved_tensors
-        dq, dk, dv = parallel_attn_bwd(
+        q, k, v, o, g_cumsum, lse = ctx.saved_tensors
+        dq, dk, dv, dg = parallel_attn_bwd(
             q=q,
             k=k,
             v=v,
             o=o,
+            g_cumsum=g_cumsum,
             lse=lse,
             do=do,
             scale=ctx.scale,
             chunk_size=ctx.chunk_size,
-            offsets=ctx.offsets,
+            offsets=ctx.cu_seqlens,
             indices=ctx.indices
         )
-        return dq.to(q), dk.to(k), dv.to(v), None, None, None, None, None, None, None, None
+        if dg is not None:
+            dg = chunk_global_cumsum(dg, offsets=ctx.cu_seqlens, reverse=True)
+
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, None, None, None, None, None, None
 
 
 def parallel_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    g: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False
@@ -604,6 +703,8 @@ def parallel_attn(
             GQA will be applied if HQ is divisible by H.
         v (torch.Tensor):
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+        g (Optional[torch.Tensor]):
+            log decay factors of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
         scale (Optional[int]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -623,7 +724,11 @@ def parallel_attn(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
         q, k, v = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v))
-    o = ParallelAttentionFunction.apply(q, k, v, scale, cu_seqlens)
+    if g is not None:
+        assert (g <= 0).all(), "g must be non-positive"
+        if head_first:
+            g = g.transpose(1, 2)
+    o = ParallelAttentionFunction.apply(q, k, v, g, scale, cu_seqlens)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
     return o

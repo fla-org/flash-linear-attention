@@ -73,7 +73,7 @@ def test_generation(
 ):
     torch.manual_seed(42)
     if config_class in [
-        ABCConfig, GatedDeltaProductConfig, ForgettingTransformerConfig, LinearAttentionConfig, LightNetConfig,
+        ABCConfig, GatedDeltaProductConfig, LinearAttentionConfig, LightNetConfig,
         Mamba2Config, MambaConfig, NSAConfig, SambaConfig, RWKV6Config, RWKV7Config,
     ]:
         pytest.skip()

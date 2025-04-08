@@ -46,6 +46,7 @@ class Cache(transformers.cache_utils.Cache):
         attn_state: Tuple[torch.Tensor, torch.Tensor] = None,
         conv_state: Tuple[torch.Tensor] = None,
         ffn_state: torch.Tensor = None,
+        forget_gate_state: torch.Tensor = None,
         layer_idx: int = 0,
         offset: Optional[int] = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
@@ -89,7 +90,8 @@ class Cache(transformers.cache_utils.Cache):
                 recurrent_state=recurrent_state,
                 attn_state=attn_state,
                 conv_state=conv_state,
-                ffn_state=ffn_state
+                ffn_state=ffn_state,
+                forget_gate_state=forget_gate_state
             )
             self.states.append(state)
         else:
@@ -115,6 +117,9 @@ class Cache(transformers.cache_utils.Cache):
                 state['conv_state'] = conv_state
             if ffn_state is not None:
                 state['ffn_state'] = ffn_state
+            if forget_gate_state is not None:
+                old_forget_state = state['forget_gate_state']
+                state['forget_gate_state'] = torch.cat([old_forget_state, forget_gate_state], -2)
 
         return state
 
