@@ -50,6 +50,9 @@ def chunk_rwkv7(
         head_first (bool):
             whether to use head first. Recommended to be False to avoid extra transposes.
             Default: `False`.
+        input_precision (Optional[torch.dtype]):
+            The precision of the input tensors. Default: `torch.bfloat16`.
+            Note: The output tensors will be in the same precision as the input tensors. Use torch.float16 with caution.
     """
     return chunk_dplr_delta_rule(
         q=r,
