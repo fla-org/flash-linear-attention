@@ -12,7 +12,7 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import pad_input, unpad_input
 from fla.modules import GroupNorm
 from fla.ops.forgetting_attn.decoding import attn_decoding_one_step
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
@@ -57,7 +57,7 @@ class ForgettingAttention(nn.Module):
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
-        self.f_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
+        self.g_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
 
         if use_output_gate:
             self.g_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
@@ -94,49 +94,36 @@ class ForgettingAttention(nn.Module):
         batch_size, q_len, _ = hidden_states.size()
 
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-        f = F.logsigmoid(self.f_proj(hidden_states).float())
+        g = F.logsigmoid(self.g_proj(hidden_states).float())
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
 
         cu_seqlens = kwargs.get('cu_seqlens', None)
-
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
-            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
             state = past_key_values.update(
-                attn_state=(k, v, f),
+                attn_state=(k, v, g),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
             )
-            k_cache, v_cache, f_cache = state['attn_state']
-        else:
-            cache_has_content = False
+            k, v, g = state['attn_state']
 
-        if cache_has_content:
-            f, k, v = f_cache, k_cache, v_cache
-
+        q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
-        q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
 
         if attention_mask is not None:
-            q, k, v, f, indices_q, cu_seqlens, max_seq_lens = unpad_input(q, k, v, f, attention_mask, q_len)
-            cu_seqlens_q, cu_seqlens_k = cu_seqlens
+            q, (k, v, g), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v, g), attention_mask, q_len, keepdim=True)
+            _, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
-            cu_seqlens = cu_seqlens_k
             if max_seqlen_q != max_seqlen_k:
                 assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
-                o = attn_decoding_one_step(q, k, v, f, self.head_dim ** -0.5, cu_seqlens_k)
-                o = o.squeeze(0)  # SY: inline squeeze to pad_input?
-                o = pad_input(o, indices_q, batch_size, q_len)
-
-                o = rearrange(o, '... h d -> ... (h d)')
-                if self.use_output_gate:
-                    o = self.g_proj(hidden_states).sigmoid() * o
-                o = self.o_proj(o)
-                return o, None, past_key_values
-        o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens, head_first=False)
+                o = attn_decoding_one_step(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens_k)
+            else:
+                o = parallel_forgetting_attn(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
+        else:
+            o = parallel_forgetting_attn(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
         if attention_mask is not None:
             o = pad_input(o.squeeze(0), indices_q, batch_size, q_len)
         o = rearrange(o, '... h d -> ... (h d)')
@@ -144,76 +131,3 @@ class ForgettingAttention(nn.Module):
             o = self.g_proj(hidden_states).sigmoid() * o
         o = self.o_proj(o)
         return o, None, past_key_values
-
-
-def unpad_input(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    f: torch.Tensor,
-    attention_mask: torch.Tensor,
-    q_len: int,
-):
-    """
-    Unpads query, key, and values tensors, using a single dimension for all tokens
-    even though they belong to different batches.
-
-
-    Arguments:
-        q (`torch.Tensor`):
-            Query state with padding. Shape: [batch_size, q_len, ...].
-        k (`torch.Tensor`):
-            Key state with padding. Shape: [batch_size, seq_len, ...].
-        v (`torch.Tensor`):
-            Value state with padding. Shape: [batch_size, seq_len, ...].
-        attention_mask (`torch.Tensor`):
-            Boolean or int tensor of shape [batch_size, sequence_length], 1 means valid and 0 means not valid.
-        q_len (`int`):
-            Target length.
-
-    Return:
-        q (`torch.Tensor`):
-            Query state without padding. Shape: [total_target_length, ...].
-        k (`torch.Tensor`):
-            Key state with padding. Shape: [total_source_length, ...].
-        v (`torch.Tensor`):
-            Value state with padding. Shape: [total_source_length, ...].
-        indices_q (`torch.Tensor`):
-            The indices of non-masked tokens from the flattened input target sequence.
-        (cu_seqlens_q, cu_seqlens_k) (`Tuple[int]`):
-            The cumulative sequence lengths for the target (query) and source (key, value),
-            used to index into ragged (unpadded) tensors.
-            `cu_seqlens` shape is [batch_size + 1].
-        (max_seqlen_in_batch_q, max_seqlen_in_batch_k) (`Tuple[int]`):
-            Maximum sequence length in batch (`max_seqlen_in_batch_q` for the target sequence
-            i.e. query, `max_seqlen_in_batch_k` for the source sequence i.e. key/value).
-    """
-    indices_k, cu_seqlens_k, max_seqlen_in_batch_k = get_unpad_data(attention_mask)
-    batch_size, seq_len, *_ = k.shape
-
-    k = index_first_axis(rearrange(k, "b s ... ->  (b s) ..."), indices_k)
-    v = index_first_axis(rearrange(v, "b s ... ->  (b s) ..."), indices_k)
-    f = index_first_axis(rearrange(f, "b s ... ->  (b s) ..."), indices_k)
-
-    if q_len == seq_len:
-        q = index_first_axis(rearrange(q, "b s ... -> (b s) ..."), indices_k)
-        cu_seqlens_q = cu_seqlens_k
-        max_seqlen_in_batch_q = max_seqlen_in_batch_k
-        indices_q = indices_k
-    elif q_len == 1:
-        max_seqlen_in_batch_q = 1
-        cu_seqlens_q = torch.arange(batch_size + 1, dtype=torch.int32, device=q.device)
-        indices_q = cu_seqlens_q[:-1]
-        q = q.squeeze(1)
-    else:
-        raise NotImplementedError("We only support either q_len == k_len (prefilling) or q_len == 1 (decoding)")
-
-    return (
-        q.unsqueeze(0),
-        k.unsqueeze(0),
-        v.unsqueeze(0),
-        f.unsqueeze(0),
-        indices_q,
-        (cu_seqlens_q, cu_seqlens_k),
-        (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
-    )

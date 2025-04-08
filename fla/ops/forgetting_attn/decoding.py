@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -16,7 +18,7 @@ from fla.utils import check_shared_mem
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
+        for num_warps in [1, 2, 4] + ([] if check_shared_mem('hopper') else [8])
         for num_stages in [2, 3, 4, 5]
     ],
     key=['H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G'],
@@ -60,7 +62,6 @@ def naive_attn_decoding_kernel(
     b_m = tl.full([1,], float('-inf'), dtype=tl.float32)
     b_acc = tl.zeros([1,], dtype=tl.float32)
 
-    # default should be
     if USE_G:
         p_g = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (T-1,), (1,), (0,))
         b_gq = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
@@ -99,13 +100,17 @@ def attn_decoding_one_step(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: float,
-    cu_seqlens: int,
+    scale: Optional[float] = None,
+    cu_seqlens: torch.LongTensor = None,
 ):
-    B, T, H, K, V = *k.shape, v.shape[-1]
     assert cu_seqlens is not None, "The cu_seqlens should be provided"
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    N = len(cu_seqlens) - 1
     HQ = q.shape[2]
     G = HQ // H
+    if scale is None:
+        scale = K ** -0.5
+
     BK = triton.next_power_of_2(K)
     if check_shared_mem('hopper', q.device.index):
         BS = min(64, max(16, triton.next_power_of_2(T)))
@@ -116,14 +121,11 @@ def attn_decoding_one_step(
     else:
         BS = min(32, max(16, triton.next_power_of_2(T)))
         BV = min(64, max(16, triton.next_power_of_2(V)))
-    if g is not None:
-        g_cumsum = chunk_global_cumsum(g, offsets=cu_seqlens, output_dtype=torch.float32)
-    else:
-        g_cumsum = None
+    g_cumsum = chunk_global_cumsum(g, offsets=cu_seqlens, output_dtype=torch.float32) if g is not None else None
     NV = triton.cdiv(V, BV)
     o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
-    B = len(cu_seqlens) - 1
-    grid = (NV, B * HQ)
+
+    grid = (NV, N * HQ)
     naive_attn_decoding_kernel[grid](
         q=q,
         k=k,

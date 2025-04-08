@@ -125,7 +125,7 @@ class BitAttention(nn.Module):
 
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
-            q, k, v, indices_q, cu_seqlens, max_seq_lens = unpad_input(q, k, v, attention_mask, q_len)
+            q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
             o = flash_attn_varlen_func(
