@@ -144,7 +144,7 @@ def test_fused_recurrent_varlen(
     # randomly split the sequence into N segments
     offsets = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
 
@@ -326,7 +326,7 @@ def test_chunk_varlen(
     # randomly split the sequence into N segments
     offsets = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths

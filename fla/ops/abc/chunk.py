@@ -1093,7 +1093,7 @@ def chunk_abc(
         v (torch.Tensor):
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
         s (torch.Tensor):
-            slot representations of shape `[B, H, T, M]` if `head_first=True` else `[B, T, H, M]`
+            slot representations of shape `[B, T, H, M]` if `head_first=False` else `[B, H, T, M]`
         initial_state (Optional[Tuple[torch.Tensor, torch.Tensor]]):
             Initial states of shape `[B, H, K, M]` and `[B, H, M, V]`. Default: `None`.
         output_final_state (Optional[bool]):
