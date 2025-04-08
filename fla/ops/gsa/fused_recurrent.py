@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
+from einops import rearrange
 
 from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
 from fla.ops.utils import chunk_global_cumsum
@@ -196,8 +198,7 @@ def fused_recurrent_gsa_fwd(
         USE_G=False,
         USE_GK=False,
         USE_GV=True,
-        REVERSE=reverse,
-        HEAD_FIRST=head_first
+        REVERSE=reverse
     )
     ok = ok.sum(0)
 
@@ -228,7 +229,6 @@ def fused_recurrent_gsa_fwd(
         USE_GK=True,
         USE_GV=False,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     ov = ov.sum(0)
     return ok, hkt, qv, ov, hvt
@@ -250,25 +250,16 @@ def fused_recurrent_gsa_bwd(
     scale: float = 1.,
     reverse: bool = False,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = False
 ) -> Tuple[torch.Tensor]:
-    if head_first:
-        B, H, T, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
-    else:
-        B, T, H, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
+    B, T, H, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
     N = B if offsets is None else len(offsets) - 1
 
     BK, BV, BM = min(K, 64), min(V, 64), min(M, 64)
     NK, NV, NM = triton.cdiv(K, BK), triton.cdiv(V, BV), triton.cdiv(M, BM)
 
-    if head_first:
-        dqv = q.new_empty(NV, B, H, T, M, dtype=torch.float)
-        dsv = q.new_empty(NV, B, H, T, M, dtype=torch.float)
-        dv = q.new_empty(NM, B, H, T, V, dtype=torch.float)
-    else:
-        dqv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
-        dsv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
-        dv = q.new_empty(NM, B, T, H, V, dtype=torch.float)
+    dqv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
+    dsv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
+    dv = q.new_empty(NM, B, T, H, V, dtype=torch.float)
     dhk0 = torch.empty_like(hk0)if hk0 is not None else None
     dhv0 = torch.empty_like(hv0)if hv0 is not None else None
 
@@ -301,25 +292,16 @@ def fused_recurrent_gsa_bwd(
         USE_GK=True,
         USE_GV=False,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     dqv = dqv.sum(0)
     dsv = dsv.sum(0)
     dv = dv.sum(0)
-    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(),
-                              reverse=not reverse,
-                              offsets=offsets,
-                              head_first=head_first)
+    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(), reverse=not reverse, offsets=offsets)
 
     dok = qv * (dqv - (qv * dqv).sum(-1, True))
-    if head_first:
-        dq = q.new_empty(NM, B, H, T, K, dtype=torch.float)
-        dk = q.new_empty(NM, B, H, T, K, dtype=torch.float)
-        dsk = q.new_empty(NK, B, H, T, M, dtype=torch.float)
-    else:
-        dq = q.new_empty(NM, B, T, H, K, dtype=torch.float)
-        dk = q.new_empty(NM, B, T, H, K, dtype=torch.float)
-        dsk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
+    dq = q.new_empty(NM, B, T, H, K, dtype=torch.float)
+    dk = q.new_empty(NM, B, T, H, K, dtype=torch.float)
+    dsk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
     gk, gv = None, g
     grid = (NM, NK, N * H)
     fused_recurrent_bwd_kernel[grid](
@@ -349,16 +331,12 @@ def fused_recurrent_gsa_bwd(
         USE_GK=False,
         USE_GV=True,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     dq = dq.sum(0)
     dk = dk.sum(0)
     dsk = dsk.sum(0)
 
-    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(),
-                              reverse=not reverse,
-                              offsets=offsets,
-                              head_first=head_first)
+    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(), reverse=not reverse, offsets=offsets)
 
     ds = dsk.add_(dsv)
     dg = dgk.add_(dgv)
@@ -384,9 +362,8 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         output_final_state: bool = False,
         reverse: bool = False,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = False
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
-        T = q.shape[2] if head_first else q.shape[1]
+        T = q.shape[1]
         if T == 1 and not q.requires_grad:
             o, (hkt, hvt) = fused_recurrent_gsa_inference(
                 q=q,
@@ -397,7 +374,6 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
                 initial_state=(hk0, hv0),
                 output_final_state=output_final_state,
                 scale=scale,
-                head_first=head_first
             )
             return o, hkt, hvt
         ok, hkt, qv, ov, hvt = fused_recurrent_gsa_fwd(
@@ -411,13 +387,11 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
             scale=scale,
             reverse=reverse,
             offsets=offsets,
-            head_first=head_first
         )
         ctx.save_for_backward(q, k, v, s, g, qv, hk0, hv0, ok)
         ctx.scale = scale
         ctx.reverse = reverse
         ctx.offsets = offsets
-        ctx.head_first = head_first
         return ov.to(q.dtype), hkt, hvt
 
     @staticmethod
@@ -428,7 +402,6 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         scale = ctx.scale
         reverse = ctx.reverse
         offsets = ctx.offsets
-        head_first = ctx.head_first
 
         # not supported yet.
         if dhkt is not None or dhvt is not None:
@@ -450,9 +423,8 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
             scale=scale,
             reverse=reverse,
             offsets=offsets,
-            head_first=head_first
         )
-        return dq.to(q), dk.to(k), dv.to(v), ds.to(s), dg.to(g), None, dhk0, dhv0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), ds.to(s), dg.to(g), None, dhk0, dhv0, None, None, None
 
 
 def fused_recurrent_gsa(
@@ -537,6 +509,19 @@ def fused_recurrent_gsa(
         >>> assert hk.allclose(hk_var)
         >>> assert hv.allclose(hv_var)
     """
+    if head_first:
+        warnings.warn(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v, s, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, s, g))
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -567,6 +552,7 @@ def fused_recurrent_gsa(
         output_final_state,
         reverse,
         cu_seqlens,
-        head_first
     )
+    if head_first:
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state
