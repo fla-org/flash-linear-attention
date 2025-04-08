@@ -465,7 +465,6 @@ def parallel_attn_fwd(
     scale: float,
     chunk_size: int = 128,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -485,6 +484,8 @@ def parallel_attn_fwd(
         BV = min(64, max(16, triton.next_power_of_2(V)))
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
+
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     assert NK == 1, "The key dimension can not be larger than 256"
 
@@ -635,11 +636,6 @@ class ParallelAttentionFunction(torch.autograd.Function):
         ctx.dtype = q.dtype
 
         chunk_size = min(128, max(16, triton.next_power_of_2(q.shape[1])))
-        # 2-d indices denoting the offsets of chunks in each sequence
-        # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
-        # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
-        # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
 
         if g is not None:
             g_cumsum = chunk_global_cumsum(g, g.dtype, offsets=cu_seqlens)
@@ -652,12 +648,10 @@ class ParallelAttentionFunction(torch.autograd.Function):
             scale=scale,
             chunk_size=chunk_size,
             offsets=cu_seqlens,
-            indices=indices
         )
         ctx.save_for_backward(q, k, v, o, g_cumsum, lse)
         ctx.chunk_size = chunk_size
         ctx.cu_seqlens = cu_seqlens
-        ctx.indices = indices
         ctx.scale = scale
         return o.to(q.dtype)
 

@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_chunk_offsets
+from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
 from fla.utils import is_nvidia_hopper, use_cuda_graph
 
@@ -54,7 +54,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
@@ -79,26 +78,15 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         b_h4 = tl.zeros([64, BV], dtype=tl.float32)
 
     # calculate offset
-    if HEAD_FIRST:
-        h += i_nh * NT * K*V
-        v += i_nh * T*V
-        k += i_nh * T*K
-        d += i_nh * T*K
-        if SAVE_NEW_VALUE:
-            v_new += i_nh * T*V
-        stride_v = V
-        stride_k = K
-        stride_h = K*V
-    else:
-        h += (boh * H + i_h) * K*V
-        v += (bos * H + i_h) * V
-        k += (bos * H + i_h) * K
-        d += (bos * H + i_h) * K
-        if SAVE_NEW_VALUE:
-            v_new += (bos * H + i_h) * V
-        stride_v = H*V
-        stride_h = H*K*V
-        stride_k = H*K
+    h += (boh * H + i_h) * K*V
+    v += (bos * H + i_h) * V
+    k += (bos * H + i_h) * K
+    d += (bos * H + i_h) * K
+    if SAVE_NEW_VALUE:
+        v_new += (bos * H + i_h) * V
+    stride_v = H*V
+    stride_h = H*K*V
+    stride_k = H*K
     if USE_INITIAL_STATE:
         h0 = h0 + i_nh * K*V
     if STORE_FINAL_STATE:
@@ -159,10 +147,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         if USE_G:
             last_idx = min((i_t + 1) * BT, T) - 1
-            if HEAD_FIRST:
-                b_g_last = tl.load(g + i_nh * T + last_idx)
-            else:
-                b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
+            b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             b_g_last = exp(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
@@ -243,8 +228,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -268,28 +252,16 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         b_dh4 = tl.zeros([64, BV], dtype=tl.float32)
 
     # calculate offset
-    if HEAD_FIRST:
-        dh += i_nh * NT * K*V
-        dv += i_nh * T*V
-        dv2 += i_nh * T*V
-        q += i_nh * T*K
-        k += i_nh * T*K
-        d += i_nh * T*K
-        do += i_nh * T*V
-        stride_v = V
-        stride_k = K
-        stride_h = K*V
-    else:
-        dh += (boh * H + i_h) * K*V
-        dv += (bos * H + i_h) * V
-        dv2 += (bos * H + i_h) * V
-        q += (bos * H + i_h) * K
-        k += (bos * H + i_h) * K
-        d += (bos * H + i_h) * K
-        do += (bos * H + i_h) * V
-        stride_v = H*V
-        stride_h = H*K*V
-        stride_k = H*K
+    dh += (boh * H + i_h) * K*V
+    dv += (bos * H + i_h) * V
+    dv2 += (bos * H + i_h) * V
+    q += (bos * H + i_h) * K
+    k += (bos * H + i_h) * K
+    d += (bos * H + i_h) * K
+    do += (bos * H + i_h) * V
+    stride_v = H*V
+    stride_h = H*K*V
+    stride_k = H*K
     if USE_INITIAL_STATE:
         dh0 += i_nh * K*V
     if USE_FINAL_STATE_GRADIENT:
@@ -324,10 +296,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         # b_dh_tmp = tl.zeros([BK, BV], dtype=tl.float32)
         if USE_G:
             last_idx = min((i_t + 1) * BT, T) - 1
-            if HEAD_FIRST:
-                bg_last = tl.load(g + i_nh * T + last_idx)
-            else:
-                bg_last = tl.load(g + (bos + last_idx) * H + i_h)
+            bg_last = tl.load(g + (bos + last_idx) * H + i_h)
             bg_last = exp(bg_last)
         else:
             bg_last = None
@@ -415,163 +384,6 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             tl.store(p_dh3, b_dh4.to(p_dh3.dtype.element_ty), boundary_check=(0, 1))
 
 
-def chunk_gated_delta_rule_fwd_h(
-    k: torch.Tensor,
-    w: torch.Tensor,
-    u: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
-    save_new_value: bool = True,
-    head_first: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, u.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, u.shape[-1]
-    BT = 64
-
-    # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
-        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
-    else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
-    assert K <= 256, "current kernel does not support head dimension larger than 256."
-
-    if head_first:
-        h = k.new_empty(B, H, NT, K, V)
-    else:
-        h = k.new_empty(B, NT, H, K, V)
-    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
-
-    if g is not None:
-        k_new = torch.empty_like(k).fill_(float('-inf'))
-        w_new = torch.empty_like(w).fill_(float('-inf'))
-        def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
-        proprocess_qkw[grid](
-            q=None,
-            k=k,
-            w=w,
-            g=g,
-            q_new=None,
-            k_new=k_new,
-            w_new=w_new,
-            offsets=offsets,
-            T=T,
-            H=H,
-            K=K,
-            BT=BT,
-            HEAD_FIRST=head_first
-        )
-
-    v_new = torch.empty_like(u) if save_new_value else None
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N*H)
-    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
-        k=k if g is None else k_new,
-        v=u,
-        d=w if g is None else w_new,
-        v_new=v_new,
-        g=g,
-        h=h,
-        h0=initial_state,
-        ht=final_state,
-        offsets=offsets,
-        chunk_offsets=chunk_offsets,
-        T=T,
-        H=H,
-        K=K,
-        V=V,
-        BT=BT,
-        NT=NT,
-        HEAD_FIRST=head_first
-    )
-    return h, v_new, final_state
-
-
-def chunk_gated_delta_rule_bwd_dhu(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    w: torch.Tensor,
-    g: torch.Tensor,
-    h0: torch.Tensor,
-    dht: Optional[torch.Tensor],
-    do: torch.Tensor,
-    dv: torch.Tensor,
-    scale: float,
-    offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
-    head_first: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *q.shape, do.shape[-1]
-    else:
-        B, T, H, K, V = *q.shape, do.shape[-1]
-    # N: the actual number of sequences in the batch with either equal or variable lengths
-    BT = 64
-    assert K <= 256, "current kernel does not support head dimension being larger than 256."
-
-    if offsets is None:
-        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
-    else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
-
-    if head_first:
-        dh = q.new_empty(B, H, NT, K, V)
-    else:
-        dh = q.new_empty(B, NT, H, K, V)
-    dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
-    dv2 = torch.empty_like(dv)
-
-    if g is not None:
-        q_new = torch.empty_like(q)
-        k_new = torch.empty_like(k)
-        w_new = torch.empty_like(w)
-        def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
-        proprocess_qkw[grid](
-            q=q,
-            k=k,
-            w=w,
-            g=g,
-            q_new=q_new,
-            k_new=k_new,
-            w_new=w_new,
-            offsets=offsets,
-            T=T,
-            H=H,
-            K=K,
-            BT=BT,
-            HEAD_FIRST=head_first
-        )
-
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N*H)
-    chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64[grid](
-        q=q if g is None else q_new,
-        k=k if g is None else k_new,
-        d=w if g is None else w_new,
-        g=g,
-        dht=dht,
-        dh0=dh0,
-        do=do,
-        dh=dh,
-        dv=dv,
-        dv2=dv2,
-        offsets=offsets,
-        chunk_offsets=chunk_offsets,
-        scale=scale,
-        T=T,
-        H=H,
-        K=K,
-        V=V,
-        BT=BT,
-        HEAD_FIRST=head_first
-    )
-    return dh, dh0, dv2
-
-
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_Q': lambda args: args['q'] is not None,
@@ -602,7 +414,6 @@ def proprocess_qkw(
     BT: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
     USE_Q: tl.constexpr
 ):
     i_k, i_nh, i_t = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -615,28 +426,16 @@ def proprocess_qkw(
         bos, eos = i_n * T, i_n * T + T
 
     # calculateoffset
-    if HEAD_FIRST:
-        k += i_nh * T * K
-        w += i_nh * T * K
-        k_new += i_nh * T * K
-        w_new += i_nh * T * K
-        if USE_Q:
-            q += i_nh * T * K
-            q_new += i_nh * T * K
-        g += i_nh * T
-        stride_k = K
-        stride_g = 1
-    else:
-        k += (bos * H + i_h) * K
-        w += (bos * H + i_h) * K
-        k_new += (bos * H + i_h) * K
-        w_new += (bos * H + i_h) * K
-        if USE_Q:
-            q += (bos * H + i_h) * K
-            q_new += (bos * H + i_h) * K
-        g += bos * H + i_h
-        stride_k = H * K
-        stride_g = H
+    k += (bos * H + i_h) * K
+    w += (bos * H + i_h) * K
+    k_new += (bos * H + i_h) * K
+    w_new += (bos * H + i_h) * K
+    if USE_Q:
+        q += (bos * H + i_h) * K
+        q_new += (bos * H + i_h) * K
+    g += bos * H + i_h
+    stride_k = H * K
+    stride_g = H
 
     # Get gate values
     last_idx = min((i_t + 1) * BT, T) - 1
@@ -664,3 +463,142 @@ def proprocess_qkw(
         b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
         b_q = b_q * b_d_begin[:, None]
         tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
+
+
+def chunk_gated_delta_rule_fwd_h(
+    k: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    g: Optional[torch.Tensor] = None,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
+    offsets: Optional[torch.LongTensor] = None,
+    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    save_new_value: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    B, T, H, K, V = *k.shape, u.shape[-1]
+    BT = chunk_size
+
+    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
+    # N: the actual number of sequences in the batch with either equal or variable lengths
+    if offsets is None:
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+    else:
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+    assert K <= 256, "current kernel does not support head dimension larger than 256."
+
+    h = k.new_empty(B, NT, H, K, V)
+    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+
+    if g is not None:
+        k_new = torch.empty_like(k).fill_(float('-inf'))
+        w_new = torch.empty_like(w).fill_(float('-inf'))
+        def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
+        proprocess_qkw[grid](
+            q=None,
+            k=k,
+            w=w,
+            g=g,
+            q_new=None,
+            k_new=k_new,
+            w_new=w_new,
+            offsets=offsets,
+            T=T,
+            H=H,
+            K=K,
+            BT=BT,
+        )
+
+    v_new = torch.empty_like(u) if save_new_value else None
+    def grid(meta): return (triton.cdiv(V, meta['BV']), N*H)
+    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+        k=k if g is None else k_new,
+        v=u,
+        d=w if g is None else w_new,
+        v_new=v_new,
+        g=g,
+        h=h,
+        h0=initial_state,
+        ht=final_state,
+        offsets=offsets,
+        chunk_offsets=chunk_offsets,
+        T=T,
+        H=H,
+        K=K,
+        V=V,
+        BT=BT,
+        NT=NT,
+    )
+    return h, v_new, final_state
+
+
+def chunk_gated_delta_rule_bwd_dhu(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    w: torch.Tensor,
+    g: torch.Tensor,
+    h0: torch.Tensor,
+    dht: Optional[torch.Tensor],
+    do: torch.Tensor,
+    dv: torch.Tensor,
+    scale: float,
+    offsets: Optional[torch.LongTensor] = None,
+    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, T, H, K, V = *q.shape, do.shape[-1]
+    # N: the actual number of sequences in the batch with either equal or variable lengths
+    BT = 64
+    assert K <= 256, "current kernel does not support head dimension being larger than 256."
+
+    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
+    if offsets is None:
+        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+    else:
+        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+
+    dh = q.new_empty(B, NT, H, K, V)
+    dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
+    dv2 = torch.empty_like(dv)
+
+    if g is not None:
+        q_new = torch.empty_like(q)
+        k_new = torch.empty_like(k)
+        w_new = torch.empty_like(w)
+        def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
+        proprocess_qkw[grid](
+            q=q,
+            k=k,
+            w=w,
+            g=g,
+            q_new=q_new,
+            k_new=k_new,
+            w_new=w_new,
+            offsets=offsets,
+            T=T,
+            H=H,
+            K=K,
+            BT=BT,
+        )
+
+    def grid(meta): return (triton.cdiv(V, meta['BV']), N*H)
+    chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64[grid](
+        q=q if g is None else q_new,
+        k=k if g is None else k_new,
+        d=w if g is None else w_new,
+        g=g,
+        dht=dht,
+        dh0=dh0,
+        do=do,
+        dh=dh,
+        dv=dv,
+        dv2=dv2,
+        offsets=offsets,
+        chunk_offsets=chunk_offsets,
+        scale=scale,
+        T=T,
+        H=H,
+        K=K,
+        V=V,
+        BT=BT,
+    )
+    return dh, dh0, dv2

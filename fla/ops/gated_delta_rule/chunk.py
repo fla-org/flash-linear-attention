@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional
 
 import torch
@@ -25,11 +26,9 @@ def chunk_gated_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ):
-    g = chunk_local_cumsum(g, chunk_size, offsets=offsets, indices=indices, head_first=head_first)
+    g = chunk_local_cumsum(g, chunk_size, offsets=offsets)
     # obtain WY representation. u is actually the new v.
     w, u, Aw, Au = fwd_prepare_wy_repr(
         k=k,
@@ -37,8 +36,6 @@ def chunk_gated_delta_rule_fwd(
         beta=beta,
         g=g,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=chunk_size
     )
 
@@ -50,8 +47,6 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=chunk_size
     )
 
@@ -64,8 +59,6 @@ def chunk_gated_delta_rule_fwd(
         g=g,
         scale=scale,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=chunk_size
     )
     return g, o, Aw, Au, final_state
@@ -84,11 +77,9 @@ def chunk_gated_delta_rule_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64
 ):
-    T = q.shape[2] if head_first else q.shape[1]
+    T = q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     w, u = fwd_recompute_w_u(
         k=k,
@@ -97,8 +88,6 @@ def chunk_gated_delta_rule_bwd(
         Aw=Aw,
         Au=Au,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
@@ -109,8 +98,6 @@ def chunk_gated_delta_rule_bwd(
         initial_state=initial_state,
         output_final_state=False,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dv = chunk_bwd_dv_local(
@@ -121,8 +108,6 @@ def chunk_gated_delta_rule_bwd(
         dh=None,
         scale=scale,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -136,8 +121,6 @@ def chunk_gated_delta_rule_bwd(
         dv=dv,
         scale=scale,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
@@ -152,8 +135,6 @@ def chunk_gated_delta_rule_bwd(
         dh=dh,
         scale=scale,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dk2, dv, db, dg2 = bwd_prepare_wy_repr(
@@ -166,14 +147,12 @@ def chunk_gated_delta_rule_bwd(
         dw=dw,
         du=dv,
         offsets=offsets,
-        indices=indices,
-        head_first=head_first,
         chunk_size=BT
     )
     dk.add_(dk2)
     dg.add_(dg2)
     assert dg.dtype == torch.float32, "dg should be fp32"
-    dg = chunk_local_cumsum(dg, chunk_size, reverse=True, offsets=offsets, indices=indices, head_first=head_first)
+    dg = chunk_local_cumsum(dg, chunk_size, reverse=True, offsets=offsets)
     return dq, dk, dv, db, dg, dh0
 
 
@@ -193,7 +172,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = False
     ):
         chunk_size = 64
@@ -203,15 +181,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
-
-        # 2-d indices denoting the offsets of chunks in each sequence
-        # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
-        # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
-        # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = None
-        if offsets is not None:
-            indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], chunk_size).tolist()])
-            indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
 
         g, o, Aw, Au, final_state = chunk_gated_delta_rule_fwd(
             q=q,
@@ -223,14 +192,11 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             offsets=offsets,
-            indices=indices,
-            head_first=head_first,
             chunk_size=chunk_size,
         )
-        ctx.save_for_backward(q_orig, k_orig, v, g, beta, Aw, Au, initial_state, offsets, indices)
+        ctx.save_for_backward(q_orig, k_orig, v, g, beta, Aw, Au, initial_state, offsets)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
-        ctx.head_first = head_first
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
 
@@ -242,7 +208,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, k, v, g, beta, Aw, Au, initial_state, offsets, indices = ctx.saved_tensors
+        q, k, v, g, beta, Aw, Au, initial_state, offsets = ctx.saved_tensors
         if ctx.use_qk_l2norm_in_kernel:
             q, q_orig = l2norm_fwd(q), q
             k, k_orig = l2norm_fwd(k), k
@@ -259,14 +225,12 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             offsets=offsets,
-            indices=indices,
-            head_first=ctx.head_first,
             chunk_size=ctx.chunk_size
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q_orig, dq)
             dk = l2norm_bwd(k_orig, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None
 
 
 @torch.compiler.disable
@@ -350,6 +314,19 @@ def chunk_gated_delta_rule(
     assert q.dtype != torch.float32, "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
     assert len(beta.shape) == 3, "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
 
+    if head_first:
+        warnings.warn(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v, beta, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, beta, g))
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -365,8 +342,6 @@ def chunk_gated_delta_rule(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
             )
-    if head_first:
-        q, k, v, beta, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, beta, g))
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
@@ -379,7 +354,6 @@ def chunk_gated_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
-        False,
         use_qk_l2norm_in_kernel
     )
     if head_first:

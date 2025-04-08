@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -301,12 +302,8 @@ def fused_recurrent_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if offsets is None else len(offsets) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -341,7 +338,7 @@ def fused_recurrent_delta_rule_fwd(
         BK=BK,
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
-        HEAD_FIRST=head_first,
+        HEAD_FIRST=False,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -359,12 +356,8 @@ def fused_recurrent_delta_rule_bwd(
     scale: float,
     initial_state: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if offsets is None else len(offsets) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -378,9 +371,9 @@ def fused_recurrent_delta_rule_bwd(
     dk = q.new_empty(NV, *k.shape)
     dv = q.new_empty(NK, *v.shape)
     if beta_vector:
-        db = q.new_empty(NV, NK, B, H, T, V) if head_first else q.new_empty(NV, NK, B, T, H, V)
+        db = q.new_empty(NV, NK, B, T, H, V)
     else:
-        db = q.new_empty(NV, B, H, T) if head_first else q.new_empty(NV, B, T, H)
+        db = q.new_empty(NV, B, T, H)
     grid = (NV, NK, N * H)
 
     if initial_state is not None and initial_state.requires_grad:
@@ -412,7 +405,7 @@ def fused_recurrent_delta_rule_bwd(
         BV=BV,
         NK=NK,
         IS_BETA_HEADWISE=beta_vector,
-        HEAD_FIRST=head_first,
+        HEAD_FIRST=False,
         num_warps=num_warps,
         num_stages=num_stages
     )
@@ -438,7 +431,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = False
     ):
         q_orig = q
@@ -457,13 +449,11 @@ class FusedRecurrentFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             offsets=offsets,
-            head_first=head_first
         )
 
         ctx.save_for_backward(q_orig, k_orig, u, beta, initial_state)
         ctx.scale = scale
         ctx.offsets = offsets
-        ctx.head_first = head_first
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o, final_state
 
@@ -484,11 +474,10 @@ class FusedRecurrentFunction(torch.autograd.Function):
             scale=ctx.scale,
             initial_state=initial_state,
             offsets=ctx.offsets,
-            head_first=ctx.head_first
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq, dk = l2norm_bwd(q_orig, dq), l2norm_bwd(k_orig, dk)
-        return dq.to(q), dk.to(k), dv.to(v), db.to(beta), None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), db.to(beta), None, dh0, None, None, None
 
 
 @torch.compiler.disable
@@ -566,6 +555,19 @@ def fused_recurrent_delta_rule(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
+    if head_first:
+        warnings.warn(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v, beta = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, beta))
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -587,9 +589,6 @@ def fused_recurrent_delta_rule(
         assert scale > 0, "scale must be positive"
     if beta is None:
         beta = torch.ones_like(q[..., 0])
-    if head_first:
-        q, k, v = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v))
-        beta = rearrange(beta, 'b h t -> b t h')
     o, final_state = FusedRecurrentFunction.apply(
         q,
         k,
@@ -599,7 +598,6 @@ def fused_recurrent_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
-        False,
         use_qk_l2norm_in_kernel
     )
     if head_first:
