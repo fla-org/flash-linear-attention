@@ -430,15 +430,11 @@ def chunk_fwd_h(
     offsets: Optional[torch.LongTensor] = None,
     split_offsets: Optional[torch.LongTensor] = None,
     split_indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64,
     split_size: int = 256,
     states_in_fp32: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     # B: batch size
     # N: the actual number of sequences in the batch
     # H: number of heads
@@ -520,17 +516,12 @@ def chunk_bwd_dh(
     offsets: Optional[torch.Tensor] = None,
     split_offsets: Optional[torch.Tensor] = None,
     split_indices: Optional[torch.Tensor] = None,
-    head_first: bool = False,
     chunk_size: int = 64,
     split_size: int = 256,
     states_in_fp32: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-        HQ = q.shape[1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
-        HQ = q.shape[2]
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    HQ = q.shape[2]
     # B: batch size
     # N: the actual number of sequences in the batch
     # H: number of heads

@@ -41,7 +41,6 @@ def fused_recurrent_delta_rule_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_BETA_HEADWISE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
@@ -53,26 +52,15 @@ def fused_recurrent_delta_rule_fwd_kernel(
         bos, eos = i_n * T, i_n * T + T
         all = B * T
 
-    if HEAD_FIRST:
-        p_q = q + i_nh * T*K + i_k * BK + tl.arange(0, BK)
-        p_k = k + i_nh * T*K + i_k * BK + tl.arange(0, BK)
-        p_v = v + i_nh * T*V + i_v * BV + tl.arange(0, BV)
-        p_u = u + i_nh * T*V + i_v * BV + tl.arange(0, BV)
-        if IS_BETA_HEADWISE:
-            p_beta = beta + i_nh * T*V + i_v * BV + tl.arange(0, BV)
-        else:
-            p_beta = beta + i_nh * T
-        p_o = o + (i_k * B*H + i_nh) * T*V + i_v * BV + tl.arange(0, BV)
+    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
+    p_u = u + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
+    if IS_BETA_HEADWISE:
+        p_beta = beta + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
     else:
-        p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
-        p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
-        p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
-        p_u = u + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
-        if IS_BETA_HEADWISE:
-            p_beta = beta + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
-        else:
-            p_beta = beta + bos * H + i_h
-        p_o = o + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV)
+        p_beta = beta + bos * H + i_h
+    p_o = o + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV)
 
     mask_k = (i_k * BK + tl.arange(0, BK)) < K
     mask_v = (i_v * BV + tl.arange(0, BV)) < V
@@ -100,12 +88,12 @@ def fused_recurrent_delta_rule_fwd_kernel(
         b_o = tl.sum(b_o, axis=1)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-        p_q += K if HEAD_FIRST else H*K
-        p_k += K if HEAD_FIRST else H*K
-        p_o += V if HEAD_FIRST else H*V
-        p_v += V if HEAD_FIRST else H*V
-        p_u += V if HEAD_FIRST else H*V
-        p_beta += (1 if HEAD_FIRST else H) * (V if IS_BETA_HEADWISE else 1)
+        p_q += H*K
+        p_k += H*K
+        p_o += H*V
+        p_v += H*V
+        p_u += H*V
+        p_beta += H * (V if IS_BETA_HEADWISE else 1)
 
     if STORE_FINAL_STATE:
         p_ht = ht + i_nh * K * V + (i_k * BK + tl.arange(0, BK)[None, :]) * V + (i_v * BV + tl.arange(0, BV)[:, None])
@@ -145,7 +133,6 @@ def fused_recurrent_delta_rule_bwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,  # whether to use dh0
     USE_FINAL_STATE_GRADIENT: tl.constexpr,  # whether to use dht
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
@@ -160,32 +147,18 @@ def fused_recurrent_delta_rule_bwd_kernel(
     mask_k = i_k * BK + tl.arange(0, BK) < K
     mask_v = i_v * BV + tl.arange(0, BV) < V
 
-    if HEAD_FIRST:
-        p_q = q + i_nh * T*K + i_k * BK + tl.arange(0, BK) + (T - 1) * K
-        p_k = k + i_nh * T*K + i_k * BK + tl.arange(0, BK) + (T - 1) * K
-        p_v = v + i_nh * T*V + i_v * BV + tl.arange(0, BV) + (T - 1) * V
-        p_do = do + i_nh * T*V + i_v * BV + tl.arange(0, BV) + (T - 1) * V
-        p_dk = dk + (i_v * B*H + i_nh) * T*K + i_k * BK + tl.arange(0, BK) + (T - 1) * K
-        p_dv = dv + (i_k * B*H + i_nh) * T*V + i_v * BV + tl.arange(0, BV) + (T - 1) * V
-        if IS_BETA_HEADWISE:
-            p_beta = beta + i_nh * T*V + i_v * BV + tl.arange(0, BV) + (T - 1) * V
-            p_dbeta = db + (i_v * NK*B*H + i_k * B*H + i_nh) * T*V + tl.arange(0, BV) + (T - 1) * V
-        else:
-            p_beta = beta + i_nh * T + T - 1
-            p_dbeta = db + (i_v * B*H + i_nh) * T + T - 1
+    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
+    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
+    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
+    p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
+    p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
+    p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
+    if IS_BETA_HEADWISE:
+        p_beta = beta + (bos + T - 1) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
+        p_dbeta = db + ((i_v * NK + i_k) * all + bos + T - 1) * H*V + i_h * V + tl.arange(0, BV)
     else:
-        p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-        p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-        p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-        p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-        p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
-        p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
-        if IS_BETA_HEADWISE:
-            p_beta = beta + (bos + T - 1) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
-            p_dbeta = db + ((i_v * NK + i_k) * all + bos + T - 1) * H*V + i_h * V + tl.arange(0, BV)
-        else:
-            p_beta = beta + (bos + T - 1) * H + i_h
-            p_dbeta = db + (i_v * all + bos + T - 1) * H + i_h
+        p_beta = beta + (bos + T - 1) * H + i_h
+        p_dbeta = db + (i_v * all + bos + T - 1) * H + i_h
 
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_FINAL_STATE_GRADIENT:
@@ -217,14 +190,14 @@ def fused_recurrent_delta_rule_bwd_kernel(
 
         b_dh -= b_k[:, None] * b_dv[None, :]
 
-        p_q -= K if HEAD_FIRST else H*K
-        p_k -= K if HEAD_FIRST else H*K
-        p_v -= V if HEAD_FIRST else H*V
-        p_do -= V if HEAD_FIRST else H*V
-        p_dk -= K if HEAD_FIRST else H*K
-        p_dv -= V if HEAD_FIRST else H*V
-        p_dbeta -= (1 if HEAD_FIRST else H) * (V if IS_BETA_HEADWISE else 1)
-        p_beta -= (1 if HEAD_FIRST else H) * (V if IS_BETA_HEADWISE else 1)
+        p_q -= H*K
+        p_k -= H*K
+        p_v -= H*V
+        p_do -= H*V
+        p_dk -= H*K
+        p_dv -= H*V
+        p_dbeta -= H * (V if IS_BETA_HEADWISE else 1)
+        p_beta -= H * (V if IS_BETA_HEADWISE else 1)
 
     if USE_INITIAL_STATE:
         p_dh0 = dh0 + i_nh * K * V + (i_k * BK + tl.arange(0, BK)[:, None]) * V + (i_v * BV + tl.arange(0, BV)[None, :])
@@ -234,30 +207,17 @@ def fused_recurrent_delta_rule_bwd_kernel(
 
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
-    if HEAD_FIRST:
-        p_q = q + i_nh * T*K + i_k * BK + tl.arange(0, BK)
-        p_k = k + i_nh * T*K + i_k * BK + tl.arange(0, BK)
-        p_v = v + i_nh * T*V + i_v * BV + tl.arange(0, BV)
-        if IS_BETA_HEADWISE:
-            p_beta = beta + i_nh * T*V + i_v * BV + tl.arange(0, BV)
-        else:
-            p_beta = beta + i_nh * T
-        p_do = do + i_nh * T*V + i_v * BV + tl.arange(0, BV)
-        p_dq = dq + (i_v * B*H + i_nh) * T*K + i_k * BK + tl.arange(0, BK)
-        p_dk = dk + (i_v * B*H + i_nh) * T*K + i_k * BK + tl.arange(0, BK)
-        p_dv = dv + (i_k * B*H + i_nh) * T*V + i_v * BV + tl.arange(0, BV)
+    p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
+    if IS_BETA_HEADWISE:
+        p_beta = beta + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
     else:
-        p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
-        p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
-        p_v = v + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
-        if IS_BETA_HEADWISE:
-            p_beta = beta + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
-        else:
-            p_beta = beta + bos * H + i_h
-        p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
-        p_dq = dq + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK)
-        p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK)
-        p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV)
+        p_beta = beta + bos * H + i_h
+    p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV)
+    p_dq = dq + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV)
 
     if USE_INITIAL_STATE:
         mask_h = mask_k[:, None] & mask_v[None, :]
@@ -284,13 +244,13 @@ def fused_recurrent_delta_rule_bwd_kernel(
         d_q = tl.sum(b_dq, axis=1) * scale
         tl.store(p_dq, d_q.to(p_dq.dtype.element_ty), mask=mask_k)
 
-        p_k += K if HEAD_FIRST else H*K
-        p_v += V if HEAD_FIRST else H*V
-        p_do += V if HEAD_FIRST else H*V
-        p_dq += K if HEAD_FIRST else H*K
-        p_dk += K if HEAD_FIRST else H*K
-        p_dv += V if HEAD_FIRST else H*V
-        p_beta += (1 if HEAD_FIRST else H) * (V if IS_BETA_HEADWISE else 1)
+        p_k += H*K
+        p_v += H*V
+        p_do += H*V
+        p_dq += H*K
+        p_dk += H*K
+        p_dv += H*V
+        p_beta += H * (V if IS_BETA_HEADWISE else 1)
 
 
 def fused_recurrent_delta_rule_fwd(
@@ -338,7 +298,6 @@ def fused_recurrent_delta_rule_fwd(
         BK=BK,
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
-        HEAD_FIRST=False,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -405,7 +364,6 @@ def fused_recurrent_delta_rule_bwd(
         BV=BV,
         NK=NK,
         IS_BETA_HEADWISE=beta_vector,
-        HEAD_FIRST=False,
         num_warps=num_warps,
         num_stages=num_stages
     )

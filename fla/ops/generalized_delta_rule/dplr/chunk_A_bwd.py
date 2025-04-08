@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, gather
 from fla.utils import check_shared_mem, is_gather_supported, use_cuda_graph
 
@@ -56,7 +57,6 @@ def chunk_dplr_bwd_kernel_intra(
     BK: tl.constexpr,
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
     GATHER_SUPPORTED: tl.constexpr
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -72,29 +72,29 @@ def chunk_dplr_bwd_kernel_intra(
         return
 
     # offset calculation
-    ge += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    gi += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    q += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    a += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    b += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    k += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dq += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dk += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    da += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    db += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dqg += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dag += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dkg += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dbg += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dgk += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dgk_offset += i_bh * T * K if HEAD_FIRST else (bos*H + i_h) * K
-    dAqk += i_bh * T * BT if HEAD_FIRST else (bos*H + i_h) * BT
-    dAqb += i_bh * T * BT if HEAD_FIRST else (bos*H + i_h) * BT
-    dAak += i_bh * T * BT if HEAD_FIRST else (bos*H + i_h) * BT
-    dAab += i_bh * T * BT if HEAD_FIRST else (bos*H + i_h) * BT
+    ge += (bos*H + i_h) * K
+    gi += (bos*H + i_h) * K
+    q += (bos*H + i_h) * K
+    a += (bos*H + i_h) * K
+    b += (bos*H + i_h) * K
+    k += (bos*H + i_h) * K
+    dq += (bos*H + i_h) * K
+    dk += (bos*H + i_h) * K
+    da += (bos*H + i_h) * K
+    db += (bos*H + i_h) * K
+    dqg += (bos*H + i_h) * K
+    dag += (bos*H + i_h) * K
+    dkg += (bos*H + i_h) * K
+    dbg += (bos*H + i_h) * K
+    dgk += (bos*H + i_h) * K
+    dgk_offset += (bos*H + i_h) * K
+    dAqk += (bos*H + i_h) * BT
+    dAqb += (bos*H + i_h) * BT
+    dAak += (bos*H + i_h) * BT
+    dAab += (bos*H + i_h) * BT
 
-    stride_qk = K if HEAD_FIRST else H*K
-    stride_A = BT if HEAD_FIRST else H*BT
+    stride_qk = H*K
+    stride_A = H*BT
 
     p_ge = tl.make_block_ptr(ge, (T, K), (stride_qk, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
     p_gi = tl.make_block_ptr(gi, (T, K), (stride_qk, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
@@ -315,7 +315,6 @@ def chunk_dplr_bwd_dgk_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
 ):
     i_t, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -330,11 +329,11 @@ def chunk_dplr_bwd_dgk_kernel(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
     T = eos - bos
-    stride_qk = K if HEAD_FIRST else H * K
-    dgk += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    dgk_offset += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
-    dgk_last += ((i_bh * NT + i_t) * K) if HEAD_FIRST else (i_tg * H + i_h) * K
-    dgk_output += i_bh * T * K if HEAD_FIRST else (bos * H + i_h) * K
+    stride_qk = H * K
+    dgk += (bos * H + i_h) * K
+    dgk_offset += (bos * H + i_h) * K
+    dgk_last += (i_tg * H + i_h) * K
+    dgk_output += (bos * H + i_h) * K
     p_dgk_last = dgk_last + tl.arange(0, BK) + i_k * BK
     m_k = tl.arange(0, BK) + i_k * BK < K
     b_dgk_last = tl.load(p_dgk_last, mask=m_k, other=0)
@@ -368,18 +367,15 @@ def chunk_dplr_bwd_dqk_intra(
     dbg: torch.Tensor,
     dgk_last: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     scale: float = 1.0,
     chunk_size: int = 64,
 ):
-    if head_first:
-        B, H, T, K = q.shape
-    else:
-        B, T, H, K = q.shape
+    B, T, H, K = q.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K)) if check_shared_mem() else min(32, triton.next_power_of_2(K))
+
+    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
@@ -423,7 +419,6 @@ def chunk_dplr_bwd_dqk_intra(
         BC=BC,
         BK=BK,
         NC=NC,
-        HEAD_FIRST=head_first,
         GATHER_SUPPORTED=is_gather_supported
     )
 
@@ -441,6 +436,5 @@ def chunk_dplr_bwd_dqk_intra(
         H=H,
         K=K,
         BT=BT,
-        HEAD_FIRST=head_first
     )
     return dq, dk, da, db, dgk_output

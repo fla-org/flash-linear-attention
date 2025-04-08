@@ -34,7 +34,6 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -47,27 +46,18 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         bos, eos = i_b * T, i_b * T + T
     o_t = tl.arange(0, BT)
 
-    if HEAD_FIRST:
-        p_beta = tl.make_block_ptr(beta + i_bh * T, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    else:
-        p_beta = tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_beta = tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_beta = tl.load(p_beta, boundary_check=(0,))
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        if HEAD_FIRST:
-            p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        else:
-            p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_kb = b_k * b_beta[:, None]
         b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
 
     b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
-    if HEAD_FIRST:
-        p_A = tl.make_block_ptr(A + i_bh * T*BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    else:
-        p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -112,6 +102,5 @@ def chunk_scaled_dot_kkt_fwd(
         H=H,
         K=K,
         BT=BT,
-        HEAD_FIRST=False
     )
     return A
