@@ -27,10 +27,11 @@ from fla.modules.layernorm import rms_norm_linear
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
+
 logger = logging.get_logger(__name__)
 
 
-class GatedDeltaNetMLP(nn.Module):
+class GatedDeltaProductMLP(nn.Module):
     def __init__(
         self,
         hidden_size: int,
@@ -39,7 +40,7 @@ class GatedDeltaNetMLP(nn.Module):
         hidden_act: str = "swish",
         norm_first: bool = True,
         norm_eps: float = 1e-5,
-    ) -> GatedDeltaNetMLP:
+    ) -> GatedDeltaProductMLP:
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -85,12 +86,12 @@ class GatedDeltaNetMLP(nn.Module):
 class GatedDeltaProductBlock(nn.Module):
     def __init__(self, config: GatedDeltaProductConfig, layer_idx: int):
         super().__init__()
+
+        self.config = config
+        self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
 
-        if not config.norm_first:
-            self.attn_norm = RMSNorm(
-                hidden_size=config.hidden_size, eps=config.norm_eps
-            )
+        self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
         if config.attn is not None and layer_idx in config.attn["layers"]:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
@@ -115,12 +116,13 @@ class GatedDeltaProductBlock(nn.Module):
                 norm_eps=config.norm_eps,
                 allow_neg_eigval=config.allow_neg_eigval,
                 num_householder=config.num_householder,
-                layer_idx=layer_idx,
-                use_beta_conv=config.use_beta_conv
+                layer_idx=layer_idx
             )
+        
         if not config.norm_first:
             self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
-        self.mlp = GatedDeltaNetMLP(
+            
+        self.mlp = GatedDeltaProductMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -136,10 +138,8 @@ class GatedDeltaProductBlock(nn.Module):
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
-        **kwargs: Unpack[Dict],
-    ) -> Tuple[
-        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
-    ]:
+        **kwargs: Unpack[Dict]
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
         if hasattr(self, "attn_norm"):
             hidden_states = self.attn_norm(hidden_states)
@@ -149,7 +149,7 @@ class GatedDeltaProductBlock(nn.Module):
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            **kwargs,
+            **kwargs
         )
         if hasattr(self, "mlp_norm"):
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
@@ -165,9 +165,12 @@ class GatedDeltaProductBlock(nn.Module):
 
 
 class GatedDeltaProductPreTrainedModel(PreTrainedModel):
+
     config_class = GatedDeltaProductConfig
+    base_model_prefix = 'model'
     supports_gradient_checkpointing = True
-    _no_split_modules = ["GatedDeltaNetBlock"]
+    _no_split_modules = ['GatedDeltaProductBlock']
+    _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
@@ -188,6 +191,8 @@ class GatedDeltaProductPreTrainedModel(PreTrainedModel):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+        elif hasattr(module, 'reset_parameters'):
+            module.reset_parameters()
 
         if rescale_prenorm_residual:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
@@ -209,20 +214,14 @@ class GatedDeltaProductPreTrainedModel(PreTrainedModel):
 
 
 class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
+
     def __init__(self, config: GatedDeltaProductConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embeddings = nn.Embedding(
-            config.vocab_size, config.hidden_size, self.padding_idx
-        )
-        self.layers = nn.ModuleList(
-            [
-                GatedDeltaProductBlock(config, layer_idx)
-                for layer_idx in range(config.num_hidden_layers)
-            ]
-        )
+        self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.layers = nn.ModuleList([GatedDeltaProductBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -238,45 +237,27 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,  
         inputs_embeds: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        **kwargs: Unpack[Dict],
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
-            warnings.warn(
-                "`GatedDeltaNetModel` does not `output_attentions` now, setting it to `False`.",
-                stacklevel=2,
-            )
+            warnings.warn("`GatedDeltaProductModel` does not `output_attentions` now, setting it to `False`.", stacklevel=2)
             output_attentions = False
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
-        )
-        use_cache = (
-            use_cache
-            if use_cache is not None
-            else (self.config.use_cache if not self.training else False)
-        )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+            
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError(
-                "You cannot specify both input_ids and inputs_embeds at the same time"
-            )
+            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         if input_ids is None and inputs_embeds is None:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
@@ -288,9 +269,7 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
         if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-            )
+            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
             use_cache = False
 
         all_hidden_states = () if output_hidden_states else None
@@ -300,16 +279,14 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = (
-                    self._gradient_checkpointing_func(
-                        layer.__call__,
-                        hidden_states,
-                        attention_mask,
-                        past_key_values,
-                        use_cache,
-                        output_attentions,
-                        **kwargs,
-                    )
+                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
+                    layer.__call__,
+                    hidden_states,
+                    attention_mask,
+                    past_key_values,
+                    use_cache,
+                    output_attentions,
+                    **kwargs
                 )
             else:
                 hidden_states, attentions, past_key_values = layer(
@@ -318,37 +295,30 @@ class GatedDeltaProductModel(GatedDeltaProductPreTrainedModel):
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    **kwargs,
+                    **kwargs
                 )
 
             if output_attentions:
                 all_attns += (attentions,)
 
         hidden_states = self.norm(hidden_states)
+
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
         if not return_dict:
-            return tuple(
-                i
-                for i in [
-                    hidden_states,
-                    past_key_values,
-                    all_hidden_states,
-                    all_attns,
-                ]
-                if i is not None
-            )
+            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
-            attentions=all_attns,
+            attentions=all_attns
         )
 
 
 class GatedDeltaProductForCausalLM(GatedDeltaProductPreTrainedModel, GenerationMixin):
+
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
@@ -382,7 +352,7 @@ class GatedDeltaProductForCausalLM(GatedDeltaProductPreTrainedModel, GenerationM
         try:
             return super().generate(*args, **kwargs)
         except AttributeError as exception:
-            if "past_key_values" in str(exception):
+            if 'past_key_values' in str(exception):
                 raise AttributeError(
                     f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
                     f"which is not supported for {self.__class__.__name__}. "
@@ -403,32 +373,30 @@ class GatedDeltaProductForCausalLM(GatedDeltaProductPreTrainedModel, GenerationM
         use_cache: bool = True,
         num_logits_to_keep: Optional[int] = None,
         logits_to_keep: Optional[int] = None,
-        **kwargs,
+        **kwargs
     ):
         # only last token for `inputs_ids` if the `past_key_values` is passed along is not empty.
         if past_key_values is not None and len(past_key_values) > 0:
             input_ids = input_ids[:, -1:]
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
+            model_inputs = {'inputs_embeds': inputs_embeds}
         else:
             # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
             # recompiles graphs as the stride of the inputs is a guard.
             # Ref: https://github.com/huggingface/transformers/pull/29114
             # TODO: use `next_tokens` directly instead.
-            model_inputs = {"input_ids": input_ids.contiguous()}
+            model_inputs = {'input_ids': input_ids.contiguous()}
 
         if logits_to_keep is not None:
             model_inputs['logits_to_keep'] = logits_to_keep
 
-        model_inputs.update(
-            {
-                "past_key_values": past_key_values,
-                "use_cache": use_cache,
-                "attention_mask": attention_mask,
-                "num_logits_to_keep": num_logits_to_keep,
-            }
-        )
+        model_inputs.update({
+            'past_key_values': past_key_values,
+            'use_cache': use_cache,
+            'attention_mask': attention_mask,
+            'num_logits_to_keep': num_logits_to_keep,
+        })
         return model_inputs
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
@@ -445,23 +413,16 @@ class GatedDeltaProductForCausalLM(GatedDeltaProductPreTrainedModel, GenerationM
         return_dict: Optional[bool] = None,
         num_logits_to_keep: Optional[int] = 0,
         logits_to_keep: Optional[int] = 0,
-        **kwargs: Unpack[Dict],
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         num_logits_to_keep = 0 if num_logits_to_keep is None else num_logits_to_keep
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         kwargs.pop("num_items_in_batch", None)
+        
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -471,8 +432,9 @@ class GatedDeltaProductForCausalLM(GatedDeltaProductPreTrainedModel, GenerationM
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            **kwargs,
+            **kwargs
         )
+        
         hidden_states = outputs[0]
         fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
