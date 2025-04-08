@@ -8,11 +8,11 @@ import torch.nn.functional as F
 
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
 from fla.ops.hgrn.naive import naive_recurrent_hgrn
-from fla.ops.utils.testing import assert_close
+from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
 from fla.utils import device
 
-compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
-if compiled_mode:
+
+if COMPILER_MODE:
     test_b_list = [1]
     test_t_list = [4096]
     test_t_varlen_list = test_t_list

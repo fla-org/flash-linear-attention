@@ -11,11 +11,11 @@ from einops import rearrange
 from fla.ops.simple_gla import chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.ops.simple_gla.parallel import parallel_simple_gla
-from fla.ops.utils.testing import assert_close
+from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
 from fla.utils import device
 
-compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
-if compiled_mode:
+
+if COMPILER_MODE:
     test_b_list = [1]
     test_t_list = [4096]
     test_t_varlen_list = test_t_list

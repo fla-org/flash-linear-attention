@@ -6,11 +6,11 @@ import pytest
 import torch
 
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
-from fla.ops.utils.testing import assert_close
+from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
 from fla.utils import device, device_platform
 
-compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
-if compiled_mode:
+
+if COMPILER_MODE:
     test_b_list = [1]
     test_t_list = [4096]
     test_t_varlen_list = test_t_list

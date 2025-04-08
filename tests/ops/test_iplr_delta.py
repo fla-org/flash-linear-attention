@@ -10,11 +10,11 @@ from einops import rearrange
 
 from fla.ops.generalized_delta_rule.iplr.chunk import chunk_iplr_delta_rule
 from fla.ops.generalized_delta_rule.iplr.fused_recurrent import fused_recurrent_iplr_delta_rule
-from fla.ops.utils.testing import assert_close
+from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
 from fla.utils import device
 
-compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
-if compiled_mode:
+
+if COMPILER_MODE:
     test_b_list = [1]
     test_t_list = [4096]
     test_t_varlen_list = test_t_list

@@ -7,11 +7,11 @@ import torch
 
 from fla.ops.retention import chunk_retention, fused_recurrent_retention, parallel_retention
 from fla.ops.retention.naive import naive_retention
-from fla.ops.utils.testing import assert_close
+from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
 from fla.utils import device
 
-compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
-if compiled_mode:
+
+if COMPILER_MODE:
     test_b_list = [1]
     test_t_list = [4096]
     test_t_varlen_list = test_t_list

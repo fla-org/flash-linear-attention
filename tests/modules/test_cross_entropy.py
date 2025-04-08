@@ -8,11 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.ops.utils.testing import assert_close
+from fla.ops.utils.testing import assert_close, FLA_CI_ENV, COMPILER_MODE
 from fla.utils import device, device_platform
 
-compiled_mode = os.getenv("FLA_COMPILER_MODE") == "1"
-FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
+
 
 
 @pytest.mark.parametrize("B", [2])
