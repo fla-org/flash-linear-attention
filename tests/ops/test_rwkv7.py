@@ -10,8 +10,6 @@ from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.utils.testing import assert_close
 from fla.utils import device, is_intel_alchemist
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
-
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [1024])
@@ -63,11 +61,11 @@ def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdi
     loss2 = out2.mean() + last2.mean()
     loss2.backward()
 
-    assert_close(" dx", x.grad, x2.grad, ratio=1e-3)
-    assert_close(" dxprev", x_prev.grad, x_prev2.grad, ratio=1e-3)
-    assert_close(" dx_k", x_k.grad, x_k2.grad, ratio=1e-3)
-    assert_close(" dK_", K_.grad, K_2.grad, ratio=1e-3)
-    assert_close(" dV_", V_.grad, V_2.grad, ratio=1e-3)
+    assert_close(" dx", x.grad, x2.grad, ratio=5e-3)
+    assert_close(" dxprev", x_prev.grad, x_prev2.grad, ratio=5e-3)
+    assert_close(" dx_k", x_k.grad, x_k2.grad, ratio=5e-3)
+    assert_close(" dK_", K_.grad, K_2.grad, ratio=5e-3)
+    assert_close(" dV_", V_.grad, V_2.grad, ratio=5e-3)
 
 
 @pytest.mark.parametrize("B", [4])

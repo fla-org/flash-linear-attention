@@ -9,13 +9,12 @@ import triton
 from fla.ops.common.utils import prepare_token_indices
 from fla.ops.nsa.naive import naive_nsa
 from fla.ops.nsa.parallel import parallel_nsa
-from fla.ops.utils.testing import assert_close
+from fla.ops.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
-if compiled_mode:
+if COMPILER_MODE:
     test_b_list = [1]
-    test_t_list = [64]
+    test_t_list = [4096]
     test_t_varlen_list = test_t_list
 else:
     test_b_list = [2]

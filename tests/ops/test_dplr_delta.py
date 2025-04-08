@@ -8,13 +8,12 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
-from fla.ops.utils.testing import assert_close
+from fla.ops.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device, device_platform
 
-compiled_mode = os.getenv("COMPILER_MODE") == "1"
-if compiled_mode:
+if COMPILER_MODE:
     test_b_list = [1]
-    test_t_list = [64]
+    test_t_list = [4096]
     test_t_varlen_list = test_t_list
     test_d_list = [64, 128, 256]
     test_gate_list = [1.0]
@@ -22,7 +21,7 @@ else:
     test_b_list = [2]
     test_t_list = [1, 15, 63, 300]
     test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [32, 64, 100, 256]
+    test_d_list = [64, 32, 100, 256]
     test_gate_list = [1, 0.1, 10]
 test_h_list = [2]
 

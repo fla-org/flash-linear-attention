@@ -19,7 +19,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: 'intel-a770'
     env:
-      CI_ENV: 1
+      FLA_CI_ENV: 1
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -76,42 +76,42 @@ jobs:
       - name: Test compiling on changed test files
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
-          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
-            pytest ${{ steps.find-dependent-tests.outputs.test_files }} --capture=no
+          FLA_COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
+            pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run pytest on test files
         continue-on-error: true
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
-          COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
+          FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run pytest on varlen test files
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         continue-on-error: true
         run: |
-          COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
+          FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} || \
             echo "Varlen tests failed (non-critical)"
 
       - name: Test full compiling on all test files
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
         run: |
-          COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
-            pytest tests/ --capture=no
+          FLA_COMPILER_MODE=1 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
+            pytest tests/
 
       # skip full pytest because it takes too long
       - name: Run full pytest on test files
         continue-on-error: true
         if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
         run: |
-          COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
+          FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run full pytest on varlen test files
         continue-on-error: true
         if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
         run: |
-          COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
+          FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} || \
             echo "Varlen tests failed (non-critical)"
