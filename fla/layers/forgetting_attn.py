@@ -12,13 +12,13 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import pad_input, unpad_input
 from fla.modules import GroupNorm
+from fla.ops.forgetting_attn.decoding import attn_decoding_one_step
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
-
 
 logger = logging.get_logger(__name__)
 
@@ -57,7 +57,7 @@ class ForgettingAttention(nn.Module):
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
-        self.f_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
+        self.g_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
 
         if use_output_gate:
             self.g_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
@@ -94,41 +94,41 @@ class ForgettingAttention(nn.Module):
         batch_size, q_len, _ = hidden_states.size()
 
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-        f = F.logsigmoid(self.f_proj(hidden_states).float())
+        g = F.logsigmoid(self.g_proj(hidden_states).float())
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
 
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if past_key_values is not None:
-            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
-            k_cached, v_cached = past_key_values.update(
-                attn_state=(k, v),
+            assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
+            state = past_key_values.update(
+                attn_state=(k, v, g),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
-            )['attn_state']
-            if cache_has_content:
-                k, v = k_cached, v_cached
-
-        cu_seqlens = kwargs.get('cu_seqlens', None)
-        if attention_mask is not None:
-            indices_q, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
-            if k.shape[1] == q.shape[1]:
-                indices_k = indices_q
-            else:
-                indices_k = get_unpad_data(attention_mask)[0]
-            q, f = map(lambda x: index_first_axis(rearrange(x, "b s ... -> (b s) ..."), indices_q).unsqueeze(0), (q, f))
-            k, v = map(lambda x: index_first_axis(rearrange(x, "b s ... -> (b s) ..."), indices_k).unsqueeze(0), (k, v))
+            )
+            k, v, g = state['attn_state']
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
+        if attention_mask is not None:
+            q, (k, v, g), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v, g), attention_mask, q_len, keepdim=True)
+            _, cu_seqlens_k = cu_seqlens
+            cu_seqlens = cu_seqlens_k
+            max_seqlen_q, max_seqlen_k = max_seq_lens
+            if max_seqlen_q != max_seqlen_k:
+                assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
+                o = attn_decoding_one_step(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
+            else:
+                o = parallel_forgetting_attn(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
+        else:
+            o = parallel_forgetting_attn(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
         if attention_mask is not None:
             o = pad_input(o.squeeze(0), indices_q, batch_size, q_len)
         o = rearrange(o, '... h d -> ... (h d)')
         if self.use_output_gate:
             o = self.g_proj(hidden_states).sigmoid() * o
         o = self.o_proj(o)
-
         return o, None, past_key_values

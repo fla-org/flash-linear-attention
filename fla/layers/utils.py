@@ -3,6 +3,8 @@
 
 # Code is adapted from flash-attn.bert_padding.py
 
+from typing import Tuple
+
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
@@ -100,10 +102,10 @@ def get_unpad_data(
 
 def unpad_input(
     q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
+    states: Tuple[torch.Tensor],
     attention_mask: torch.Tensor,
     q_len: int,
+    keepdim: bool = False,
 ):
     """
     Unpads query, key, and values tensors, using a single dimension for all tokens
@@ -113,22 +115,22 @@ def unpad_input(
     Arguments:
         q (`torch.Tensor`):
             Query state with padding. Shape: [batch_size, q_len, ...].
-        k (`torch.Tensor`):
-            Key state with padding. Shape: [batch_size, seq_len, ...].
-        v (`torch.Tensor`):
-            Value state with padding. Shape: [batch_size, seq_len, ...].
+        states (`Tuple[torch.Tensor]`):
+            Attention state with padding. Shape: [batch_size, seq_len, ...].
         attention_mask (`torch.Tensor`):
             Boolean or int tensor of shape [batch_size, sequence_length], 1 means valid and 0 means not valid.
         q_len (`int`):
             Target length.
+        keepdim (`bool`):
+            Whether to keep the batch dimension. Default: `False`.
 
     Return:
         q (`torch.Tensor`):
-            Query state without padding. Shape: [total_target_length, ...].
-        k (`torch.Tensor`):
-            Key state with padding. Shape: [total_source_length, ...].
-        v (`torch.Tensor`):
-            Value state with padding. Shape: [total_source_length, ...].
+            Query state without padding.
+            Shape: [1, total_target_length, ...] if `keepdim=True` else [total_target_length, ...].
+        states (`Tuple[torch.Tensor]`):
+            Attention state without padding.
+            Shape: [1, total_source_length, ...] if `keepdim=True` else [total_source_length, ...].
         indices_q (`torch.Tensor`):
             The indices of non-masked tokens from the flattened input target sequence.
         (cu_seqlens_q, cu_seqlens_k) (`Tuple[int]`):
@@ -140,10 +142,12 @@ def unpad_input(
             i.e. query, `max_seqlen_in_batch_k` for the source sequence i.e. key/value).
     """
     indices_k, cu_seqlens_k, max_seqlen_in_batch_k = get_unpad_data(attention_mask)
-    batch_size, seq_len, *_ = k.shape
+    batch_size, seq_len, *_ = states[0].shape
 
-    k = index_first_axis(rearrange(k, "b s ... -> (b s) ..."), indices_k)
-    v = index_first_axis(rearrange(v, "b s ... -> (b s) ..."), indices_k)
+    state = tuple(
+        index_first_axis(rearrange(s, "b s ... -> (b s) ..."), indices_k)
+        for s in states
+    )
 
     if q_len == seq_len:
         q = index_first_axis(rearrange(q, "b s ... -> (b s) ..."), indices_k)
@@ -156,14 +160,15 @@ def unpad_input(
         indices_q = cu_seqlens_q[:-1]
         q = q.squeeze(1)
     else:
-        # The -q_len: slice assumes left padding.
-        indices_q, cu_seqlens_q, max_seqlen_in_batch_q = get_unpad_data(attention_mask[:, -q_len:])
-        q = index_first_axis(rearrange(q, "b s ... -> (b s) ..."), indices_q)
+        raise NotImplementedError("We only support either q_len == k_len (prefilling) or q_len == 1 (decoding)")
+
+    if keepdim:
+        q = q.unsqueeze(0)
+        state = tuple(s.unsqueeze(0) for s in state)
 
     return (
         q,
-        k,
-        v,
+        state,
         indices_q,
         (cu_seqlens_q, cu_seqlens_k),
         (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
