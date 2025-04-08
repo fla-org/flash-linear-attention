@@ -30,7 +30,7 @@ jobs:
         run: |
           COMMIT_MSG=$(jq -r '.head_commit.message' <<< '${{ toJSON(github.event) }}')
           echo "Latest commit message: $COMMIT_MSG"
-          if [[ "$COMMIT_MSG" =~ $$skip[[:space:]_-]?test$$ ]]; then
+          if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
             echo "::notice::Tests skipped by commit message"
             echo "skip_tests=true" >> $GITHUB_OUTPUT
           else
