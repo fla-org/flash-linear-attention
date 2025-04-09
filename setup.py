@@ -18,7 +18,7 @@ def get_package_version():
 
 
 setup(
-    name='fla',
+    name='flash-linear-attention',
     version=get_package_version(),
     description='Fast Triton-based implementations of causal linear attention',
     long_description=long_description,

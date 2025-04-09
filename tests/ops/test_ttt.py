@@ -6,9 +6,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.ttt import chunk_ttt_linear
-from fla.ops.ttt import fused_chunk_ttt_linear
+from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
 from fla.ops.ttt.naive import chunk_ttt_linear_ref
+from fla.utils import device
 
 
 def get_abs_err(x, y):
@@ -63,7 +63,7 @@ def test_chunk(
         h0 = torch.randn(B, H, D, D, dtype=torch.float32)
         hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
 
-    q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, w, b, eta, h0, hb0))
+    q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, w, b, eta, h0, hb0))
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
     dhbt = torch.rand_like(hb0)
@@ -81,8 +81,9 @@ def test_chunk(
         initial_state_bias=hb0.clone(),
         head_first=head_first
     )
-    ((tri * do).sum() + (tri_ht * dht).sum() +  (tri_hbt * dhbt).sum()).backward(retain_graph=True)
-    tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, tri_dh0, tri_dhb0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad, hb0.grad
+    ((tri * do).sum() + (tri_ht * dht).sum() + (tri_hbt * dhbt).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, \
+        tri_dh0, tri_dhb0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad, hb0.grad
     q.grad = k.grad = v.grad = w.grad = b.grad = eta.grad = h0.grad = hb0.grad = None
 
     ref, ref_ht, ref_hbt = chunk_ttt_linear_ref(
@@ -98,9 +99,10 @@ def test_chunk(
         initial_state_bias=hb0.clone(),
         head_first=head_first
     )
-    ((ref * do).sum() + (ref_ht * dht).sum() +  (ref_hbt * dhbt).sum()).backward(retain_graph=True)
-    ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, ref_dh0, ref_dhb0 =  q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad, hb0.grad
-    
+    ((ref * do).sum() + (ref_ht * dht).sum() + (ref_hbt * dhbt).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, \
+        ref_dh0, ref_dhb0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad, hb0.grad
+
     assert_close("   o", ref, tri, 0.005)
     assert_close("  ht", ref_ht, tri_ht, 0.005)
     assert_close(" hbt", ref_hbt, tri_hbt, 0.005)
@@ -111,9 +113,9 @@ def test_chunk(
     assert_close("  db", ref_db, tri_db, 0.006)
     assert_close("  de", ref_deta, tri_deta, 0.030)  # because the last element of the chunk
     if head_first:
-        assert_close(" de0", ref_deta[:,:,:14,:], tri_deta[:,:,:14,:], 0.010)
+        assert_close(" de0", ref_deta[:, :, :14, :], tri_deta[:, :, :14, :], 0.010)
     else:
-        assert_close(" de0", ref_deta[:,:14,:,:], tri_deta[:,:14,:,:], 0.010)
+        assert_close(" de0", ref_deta[:, :14, :, :], tri_deta[:, :14, :, :], 0.010)
     assert_close(" dh0", ref_dh0, tri_dh0, 0.007)
     assert_close("dhb0", ref_dhb0, tri_dhb0, 0.005)
 
@@ -154,7 +156,7 @@ def test_fused_chunk_fwd(
         h0 = torch.randn(B, H, D, D, dtype=torch.float32)
         hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
 
-    q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, w, b, eta, h0, hb0))
+    q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, w, b, eta, h0, hb0))
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
     dhbt = torch.rand_like(hb0)
@@ -172,8 +174,9 @@ def test_fused_chunk_fwd(
         initial_state_bias=hb0.clone(),
         head_first=head_first
     )
-    ((tri * do).sum() + (tri_ht * dht).sum() +  (tri_hbt * dhbt).sum()).backward(retain_graph=True)
-    tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, tri_dh0, tri_dhb0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad, hb0.grad
+    ((tri * do).sum() + (tri_ht * dht).sum() + (tri_hbt * dhbt).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, \
+        tri_dh0, tri_dhb0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad, hb0.grad
     q.grad = k.grad = v.grad = w.grad = b.grad = eta.grad = h0.grad = hb0.grad = None
 
     ref, ref_ht, ref_hbt = chunk_ttt_linear_ref(
@@ -189,9 +192,10 @@ def test_fused_chunk_fwd(
         initial_state_bias=hb0.clone(),
         head_first=head_first
     )
-    ((ref * do).sum() + (ref_ht * dht).sum() +  (ref_hbt * dhbt).sum()).backward(retain_graph=True)
-    ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, ref_dh0, ref_dhb0 =  q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad, hb0.grad
-    
+    ((ref * do).sum() + (ref_ht * dht).sum() + (ref_hbt * dhbt).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, \
+        ref_dh0, ref_dhb0 = q.grad, k.grad, v.grad, w.grad, b.grad, eta.grad, h0.grad, hb0.grad
+
     assert_close("   o", ref, tri, 0.005)
     assert_close("  ht", ref_ht, tri_ht, 0.005)
     assert_close(" hbt", ref_hbt, tri_hbt, 0.005)
@@ -202,9 +206,9 @@ def test_fused_chunk_fwd(
     assert_close("  db", ref_db, tri_db, 0.005)
     assert_close("  de", ref_deta, tri_deta, 0.03)  # because the last element of the chunk
     if head_first:
-        assert_close(" de0", ref_deta[:,:,:14,:], tri_deta[:,:,:14,:], 0.008)
+        assert_close(" de0", ref_deta[:, :, :14, :], tri_deta[:, :, :14, :], 0.008)
     else:
-        assert_close(" de0", ref_deta[:,:14,:,:], tri_deta[:,:14,:,:], 0.008)
+        assert_close(" de0", ref_deta[:, :14, :, :], tri_deta[:, :14, :, :], 0.008)
     assert_close(" dh0", ref_dh0, tri_dh0, 0.006)
     assert_close("dhb0", ref_dhb0, tri_dhb0, 0.005)
 
@@ -230,7 +234,7 @@ def test_chunk_varlen_fwd(
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    ], 0).to(device).sort()[0]
     eta_base = 5e-3
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
@@ -241,7 +245,7 @@ def test_chunk_varlen_fwd(
     b = torch.randn(H, D, dtype=dtype)
     h0 = torch.randn((N, H, D, D), dtype=torch.float32)
     hb0 = torch.randn((N, H, 1, D), dtype=torch.float32)
-    q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.cuda().requires_grad_(), (q, k, v, w, b, eta, h0, hb0))
+    q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, w, b, eta, h0, hb0))
 
     tri, tri_ht, tri_hbt = chunk_ttt_linear(
         q.clone(),

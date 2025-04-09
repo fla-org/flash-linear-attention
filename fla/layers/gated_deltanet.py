@@ -36,6 +36,7 @@ class GatedDeltaNet(nn.Module):
     The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
 
     Similar to Mamba2, each layer contains around 6*hidden_size*hidden_size parameters.
+
     Parameter alloation when use_gate=True:
         - 0.75 * hidden_size * hidden_size for the q_proj and k_proj each
         - 1.5 * hidden_size * hidden_size for the v_proj, g_proj and o_proj each
@@ -108,23 +109,33 @@ class GatedDeltaNet(nn.Module):
         self.head_dim = head_dim
         self.num_heads = num_heads
 
-        self.key_dim = self.num_heads * self.head_dim
-        self.value_dim = self.key_dim * self.expand_v
+        self.key_dim = int(self.num_heads * self.head_dim)
+        self.value_dim = int(self.key_dim * self.expand_v)
         self.head_k_dim = head_dim
-        self.head_v_dim = head_dim * self.expand_v
+        self.head_v_dim = int(head_dim * self.expand_v)
         self.layer_idx = layer_idx
-        self.silu = nn.SiLU()
 
+        # Consistency check: Ensure expand_v produces integer values
+        if not math.isclose(self.key_dim * expand_v, self.value_dim, rel_tol=1e-5):
+            raise ValueError(
+                f"expand_v={expand_v} does not produce an integer value when multiplied by key_dim={self.key_dim}. "
+                f"Resulting value_dim would be {self.key_dim * expand_v}, which is invalid for nn.Linear."
+            )
+        if not math.isclose(head_dim * expand_v, self.head_v_dim, rel_tol=1e-5):
+            raise ValueError(
+                f"expand_v={expand_v} does not produce an integer value when multiplied by head_dim={head_dim}. "
+                f"Resulting head_v_dim would be {head_dim * expand_v}, which is invalid for FusedRMSNormSwishGate."
+            )
         assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.v_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-        self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
         self.a_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
+        self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
+
         A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
-        A_log = torch.log(A)
-        self.A_log = nn.Parameter(A_log)
+        self.A_log = nn.Parameter(torch.log(A))
         self.A_log._no_weight_decay = True
         # hard coded for now
         dt_min = 0.001
@@ -227,9 +238,9 @@ class GatedDeltaNet(nn.Module):
                 seq_idx=seq_idx
             )
         else:
-            q = self.silu(self.q_proj(hidden_states))
-            k = self.silu(self.k_proj(hidden_states))
-            v = self.silu(self.v_proj(hidden_states))
+            q = F.silu(self.q_proj(hidden_states))
+            k = F.silu(self.k_proj(hidden_states))
+            v = F.silu(self.v_proj(hidden_states))
 
         q, k = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)

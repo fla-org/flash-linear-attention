@@ -6,6 +6,8 @@ import torch.nn.functional as F
 from ops.titans.fused_chunk import fused_chunk_titans_linear
 from ops.titans.naive import chunk_titans_linear_ref
 
+from fla.utils import device
+
 
 def get_abs_err(x, y):
     return (x - y).flatten().abs().max().item()
@@ -88,10 +90,10 @@ def test_naive_chunk_fwd(
         alpha = alpha.permute(0, 2, 1, 3)
         eta = eta.permute(0, 2, 1, 3)
     q, k, v, w, b, theta, alpha, eta = map(
-        lambda x: x.cuda().requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
+        lambda x: x.to(device).requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
     )
     # in titans paper, h0 is not learnable
-    h0 = h0.cuda()
+    h0 = h0.to(device)
 
     ref_naive, ref_ht_naive = chunk_titans_linear_ref(
         q.clone(),
@@ -177,10 +179,10 @@ def test_fused_chunk_fwd(
         alpha = alpha.permute(0, 2, 1, 3)
         eta = eta.permute(0, 2, 1, 3)
     q, k, v, w, b, theta, alpha, eta = map(
-        lambda x: x.cuda().requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
+        lambda x: x.to(device).requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
     )
     # in titans paper, h0 is not learnable
-    h0 = h0.cuda()
+    h0 = h0.to(device)
 
     ref_naive, ref_ht_naive = fused_chunk_titans_linear(
         q.clone(),

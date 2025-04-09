@@ -34,6 +34,7 @@ class RWKV7Attention(nn.Module):
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
+        is_first_layer: bool = True,
         fuse_norm: bool = False,
         value_dim: int = None,
         **kwargs
@@ -45,7 +46,8 @@ class RWKV7Attention(nn.Module):
         self.hidden_size = hidden_size
 
         self.key_dim = hidden_size
-        self.value_dim = value_dim if value_dim is not None else hidden_size
+        #self.value_dim = value_dim if value_dim is not None else hidden_size
+        self.value_dim = hidden_size
         if head_dim is None and num_heads is None:
             raise ValueError("Either `head_dim` or `num_heads` must be specified.")
         elif head_dim is not None:
@@ -54,12 +56,12 @@ class RWKV7Attention(nn.Module):
         elif num_heads is not None:
             self.head_dim = int(hidden_size // num_heads)
             self.num_heads = num_heads
-
         self.decay_low_rank_dim = decay_low_rank_dim
         self.gate_low_rank_dim = gate_low_rank_dim
         self.a_low_rank_dim = a_low_rank_dim
         self.v_low_rank_dim = v_low_rank_dim
         self.layer_idx = layer_idx
+        self.is_first_layer = is_first_layer
         self.fuse_norm = fuse_norm
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
@@ -76,7 +78,7 @@ class RWKV7Attention(nn.Module):
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
         self.w_lora = LoRA(hidden_size, self.key_dim, low_rank_dim=decay_low_rank_dim, activation='tanh')
-        if self.layer_idx != 0:
+        if not is_first_layer:
             self.v_lora = LoRA(hidden_size, self.value_dim, low_rank_dim=v_low_rank_dim, activation=None)
         self.a_lora = LoRA(hidden_size, self.key_dim, low_rank_dim=a_low_rank_dim, activation=None)
         self.g_lora = LoRA(hidden_size, self.value_dim, low_rank_dim=gate_low_rank_dim, activation='sigmoid', bias=False)
@@ -163,7 +165,7 @@ class RWKV7Attention(nn.Module):
         k = self.k_proj(xk)
         v = self.v_proj(xv)
 
-        if self.layer_idx == 0:
+        if self.is_first_layer:
             v_first = v
         else:
             v = torch.lerp(v, v_first, self.v_lora(xv).sigmoid())
@@ -212,8 +214,11 @@ class RWKV7Attention(nn.Module):
             o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))
         else:
             o = self.g_norm(rearrange(o, 'b t h d -> (b t) (h d)')).view(batch_size, seq_len, -1)
+        
+        right_term = (r * k * self.r_k).sum(-1, keepdim=True) * v
+        right_term = rearrange(right_term, 'b t h d -> b t (h d)') 
 
-        o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
+        o = o + right_term
         o = self.o_proj(o * g)
 
         return o, None, past_key_values, v_first

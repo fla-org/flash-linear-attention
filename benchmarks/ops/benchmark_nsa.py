@@ -29,7 +29,7 @@ from fla.ops.nsa import parallel_nsa
     )
 )
 def benchmark(T, provider):
-    device = 'cuda'
+    from fla.utils import device
     dtype = torch.bfloat16
     requires_grad = True
     B, H, HQ, D, S = 4, 4, 64, 128, 16
@@ -40,7 +40,7 @@ def benchmark(T, provider):
     v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
     do = torch.ones_like(q, dtype=dtype)
 
-    indices = torch.full((B, T, H, S), T, dtype=torch.long, device='cuda')
+    indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
     for b in range(B):
         for t in range(T):
             for h in range(H):

@@ -86,13 +86,23 @@ def chunk_dplr_fwd_kernel_o(
         p_v_new = tl.make_block_ptr(v_new + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_o = tl.make_block_ptr(o + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
+    current_offset = i_t * BT
+    valid_T = tl.minimum(BT, T - current_offset)
+    valid_mask_row = tl.arange(0, BT)[:, None] < valid_T  # (BT, 1)
+    valid_mask_col = tl.arange(0, BT)[None, :] < valid_T  # (1, BT)
+    valid_mask_matrix = valid_mask_row & valid_mask_col            # (BT, BT)
+
     m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
-    b_Aqk = tl.load(p_Aqk, boundary_check=(0, 1))
-    b_Aqb = tl.load(p_Aqb, boundary_check=(0, 1))
+    b_Aqk = tl.load(p_Aqk, boundary_check=(0, 1), padding_option="zero")
+    b_Aqk = tl.where(valid_mask_matrix, b_Aqk, 0)
+    b_Aqb = tl.load(p_Aqb, boundary_check=(0, 1), padding_option="zero")
+    b_Aqb = tl.where(valid_mask_matrix, b_Aqb, 0)
     b_Aqk = tl.where(m_s, b_Aqk, 0)
     b_Aqb = tl.where(m_s, b_Aqb, 0)
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
+    b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero")
+    b_v = tl.where(valid_mask_row, b_v, 0.0)  
+    b_v_new = tl.load(p_v_new, boundary_check=(0, 1), padding_option="zero")
+    b_v_new = tl.where(valid_mask_row, b_v_new, 0.0)
     b_o = b_o + tl.dot(b_Aqk.to(b_v.dtype), b_v) + tl.dot(b_Aqb.to(b_v_new.dtype), b_v_new)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 

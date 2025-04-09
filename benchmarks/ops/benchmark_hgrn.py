@@ -27,11 +27,12 @@ from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
     )
 )
 def benchmark(T, provider):
+    from fla.utils import device
     dtype = torch.bfloat16
     B, D = 16, 512
 
-    x = torch.randn((B, T, D), dtype=dtype, device='cuda')
-    g = torch.randn((B, T, D), dtype=dtype, device='cuda').sigmoid()
+    x = torch.randn((B, T, D), dtype=dtype, device=device)
+    g = torch.randn((B, T, D), dtype=dtype, device=device).sigmoid()
     x = (1 - g) * x
     x, g = (i.detach().clone().to(dtype).requires_grad_() for i in (x, g))
     do = torch.randn_like(x, dtype=dtype)

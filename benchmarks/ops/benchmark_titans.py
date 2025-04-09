@@ -3,6 +3,7 @@
 
 import torch
 from benchmark import benchmark_backward, benchmark_combined, benchmark_forward
+from torch.nn import functional as F
 
 from fla.ops.titans.naive import chunk_titans_linear_ref
 
@@ -50,7 +51,7 @@ for causal in causal_vals:
             q = torch.randn(
                 B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype
             )
-            k = torch.nn.functional.normalize(
+            k = F.normalize(
                 torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype),
                 p=2,
                 dim=-1,
