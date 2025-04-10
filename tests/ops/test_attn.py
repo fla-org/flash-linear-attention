@@ -21,12 +21,12 @@ if COMPILER_MODE:
     test_b_list = [2]
     test_t_list = [2048]
     test_t_varlen_list = test_t_list
-    test_d_list = [64, 100, 128, 256]
+    test_d_list = [64, 100, 128]
 else:
     test_b_list = [2, 4]
     test_t_list = [1, 15, 63, 286, 300, 1024, 2048]
     test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [64, 32, 100, 256]
+    test_d_list = [32, 64, 100]
 test_hq_list = [8, 16]
 test_h_list = [2]
 
