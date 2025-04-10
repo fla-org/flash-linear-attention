@@ -49,12 +49,12 @@ def test_global_cumsum(
     torch.manual_seed(42)
     s = torch.randn(B, T, H, dtype=dtype).to(device)
     ref = s.float().cumsum(1).to(dtype)
-    tri = chunk_global_cumsum(s, dtype)
+    tri = chunk_global_cumsum(s)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
     s = torch.randn(B, T, H, D, dtype=dtype).to(device)
     ref = s.float().cumsum(1).to(dtype)
-    tri = chunk_global_cumsum(s, dtype)
+    tri = chunk_global_cumsum(s)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
@@ -75,19 +75,19 @@ def test_global_cumsum_varlen(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
     s = torch.randn(1, T, H, dtype=dtype).to(device)
-    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(offsets[:-1], offsets[1:])], 1).to(dtype)
-    tri = chunk_global_cumsum(s, dtype, offsets=offsets)
+    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
+    tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
-    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(offsets[:-1], offsets[1:])], 1).to(dtype)
-    tri = chunk_global_cumsum(s, dtype, offsets=offsets)
+    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
+    tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
@@ -110,12 +110,12 @@ def test_global_reversed_cumsum(
     torch.manual_seed(42)
     s = torch.randn(B, T, H, dtype=dtype).to(device)
     ref = reversed_cumsum(s, dim=(1)).to(dtype)
-    tri = chunk_global_cumsum(s, dtype, reverse=True)
+    tri = chunk_global_cumsum(s, reverse=True)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
     s = torch.randn(B, T, H, D, dtype=dtype).to(device)
     ref = reversed_cumsum(s, dim=(1)).to(dtype)
-    tri = chunk_global_cumsum(s, dtype, reverse=True)
+    tri = chunk_global_cumsum(s, reverse=True)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
@@ -136,19 +136,19 @@ def test_global_reversed_cumsum_varlen(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
     s = torch.randn(1, T, H, dtype=dtype).to(device)
-    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(offsets[:-1], offsets[1:])], 1).to(dtype)
-    tri = chunk_global_cumsum(s, dtype, reverse=True, offsets=offsets)
+    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
+    tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
-    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(offsets[:-1], offsets[1:])], 1).to(dtype)
-    tri = chunk_global_cumsum(s, dtype, reverse=True, offsets=offsets)
+    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
+    tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
@@ -197,7 +197,7 @@ def test_local_cumsum_varlen(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
         torch.tensor([T], dtype=torch.long)
@@ -205,17 +205,17 @@ def test_local_cumsum_varlen(
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([
         torch.cat([s[:, i:min(end, i+C), :].float().cumsum(1) for i in range(start, end, C)], 1)
-        for start, end in zip(offsets[:-1], offsets[1:])
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
     ], 1)
-    tri = chunk_local_cumsum(s, chunk_size=C, offsets=offsets)
+    tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
     ref = torch.cat([
         torch.cat([s[:, i:min(end, i+C), :].float().cumsum(1) for i in range(start, end, C)], 1)
-        for start, end in zip(offsets[:-1], offsets[1:])
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
     ], 1)
-    tri = chunk_local_cumsum(s, chunk_size=C, offsets=offsets)
+    tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
@@ -272,7 +272,7 @@ def test_mean_pooling_varlen(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
         torch.tensor([T], dtype=torch.long)
@@ -281,13 +281,13 @@ def test_mean_pooling_varlen(
     x = torch.randn(1, T, H, D, dtype=dtype).to(device).requires_grad_(True)
     ref = torch.cat([
         torch.cat([x[:, i:min(end, i+C), :].float().mean(1, True) for i in range(start, end, C)], 1)
-        for start, end in zip(offsets[:-1], offsets[1:])
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
     ], 1).to(dtype)
     do = torch.randn_like(ref)
     ref.backward(do)
     ref_dx, x.grad = x.grad.clone(), None
 
-    tri = mean_pooling(x, chunk_size=C, cu_seqlens=offsets)
+    tri = mean_pooling(x, chunk_size=C, cu_seqlens=cu_seqlens)
     tri.backward(do)
     tri_dx, x.grad = x.grad.clone(), None
 

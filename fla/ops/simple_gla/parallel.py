@@ -609,7 +609,7 @@ def parallel_simple_gla_bwd(
     dq = dq.sum(0)
     dk = dk.sum(0)
     dv = dv.sum(0)
-    dg = chunk_global_cumsum(dg.sum(0), reverse=True, offsets=offsets) if g is not None else None
+    dg = chunk_global_cumsum(dg.sum(0), reverse=True, cu_seqlens=offsets) if g is not None else None
     return dq, dk, dv, dg
 
 

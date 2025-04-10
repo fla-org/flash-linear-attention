@@ -121,7 +121,7 @@ def attn_decoding_one_step(
     else:
         BS = min(32, max(16, triton.next_power_of_2(T)))
         BV = min(64, max(16, triton.next_power_of_2(V)))
-    g_cumsum = chunk_global_cumsum(g, offsets=cu_seqlens, output_dtype=torch.float32) if g is not None else None
+    g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, output_dtype=torch.float32) if g is not None else None
     NV = triton.cdiv(V, BV)
     o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
 
