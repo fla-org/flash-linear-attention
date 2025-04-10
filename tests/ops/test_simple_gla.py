@@ -38,13 +38,10 @@ def chunk_simple_gla_ref(
     output_final_state: bool = False,
     chunk_size: int = 64,
     scale: Optional[float] = None,
-    head_first: bool = True
 ):
-    if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        g = g.transpose(1, 2)
+    q, k, v = map(lambda x: rearrange(x, 'b t h ... -> b h t ...'), [q, k, v])
+    if g is not None:
+        g = rearrange(g, 'b t h ... -> b h t ...')
     if scale is None:
         scale = 1.0 / q.shape[-1] ** 0.5
 
@@ -81,17 +78,20 @@ def chunk_simple_gla_ref(
     # unpad
     o = rearrange(o, 'b h n c d -> b h (n c) d')
     o = o[:, :, :T]
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o, S
 
 
-def parallel_simple_gla_ref(q, k, v, g, scale=None, head_first=True):
-    if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        g = g.transpose(1, 2) if g is not None else None
+def parallel_simple_gla_ref(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    scale: Optional[float] = None
+):
+    q, k, v = map(lambda x: rearrange(x, 'b t h ... -> b h t ...'), [q, k, v])
+    if g is not None:
+        g = rearrange(g, 'b t h ... -> b h t ...')
     if scale is None:
         scale = 1.0 / q.shape[-1] ** 0.5
     original_dtype = q.dtype
@@ -104,8 +104,7 @@ def parallel_simple_gla_ref(q, k, v, g, scale=None, head_first=True):
     else:
         A = A.tril()
     o = A @ v
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o.to(original_dtype), A
 
 
@@ -115,7 +114,6 @@ def parallel_simple_gla_ref(q, k, v, g, scale=None, head_first=True):
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.parametrize("scale", [1, 0.1])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -127,33 +125,26 @@ def test_chunk(
     H: int,
     D: int,
     dtype: torch.dtype,
-    head_first: bool,
     scale: float,
     gate_logit_normalizer: float
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    # [B, H, T, D]
-    if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
-        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
-        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
-        g = torch.randn((B, H, T), dtype=torch.float32, device=device)
-    else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-        g = torch.randn((B, T, H), dtype=torch.float32, device=device)
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    g = torch.randn((B, T, H), dtype=torch.float32, device=device)
     h0 = torch.rand((B, H, D, D), dtype=torch.float32, device=device).requires_grad_(True)
     dht = torch.randn_like(h0)
     g = (F.logsigmoid(g) / gate_logit_normalizer).requires_grad_(True)
     do = torch.randn_like(v)
 
-    ref, ref_ht = chunk_simple_gla_ref(q, k, v, g,
-                                       scale=scale,
-                                       initial_state=h0,
-                                       output_final_state=True,
-                                       head_first=head_first)
+    ref, ref_ht = chunk_simple_gla_ref(
+        q, k, v, g,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+    )
     ((ref * do).sum() + (dht * ref_ht).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -161,11 +152,12 @@ def test_chunk(
     ref_dg, g.grad = g.grad.clone(), None
     ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, tri_ht = chunk_simple_gla(q, k, v, g,
-                                   scale=scale,
-                                   initial_state=h0,
-                                   output_final_state=True,
-                                   head_first=head_first)
+    tri, tri_ht = chunk_simple_gla(
+        q, k, v, g,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True
+    )
     ((tri * do).sum() + (dht * tri_ht).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -202,7 +194,7 @@ def test_chunk_varlen(
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
@@ -222,8 +214,7 @@ def test_chunk_varlen(
         g=g,
         initial_state=h0,
         output_final_state=True,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ((ref * do).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
@@ -239,8 +230,7 @@ def test_chunk_varlen(
         g=g,
         initial_state=h0,
         output_final_state=True,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
@@ -278,12 +268,11 @@ def test_parallel_varlen(
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
-    # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -296,8 +285,7 @@ def test_parallel_varlen(
         v=v,
         g=g,
         output_final_state=False,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ((ref * do).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
@@ -310,8 +298,7 @@ def test_parallel_varlen(
         k=k,
         v=v,
         g=g,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
@@ -331,7 +318,6 @@ def test_parallel_varlen(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
-@pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
@@ -344,27 +330,20 @@ def test_parallel(
     T: int,
     D: int,
     dtype: torch.dtype,
-    head_first: bool,
     scale: float,
     gate_logit_normalizer: float,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     USE_G = gate_logit_normalizer > 0
-    if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
-        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
-        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_(True)
-        g = F.logsigmoid(torch.randn((B, H, T), dtype=dtype, device=device)) if USE_G else None
-    else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-        g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device=device)) if USE_G else None
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device=device)) if USE_G else None
     g = (g / gate_logit_normalizer).requires_grad_(True) if USE_G else None
     do = torch.randn_like(v)
 
-    ref, ref_A = parallel_simple_gla_ref(q=q, k=k, v=v, g=g, scale=scale, head_first=head_first)
+    ref, ref_A = parallel_simple_gla_ref(q=q, k=k, v=v, g=g, scale=scale)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -372,7 +351,7 @@ def test_parallel(
     if USE_G:
         ref_dg, g.grad = g.grad.clone(), None
 
-    tri, tri_A = parallel_simple_gla(q=q, k=k, v=v, g=g, scale=scale, head_first=head_first, output_attentions=True)
+    tri, tri_A = parallel_simple_gla(q=q, k=k, v=v, g=g, scale=scale, output_attentions=True)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None

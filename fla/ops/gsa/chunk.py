@@ -790,7 +790,7 @@ def chunk_gsa_bwd_k(
         num_warps=4,
         num_stages=2
     )
-    dg = dgv.add_(chunk_local_cumsum(dg, chunk_size=BT, reverse=True, offsets=offsets))
+    dg = dgv.add_(chunk_local_cumsum(dg, chunk_size=BT, reverse=True, cu_seqlens=offsets))
 
     return dq, dk, dv, dg, dh0
 
@@ -930,7 +930,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         T = q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
 
-        g_org, g = g, chunk_local_cumsum(g, chunk_size, offsets=offsets)
+        g_org, g = g, chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=offsets)
         Ak, hk, hkt, ok, p, Av, hv, hvt, ov = chunk_gsa_fwd(
             q=q,
             k=k,
@@ -970,7 +970,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         chunk_size = ctx.chunk_size
 
         if ctx.checkpoint_level >= 1:
-            g = chunk_local_cumsum(g, chunk_size, offsets=offsets)
+            g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=offsets)
         dq, dk, dv, ds, dg, dhk0, dhv0 = chunk_gsa_bwd(
             q=q,
             k=k,

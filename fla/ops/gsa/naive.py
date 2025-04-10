@@ -17,6 +17,7 @@ def naive_recurrent_gsa(
     output_final_state: Optional[bool] = False
 ) -> torch.Tensor:
     dtype = q.dtype
+    q, k, v, s, g = map(lambda x: x.transpose(1, 2).contiguous().float(), (q, k, v, s, g))
 
     NG = q.shape[1]//k.shape[1]
     # [batch_size, n_heads, seq_len, n_slots]
@@ -24,7 +25,6 @@ def naive_recurrent_gsa(
         z = s.float().logcumsumexp(2)
         g = torch.cat((z[:, :, :1], z[:, :, :-1]), 2) - z
         s = torch.exp(s - z)
-    q, k, v, s, g = map(lambda x: x.float(), (q, k, v, s, g))
     k, v, s, g = map(lambda x: repeat(x, 'b h t d -> b (h g) t d', g=NG), (k, v, s, g))
     if initial_state is not None:
         initial_state = tuple(map(lambda x: repeat(x, 'b h k v -> b (h g) k v', g=NG), initial_state))
@@ -65,4 +65,5 @@ def naive_recurrent_gsa(
 
     if output_final_state:
         final_state = (hk.view(B, -1, NG, K, M)[:, :, 0], hv.view(B, -1, NG, M, V)[:, :, 0])
+    ov = ov.transpose(1, 2).contiguous()
     return ov.to(dtype), final_state

@@ -25,7 +25,7 @@ def chunk_simple_gla_fwd(
     offsets: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    g = chunk_local_cumsum(g, chunk_size, offsets=offsets) if g is not None else None
+    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=offsets) if g is not None else None
     h, ht = chunk_fwd_h(
         k=k,
         v=v,
@@ -170,9 +170,9 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             offsets=offsets,
             chunk_size=chunk_size
         )
-        dg = chunk_local_cumsum(dg, chunk_size, reverse=True, offsets=offsets).to(g.dtype) if g is not None else None
+        dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=offsets) if g is not None else None
 
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, None, dh0, None, None
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg.to(g.dtype), None, dh0, None, None
 
 
 @torch.compiler.disable

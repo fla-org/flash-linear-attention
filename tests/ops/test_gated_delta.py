@@ -35,11 +35,8 @@ def recurrent_gated_delta_rule_ref(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first=False,
 ):
-    q, k, v, beta, g = map(lambda x: x.to(torch.float32), [q, k, v, beta, g])
-    if not head_first:
-        q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous(), (q, k, v, beta, g))
+    q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g])
     B, H, T, K, V = *k.shape, v.shape[-1]
     o = torch.zeros(B, H, T, V).to(v)
     h = torch.zeros(B, H, K, V).to(v)
@@ -60,8 +57,7 @@ def recurrent_gated_delta_rule_ref(
         o[:, :, i] = torch.einsum('bhd,bhdm->bhm', b_q, h)
     if not output_final_state:
         h = None
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2).contiguous()
     return o, h
 
 
@@ -75,18 +71,12 @@ def chunk_gated_delta_rule_ref(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = True
 ):
     BT = chunk_size
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
     # Calculate padding needed to make T a multiple of BT
-    if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        beta = beta.transpose(1, 2)
-        g = g.transpose(1, 2)
+    q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g])
 
     T = q.shape[-2]
     pad_len = (BT - (T % BT)) % BT
@@ -147,8 +137,7 @@ def chunk_gated_delta_rule_ref(
     # unpad
     o = rearrange(o, 'b h n c d -> b h (n c) d')
     o = o[:, :, :T]
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o, S
 
 
@@ -160,7 +149,6 @@ def chunk_gated_delta_rule_ref(
 @pytest.mark.parametrize("scale", [1])
 @pytest.mark.parametrize("use_qk_l2norm_in_kernel", [True, False])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -174,21 +162,13 @@ def test_recurrent_forward(
     dtype: torch.dtype,
     use_qk_l2norm_in_kernel: bool,
     gate_logit_normalizer: float,
-    head_first: bool
 ):
     torch.manual_seed(42)
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=torch.float32)
-        k = torch.randn(B, H, T, D, dtype=torch.float32)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        beta = torch.rand(B, H, T, dtype=dtype).sigmoid()
-        g = F.logsigmoid(torch.rand(B, H, T, dtype=torch.float32))
-    else:
-        q = torch.randn(B, T, H, D, dtype=torch.float32)
-        k = torch.randn(B, T, H, D, dtype=torch.float32)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
-        g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    q = torch.randn(B, T, H, D, dtype=torch.float32)
+    k = torch.randn(B, T, H, D, dtype=torch.float32)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
     g = g / gate_logit_normalizer
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
@@ -201,7 +181,6 @@ def test_recurrent_forward(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
     )
     tri, tri_ht = fused_recurrent_gated_delta_rule(
         q=F.normalize(q.clone(), p=2, dim=-1).to(dtype) if not use_qk_l2norm_in_kernel else q.clone(),
@@ -213,7 +192,6 @@ def test_recurrent_forward(
         initial_state=h0.clone(),
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         output_final_state=True,
-        head_first=head_first
     )
     assert_close("  o", ref, tri, 0.002)
     assert_close(" ht", ref_ht, tri_ht, 0.002)
@@ -225,8 +203,7 @@ def test_recurrent_forward(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("scale", [1, 0.1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -238,25 +215,17 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     scale: float,
-    head_first: bool,
     gate_logit_normalizer: float
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        beta = torch.rand(B, H, T, dtype=dtype).sigmoid()
-        g = F.logsigmoid(torch.rand(B, H, T, dtype=torch.float32))
-        h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
-        g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
-        h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
+
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     g = g / gate_logit_normalizer
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
 
@@ -269,7 +238,6 @@ def test_chunk(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=head_first
     )
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
@@ -286,7 +254,6 @@ def test_chunk(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=head_first
     )
 
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
@@ -307,7 +274,7 @@ def test_chunk(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [1, 0.1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
@@ -325,18 +292,19 @@ def test_chunk_varlen(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
+    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=dtype)
-    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
+
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
@@ -350,8 +318,7 @@ def test_chunk_varlen(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
@@ -361,15 +328,14 @@ def test_chunk_varlen(
     ref_ht = []
     for i in range(N):
         ref_i, ref_ht_i = recurrent_gated_delta_rule_ref(
-            q=q[:, offsets[i]:offsets[i+1]],
-            k=k[:, offsets[i]:offsets[i+1]],
-            v=v[:, offsets[i]:offsets[i+1]],
-            beta=beta[:, offsets[i]:offsets[i+1]],
-            g=g[:, offsets[i]:offsets[i+1]],
+            q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            beta=beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
             scale=scale,
             initial_state=h0[i],
             output_final_state=True,
-            head_first=False
         )
         ref.append(ref_i)
         ref_ht.append(ref_ht_i)

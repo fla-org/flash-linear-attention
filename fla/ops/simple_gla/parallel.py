@@ -514,7 +514,7 @@ def parallel_simple_gla_fwd(
 
     # local cumulative decay in log space
     if g is not None:
-        g = chunk_local_cumsum(g, chunk_size, offsets=offsets)
+        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=offsets)
     grid = (NK * NV, NT, B * H)
     o = torch.empty(NK, *v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     attn = q.new_zeros(NK, B, H, T, T) if output_attentions else None

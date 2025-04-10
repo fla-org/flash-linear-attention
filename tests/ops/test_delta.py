@@ -29,7 +29,6 @@ test_h_list = [2]
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [1])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("head_first", [False, True])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -45,21 +44,13 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     scale: float,
-    head_first: bool
 ):
     torch.manual_seed(42)
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        beta = torch.rand(B, H, T, dtype=dtype).sigmoid()
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
@@ -72,7 +63,6 @@ def test_chunk(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=head_first
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
@@ -86,7 +76,6 @@ def test_chunk(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=head_first
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
@@ -125,7 +114,7 @@ def test_chunk_varlen(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
@@ -135,7 +124,7 @@ def test_chunk_varlen(
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    h0 = torch.randn(N, H, D, D, dtype=dtype)
     q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, h0))
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
@@ -148,8 +137,7 @@ def test_chunk_varlen(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
@@ -163,8 +151,7 @@ def test_chunk_varlen(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
@@ -196,10 +183,10 @@ def test_l2_in_kernel(
     dtype: torch.dtype,
     scale: float,
 ):
-    q = torch.randn(B, H, T, D, dtype=dtype)
-    k = torch.randn(B, H, T, D, dtype=dtype)
-    v = torch.randn(B, H, T, D, dtype=dtype)
-    beta = torch.rand(B, H, T, dtype=dtype).sigmoid()
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
 
     q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
@@ -214,7 +201,6 @@ def test_l2_in_kernel(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=True
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
@@ -228,7 +214,6 @@ def test_l2_in_kernel(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=True,
         use_qk_l2norm_in_kernel=True
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
@@ -250,7 +235,6 @@ def test_l2_in_kernel(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=True
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
@@ -264,7 +248,6 @@ def test_l2_in_kernel(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=True,
         use_qk_l2norm_in_kernel=True
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
@@ -287,7 +270,6 @@ def test_l2_in_kernel(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=True
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
@@ -301,7 +283,6 @@ def test_l2_in_kernel(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
-        head_first=True,
         use_qk_l2norm_in_kernel=True
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)

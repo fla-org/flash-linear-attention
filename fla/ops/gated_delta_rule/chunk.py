@@ -28,7 +28,7 @@ def chunk_gated_delta_rule_fwd(
     offsets: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
-    g = chunk_local_cumsum(g, chunk_size, offsets=offsets)
+    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=offsets)
     # obtain WY representation. u is actually the new v.
     w, u, Aw, Au = fwd_prepare_wy_repr(
         k=k,
@@ -152,7 +152,7 @@ def chunk_gated_delta_rule_bwd(
     dk.add_(dk2)
     dg.add_(dg2)
     assert dg.dtype == torch.float32, "dg should be fp32"
-    dg = chunk_local_cumsum(dg, chunk_size, reverse=True, offsets=offsets)
+    dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=offsets)
     return dq, dk, dv, db, dg, dh0
 
 

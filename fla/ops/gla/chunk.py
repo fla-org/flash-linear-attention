@@ -1021,7 +1021,7 @@ def chunk_gla_fwd(
     T = q.shape[1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     if g_cumsum is None:
-        g_cumsum = chunk_local_cumsum(g, BT, offsets=offsets)
+        g_cumsum = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=offsets)
 
     h, ht = chunk_fwd_h(
         k=k,
@@ -1077,7 +1077,7 @@ def chunk_gla_bwd(
     T = q.shape[1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     if g_cumsum is None:
-        g_cumsum = chunk_local_cumsum(g, BT, offsets=offsets)
+        g_cumsum = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=offsets)
 
     if h is None:
         h, _ = chunk_fwd_h(
