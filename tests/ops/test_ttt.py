@@ -30,7 +30,6 @@ test_h_list = [2]
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -42,29 +41,19 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     scale: float,
-    head_first: bool
 ):
     if D > 64 and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        eta = torch.randn(B, H, T, 1, dtype=dtype) * eta_base
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-        hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-        hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
+
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    w = torch.randn(H, D, dtype=dtype)
+    b = torch.randn(H, D, dtype=dtype)
+    eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
 
     q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, w, b, eta, h0, hb0))
     do = torch.rand_like(v)
@@ -129,7 +118,6 @@ def test_chunk(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -146,24 +134,15 @@ def test_fused_chunk_fwd(
     if D > 64 and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        eta = torch.randn(B, H, T, 1, dtype=dtype) * eta_base
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-        hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-        hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
+
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    w = torch.randn(H, D, dtype=dtype)
+    b = torch.randn(H, D, dtype=dtype)
+    eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
 
     q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, w, b, eta, h0, hb0))
     do = torch.rand_like(v)

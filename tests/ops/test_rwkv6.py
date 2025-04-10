@@ -32,7 +32,6 @@ test_h_list = [2]
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -48,21 +47,14 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     gate_logit_normalizer: float,
-    head_first: bool
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        w = F.logsigmoid(torch.randn((B, H, T, D), dtype=dtype, device=device)) / gate_logit_normalizer
-    else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device=device)) / gate_logit_normalizer
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device=device)) / gate_logit_normalizer
 
     u = torch.randn(H, D, dtype=dtype, device=device).requires_grad_(True)
     h0 = torch.randn(B, H, D, D, dtype=dtype, device=device).requires_grad_()

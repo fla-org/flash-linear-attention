@@ -26,7 +26,6 @@ test_h_list = [2]
 @pytest.mark.parametrize("T", test_t_list)
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("chunk_size", [16, 32, 64])
-@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -43,10 +42,8 @@ def test_solve_tril(B, T, H, chunk_size, head_first):
     k_padded = F.pad(k, (0, 0, 0, padding_size, 0, 0, 0, 0))
     k_padded = k_padded.reshape(B, H, -1, chunk_size, 64)
     A = (k_padded @ k_padded.transpose(-1, -2)).tril(-1)
-    if head_first:
-        Ai = solve_tril(A.reshape(B, H, -1, chunk_size)[:, :, :T, :], head_first=True)
-    else:
-        Ai = solve_tril(A.reshape(B, H, -1, chunk_size)[:, :, :T, :].transpose(1, 2), head_first=False).transpose(1, 2)
+
+    Ai = solve_tril(A.reshape(B, H, -1, chunk_size)[:, :, :T, :].transpose(1, 2), head_first=False).transpose(1, 2)
 
     Ai_ref = torch.inverse(A + torch.eye(A.shape[-1], device=A.device)[None, None, None, ...])
     Ai_ref = Ai_ref.reshape(B, H, -1, chunk_size)[:, :, :T, :]
