@@ -35,7 +35,6 @@ def fused_recurrent_linear_attn_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
 ):
-    # indices
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     p_q = q + i_bh * T*K + i_k * BK + tl.arange(0, BK)

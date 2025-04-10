@@ -21,14 +21,14 @@ else:
 test_h_list = [2]
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float32])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 def test_based(
     B: int,

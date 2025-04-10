@@ -160,10 +160,10 @@ class RWKV6Attention(nn.Module):
             )
         elif mode == 'chunk':
             o, recurrent_state = chunk_rwkv6(
-                q=r,
+                r=r,
                 k=k,
                 v=v,
-                g=w,
+                w=w,
                 u=u,
                 scale=1.,
                 initial_state=recurrent_state,

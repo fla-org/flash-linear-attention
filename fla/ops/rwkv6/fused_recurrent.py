@@ -16,7 +16,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -35,7 +35,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
     o,  # output [NK, B, H, T, V]/[NK, B, T, H, V]
     h0,  # initial hidden state [B, H, K, V]
     ht,  # final hidden state [B, H, K, V]
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -52,7 +52,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -101,7 +101,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -121,7 +121,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     dq,  # gradient of query [NV, B, H, T, K]/[NV, B, T, H, K]
     dq1,  # gradient of query_aux [NV, B, H, T, K]/[NV, B, T, H, K]
     h0,
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -137,7 +137,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -190,7 +190,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -212,7 +212,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     dk1,  # gradient of key_aux [NV, B, H, T, K]/[NK, B, T, H, K]
     dv,  # gradient of value [NK, B, H, T, V]/[NV, B, T, H, V]
     dh0,  # gradient of initial hidden state [N, H, K, V]
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -228,7 +228,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -286,7 +286,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -304,7 +304,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     dq,
     dk,
     dw,
-    offsets,
+    cu_seqlens,
     scale,
     T,
     H: tl.constexpr,
@@ -317,7 +317,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     i_k, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     else:
         bos, eos = i_n * T, i_n * T + T
     T = eos - bos
@@ -359,10 +359,10 @@ def fused_recurrent_rwkv6_fwd(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = min(triton.next_power_of_2(K), 32), min(triton.next_power_of_2(V), 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
@@ -380,7 +380,7 @@ def fused_recurrent_rwkv6_fwd(
         o,
         h0,
         ht,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         B=B,
@@ -405,10 +405,10 @@ def fused_recurrent_rwkv6_bwd(
     scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
     BK, BV = min(triton.next_power_of_2(K), 16), min(triton.next_power_of_2(V), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -426,7 +426,7 @@ def fused_recurrent_rwkv6_bwd(
         dq,
         dq1,
         initial_state,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         B=B,
@@ -460,7 +460,7 @@ def fused_recurrent_rwkv6_bwd(
         dk1,
         dv,
         dh0,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         B=B,
@@ -483,7 +483,7 @@ def fused_recurrent_rwkv6_bwd(
         dq1,
         dk1,
         dw,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         H=H,
@@ -511,7 +511,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        offsets: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ):
         o, ht = fused_recurrent_rwkv6_fwd(
             q=q,
@@ -523,12 +523,12 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             reverse=reverse,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, w, u, initial_state)
         ctx.scale = scale
         ctx.reverse = reverse
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return o.to(v), ht
 
     @staticmethod
@@ -547,7 +547,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             scale=ctx.scale,
             initial_state=initial_state,
             reverse=ctx.reverse,
-            offsets=ctx.offsets,
+            cu_seqlens=ctx.cu_seqlens,
         )
         dh0 = dh0.to(initial_state) if dh0 is not None else dh0
         return dq.to(q), dk.to(k), dv.to(v), dw.to(w), du.to(u), None, dh0, None, None, None

@@ -22,10 +22,10 @@ def chunk_simple_gla_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=offsets) if g is not None else None
+    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
     h, ht = chunk_fwd_h(
         k=k,
         v=v,
@@ -35,7 +35,7 @@ def chunk_simple_gla_fwd(
         h0=initial_state,
         output_final_state=output_final_state,
         states_in_fp32=False,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     o = chunk_fwd_o(
@@ -45,7 +45,7 @@ def chunk_simple_gla_fwd(
         g=g,
         h=h,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     return g, o, ht
@@ -60,7 +60,7 @@ def chunk_simple_gla_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # (SY 09/22) states_in_fp32 seems not affecting the error of dg but for safety, set to True
@@ -73,7 +73,7 @@ def chunk_simple_gla_bwd(
         h0=initial_state,
         output_final_state=False,
         states_in_fp32=True,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     dh, dh0 = chunk_bwd_dh(
@@ -88,7 +88,7 @@ def chunk_simple_gla_bwd(
         dht=dht,
         scale=scale,
         states_in_fp32=True,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     dq, dk, _, dg = chunk_bwd_dqkwg(
@@ -100,7 +100,7 @@ def chunk_simple_gla_bwd(
         do=do,
         dh=dh,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     dv = chunk_bwd_dv(
@@ -110,7 +110,7 @@ def chunk_simple_gla_bwd(
         do=do,
         dh=dh,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     return dq, dk, dv, dg, dh0
@@ -130,7 +130,7 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         scale,
         initial_state,
         output_final_state,
-        offsets
+        cu_seqlens
     ):
         T = q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
@@ -143,20 +143,20 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
         ctx.save_for_backward(q, k, v, g, initial_state)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return o.to(q.dtype), ht
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
-        chunk_size, scale, offsets = ctx.chunk_size, ctx.scale, ctx.offsets
+        chunk_size, scale, cu_seqlens = ctx.chunk_size, ctx.scale, ctx.cu_seqlens
         q, k, v, g, initial_state = ctx.saved_tensors
         dq, dk, dv, dg, dh0 = chunk_simple_gla_bwd(
             q=q,
@@ -167,12 +167,15 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             scale=scale,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
-        dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=offsets) if g is not None else None
+        if g is not None:
+            dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens).to(g)
+        else:
+            dg = None
 
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg.to(g.dtype), None, dh0, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None
 
 
 @torch.compiler.disable

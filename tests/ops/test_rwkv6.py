@@ -26,13 +26,12 @@ else:
 test_h_list = [2]
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
+@pytest.mark.parametrize('dtype', [torch.bfloat16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -48,43 +47,38 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     gate_logit_normalizer: float,
-    head_first: bool
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        w = F.logsigmoid(torch.randn((B, H, T, D), dtype=dtype, device=device)) / gate_logit_normalizer
-    else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device=device)) / gate_logit_normalizer
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device=device)) / gate_logit_normalizer
 
     u = torch.randn(H, D, dtype=dtype, device=device).requires_grad_(True)
     h0 = torch.randn(B, H, D, D, dtype=dtype, device=device).requires_grad_()
     w = w.requires_grad_()
     do = torch.randn_like(v)
 
-    ref, ref_ht = fused_recurrent_rwkv6(q.clone(),
-                                        k.clone(),
-                                        v.clone(),
-                                        w.clone(),
-                                        u.clone(),
-                                        initial_state=h0.clone(),
-                                        output_final_state=True,
-                                        head_first=head_first)
-    ref, _ = fused_recurrent_rwkv6(q.clone(),
-                                   k.clone(),
-                                   v.clone(),
-                                   w.clone(),
-                                   u.clone(),
-                                   initial_state=h0.clone(),
-                                   output_final_state=False,
-                                   head_first=head_first)
+    ref, ref_ht = fused_recurrent_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    ref, _ = fused_recurrent_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=False,
+    )
 
     ((ref * do).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
@@ -95,14 +89,15 @@ def test_chunk(
     ref_dh0, h0.grad = h0.grad.clone(), None
 
     # triton implementation
-    tri, tri_ht = chunk_rwkv6(q.clone(),
-                              k.clone(),
-                              v.clone(),
-                              w.clone(),
-                              u.clone(),
-                              initial_state=h0.clone(),
-                              output_final_state=True,
-                              head_first=head_first)
+    tri, tri_ht = chunk_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
     ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -140,7 +135,7 @@ def test_chunk_varlen(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
@@ -162,8 +157,7 @@ def test_chunk_varlen(
         u.clone(),
         initial_state=h0.clone(),
         output_final_state=True,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ref, _ = fused_recurrent_rwkv6(
         q.clone(),
@@ -173,8 +167,7 @@ def test_chunk_varlen(
         u.clone(),
         initial_state=h0.clone(),
         output_final_state=False,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -192,8 +185,7 @@ def test_chunk_varlen(
         u.clone(),
         initial_state=h0.clone(),
         output_final_state=True,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
