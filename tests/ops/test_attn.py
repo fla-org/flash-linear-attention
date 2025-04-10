@@ -31,13 +31,13 @@ test_hq_list = [8, 16]
 test_h_list = [2]
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("HQ", test_hq_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("scale", [0.1])
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('HQ', test_hq_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('scale', [0.1])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     not HAS_FLASH,
     reason="Skipping test because flash-attn is not installed"
@@ -79,12 +79,12 @@ def test_parallel(
     assert_close("dv", ref_dv, tri_dv, 0.005)
 
 
-@pytest.mark.parametrize("N", test_b_list)
-@pytest.mark.parametrize("T", test_t_varlen_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("HQ", test_hq_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize('N', test_b_list)
+@pytest.mark.parametrize('T', test_t_varlen_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('HQ', test_hq_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     not HAS_FLASH,
     reason="Skipping test because flash-attn is not installed"
@@ -104,7 +104,7 @@ def test_parallel_varlen(
 
     N = min(1, N) if T < 64 else N
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
@@ -119,10 +119,10 @@ def test_parallel_varlen(
         q=q.squeeze(0),
         k=k.squeeze(0),
         v=v.squeeze(0),
-        cu_seqlens_q=offsets,
-        cu_seqlens_k=offsets,
-        max_seqlen_q=prepare_lens(offsets).max(),
-        max_seqlen_k=prepare_lens(offsets).max(),
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=prepare_lens(cu_seqlens).max(),
+        max_seqlen_k=prepare_lens(cu_seqlens).max(),
         causal=True
     )
     ref.backward(do.squeeze(0))
@@ -134,14 +134,14 @@ def test_parallel_varlen(
         q=q,
         k=k,
         v=v,
-        cu_seqlens=offsets
+        cu_seqlens=cu_seqlens
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    assert_close("  o", ref, tri, 0.004)
-    assert_close(" dq", ref_dq.squeeze(), tri_dq.squeeze(), 0.005)
-    assert_close(" dk", ref_dk.squeeze(), tri_dk.squeeze(), 0.005)
-    assert_close(" dv", ref_dv.squeeze(), tri_dv.squeeze(), 0.005)
+    assert_close(" o", ref, tri, 0.004)
+    assert_close("dq", ref_dq.squeeze(), tri_dq.squeeze(), 0.005)
+    assert_close("dk", ref_dk.squeeze(), tri_dk.squeeze(), 0.005)
+    assert_close("dv", ref_dv.squeeze(), tri_dv.squeeze(), 0.005)
