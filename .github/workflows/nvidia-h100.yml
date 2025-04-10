@@ -25,14 +25,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check skip keyword in LATEST commit (Push only)
-        if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
         id: check_skip
         run: |
-          COMMIT_MSG=$(jq -r '.head_commit.message' <<< '${{ toJSON(github.event) }}')
-          echo "Latest commit message: $COMMIT_MSG"
-          if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
-            echo "::notice::Tests skipped by commit message"
-            echo "skip_tests=true" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" = "push" ] && ! [[ "${{ github.ref }}" =~ ^refs/tags/ ]]; then
+            COMMIT_MSG=$(jq -r '.head_commit.message' <<< '${{ toJSON(github.event) }}')
+            echo "Latest commit message: $COMMIT_MSG"
+            if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
+              echo "::notice::Tests skipped by commit message"
+              echo "skip_tests=true" >> $GITHUB_OUTPUT
+            else
+              echo "skip_tests=false" >> $GITHUB_OUTPUT
+            fi
           else
             echo "skip_tests=false" >> $GITHUB_OUTPUT
           fi
