@@ -21,7 +21,7 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['BT']
+    key=['B', 'H', 'BT', 'IS_VARLEN', 'REVERSE']
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_local_cumsum_scalar_kernel(
@@ -30,11 +30,12 @@ def chunk_local_cumsum_scalar_kernel(
     offsets,
     indices,
     T,
+    B: tl.constexpr,
     H: tl.constexpr,
     BT: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
+    REVERSE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    REVERSE: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -69,7 +70,7 @@ def chunk_local_cumsum_scalar_kernel(
         for BS in BS_LIST
         for num_warps in [2, 4, 8]
     ],
-    key=['S', 'BT'],
+    key=['B', 'H', 'S', 'BT', 'IS_VARLEN', 'REVERSE']
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_local_cumsum_vector_kernel(
@@ -78,13 +79,14 @@ def chunk_local_cumsum_vector_kernel(
     offsets,
     indices,
     T,
+    B: tl.constexpr,
     H: tl.constexpr,
     S: tl.constexpr,
     BT: tl.constexpr,
     BS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
+    REVERSE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    REVERSE: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -118,13 +120,12 @@ def chunk_local_cumsum_vector_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BT': 16}, num_warps=2),
-        triton.Config({'BT': 32}, num_warps=4),
-        triton.Config({'BT': 32}, num_warps=2),
-        triton.Config({'BT': 64}, num_warps=8),
-        triton.Config({'BT': 64}, num_warps=4),
+        triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
+        for BT in [32, 64, 128, 256]
+        for num_warps in [2, 4, 8]
+        for num_stages in [1, 2, 3, 4]
     ],
-    key=[]
+    key=['B', 'H', 'IS_VARLEN', 'REVERSE']
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_global_cumsum_scalar_kernel(
@@ -132,18 +133,19 @@ def chunk_global_cumsum_scalar_kernel(
     o,
     offsets,
     T,
+    B: tl.constexpr,
     H: tl.constexpr,
     BT: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
+    REVERSE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    REVERSE: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
 ):
-    i_bh = tl.program_id(0)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_nh = tl.program_id(0)
+    i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_b).to(tl.int32), tl.load(offsets + i_b + 1).to(tl.int32)
+        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = i_n * T, i_n * T + T
     T = eos - bos
 
     b_z = tl.zeros([], dtype=tl.float32)
@@ -172,11 +174,12 @@ def chunk_global_cumsum_scalar_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BT': BT}, num_warps=num_warps)
-        for BT in [16, 32, 64]
+        triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
+        for BT in [16, 32, 64, 128]
         for num_warps in [2, 4, 8]
+        for num_stages in [1, 2, 3, 4]
     ],
-    key=['S']
+    key=['B', 'H', 'S', 'IS_VARLEN', 'REVERSE']
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_global_cumsum_vector_kernel(
@@ -184,20 +187,21 @@ def chunk_global_cumsum_vector_kernel(
     z,
     offsets,
     T,
+    B: tl.constexpr,
     H: tl.constexpr,
     S: tl.constexpr,
     BT: tl.constexpr,
     BS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
+    REVERSE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    REVERSE: tl.constexpr
+    HEAD_FIRST: tl.constexpr,
 ):
-    i_s, i_bh = tl.program_id(0), tl.program_id(1)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_s, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_b).to(tl.int32), tl.load(offsets + i_b + 1).to(tl.int32)
+        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = i_n * T, i_n * T + T
     T = eos - bos
 
     o_i = tl.arange(0, BT)
@@ -236,8 +240,6 @@ def chunk_local_cumsum_scalar(
         B, H, T = g.shape
     else:
         B, T, H = g.shape
-    if offsets is not None:
-        B = len(offsets) - 1
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
     BT = chunk_size
     indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
@@ -250,6 +252,7 @@ def chunk_local_cumsum_scalar(
         offsets,
         indices,
         T=T,
+        B=B,
         H=H,
         BT=BT,
         HEAD_FIRST=head_first,
@@ -286,6 +289,7 @@ def chunk_local_cumsum_vector(
         offsets,
         indices,
         T=T,
+        B=B,
         H=H,
         S=S,
         BT=BT,
@@ -309,15 +313,16 @@ def chunk_global_cumsum_scalar(
         B, H, T = s.shape
     else:
         B, T, H = s.shape
-    if offsets is not None:
-        B = len(offsets) - 1
-    grid = (B * H,)
+    N = len(offsets) - 1 if offsets is not None else B
+
     z = torch.empty_like(s, dtype=output_dtype or dtype)
+    grid = (N * H,)
     chunk_global_cumsum_scalar_kernel[grid](
         s,
         z,
         offsets,
         T=T,
+        B=B,
         H=H,
         HEAD_FIRST=head_first,
         REVERSE=reverse
@@ -339,16 +344,17 @@ def chunk_global_cumsum_vector(
         B, H, T, S = s.shape
     else:
         B, T, H, S = s.shape
+    N = len(offsets) - 1 if offsets is not None else B
     BS = min(32, triton.next_power_of_2(S))
-    if offsets is not None:
-        B = len(offsets) - 1
-    grid = (triton.cdiv(S, BS), B * H)
+
     z = torch.empty_like(s, dtype=output_dtype or dtype)
+    grid = (triton.cdiv(S, BS), N * H)
     chunk_global_cumsum_vector_kernel[grid](
         s,
         z,
         offsets,
         T=T,
+        B=B,
         H=H,
         S=S,
         BS=BS,

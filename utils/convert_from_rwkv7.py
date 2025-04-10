@@ -90,9 +90,7 @@ def convert(
             'ln1': 'attn_norm',
             'ln2': 'ffn_norm'
         }[name_compo[2]]
-        if name_compo[2] == 'attn' and re.match("x_[rwkvag]", name_compo[3]):
-            name_compo[3] = 'x_x'
-        elif re.match("[wvag][012]", name_compo[3]):
+        if re.match("[wvag][012]", name_compo[3]):
             typ, num = name_compo[3]
             name_compo[3] = f'{typ}_lora.lora.' + {
                 '0': '2.bias',
@@ -121,15 +119,9 @@ def convert(
         if shape1 == [1, 1, config.hidden_size]:
             weight.squeeze_()
 
-        # fix: fusing x_[rwkvag] to x_x
-        if fla_name.endswith('attn.x_x'):
-            model_dict[fla_name].data['rwkvag'.find(name[-1])].copy_(weight)
-            if fla_name in model_names:
-                model_names.remove(fla_name)
-        else:
-            assert model_dict[fla_name].shape == weight.shape
-            model_dict[fla_name].data.copy_(weight)
-            model_names.remove(fla_name)
+        assert model_dict[fla_name].shape == weight.shape
+        model_dict[fla_name].data.copy_(weight)
+        model_names.remove(fla_name)
 
     print("uninitialized parameters: ", model_names)
     for n in model_names:

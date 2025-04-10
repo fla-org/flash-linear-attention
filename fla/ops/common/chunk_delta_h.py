@@ -491,8 +491,8 @@ def chunk_gated_delta_rule_fwd_h(
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
 
     if g is not None:
-        k_new = torch.empty_like(k).fill_(float('-inf'))
-        w_new = torch.empty_like(w).fill_(float('-inf'))
+        k_new = torch.empty_like(k)
+        w_new = torch.empty_like(w)
         def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
         proprocess_qkw[grid](
             q=None,

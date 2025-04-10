@@ -157,7 +157,7 @@ def test_chunk_varlen(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("K", test_d_list)
 @pytest.mark.parametrize("expand_ratio", [1, 2])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -173,12 +173,12 @@ def test_parallel(
     torch.manual_seed(42)
     V = K * expand_ratio
 
-    q = torch.randn((B, H, T, K), dtype=dtype, device=device).requires_grad_()
-    k = torch.randn((B, H, T, K), dtype=dtype, device=device).requires_grad_()
-    v = torch.randn((B, H, T, V), dtype=dtype, device=device).requires_grad_()
+    q = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, K), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
     do = torch.randn_like(v)
 
-    ref = naive_retention(q, k, v)
+    ref = naive_retention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None

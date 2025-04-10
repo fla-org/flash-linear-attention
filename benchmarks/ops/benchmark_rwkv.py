@@ -58,18 +58,18 @@ def benchmark(T, provider):
     H = int(os.getenv('BENCH_H', '64'))   # Number of heads
     D = int(os.getenv('BENCH_D', '64'))  # Dimension per head
     with torch.no_grad():
-        q = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        k = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
         if provider.startswith('flash'):
             q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
             k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
             v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
         if provider.startswith('gla'):
-            g = F.logsigmoid(torch.randn(B, H, T, D, device=device, dtype=dtype))
+            g = F.logsigmoid(torch.randn(B, T, H, D, device=device, dtype=dtype))
             g = g.clamp_min(-5).requires_grad_(requires_grad)
         if provider.startswith('rwkv6'):
-            w = F.logsigmoid(torch.randn(B, H, T, D, device=device, dtype=dtype)).requires_grad_(True)
+            w = F.logsigmoid(torch.randn(B, T, H, D, device=device, dtype=dtype)).requires_grad_(True)
             u = torch.randn(H, D, device=device, dtype=dtype).requires_grad_(True)
         if provider.startswith('rwkv7'):
             q = torch.empty(B, T, H, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
@@ -89,14 +89,13 @@ def benchmark(T, provider):
     if provider == 'rwkv6':
         results = triton.testing.do_bench(lambda: chunk_rwkv6(q, k, v, w, u), quantiles=quantiles)
     elif provider == 'rwkv7':
-        results = triton.testing.do_bench(lambda: chunk_rwkv7(q, w, k, v, a, b, head_first=False), quantiles=quantiles)
+        results = triton.testing.do_bench(lambda: chunk_rwkv7(q, w, k, v, a, b), quantiles=quantiles)
     elif provider == 'gla':
         results = triton.testing.do_bench(lambda: chunk_gla(q, k, v, g), quantiles=quantiles)
     elif provider == 'rwkv6_bwd':
         results = triton.testing.do_bench(lambda: chunk_rwkv6(q, k, v, w, u)[0].backward(do), quantiles=quantiles)
     elif provider == 'rwkv7_bwd':
-        results = triton.testing.do_bench(lambda: chunk_rwkv7(q, w, k, v, a, b, head_first=False)[
-                                          0].backward(do), quantiles=quantiles)
+        results = triton.testing.do_bench(lambda: chunk_rwkv7(q, w, k, v, a, b)[0].backward(do), quantiles=quantiles)
     elif provider == 'gla_bwd':
         results = triton.testing.do_bench(lambda: chunk_gla(q, k, v, g)[0].backward(do), quantiles=quantiles)
     elif provider == 'retention_bwd':

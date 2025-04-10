@@ -14,6 +14,7 @@ from fla.layers.rwkv6 import LoRA
 from fla.modules import GroupNorm
 from fla.modules.l2norm import l2_norm
 from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
+from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -64,8 +65,12 @@ class RWKV7Attention(nn.Module):
         self.fuse_norm = fuse_norm
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-
-        self.x_x = nn.Parameter(torch.zeros(6, hidden_size))
+        self.x_r = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.x_w = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.x_k = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.x_v = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.x_a = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.x_g = nn.Parameter(torch.zeros(1, 1, hidden_size))
 
         self.k_k = nn.Parameter(torch.zeros(self.key_dim))
         self.k_a = nn.Parameter(torch.zeros(self.key_dim))
@@ -152,14 +157,15 @@ class RWKV7Attention(nn.Module):
 
         # [batch_size, seq_len, hidden_size]
         delta = shifted - hidden_states
-        xr, xw, xk, xv, xa, xg = hidden_states.addcmul(delta, self.x_x.view(6, 1, 1, -1)).unbind(0)
+
+        xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
+                                                     self.x_k, self.x_v, self.x_a, self.x_g)
 
         r = self.r_proj(xr)
-        # -math.exp(-0.5) = -0.6065306597126334
-        # I think .to(torch.float) is unnecessary here, since we calculate lora in bloat16
+        # w (-0.6065, 0)
         # when we apply sigmoid, bf16 input will not have numerical issue
-        # FIXME: check if we can remove .to(torch.float)
-        w = -0.6065306597126334 * self.w_lora(xw).to(torch.float).sigmoid()
+        # (w.float() - w2).abs().max()/mean() = 0.003, 0.0004
+        w = -0.6065306597126334 * self.w_lora(xw).sigmoid()
 
         k = self.k_proj(xk)
         v = self.v_proj(xv)
@@ -199,7 +205,8 @@ class RWKV7Attention(nn.Module):
             initial_state=recurrent_state,
             output_final_state=use_cache,
             cu_seqlens=cu_seqlens,
-            head_first=False
+            head_first=False,
+            input_precision=r.dtype,
         )
 
         if past_key_values is not None:

@@ -565,6 +565,7 @@ def parallel_attn_bwd(
     dv = torch.empty(B, T, HQ, V, dtype=v.dtype if H == HQ else torch.float, device=q.device)
     grid = (NV, NT, B * HQ)
 
+    dg_cumsum, dg_cumsum_k = None, None
     if g_cumsum is not None:
         dg_cumsum = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)
         dg_cumsum_k = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)
@@ -638,9 +639,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
 
         chunk_size = min(128, max(16, triton.next_power_of_2(q.shape[1])))
 
-        if g is not None:
-            g_cumsum = chunk_global_cumsum(g, g.dtype, offsets=cu_seqlens)
-
+        g_cumsum = chunk_global_cumsum(g, g.dtype, offsets=cu_seqlens) if g is not None else None
         o, lse = parallel_attn_fwd(
             q=q,
             k=k,

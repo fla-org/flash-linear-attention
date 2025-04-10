@@ -19,7 +19,8 @@ def chunk_rwkv7(
     initial_state: torch.Tensor = None,
     output_final_state: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    head_first: bool = False,
+    input_precision: Optional[torch.dtype] = torch.bfloat16,
 ):
     """
     Args:
@@ -49,6 +50,9 @@ def chunk_rwkv7(
         head_first (bool):
             whether to use head first. Recommended to be False to avoid extra transposes.
             Default: `False`.
+        input_precision (Optional[torch.dtype]):
+            The precision of the input tensors. Default: `torch.bfloat16`.
+            Note: The output tensors will be in the same precision as the input tensors. Use torch.float16 with caution.
     """
     return chunk_dplr_delta_rule(
         q=r,
@@ -61,5 +65,6 @@ def chunk_rwkv7(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        head_first=head_first
+        head_first=head_first,
+        input_precision=input_precision
     )

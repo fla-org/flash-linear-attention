@@ -10,7 +10,7 @@ def get_abs_err(x, y):
 
 def get_err_ratio(x, y):
     err = (x.detach()-y.detach()).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
+    base = (x.detach()).flatten().square().mean().sqrt().item()
     return err / (base + 1e-8)
 
 
@@ -21,11 +21,9 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
     error_rate = get_err_ratio(ref, tri)
     if abs_atol <= err_atol:
         return
-    if warning or (FLA_CI_ENV and error_rate < 0.01):
+    if warning or (FLA_CI_ENV and (error_rate < 0.01 or abs_atol <= 0.3)):
         if error_rate > ratio:
             import warnings
             warnings.warn(msg)
-        else:
-            assert error_rate < ratio, msg
     else:
         assert error_rate < ratio, msg

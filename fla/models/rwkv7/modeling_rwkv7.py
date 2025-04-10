@@ -263,6 +263,56 @@ class RWKV7Model(RWKV7PreTrainedModel):
     def set_input_embeddings(self, value):
         self.embeddings = value
 
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """
+        Override the load_state_dict method to handle migration from version 1 to version 2.
+        Handles hierarchical keys like 'model.layers.0.attn.x_x'.
+        """
+        # Collect all layer indices from the state_dict keys
+        layer_indices = set()
+        for key in state_dict.keys():
+            if key.startswith("model.layers."):
+                # Extract the layer index from the key
+                try:
+                    layer_idx = int(key.split(".")[2])  # Extract the number after 'model.layers.'
+                    layer_indices.add(layer_idx)
+                except ValueError:
+                    # Skip keys that don't match the expected format
+                    continue
+
+        # Sort the layer indices to process them in order
+        sorted_layer_indices = sorted(layer_indices)
+
+        # Migration logic for each layer
+        for layer_idx in sorted_layer_indices:
+            layer_prefix = f"model.layers.{layer_idx}"
+            attn_prefix = f"{layer_prefix}.attn"
+
+            # Check if the layer contains the old 'x_x' parameter
+            if f"{attn_prefix}.x_x" in state_dict:
+                logger.info(f"Migrating weights for layer {layer_idx} from RWKV7Attention version 1 to version 2...")
+                # Extract the x_x parameter
+                x_x = state_dict[f"{attn_prefix}.x_x"]
+                with torch.no_grad():
+                    # Create new parameters for version 2
+                    state_dict[f"{attn_prefix}.x_r"] = x_x[0].unsqueeze(0).unsqueeze(0)
+                    state_dict[f"{attn_prefix}.x_w"] = x_x[1].unsqueeze(0).unsqueeze(0)
+                    state_dict[f"{attn_prefix}.x_k"] = x_x[2].unsqueeze(0).unsqueeze(0)
+                    state_dict[f"{attn_prefix}.x_v"] = x_x[3].unsqueeze(0).unsqueeze(0)
+                    state_dict[f"{attn_prefix}.x_a"] = x_x[4].unsqueeze(0).unsqueeze(0)
+                    state_dict[f"{attn_prefix}.x_g"] = x_x[5].unsqueeze(0).unsqueeze(0)
+
+        # Call the parent method to load the modified state_dict
+        try:
+            super().load_state_dict(state_dict, strict=strict, assign=assign)
+        except TypeError:
+            # If the parent method does not support `assign`, fall back to strict loading
+            logger.warning(
+                "`assign` parameter is not supported by the parent `load_state_dict` method. "
+                "Falling back to default behavior."
+            )
+            super().load_state_dict(state_dict, strict=strict)
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -349,7 +399,7 @@ class RWKV7Model(RWKV7PreTrainedModel):
         )
 
 
-class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
+class RWKV7ForCausalLM(RWKV7Model, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 

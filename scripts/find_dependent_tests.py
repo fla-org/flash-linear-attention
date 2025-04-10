@@ -1,9 +1,12 @@
 import ast
 import sys
+from collections import deque
+from functools import lru_cache
 from pathlib import Path
 
 
-def extract_definitions(file_path):
+@lru_cache(maxsize=200)
+def extract_definitions(file_path, include_vars=False):
     """Extract function and class definitions from a Python file."""
     if file_path.suffix != ".py":
         return set()
@@ -17,6 +20,14 @@ def extract_definitions(file_path):
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
                 definitions.add(node.name)
+            elif include_vars and isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        definitions.add(target.id)
+                    elif isinstance(target, ast.Tuple):
+                        for elt in target.elts:
+                            if isinstance(elt, ast.Name):
+                                definitions.add(elt.id)
         return definitions
     except BaseException:
         return set()
@@ -47,39 +58,35 @@ def find_files_using_definitions(definitions, directory):
     return files
 
 
-def find_dependent_tests(changed_file, test_dir, search_dir):
-    """Find test files that call any of the definitions in the changed file or files that use these definitions."""
-    # Convert all paths to absolute paths for consistent comparison
+def find_dependent_tests(changed_file, test_dir, search_dir, max_depth=3):
     abs_test_dir = Path(test_dir).resolve()
     abs_search_dir = Path(search_dir).resolve()
     abs_changed_file = Path(changed_file).resolve()
 
-    # Check if the changed file is a test file itself
-    is_test_file = abs_test_dir in abs_changed_file.parents
-
-    # Extract definitions from the changed file
-    definitions = extract_definitions(abs_changed_file)
-    if not definitions and not is_test_file:
-        return set()
-
-    # If it's a test file, just return itself
-    if is_test_file:
+    if abs_test_dir in abs_changed_file.parents:
         return {str(abs_changed_file)}
 
-    # Find files that use these definitions
-    dependent_files = find_files_using_definitions(definitions, abs_search_dir)
+    queue = deque([(abs_changed_file, 0, True)])  # (file, depth, include_vars)
+    processed = set()
+    all_definitions = set()
 
-    # Find test files that call these definitions or are dependent on the dependent files
-    test_files = set()
-    for test_file in abs_test_dir.rglob("test_*.py"):
-        if find_calls_in_file(test_file, definitions):
-            test_files.add(str(test_file))
-        else:
-            for dependent_file in dependent_files:
-                if find_calls_in_file(test_file, extract_definitions(dependent_file)):
-                    test_files.add(str(test_file))
-                    break
-    return test_files
+    while queue:
+        current_file, depth, include_vars = queue.popleft()
+        if current_file in processed or depth > max_depth:
+            continue
+
+        processed.add(current_file)
+        current_defs = extract_definitions(current_file, include_vars)
+        all_definitions.update(current_defs)
+
+        for f in Path(abs_search_dir).rglob("*.py"):
+            if f not in processed and find_calls_in_file(f, current_defs):
+                queue.append((f, depth + 1, False))
+
+    return {
+        str(test_file) for test_file in abs_test_dir.rglob("test_*.py")
+        if find_calls_in_file(test_file, all_definitions)
+    }
 
 
 if __name__ == "__main__":

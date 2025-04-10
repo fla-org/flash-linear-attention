@@ -57,7 +57,7 @@ class ForgettingAttention(nn.Module):
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
-        self.g_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
+        self.f_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
 
         if use_output_gate:
             self.g_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
@@ -94,7 +94,7 @@ class ForgettingAttention(nn.Module):
         batch_size, q_len, _ = hidden_states.size()
 
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-        g = F.logsigmoid(self.g_proj(hidden_states).float())
+        f = F.logsigmoid(self.f_proj(hidden_states).float())
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
 
@@ -102,29 +102,29 @@ class ForgettingAttention(nn.Module):
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
             state = past_key_values.update(
-                attn_state=(k, v, g),
+                attn_state=(k, v, f),
                 layer_idx=self.layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size)
             )
-            k, v, g = state['attn_state']
+            k, v, f = state['attn_state']
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
         if attention_mask is not None:
-            q, (k, v, g), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v, g), attention_mask, q_len, keepdim=True)
+            q, (k, v, f), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v, f), attention_mask, q_len, keepdim=True)
             _, cu_seqlens_k = cu_seqlens
             cu_seqlens = cu_seqlens_k
             max_seqlen_q, max_seqlen_k = max_seq_lens
             if max_seqlen_q != max_seqlen_k:
                 assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
-                o = attn_decoding_one_step(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
+                o = attn_decoding_one_step(q, k, v, f, cu_seqlens=cu_seqlens)
             else:
-                o = parallel_forgetting_attn(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
+                o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
         else:
-            o = parallel_forgetting_attn(q=q, k=k, v=v, g=g, cu_seqlens=cu_seqlens)
+            o = parallel_forgetting_attn(q, k, v, f, cu_seqlens=cu_seqlens)
         if attention_mask is not None:
             o = pad_input(o.squeeze(0), indices_q, batch_size, q_len)
         o = rearrange(o, '... h d -> ... (h d)')
