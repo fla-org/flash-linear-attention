@@ -175,7 +175,7 @@ def test_recurrent_forward(
 ):
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     os.environ['TORCH_CUDA_MATMUL_PRECISION'] = 'highest'
-    
+
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = torch.randn(B, T, H, D, dtype=dtype)
     v = torch.randn(B, T, H, D, dtype=dtype)
@@ -236,7 +236,7 @@ def test_fused_recurrent_fwd(
     dtype: torch.dtype,
     compile: bool,
 ):
-    
+
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = torch.randn(B, T, H, D, dtype=dtype)
     v = torch.randn(B, T, H, D, dtype=dtype)

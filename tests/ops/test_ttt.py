@@ -104,10 +104,7 @@ def test_chunk(
     assert_close("  dw", ref_dw, tri_dw, 0.006)
     assert_close("  db", ref_db, tri_db, 0.006)
     assert_close("  de", ref_deta, tri_deta, 0.030)  # because the last element of the chunk
-    if head_first:
-        assert_close(" de0", ref_deta[:, :, :14, :], tri_deta[:, :, :14, :], 0.010)
-    else:
-        assert_close(" de0", ref_deta[:, :14, :, :], tri_deta[:, :14, :, :], 0.010)
+    assert_close(" de0", ref_deta[:, :14, :, :], tri_deta[:, :14, :, :], 0.010)
     assert_close(" dh0", ref_dh0, tri_dh0, 0.007)
     assert_close("dhb0", ref_dhb0, tri_dhb0, 0.005)
 

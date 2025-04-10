@@ -47,13 +47,13 @@ def test_global_cumsum(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    s = torch.randn(B, H, T, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, dtype=dtype).to(device)
-    ref = s.float().cumsum(2 if head_first else 1).to(dtype)
+    s = torch.randn(B, T, H, dtype=dtype).to(device)
+    ref = s.float().cumsum(1).to(dtype)
     tri = chunk_global_cumsum(s, dtype, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
-    s = torch.randn(B, H, T, D, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, D, dtype=dtype).to(device)
-    ref = s.float().cumsum(2 if head_first else 1).to(dtype)
+    s = torch.randn(B, T, H, D, dtype=dtype).to(device)
+    ref = s.float().cumsum(1).to(dtype)
     tri = chunk_global_cumsum(s, dtype, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
@@ -108,13 +108,13 @@ def test_global_reversed_cumsum(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    s = torch.randn(B, H, T, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, dtype=dtype).to(device)
-    ref = reversed_cumsum(s, dim=(2 if head_first else 1)).to(dtype)
+    s = torch.randn(B, T, H, dtype=dtype).to(device)
+    ref = reversed_cumsum(s, dim=1).to(dtype)
     tri = chunk_global_cumsum(s, dtype, reverse=True, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
-    s = torch.randn(B, H, T, D, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, D, dtype=dtype).to(device)
-    ref = reversed_cumsum(s, dim=(2 if head_first else 1)).to(dtype)
+    s = torch.randn(B, T, H, D, dtype=dtype).to(device)
+    ref = reversed_cumsum(s, dim=1).to(dtype)
     tri = chunk_global_cumsum(s, dtype, reverse=True, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
