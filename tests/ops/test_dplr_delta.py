@@ -173,21 +173,14 @@ def test_recurrent_forward(
     scale: float,
     dtype: torch.dtype,
 ):
-    head_first = True
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     os.environ['TORCH_CUDA_MATMUL_PRECISION'] = 'highest'
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = torch.randn(B, H, T, D, dtype=dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        a = torch.rand(B, H, T, D, dtype=dtype)
-        gk = (torch.randn(B, H, T, D, dtype=torch.float))
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = torch.randn(B, T, H, D, dtype=dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        a = torch.rand(B, T, H, D, dtype=dtype)
-        gk = torch.randn(B, T, H, D, dtype=torch.float)
+    
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = torch.rand(B, T, H, D, dtype=dtype)
+    gk = torch.randn(B, T, H, D, dtype=torch.float)
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
@@ -205,7 +198,7 @@ def test_recurrent_forward(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     tri, tri_ht = recurrent_dplr_delta_rule_ref(
         q=q.clone(),
@@ -217,7 +210,7 @@ def test_recurrent_forward(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     assert_close("  o", ref, tri, 0.001)
     assert_close(" ht", ref_ht, tri_ht, 0.001)
@@ -229,7 +222,6 @@ def test_recurrent_forward(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.parametrize("compile", [False, True])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -242,21 +234,14 @@ def test_fused_recurrent_fwd(
     D: int,
     scale: float,
     dtype: torch.dtype,
-    head_first: bool,
     compile: bool,
 ):
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = torch.randn(B, H, T, D, dtype=dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        a = torch.rand(B, H, T, D, dtype=dtype)
-        gk = (torch.randn(B, H, T, D, dtype=torch.float))
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = torch.randn(B, T, H, D, dtype=dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        a = torch.rand(B, T, H, D, dtype=dtype)
-        gk = torch.randn(B, T, H, D, dtype=torch.float)
+    
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = torch.rand(B, T, H, D, dtype=dtype)
+    gk = torch.randn(B, T, H, D, dtype=torch.float)
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
@@ -274,7 +259,7 @@ def test_fused_recurrent_fwd(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
 
     fused_compiled = torch.compile(fused_recurrent_dplr_delta_rule) if compile else fused_recurrent_dplr_delta_rule
@@ -289,7 +274,7 @@ def test_fused_recurrent_fwd(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     assert_close("  o", ref, tri, 0.002)
     assert_close(" ht", ref_ht, tri_ht, 0.002)
@@ -302,7 +287,6 @@ def test_fused_recurrent_fwd(
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.parametrize("compile", [False, True])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -320,21 +304,13 @@ def test_chunk(
     scale: float,
     gate_logit_normalizer: float,
     dtype: torch.dtype,
-    head_first: bool,
     compile: bool,
 ):
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = torch.randn(B, H, T, D, dtype=dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        a = torch.rand(B, H, T, D, dtype=dtype)
-        gk = (torch.randn(B, H, T, D, dtype=torch.float))
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = torch.randn(B, T, H, D, dtype=dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        a = torch.rand(B, T, H, D, dtype=dtype)
-        gk = torch.randn(B, T, H, D, dtype=torch.float)
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = torch.rand(B, T, H, D, dtype=dtype)
+    gk = torch.randn(B, T, H, D, dtype=torch.float)
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
@@ -352,7 +328,7 @@ def test_chunk(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
@@ -372,7 +348,7 @@ def test_chunk(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_da, tri_db, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, a.grad, b.grad, gk.grad, h0.grad
