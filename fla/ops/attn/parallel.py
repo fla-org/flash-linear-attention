@@ -639,7 +639,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
 
         chunk_size = min(128, max(16, triton.next_power_of_2(q.shape[1])))
 
-        g_cumsum = chunk_global_cumsum(g, g.dtype, offsets=cu_seqlens) if g is not None else None
+        g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens) if g is not None else None
         o, lse = parallel_attn_fwd(
             q=q,
             k=k,
@@ -673,7 +673,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
             offsets=ctx.cu_seqlens,
         )
         if dg is not None:
-            dg = chunk_global_cumsum(dg, offsets=ctx.cu_seqlens, reverse=True)
+            dg = chunk_global_cumsum(dg, cu_seqlens=ctx.cu_seqlens, reverse=True)
 
         return dq.to(q), dk.to(k), dv.to(v), dg, None, None, None, None, None, None, None, None
 

@@ -108,11 +108,11 @@ def mean_pooling_bwd_kernel(
 def mean_pooling_fwd(
     x: torch.Tensor,
     chunk_size: int,
-    offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None
+    offsets: Optional[torch.LongTensor] = None
 ) -> torch.Tensor:
     B, T, H, D = x.shape
     BT = chunk_size
+    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     o = x.new_empty(B, NT, H, D)
@@ -136,11 +136,11 @@ def mean_pooling_bwd(
     batch_size: int,
     seq_len: int,
     chunk_size: int,
-    offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None
+    offsets: Optional[torch.LongTensor] = None
 ) -> torch.Tensor:
     B, T, H, D = batch_size, seq_len, *do.shape[-2:]
     BT = chunk_size
+    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
     NT = triton.cdiv(T, BT) if offsets is None else len(indices)
 
     dx = do.new_empty(B, T, H, D)
@@ -170,17 +170,11 @@ class MeanPoolingFunction(torch.autograd.Function):
         chunk_size: int,
         offsets: Optional[torch.LongTensor] = None
     ) -> torch.Tensor:
-        # 2-d indices denoting the offsets of chunks in each sequence
-        # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
-        # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
-        # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
-        o = mean_pooling_fwd(x, chunk_size, offsets, indices)
+        o = mean_pooling_fwd(x, chunk_size, offsets)
         ctx.batch_size = x.shape[0]
         ctx.seq_len = x.shape[1]
         ctx.chunk_size = chunk_size
         ctx.offsets = offsets
-        ctx.indices = indices
         return o
 
     @staticmethod
@@ -193,8 +187,7 @@ class MeanPoolingFunction(torch.autograd.Function):
         seq_len = ctx.seq_len
         chunk_size = ctx.chunk_size
         offsets = ctx.offsets
-        indices = ctx.indices
-        dx = mean_pooling_bwd(do, batch_size, seq_len, chunk_size, offsets, indices)
+        dx = mean_pooling_bwd(do, batch_size, seq_len, chunk_size, offsets)
         return dx, None, None
 
 
@@ -208,8 +201,10 @@ def mean_pooling(
         x = x.transpose(1, 2)
     if cu_seqlens is not None:
         if x.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {x.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {x.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
     o = MeanPoolingFunction.apply(x, chunk_size, cu_seqlens)
     if head_first:
         o = o.transpose(1, 2)

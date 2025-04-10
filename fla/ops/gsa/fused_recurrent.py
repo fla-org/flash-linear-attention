@@ -296,7 +296,7 @@ def fused_recurrent_gsa_bwd(
     dqv = dqv.sum(0)
     dsv = dsv.sum(0)
     dv = dv.sum(0)
-    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(), reverse=not reverse, offsets=offsets)
+    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(), reverse=not reverse, cu_seqlens=offsets)
 
     dok = qv * (dqv - (qv * dqv).sum(-1, True))
     dq = q.new_empty(NM, B, T, H, K, dtype=torch.float)
@@ -336,7 +336,7 @@ def fused_recurrent_gsa_bwd(
     dk = dk.sum(0)
     dsk = dsk.sum(0)
 
-    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(), reverse=not reverse, offsets=offsets)
+    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(), reverse=not reverse, cu_seqlens=offsets)
 
     ds = dsk.add_(dsv)
     dg = dgk.add_(dgv)
