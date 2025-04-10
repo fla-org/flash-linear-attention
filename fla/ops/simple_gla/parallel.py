@@ -595,6 +595,7 @@ def parallel_simple_gla_bwd(
         dv=dv,
         dg=dg,
         offsets=offsets,
+        indices=indices,
         scale=scale,
         T=T,
         B=B,
