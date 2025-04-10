@@ -83,9 +83,10 @@ def bwd_prepare_wy_repr_kernel(
         b_dv = b_dv0 + tl.dot(b_A_tmp_t, b_du)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
-    b_dA_tmp = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_dA_tmp, 0)
+    m_i = tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :]
+    b_dA_tmp = tl.where(m_i, b_dA_tmp, 0)
     b_dA_ak = tl.dot(b_A_ab_inv_t, b_dA_tmp)
-    b_dA_ak = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_dA_ak, 0)
+    b_dA_ak = tl.where(m_i, b_dA_ak, 0)
     tl.store(p_dAak, b_dA_ak, boundary_check=(0, 1))
     b_dA_ab_inv = tl.dot(b_dA_tmp, b_A_ak_t)
 
@@ -109,7 +110,7 @@ def bwd_prepare_wy_repr_kernel(
     b_dA_ab_inv = tl.where(tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :], b_dA_ab_inv, 0)
     b_dA_ab_inv = tl.dot(b_A_ab_inv_t, b_dA_ab_inv)
     b_dA_ab_inv = tl.dot(b_dA_ab_inv, b_A_ab_inv_t)
-    b_dA_ab_inv = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_dA_ab_inv, 0)
+    b_dA_ab_inv = tl.where(m_i, b_dA_ab_inv, 0)
     tl.store(p_dAab, b_dA_ab_inv, boundary_check=(0, 1))
 
 

@@ -61,7 +61,8 @@ def chunk_dplr_bwd_kernel_dAu(
 
     b_A_qb = tl.load(p_A_qb, boundary_check=(0, 1))
     # causal mask
-    b_A_qb = tl.where(tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :], b_A_qb, 0.).to(b_A_qb.dtype)
+    m_s = (tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]).to(tl.int1)
+    b_A_qb = (b_A_qb * m_s).to(b_A_qb.dtype)
 
     for i_v in range(tl.cdiv(V, BV)):
         p_do = tl.make_block_ptr(do + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -79,10 +80,9 @@ def chunk_dplr_bwd_kernel_dAu(
 
     p_dA_qk = tl.make_block_ptr(dA_qk + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     p_dA_qb = tl.make_block_ptr(dA_qb + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
-    b_dA_qk = tl.where(m_s, b_dA_qk * scale, 0.)
+    b_dA_qk = b_dA_qk * scale * m_s
     tl.store(p_dA_qk, b_dA_qk.to(p_dA_qk.dtype.element_ty), boundary_check=(0, 1))
-    b_dA_qb = tl.where(m_s, b_dA_qb * scale, 0.)
+    b_dA_qb = b_dA_qb * scale * m_s
     tl.store(p_dA_qb, b_dA_qb.to(p_dA_qb.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -279,7 +279,9 @@ def chunk_dplr_bwd_kernel_dv(
         b_dv += tl.dot(b_kg, b_dh.to(b_kg.dtype))
 
     p_Aqk = tl.make_block_ptr(A_qk, (BT, T), (1, stride_A), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.where(tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :], tl.load(p_Aqk, boundary_check=(0, 1)), 0)
+    m_s = (tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :]).to(tl.int1)
+    b_A = tl.load(p_Aqk, boundary_check=(0, 1)) 
+    b_A = (b_A * m_s).to(b_A.dtype)
     p_do = tl.make_block_ptr(do, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_dv = tl.make_block_ptr(dv, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     b_do = tl.load(p_do, boundary_check=(0, 1))
@@ -293,7 +295,7 @@ def chunk_dplr_bwd_dv(
     do: torch.Tensor,
     dh: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    chunk_size: int = 16
 ) -> torch.Tensor:
     B, T, H, K, V = *kg.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -333,7 +335,7 @@ def chunk_dplr_bwd_o(
     dv: torch.Tensor,
     w: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64,
+    chunk_size: int = 16,
     scale: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
@@ -390,7 +392,7 @@ def chunk_dplr_bwd_dAu(
     A_qb: torch.Tensor,
     scale: float,
     offsets: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    chunk_size: int = 16
 ) -> torch.Tensor:
     B, T, H, V = v.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))

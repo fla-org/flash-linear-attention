@@ -75,14 +75,14 @@ def chunk_dplr_fwd_kernel_o(
     p_v_new = tl.make_block_ptr(v_new + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_o = tl.make_block_ptr(o + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
-    m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
     b_Aqk = tl.load(p_Aqk, boundary_check=(0, 1))
     b_Aqb = tl.load(p_Aqb, boundary_check=(0, 1))
-    b_Aqk = tl.where(m_s, b_Aqk, 0)
-    b_Aqb = tl.where(m_s, b_Aqb, 0)
+    m_s = (tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]).to(tl.int1)
     b_v = tl.load(p_v, boundary_check=(0, 1))
     b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
-    b_o = b_o + tl.dot(b_Aqk.to(b_v.dtype), b_v) + tl.dot(b_Aqb.to(b_v_new.dtype), b_v_new)
+    b_Aqk = (b_Aqk * m_s).to(b_v.dtype)
+    b_Aqb = (b_Aqb * m_s).to(b_v_new.dtype)
+    b_o = b_o + tl.dot(b_Aqk, b_v) + tl.dot(b_Aqb, b_v_new)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -94,7 +94,7 @@ def chunk_dplr_fwd_o(
     A_qb: torch.Tensor,
     h: torch.Tensor,
     offsets: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    chunk_size: int = 16
 ) -> torch.Tensor:
     B, T, H, K, V = *qg.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
