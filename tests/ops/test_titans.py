@@ -24,7 +24,7 @@ else:
 test_h_list = [2]
 
 
-def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
+def initialize_chunked_param(B, T, H, BT, dtype=torch.float32):
     # Calculate number of complete chunks and remaining elements
     num_complete_chunks = T // BT
     remainder = T % BT
@@ -59,7 +59,6 @@ def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [1])
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -71,27 +70,20 @@ def test_naive_chunk_fwd(
     # set seed
     torch.manual_seed(1)
     # we don't use such initialization in the original code
-    # theta = initialize_chunked_param(B, H, T, BT, dtype)
-    # alpha = initialize_chunked_param(B, H, T, BT, dtype)
-    # eta = initialize_chunked_param(B, H, T, BT, dtype)
-    theta = torch.rand(B, H, T, 1, dtype=dtype)
-    alpha = torch.rand(B, H, T, 1, dtype=dtype)
-    eta = torch.rand(B, H, T, 1, dtype=dtype)
+    # theta = initialize_chunked_param(B, T, H, BT, dtype)
+    # alpha = initialize_chunked_param(B, T, H, BT, dtype)
+    # eta = initialize_chunked_param(B, T, H, BT, dtype)
+    theta = torch.rand(B, T, H, 1, dtype=dtype)
+    alpha = torch.rand(B, T, H, 1, dtype=dtype)
+    eta = torch.rand(B, T, H, 1, dtype=dtype)
 
     # titans normalize queries and keys using ℓ2-normalization
-    q = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn(B, H, T, D, dtype=dtype)
+    q = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
     w = torch.randn(H, D, dtype=dtype)
     b = torch.randn(H, D, dtype=dtype)
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-    if not head_first:
-        q = q.permute(0, 2, 1, 3)
-        k = k.permute(0, 2, 1, 3)
-        v = v.permute(0, 2, 1, 3)
-        theta = theta.permute(0, 2, 1, 3)
-        alpha = alpha.permute(0, 2, 1, 3)
-        eta = eta.permute(0, 2, 1, 3)
     q, k, v, w, b, theta, alpha, eta = map(
         lambda x: x.to(device).requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
     )
@@ -110,7 +102,7 @@ def test_naive_chunk_fwd(
         output_final_state=True,
         chunk_size=BT,
         initial_state=h0.clone(),
-        head_first=head_first,
+        head_first=False,
         use_chunk=False,
     )
     ref, ref_ht = chunk_titans_linear_ref(
@@ -125,7 +117,7 @@ def test_naive_chunk_fwd(
         output_final_state=True,
         chunk_size=BT,
         initial_state=h0.clone(),
-        head_first=head_first,
+        head_first=False,
         use_chunk=True,
     )
 
@@ -139,7 +131,7 @@ def test_naive_chunk_fwd(
 # @pytest.mark.parametrize("D", test_d_list)
 # @pytest.mark.parametrize("scale", [1])
 # @pytest.mark.parametrize("dtype", [torch.float32])
-# @pytest.mark.parametrize("head_first", [True, False])
+# @pytest.mark.parametrize("head_first", [False])
 # def test_fused_chunk_fwd(
 #     B: int, T: int, H: int, D: int, dtype: torch.dtype, scale: float, head_first: bool
 # ):
@@ -147,40 +139,25 @@ def test_naive_chunk_fwd(
 #     # set seed
 #     torch.manual_seed(1)
 #     # we don't use such initialization in the original code
-#     # theta = initialize_chunked_param(B, H, T, BT, dtype)
-#     # alpha = initialize_chunked_param(B, H, T, BT, dtype)
-#     # eta = initialize_chunked_param(B, H, T, BT, dtype)
-#     theta = torch.rand(B, H, T, 1, dtype=dtype)
-#     alpha = torch.rand(B, H, T, 1, dtype=dtype)
-#     eta = torch.rand(B, H, T, 1, dtype=dtype)
+#     # theta = initialize_chunked_param(B, T, H, BT, dtype)
+#     # alpha = initialize_chunked_param(B, T, H, BT, dtype)
+#     # eta = initialize_chunked_param(B, T, H, BT, dtype)
+#     theta = torch.rand(B, T, H, 1, dtype=dtype)
+#     alpha = torch.rand(B, T, H, 1, dtype=dtype)
+#     eta = torch.rand(B, T, H, 1, dtype=dtype)
 
-#     if head_first:
-#         # titans normalize queries and keys using ℓ2-normalization
-#         q = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(
-#             dtype
-#         )
-#         k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(
-#             dtype
-#         )
-#         v = torch.randn(B, H, T, D, dtype=dtype)
-#         w = torch.randn(H, D, dtype=dtype)
-#         b = torch.randn(H, D, dtype=dtype)
-#         h0 = torch.randn(B, H, D, D, dtype=dtype)
-#     else:
-#         q = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(
-#             dtype
-#         )
-#         k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(
-#             dtype
-#         )
-#         v = torch.randn(B, T, H, D, dtype=dtype)
-#         w = torch.randn(H, D, dtype=dtype)
-#         b = torch.randn(H, D, dtype=dtype)
-#         h0 = torch.randn(B, H, D, D, dtype=dtype)
+
+# q = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(
+#     dtype
+# )
+# k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(
+#     dtype
+# )
+# v = torch.randn(B, T, H, D, dtype=dtype)
+# w = torch.randn(H, D, dtype=dtype)
+# b = torch.randn(H, D, dtype=dtype)
+# h0 = torch.randn(B, H, D, D, dtype=dtype)
 #         # we need to reshape here because head_first is True
-#         theta = theta.permute(0, 2, 1, 3)
-#         alpha = alpha.permute(0, 2, 1, 3)
-#         eta = eta.permute(0, 2, 1, 3)
 #     q, k, v, w, b, theta, alpha, eta = map(
 #         lambda x: x.to(device).requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
 #     )
@@ -199,7 +176,7 @@ def test_naive_chunk_fwd(
 #         output_final_state=True,
 #         chunk_size=BT,
 #         initial_state=h0.clone(),
-#         head_first=head_first,
+#         head_first=False,
 #     )
 #     ref, ref_ht = chunk_titans_linear_ref(
 #         q.clone(),
@@ -213,7 +190,7 @@ def test_naive_chunk_fwd(
 #         output_final_state=True,
 #         chunk_size=BT,
 #         initial_state=h0.clone(),
-#         head_first=head_first,
+#         head_first=False,
 #         use_chunk=True,
 #     )
 

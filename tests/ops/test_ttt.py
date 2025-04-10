@@ -30,7 +30,6 @@ test_h_list = [2]
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -42,29 +41,19 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     scale: float,
-    head_first: bool
 ):
     if D > 64 and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        eta = torch.randn(B, H, T, 1, dtype=dtype) * eta_base
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-        hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-        hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
+
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    w = torch.randn(H, D, dtype=dtype)
+    b = torch.randn(H, D, dtype=dtype)
+    eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
 
     q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, w, b, eta, h0, hb0))
     do = torch.rand_like(v)
@@ -82,7 +71,7 @@ def test_chunk(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
-        head_first=head_first
+        head_first=False
     )
     ((tri * do).sum() + (tri_ht * dht).sum() + (tri_hbt * dhbt).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, \
@@ -100,7 +89,7 @@ def test_chunk(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
-        head_first=head_first
+        head_first=False
     )
     ((ref * do).sum() + (ref_ht * dht).sum() + (ref_hbt * dhbt).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, \
@@ -115,10 +104,7 @@ def test_chunk(
     assert_close("  dw", ref_dw, tri_dw, 0.006)
     assert_close("  db", ref_db, tri_db, 0.006)
     assert_close("  de", ref_deta, tri_deta, 0.030)  # because the last element of the chunk
-    if head_first:
-        assert_close(" de0", ref_deta[:, :, :14, :], tri_deta[:, :, :14, :], 0.010)
-    else:
-        assert_close(" de0", ref_deta[:, :14, :, :], tri_deta[:, :14, :, :], 0.010)
+    assert_close(" de0", ref_deta[:, :14, :, :], tri_deta[:, :14, :, :], 0.010)
     assert_close(" dh0", ref_dh0, tri_dh0, 0.007)
     assert_close("dhb0", ref_dhb0, tri_dhb0, 0.005)
 
@@ -129,7 +115,6 @@ def test_chunk(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -146,24 +131,15 @@ def test_fused_chunk_fwd(
     if D > 64 and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        eta = torch.randn(B, H, T, 1, dtype=dtype) * eta_base
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-        hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
-        h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-        hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
+
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    w = torch.randn(H, D, dtype=dtype)
+    b = torch.randn(H, D, dtype=dtype)
+    eta = torch.randn(B, T, H, 1, dtype=dtype) * eta_base
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    hb0 = torch.randn(B, H, 1, D, dtype=torch.float32)
 
     q, k, v, w, b, eta, h0, hb0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, w, b, eta, h0, hb0))
     do = torch.rand_like(v)
@@ -181,7 +157,7 @@ def test_fused_chunk_fwd(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
-        head_first=head_first
+        head_first=False
     )
     ((tri * do).sum() + (tri_ht * dht).sum() + (tri_hbt * dhbt).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, \
@@ -199,7 +175,7 @@ def test_fused_chunk_fwd(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
-        head_first=head_first
+        head_first=False
     )
     ((ref * do).sum() + (ref_ht * dht).sum() + (ref_hbt * dhbt).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, \
