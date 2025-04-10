@@ -114,14 +114,14 @@ def chunk_dplr_bwd_kernel_intra(
     p_b = tl.make_block_ptr(b, (T, K), (stride_qk, 1), (i_t*BT, i_k*BK), (BC, BK), (1, 0))
     p_a = tl.make_block_ptr(a, (T, K), (stride_qk, 1), (i_t*BT, i_k*BK), (BC, BK), (1, 0))
     p_q = tl.make_block_ptr(q, (T, K), (stride_qk, 1), (i_t*BT, i_k*BK), (BC, BK), (1, 0))
-    b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
-    b_b = tl.load(p_b, boundary_check=(0, 1)).to(tl.float32)
-    b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
-    b_a = tl.load(p_a, boundary_check=(0, 1)).to(tl.float32)
-    b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1)).to(tl.float32)
-    b_dAab = tl.load(p_dAab, boundary_check=(0, 1)).to(tl.float32)
-    b_dAqb = tl.load(p_dAqb, boundary_check=(0, 1)).to(tl.float32)
-    b_dAak = tl.load(p_dAak, boundary_check=(0, 1)).to(tl.float32)
+    b_k = tl.load(p_k, boundary_check=(0, 1))
+    b_b = tl.load(p_b, boundary_check=(0, 1))
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_a = tl.load(p_a, boundary_check=(0, 1))
+    b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
+    b_dAab = tl.load(p_dAab, boundary_check=(0, 1))
+    b_dAqb = tl.load(p_dAqb, boundary_check=(0, 1))
+    b_dAak = tl.load(p_dAak, boundary_check=(0, 1))
 
 
     # inter chunk gradient calculation
@@ -170,8 +170,8 @@ def chunk_dplr_bwd_kernel_intra(
             b_qj = tl.sum(tl.where(mask_idx[:, None], b_q, 0), 0)[None, :]
             b_aj = tl.sum(tl.where(mask_idx[:, None], b_a, 0), 0)[None, :]
 
-        tmp1 = exp(b_gi - b_gij)
-        tmp2 = exp(b_ge - b_gij)
+        tmp1 = exp((b_gi - b_gij).to(tl.float32))
+        tmp2 = exp((b_ge - b_gij).to(tl.float32))
 
         m_e1 = (o_i[:, None] > j).to(tl.int1)
         m_i1 = (o_i[:, None] >= j).to(tl.int1)
@@ -182,8 +182,8 @@ def chunk_dplr_bwd_kernel_intra(
 
         m_i2 = (o_i[:, None] <= j).to(tl.int1)
         m_e2 = (o_i[:, None] < j).to(tl.int1)
-        tmp1 = exp(b_gij - b_gi)
-        tmp2 = exp(b_gej - b_gi)
+        tmp1 = exp((b_gij - b_gi).to(tl.float32))
+        tmp2 = exp((b_gej - b_gi).to(tl.float32))
         b_dk += m_i2 * b_dA_qk_j * b_qj * tmp1
         b_dk += m_e2 * b_dA_ak_j * b_aj * tmp2
         b_db += m_i2 * b_dA_qb_j * b_qj * tmp1
