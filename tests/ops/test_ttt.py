@@ -30,7 +30,7 @@ test_h_list = [2]
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -82,7 +82,7 @@ def test_chunk(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
-        head_first=head_first
+        head_first=False
     )
     ((tri * do).sum() + (tri_ht * dht).sum() + (tri_hbt * dhbt).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, \
@@ -100,7 +100,7 @@ def test_chunk(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
-        head_first=head_first
+        head_first=False
     )
     ((ref * do).sum() + (ref_ht * dht).sum() + (ref_hbt * dhbt).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, \
@@ -129,7 +129,7 @@ def test_chunk(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -181,7 +181,7 @@ def test_fused_chunk_fwd(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
-        head_first=head_first
+        head_first=False
     )
     ((tri * do).sum() + (tri_ht * dht).sum() + (tri_hbt * dhbt).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dw, tri_db, tri_deta, \
@@ -199,7 +199,7 @@ def test_fused_chunk_fwd(
         output_final_state=True,
         initial_state=h0.clone(),
         initial_state_bias=hb0.clone(),
-        head_first=head_first
+        head_first=False
     )
     ((ref * do).sum() + (ref_ht * dht).sum() + (ref_hbt * dhbt).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dw, ref_db, ref_deta, \

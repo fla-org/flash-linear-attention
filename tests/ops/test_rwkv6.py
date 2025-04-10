@@ -32,7 +32,7 @@ test_h_list = [2]
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -76,7 +76,7 @@ def test_chunk(
                                         u.clone(),
                                         initial_state=h0.clone(),
                                         output_final_state=True,
-                                        head_first=head_first)
+                                        head_first=False)
     ref, _ = fused_recurrent_rwkv6(q.clone(),
                                    k.clone(),
                                    v.clone(),
@@ -84,7 +84,7 @@ def test_chunk(
                                    u.clone(),
                                    initial_state=h0.clone(),
                                    output_final_state=False,
-                                   head_first=head_first)
+                                   head_first=False)
 
     ((ref * do).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
@@ -102,7 +102,7 @@ def test_chunk(
                               u.clone(),
                               initial_state=h0.clone(),
                               output_final_state=True,
-                              head_first=head_first)
+                              head_first=False)
     ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None

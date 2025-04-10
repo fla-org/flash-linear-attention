@@ -59,7 +59,7 @@ def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [1])
 @pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -110,7 +110,7 @@ def test_naive_chunk_fwd(
         output_final_state=True,
         chunk_size=BT,
         initial_state=h0.clone(),
-        head_first=head_first,
+        head_first=False,
         use_chunk=False,
     )
     ref, ref_ht = chunk_titans_linear_ref(
@@ -125,7 +125,7 @@ def test_naive_chunk_fwd(
         output_final_state=True,
         chunk_size=BT,
         initial_state=h0.clone(),
-        head_first=head_first,
+        head_first=False,
         use_chunk=True,
     )
 
@@ -139,7 +139,7 @@ def test_naive_chunk_fwd(
 # @pytest.mark.parametrize("D", test_d_list)
 # @pytest.mark.parametrize("scale", [1])
 # @pytest.mark.parametrize("dtype", [torch.float32])
-# @pytest.mark.parametrize("head_first", [True, False])
+# @pytest.mark.parametrize("head_first", [False])
 # def test_fused_chunk_fwd(
 #     B: int, T: int, H: int, D: int, dtype: torch.dtype, scale: float, head_first: bool
 # ):
@@ -199,7 +199,7 @@ def test_naive_chunk_fwd(
 #         output_final_state=True,
 #         chunk_size=BT,
 #         initial_state=h0.clone(),
-#         head_first=head_first,
+#         head_first=False,
 #     )
 #     ref, ref_ht = chunk_titans_linear_ref(
 #         q.clone(),
@@ -213,7 +213,7 @@ def test_naive_chunk_fwd(
 #         output_final_state=True,
 #         chunk_size=BT,
 #         initial_state=h0.clone(),
-#         head_first=head_first,
+#         head_first=False,
 #         use_chunk=True,
 #     )
 

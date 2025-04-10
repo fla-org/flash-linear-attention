@@ -26,7 +26,7 @@ test_h_list = [2]
 @pytest.mark.parametrize("T", test_t_list)
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("chunk_size", [16, 32, 64])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"

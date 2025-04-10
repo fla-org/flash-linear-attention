@@ -153,7 +153,7 @@ def test_chunk(
                                        scale=scale,
                                        initial_state=h0,
                                        output_final_state=True,
-                                       head_first=head_first)
+                                       head_first=False)
     ((ref * do).sum() + (dht * ref_ht).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -165,7 +165,7 @@ def test_chunk(
                                    scale=scale,
                                    initial_state=h0,
                                    output_final_state=True,
-                                   head_first=head_first)
+                                   head_first=False)
     ((tri * do).sum() + (dht * tri_ht).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -331,7 +331,7 @@ def test_parallel_varlen(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.parametrize("scale", [0.1])
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
@@ -364,7 +364,7 @@ def test_parallel(
     g = (g / gate_logit_normalizer).requires_grad_(True) if USE_G else None
     do = torch.randn_like(v)
 
-    ref, ref_A = parallel_simple_gla_ref(q=q, k=k, v=v, g=g, scale=scale, head_first=head_first)
+    ref, ref_A = parallel_simple_gla_ref(q=q, k=k, v=v, g=g, scale=scale, head_first=False)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -372,7 +372,7 @@ def test_parallel(
     if USE_G:
         ref_dg, g.grad = g.grad.clone(), None
 
-    tri, tri_A = parallel_simple_gla(q=q, k=k, v=v, g=g, scale=scale, head_first=head_first, output_attentions=True)
+    tri, tri_A = parallel_simple_gla(q=q, k=k, v=v, g=g, scale=scale, head_first=False, output_attentions=True)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None

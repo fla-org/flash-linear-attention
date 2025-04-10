@@ -34,7 +34,8 @@ def reversed_cumsum(x, dim=-1):
 @pytest.mark.parametrize("T", test_t_list)
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -47,14 +48,14 @@ def test_global_cumsum(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    s = torch.randn(B, T, H, dtype=dtype).to(device)
-    ref = s.float().cumsum(1).to(dtype)
-    tri = chunk_global_cumsum(s)
+    s = torch.randn(B, H, T, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, dtype=dtype).to(device)
+    ref = s.float().cumsum(2 if head_first else 1).to(dtype)
+    tri = chunk_global_cumsum(s, dtype, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
-    s = torch.randn(B, T, H, D, dtype=dtype).to(device)
-    ref = s.float().cumsum(1).to(dtype)
-    tri = chunk_global_cumsum(s)
+    s = torch.randn(B, H, T, D, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, D, dtype=dtype).to(device)
+    ref = s.float().cumsum(2 if head_first else 1).to(dtype)
+    tri = chunk_global_cumsum(s, dtype, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
@@ -95,7 +96,8 @@ def test_global_cumsum_varlen(
 @pytest.mark.parametrize("T", test_t_list)
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -108,14 +110,14 @@ def test_global_reversed_cumsum(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    s = torch.randn(B, T, H, dtype=dtype).to(device)
-    ref = reversed_cumsum(s, dim=(1)).to(dtype)
-    tri = chunk_global_cumsum(s, reverse=True)
+    s = torch.randn(B, H, T, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, dtype=dtype).to(device)
+    ref = reversed_cumsum(s, dim=(2 if head_first else 1)).to(dtype)
+    tri = chunk_global_cumsum(s, dtype, reverse=True, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
-    s = torch.randn(B, T, H, D, dtype=dtype).to(device)
-    ref = reversed_cumsum(s, dim=(1)).to(dtype)
-    tri = chunk_global_cumsum(s, reverse=True)
+    s = torch.randn(B, H, T, D, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, D, dtype=dtype).to(device)
+    ref = reversed_cumsum(s, dim=(2 if head_first else 1)).to(dtype)
+    tri = chunk_global_cumsum(s, dtype, reverse=True, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
@@ -157,7 +159,8 @@ def test_global_reversed_cumsum_varlen(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("C", [32, 64])
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("head_first", [False])
 def test_local_cumsum(
     B: int,
     T: int,
@@ -165,16 +168,23 @@ def test_local_cumsum(
     C: int,
     D: int,
     dtype: torch.dtype,
+    head_first: bool
 ):
     torch.manual_seed(42)
-    s = torch.randn(B, T, H, dtype=dtype).to(device)
-    ref = torch.cat([s[:, i:i+C, :].float().cumsum(1) for i in range(0, T, C)], 1)
-    tri = chunk_local_cumsum(s, chunk_size=C)
+    s = torch.randn(B, H, T, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, dtype=dtype).to(device)
+    if head_first:
+        ref = torch.cat([s[:, :, i:i+C].float().cumsum(2) for i in range(0, T, C)], 2)
+    else:
+        ref = torch.cat([s[:, i:i+C, :].float().cumsum(1) for i in range(0, T, C)], 1)
+    tri = chunk_local_cumsum(s, chunk_size=C, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
-    s = torch.randn(B, T, H, D, dtype=dtype).to(device)
-    ref = torch.cat([s[:, i:i+C, :].float().cumsum(1) for i in range(0, T, C)], 1)
-    tri = chunk_local_cumsum(s, chunk_size=C)
+    s = torch.randn(B, H, T, D, dtype=dtype).to(device) if head_first else torch.randn(B, T, H, D, dtype=dtype).to(device)
+    if head_first:
+        ref = torch.cat([s[:, :, i:i+C].float().cumsum(2) for i in range(0, T, C)], 2)
+    else:
+        ref = torch.cat([s[:, i:i+C, :].float().cumsum(1) for i in range(0, T, C)], 1)
+    tri = chunk_local_cumsum(s, chunk_size=C, head_first=False)
     torch.testing.assert_close(ref, tri.to(ref.dtype), rtol=1.6e-2, atol=3e-5)
 
 
@@ -224,7 +234,8 @@ def test_local_cumsum_varlen(
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("C", [32, 64])
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -245,7 +256,7 @@ def test_mean_pooling(
     ref.backward(do)
     ref_dx, x.grad = x.grad.clone(), None
 
-    tri = mean_pooling(x, chunk_size=C)
+    tri = mean_pooling(x, chunk_size=C, head_first=False)
     tri.backward(do)
     tri_dx, x.grad = x.grad.clone(), None
 

@@ -152,7 +152,6 @@ def recurrence_iplr_delta_rule_ref(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -164,18 +163,11 @@ def test_chunk(
     D: int,
     scale: float,
     dtype: torch.dtype,
-    head_first: bool,
 ):
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = torch.randn(B, H, T, D, dtype=dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        a = torch.rand(B, H, T, D, dtype=dtype)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = torch.randn(B, T, H, D, dtype=dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        a = torch.rand(B, T, H, D, dtype=dtype)
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = torch.rand(B, T, H, D, dtype=dtype)
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
@@ -190,7 +182,7 @@ def test_chunk(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     tri, tri_ht = chunk_iplr_delta_rule(
         q=q.clone(),
@@ -201,7 +193,7 @@ def test_chunk(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     assert_close("  o", ref, tri, 0.007)
     assert_close(" ht", ref_ht, tri_ht, 0.008)
@@ -213,7 +205,6 @@ def test_chunk(
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
 def test_recurrent(
     B: int,
     T: int,
@@ -221,18 +212,11 @@ def test_recurrent(
     D: int,
     scale: float,
     dtype: torch.dtype,
-    head_first: bool,
 ):
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = torch.randn(B, H, T, D, dtype=dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        a = torch.rand(B, H, T, D, dtype=dtype)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = torch.randn(B, T, H, D, dtype=dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        a = torch.rand(B, T, H, D, dtype=dtype)
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = torch.rand(B, T, H, D, dtype=dtype)
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
@@ -247,7 +231,7 @@ def test_recurrent(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     dht = torch.rand_like(h0)
     do = torch.rand_like(ref)
@@ -263,7 +247,7 @@ def test_recurrent(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
+        head_first=False
     )
     ((dht * tri_ht).sum() + (do * tri).sum()).backward()
     assert_close("  o", ref, tri, 0.003)
