@@ -16,7 +16,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -39,7 +39,7 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     o,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -57,7 +57,7 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
@@ -118,10 +118,10 @@ def fused_recurrent_dplr_delta_rule_fwd(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
 
     h0 = initial_state
@@ -142,7 +142,7 @@ def fused_recurrent_dplr_delta_rule_fwd(
         o,
         h0,
         ht,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         B=B,
@@ -172,7 +172,7 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        offsets: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ):
         o, ht = fused_recurrent_dplr_delta_rule_fwd(
             q=q,
@@ -185,7 +185,7 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             reverse=reverse,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
         return o, ht
 
@@ -213,7 +213,6 @@ def fused_recurrent_dplr_delta_rule(
     reverse: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False,
-    input_precision: Optional[torch.dtype] = torch.bfloat16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
@@ -248,9 +247,6 @@ def fused_recurrent_dplr_delta_rule(
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `False`.
-        input_precision (Optional[torch.dtype]):
-            The precision of the input tensors. Default: `torch.bfloat16`.
-            Note: The output tensors will be in the same precision as the input tensors. Use torch.float16 with caution.
     """
     if head_first:
         warnings.warn(
@@ -265,8 +261,7 @@ def fused_recurrent_dplr_delta_rule(
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
         )
-    # use pytorch fast path here, if q, k, v are already in input_precision, nothing to do
-    q, k, v = q.to(input_precision), k.to(input_precision), v.to(input_precision)
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

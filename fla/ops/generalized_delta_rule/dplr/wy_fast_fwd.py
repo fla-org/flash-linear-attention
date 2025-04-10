@@ -13,7 +13,7 @@ from fla.utils import is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -27,8 +27,8 @@ from fla.utils import is_gather_supported, use_cuda_graph
 def fwd_prepare_wy_repr_kernel_chunk32(
     A_ab,
     A_ab_inv,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
@@ -38,8 +38,8 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -57,7 +57,7 @@ def fwd_prepare_wy_repr_kernel_chunk32(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -72,8 +72,8 @@ def fwd_prepare_wy_repr_kernel_chunk32(
 def fwd_prepare_wy_repr_kernel_chunk64(
     A_ab,
     A_ab_inv,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
@@ -84,8 +84,8 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -136,27 +136,27 @@ def fwd_prepare_wy_repr_kernel_chunk64(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'BK', 'BV'],
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def fwd_wu_kernel(
-    u,
     w,
+    u,
     ag,
     v,
     A_ab_inv,
     A_ak,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -169,17 +169,18 @@ def fwd_wu_kernel(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+    o_s = tl.arange(0, BT)
 
     p_A_ab_inv = tl.make_block_ptr(A_ab_inv + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     p_A_ak = tl.make_block_ptr(A_ak + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+
     b_Aab_inv = tl.load(p_A_ab_inv, boundary_check=(0, 1))
     b_Aak = tl.load(p_A_ak, boundary_check=(0, 1))
-    o_s = tl.arange(0, BT)
     b_Aab_inv = tl.where(o_s[:, None] >= o_s[None, :], b_Aab_inv, 0)
     b_Aak = tl.where(o_s[:, None] > o_s[None, :], b_Aak, 0)
     # let's use tf32 here
@@ -208,19 +209,19 @@ def fwd_wu(
     v: torch.Tensor,
     A_ak: torch.Tensor,
     A_ab_inv: torch.Tensor,
-    offsets: Optional[torch.LongTensor],
+    cu_seqlens: Optional[torch.LongTensor],
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *ag.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(triton.next_power_of_2(K), 64)
     BV = min(triton.next_power_of_2(V), 64)
 
-    u = torch.empty_like(v)
     w = torch.empty_like(ag)
+    u = torch.empty_like(v)
     fwd_wu_kernel[(NT, B * H)](
         ag=ag,
         v=v,
@@ -228,8 +229,8 @@ def fwd_wu(
         A_ab_inv=A_ab_inv,
         w=w,
         u=u,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,
@@ -246,22 +247,22 @@ def fwd_prepare_wy_repr(
     v: torch.Tensor,
     A_ak: torch.Tensor,
     A_ab: torch.Tensor,
-    offsets: Optional[torch.LongTensor],
+    cu_seqlens: Optional[torch.LongTensor],
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, _ = ag.shape
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
     fwd_fn = fwd_prepare_wy_repr_kernel_chunk64 if BT == 64 else fwd_prepare_wy_repr_kernel_chunk32
     A_ab_inv = torch.empty_like(A_ab)
     fwd_fn[(NT, B * H)](
         A_ab=A_ab,
         A_ab_inv=A_ab_inv,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         BT=BT,
@@ -272,7 +273,7 @@ def fwd_prepare_wy_repr(
         v=v,
         A_ak=A_ak,
         A_ab_inv=A_ab_inv,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     return w, u, A_ab_inv

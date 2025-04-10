@@ -38,17 +38,12 @@ def chunk_iplr_delta_rule_ref(
     output_final_state: bool = True,
     scale: float = None,
     chunk_size: int = 64,
-    head_first: bool = True,
 ):
     BT = chunk_size
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
-    if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        a = a.transpose(1, 2)
-        b = b.transpose(1, 2)
+
+    q, k, v, a, b = map(lambda x: x.transpose(1, 2), (q, k, v, a, b))
     T = q.shape[-2]
     pad_len = (BT - (T % BT)) % BT
     if pad_len > 0:
@@ -97,8 +92,7 @@ def chunk_iplr_delta_rule_ref(
     S = None if output_final_state is False else S
     o = rearrange(o, 'b h n c d -> b h (n c) d')
     o = o[:, :, :T]
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o, S
 
 
@@ -110,19 +104,12 @@ def recurrence_iplr_delta_rule_ref(
     b,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = True,
-    head_first: bool = True,
     scale: Optional[float] = None
 ):
     orig_dtype = q.dtype
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
-    if not head_first:
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        a = a.transpose(1, 2)
-        b = b.transpose(1, 2)
-    q, k, v, a, b = map(lambda x: x.to(torch.float32), [q, k, v, a, b])
+    q, k, v, a, b = map(lambda x: x.transpose(1, 2).to(torch.float32), [q, k, v, a, b])
     q = q * scale
     B, H, L, DK = q.shape
     DV = v.shape[-1]
@@ -141,21 +128,19 @@ def recurrence_iplr_delta_rule_ref(
         S = S + _kv
         o[:, :, i] = torch.einsum('bhd,bhdm->bhm', _q, S)
     S = None if output_final_state is False else S
-    if not head_first:
-        o = o.transpose(1, 2)
+    o = o.transpose(1, 2)
     return o.to(orig_dtype), S
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("scale", [0.25])
-@pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('scale', [0.25])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 def test_chunk(
     B: int,
@@ -164,18 +149,11 @@ def test_chunk(
     D: int,
     scale: float,
     dtype: torch.dtype,
-    head_first: bool,
 ):
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = torch.randn(B, H, T, D, dtype=dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        a = torch.rand(B, H, T, D, dtype=dtype)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = torch.randn(B, T, H, D, dtype=dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        a = torch.rand(B, T, H, D, dtype=dtype)
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = torch.rand(B, T, H, D, dtype=dtype)
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
@@ -190,7 +168,6 @@ def test_chunk(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
     )
     tri, tri_ht = chunk_iplr_delta_rule(
         q=q.clone(),
@@ -201,19 +178,17 @@ def test_chunk(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
     )
-    assert_close("  o", ref, tri, 0.007)
-    assert_close(" ht", ref_ht, tri_ht, 0.008)
+    assert_close(' o', ref, tri, 0.007)
+    assert_close('ht', ref_ht, tri_ht, 0.008)
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("scale", [0.25])
-@pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('scale', [0.25])
+@pytest.mark.parametrize('dtype', [torch.float16])
 def test_recurrent(
     B: int,
     T: int,
@@ -221,18 +196,11 @@ def test_recurrent(
     D: int,
     scale: float,
     dtype: torch.dtype,
-    head_first: bool,
 ):
-    if head_first:
-        q = torch.randn(B, H, T, D, dtype=dtype)
-        k = torch.randn(B, H, T, D, dtype=dtype)
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        a = torch.rand(B, H, T, D, dtype=dtype)
-    else:
-        q = torch.randn(B, T, H, D, dtype=dtype)
-        k = torch.randn(B, T, H, D, dtype=dtype)
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        a = torch.rand(B, T, H, D, dtype=dtype)
+    q = torch.randn(B, T, H, D, dtype=dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    a = torch.rand(B, T, H, D, dtype=dtype)
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
@@ -247,7 +215,6 @@ def test_recurrent(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
     )
     dht = torch.rand_like(h0)
     do = torch.rand_like(ref)
@@ -263,14 +230,13 @@ def test_recurrent(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        head_first=head_first
     )
     ((dht * tri_ht).sum() + (do * tri).sum()).backward()
-    assert_close("  o", ref, tri, 0.003)
-    assert_close(" ht", ref_ht, tri_ht, 0.003)
-    assert_close(" dq", dq, q.grad, 0.003)
-    assert_close(" dk", dk, k.grad, 0.003)
-    assert_close(" dv", dv, v.grad, 0.003)
-    assert_close(" da", da, a.grad, 0.003)
-    assert_close(" db", db, b.grad, 0.003)
-    assert_close("dh0", dh0, h0.grad, 0.003)
+    assert_close('  o', ref, tri, 0.003)
+    assert_close(' ht', ref_ht, tri_ht, 0.003)
+    assert_close(' dq', dq, q.grad, 0.003)
+    assert_close(' dk', dk, k.grad, 0.003)
+    assert_close(' dv', dv, v.grad, 0.003)
+    assert_close(' da', da, a.grad, 0.003)
+    assert_close(' db', db, b.grad, 0.003)
+    assert_close('dh0', dh0, h0.grad, 0.003)

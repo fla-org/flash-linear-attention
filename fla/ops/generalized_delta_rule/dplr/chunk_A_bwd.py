@@ -13,7 +13,7 @@ from fla.utils import check_shared_mem, is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -46,8 +46,8 @@ def chunk_dplr_bwd_kernel_intra(
     dbg,
     dgk,
     dgk_offset,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale: tl.constexpr,
     T,
     H: tl.constexpr,
@@ -63,8 +63,8 @@ def chunk_dplr_bwd_kernel_intra(
     i_b, i_h = i_bh // H, i_bh % H
     i_t, i_i = i_c // NC, i_c % NC
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
     T = eos - bos
@@ -289,7 +289,7 @@ def chunk_dplr_bwd_kernel_intra(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -307,8 +307,8 @@ def chunk_dplr_bwd_dgk_kernel(
     dgk_offset,
     dgk_last,
     dgk_output,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -320,8 +320,8 @@ def chunk_dplr_bwd_dgk_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -366,8 +366,8 @@ def chunk_dplr_bwd_dqk_intra(
     dag: torch.Tensor,
     dbg: torch.Tensor,
     dgk_last: torch.Tensor,
-    offsets: Optional[torch.LongTensor] = None,
     scale: float = 1.0,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
 ):
     B, T, H, K = q.shape
@@ -375,8 +375,8 @@ def chunk_dplr_bwd_dqk_intra(
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K)) if check_shared_mem() else min(32, triton.next_power_of_2(K))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
 
@@ -409,8 +409,8 @@ def chunk_dplr_bwd_dqk_intra(
         dbg=dbg,
         da=da,
         db=db,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         scale=scale,
         T=T,
         H=H,
@@ -422,16 +422,16 @@ def chunk_dplr_bwd_dqk_intra(
         GATHER_SUPPORTED=is_gather_supported
     )
 
-    def grid2(meta): return (NT, triton.cdiv(K, meta['BK']), B * H)
     dgk_output = torch.empty_like(dgk)
 
-    chunk_dplr_bwd_dgk_kernel[grid2](
+    def grid(meta): return (NT, triton.cdiv(K, meta['BK']), B * H)
+    chunk_dplr_bwd_dgk_kernel[grid](
         dgk=dgk,
         dgk_offset=dgk_offset,
         dgk_last=dgk_last,
         dgk_output=dgk_output,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,
