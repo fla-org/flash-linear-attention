@@ -15,7 +15,7 @@ from fla.utils import input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -37,7 +37,7 @@ def fused_recurrent_fwd_kernel(
     ha,  # tmp variable [B, H, L, V] for storing intermediate results of (h * a[None, :]).sum(0)
     h0,  # initial hidden state [B, H, K, V]
     ht,  # final hidden state [B, H, K, V]
-    offsets,  # varlen offsets
+    cu_seqlens,  # varlen cu_seqlens
     scale,  # K ** -0.5
     H,  # n_heads
     T,  # seq_len
@@ -49,12 +49,11 @@ def fused_recurrent_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
     IS_VARLEN: tl.constexpr,
 ):
-    # indices
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
@@ -107,7 +106,7 @@ def fused_recurrent_fwd_kernel(
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_DHT': lambda args: args['dht'] is not None,
     'USE_DH0': lambda args: args['dh0'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -138,7 +137,7 @@ def fused_recurrent_bwd_kernel(
     dha,  # gradient of ha [NK, B, H, L, V]
     h0,  # initial state [B, H, K, V]
     scale,  # K ** -0.5
-    offsets,  # offsets
+    cu_seqlens,  # cu_seqlens
     B,  # batch_size
     H,  # n_heads
     T,  # seq_len
@@ -158,7 +157,7 @@ def fused_recurrent_bwd_kernel(
     dq += i_v * B * H * K * T
     da += i_v * B * H * K * T
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
@@ -281,9 +280,20 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def forward(ctx, q, k, v, a, b, scale=None, initial_state=None, output_final_state=False, offsets=None):
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        scale: Optional[float] = None,
+        initial_state: Optional[torch.Tensor] = None,
+        output_final_state: bool = False,
+        cu_seqlens: Optional[torch.LongTensor] = None
+    ):
         B, T, H, K, V = *k.shape, v.shape[-1]
-        N = B if offsets is None else len(offsets) - 1
+        N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
         BK = triton.next_power_of_2(K)
         if output_final_state:
@@ -309,7 +319,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
             h0=initial_state,
             ht=final_state,
             scale=scale,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             H=H,
             T=T,
             K=K,
@@ -318,7 +328,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
         )
         ctx.save_for_backward(q, k, v, a, b, ha, initial_state)
         ctx.scale = scale
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return o, final_state
 
     @staticmethod
@@ -326,11 +336,10 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
     def backward(ctx, do, dht):
         q, k, v, a, b, ha, initial_state = ctx.saved_tensors
         B, T, H, K, V = *q.shape, v.shape[-1]
-
-        N = B if ctx.offsets is None else len(ctx.offsets) - 1
-        scale = ctx.scale
+        N = B if ctx.cu_seqlens is None else len(ctx.cu_seqlens) - 1
         BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 64)
         NV = triton.cdiv(V, BV)
+        scale = ctx.scale
 
         dq = q.new_empty(NV, *q.shape)
         dk = k.new_empty(NV, *k.shape)
@@ -363,7 +372,7 @@ class FusedRecurrentIPLRDeltaRuleFunction(torch.autograd.Function):
             dha=dha,
             h0=initial_state,
             scale=scale,
-            offsets=ctx.offsets,
+            cu_seqlens=ctx.cu_seqlens,
             B=B,
             H=H,
             T=T,
@@ -433,7 +442,7 @@ def fused_recurrent_iplr_delta_rule(
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `offsets`."
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                 f"Please flatten variable-length inputs before processing."
             )
         if head_first:

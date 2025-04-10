@@ -19,7 +19,7 @@ BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -40,7 +40,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     h,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     T,
     H: tl.constexpr,
@@ -58,7 +58,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -102,7 +102,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -124,8 +124,8 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
     b,
     h,
     o,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale,
     T,
     H: tl.constexpr,
@@ -141,8 +141,8 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -206,7 +206,7 @@ def chunk_generalized_iplr_delta_rule_fwd_o(
     b: torch.Tensor,
     h: torch.Tensor,
     scale: Optional[float] = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
@@ -214,8 +214,8 @@ def chunk_generalized_iplr_delta_rule_fwd_o(
         scale = k.shape[-1] ** -0.5
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = torch.empty_like(v)
 
@@ -232,8 +232,8 @@ def chunk_generalized_iplr_delta_rule_fwd_o(
         b=b,
         h=h,
         o=o,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         scale=scale,
         T=T,
         H=H,
@@ -252,18 +252,18 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     b: torch.Tensor,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, u.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
@@ -301,7 +301,7 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
         h=h,
         h0=initial_state,
         ht=final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
         H=H,
@@ -325,7 +325,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
     T = q.shape[1]
@@ -335,7 +335,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         b=b,
         k=k,
         v=v,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
 
@@ -347,7 +347,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         u=u,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     o = chunk_generalized_iplr_delta_rule_fwd_o(
@@ -358,7 +358,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         b=b,
         h=h,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     return o, final_state
@@ -379,7 +379,7 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        offsets: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ):
         chunk_size = 64
 
@@ -392,7 +392,7 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
         return o.to(q.dtype), final_state

@@ -14,7 +14,7 @@ from fla.utils import input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -31,7 +31,7 @@ def fused_recurrent_hgrn_fwd_kernel(
     o,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     T,
     D: tl.constexpr,
     BD: tl.constexpr,
@@ -41,7 +41,7 @@ def fused_recurrent_hgrn_fwd_kernel(
 ):
     i_d, i_n = tl.program_id(0), tl.program_id(1)
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
@@ -75,7 +75,7 @@ def fused_recurrent_hgrn_fwd_kernel(
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -95,7 +95,7 @@ def fused_recurrent_hgrn_bwd_kernel(
     do,
     dht,
     dh0,
-    offsets,
+    cu_seqlens,
     T,
     D: tl.constexpr,
     BD: tl.constexpr,
@@ -105,7 +105,7 @@ def fused_recurrent_hgrn_bwd_kernel(
 ):
     i_d, i_n = tl.program_id(0), tl.program_id(1)
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
@@ -157,10 +157,10 @@ def fused_recurrent_hgrn_fwd(
     g: torch.Tensor,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, D = x.shape
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
     o = torch.empty_like(x)
     final_state = x.new_empty(N, D) if output_final_state else None
@@ -172,7 +172,7 @@ def fused_recurrent_hgrn_fwd(
         o=o,
         h0=initial_state,
         ht=final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         T=T,
         D=D
     )
@@ -185,10 +185,10 @@ def fused_recurrent_hgrn_bwd(
     do: torch.Tensor,
     dht: torch.Tensor = None,
     initial_state: torch.Tensor = None,
-    offsets: Optional[torch.LongTensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, D = do.shape
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
     dx = torch.empty_like(o, dtype=torch.float)
     dg = torch.empty_like(g, dtype=torch.float)
@@ -203,7 +203,7 @@ def fused_recurrent_hgrn_bwd(
         do=do,
         dht=dht,
         dh0=dh0,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         T=T,
         D=D
     )
@@ -220,24 +220,24 @@ class FusedRecurrentHGRNFunction(torch.autograd.Function):
         g: torch.Tensor,
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
-        offsets: Optional[torch.LongTensor] = None
+        cu_seqlens: Optional[torch.LongTensor] = None
     ):
         o, ht = fused_recurrent_hgrn_fwd(
             x=x,
             g=g,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            offsets=offsets
+            cu_seqlens=cu_seqlens
         )
         ctx.save_for_backward(g, o, initial_state)
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return o, ht
 
     @staticmethod
     @input_guard
     def backward(ctx, do, dht=None):
         g, o, initial_state = ctx.saved_tensors
-        offsets = ctx.offsets
+        cu_seqlens = ctx.cu_seqlens
 
         dx, dg, dh0 = fused_recurrent_hgrn_bwd(
             g=g,
@@ -245,7 +245,7 @@ class FusedRecurrentHGRNFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             initial_state=initial_state,
-            offsets=offsets
+            cu_seqlens=cu_seqlens
         )
         return dx, dg, dh0, None, None
 

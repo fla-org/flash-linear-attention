@@ -19,7 +19,7 @@ NUM_WARPS = [1, 2] if is_nvidia_hopper else [1, 2, 4, 8]
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_INITIAL_STATE_B': lambda args: args['hb0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -44,7 +44,7 @@ def fused_chunk_ttt_linear_fwd_kernel(
     hb0,
     ht,
     hbt,
-    offsets,
+    cu_seqlens,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -57,11 +57,10 @@ def fused_chunk_ttt_linear_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    # indices
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -180,7 +179,6 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
     USE_INITIAL_STATE: tl.constexpr,
     USE_INITIAL_STATE_B: tl.constexpr,
 ):
-    # indices
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
     bos, _ = i_n * T, i_n * T + T
@@ -308,7 +306,6 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT_B: tl.constexpr,
 ):
-    # indices
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
     bos, _ = i_n * T, i_n * T + T
@@ -436,9 +433,9 @@ def fused_chunk_ttt_linear_bwd_h(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    assert offsets is None, "bwd of varlen is not implemented yet."
+    assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     N, NT = B, triton.cdiv(T, BT)
@@ -500,9 +497,9 @@ def fused_chunk_ttt_linear_bwd_dh(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    assert offsets is None, "bwd of varlen is not implemented yet."
+    assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     N = B
@@ -566,12 +563,12 @@ def fused_chunk_ttt_linear_fwd(
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     BT: int = 16
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
     o = torch.empty_like(v)
@@ -593,7 +590,7 @@ def fused_chunk_ttt_linear_fwd(
         hb0=initial_state_bias,
         ht=final_state,
         hbt=final_state_bias,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         T=T,
         H=H,
         K=K,
@@ -620,9 +617,9 @@ def fused_chunk_ttt_linear_bwd(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    assert offsets is None, "bwd of varlen is not implemented yet."
+    assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     dq, h, v2, x, y, rstd = fused_chunk_ttt_linear_bwd_h(
         q=q,
         k=k,
@@ -636,7 +633,7 @@ def fused_chunk_ttt_linear_bwd(
         BT=BT,
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
     )
     dk, dv, de, dw, db, dh0, dhb0 = fused_chunk_ttt_linear_bwd_dh(
         q=q,
@@ -657,7 +654,7 @@ def fused_chunk_ttt_linear_bwd(
         BT=BT,
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
     )
     return dq, dk, dv, de, dw, db, dh0, dhb0
 
@@ -668,7 +665,7 @@ class FusedChunkTTTLinearFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, w, b, BT, eta, scale, eps, initial_state,
-                initial_state_bias, output_final_state, offsets):
+                initial_state_bias, output_final_state, cu_seqlens):
         o, final_state, final_state_bias = fused_chunk_ttt_linear_fwd(
             q=q,
             k=k,
@@ -682,13 +679,13 @@ class FusedChunkTTTLinearFunction(torch.autograd.Function):
             initial_state=initial_state,
             initial_state_bias=initial_state_bias,
             output_final_state=output_final_state,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, eta, w, b, initial_state, initial_state_bias)
         ctx.BT = BT
         ctx.scale = scale
         ctx.eps = eps
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return o.to(q.dtype), final_state, final_state_bias
 
     @staticmethod
@@ -711,7 +708,7 @@ class FusedChunkTTTLinearFunction(torch.autograd.Function):
             BT=ctx.BT,
             initial_state=initial_state,
             initial_state_bias=initial_state_bias,
-            offsets=ctx.offsets,
+            cu_seqlens=ctx.cu_seqlens,
         )
         return dq.to(q), dk.to(k), dv.to(v), dw.to(w), db.to(b), None, de.to(eta), None, None, dh0, dhb0, None, None
 

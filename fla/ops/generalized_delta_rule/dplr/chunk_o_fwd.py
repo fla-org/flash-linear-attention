@@ -14,7 +14,7 @@ BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -36,8 +36,8 @@ def chunk_dplr_fwd_kernel_o(
     A_qb,
     h,
     o,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -52,8 +52,8 @@ def chunk_dplr_fwd_kernel_o(
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -93,14 +93,14 @@ def chunk_dplr_fwd_o(
     A_qk: torch.Tensor,
     A_qb: torch.Tensor,
     h: torch.Tensor,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16
 ) -> torch.Tensor:
     B, T, H, K, V = *qg.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = torch.empty_like(v)
     def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
@@ -112,8 +112,8 @@ def chunk_dplr_fwd_o(
         A_qb=A_qb,
         h=h,
         o=o,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,

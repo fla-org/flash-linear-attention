@@ -29,8 +29,8 @@ NUM_WARPS = [2, 4, 8] if is_nvidia_hopper else [2, 4, 8, 16]
 @triton.heuristics({
     'NV': lambda args: triton.cdiv(args['V'], args['BV']),
     'OUTPUT_ATTENTIONS': lambda args: args['attn'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
-    'USE_G': lambda args: args['g'] is not None
+    'USE_G': lambda args: args['g'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -49,8 +49,8 @@ def parallel_simple_gla_fwd_kernel(
     o,
     attn,
     scale,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -71,8 +71,8 @@ def parallel_simple_gla_fwd_kernel(
     o += i_k * B * T * H * V
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -364,8 +364,8 @@ def parallel_simple_gla_bwd_kernel_dkv(
 
 @triton.heuristics({
     'NV': lambda args: triton.cdiv(args['V'], args['BV']),
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
-    'USE_G': lambda args: args['g'] is not None
+    'USE_G': lambda args: args['g'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -386,8 +386,8 @@ def parallel_simple_gla_bwd_kernel(
     dv,
     dg,
     scale,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     B: tl.constexpr,
     H: tl.constexpr,
@@ -411,8 +411,8 @@ def parallel_simple_gla_bwd_kernel(
         dg += i_kv * B * H * T
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -491,7 +491,7 @@ def parallel_simple_gla_fwd(
     scale: float,
     output_attentions: bool = False,
     chunk_size: int = 128,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT, BS = chunk_size, 32
@@ -509,12 +509,12 @@ def parallel_simple_gla_fwd(
     NV = triton.cdiv(V, BV)
     assert BT % BS == 0
 
-    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     # local cumulative decay in log space
     if g is not None:
-        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=offsets)
+        g = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
     grid = (NK * NV, NT, B * H)
     o = torch.empty(NK, *v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     attn = q.new_zeros(NK, B, H, T, T) if output_attentions else None
@@ -527,8 +527,8 @@ def parallel_simple_gla_fwd(
         o=o,
         attn=attn,
         scale=scale,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         B=B,
         H=H,
         T=T,
@@ -554,7 +554,7 @@ def parallel_simple_gla_bwd(
     do: torch.Tensor,
     scale: float,
     chunk_size: int = 128,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT, BS = chunk_size, 32
@@ -580,8 +580,8 @@ def parallel_simple_gla_bwd(
     dv = torch.empty(NK, * v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     dg = torch.empty(NK*NV, *g.shape, dtype=torch.float, device=q.device) if g is not None else None
 
-    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     grid = (NK * NV, NT, B * H)
     parallel_simple_gla_bwd_kernel[grid](
@@ -594,7 +594,8 @@ def parallel_simple_gla_bwd(
         dk=dk,
         dv=dv,
         dg=dg,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         scale=scale,
         T=T,
         B=B,
@@ -609,7 +610,7 @@ def parallel_simple_gla_bwd(
     dq = dq.sum(0)
     dk = dk.sum(0)
     dv = dv.sum(0)
-    dg = chunk_global_cumsum(dg.sum(0), reverse=True, cu_seqlens=offsets) if g is not None else None
+    dg = chunk_global_cumsum(dg.sum(0), reverse=True, cu_seqlens=cu_seqlens) if g is not None else None
     return dq, dk, dv, dg
 
 
@@ -618,7 +619,7 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, g, scale, output_attentions, offsets):
+    def forward(ctx, q, k, v, g, scale, output_attentions, cu_seqlens):
         chunk_size = 128
         ctx.dtype = q.dtype
 
@@ -630,9 +631,9 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
             scale=scale,
             output_attentions=output_attentions,
             chunk_size=chunk_size,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
-        ctx.save_for_backward(q, k, v, g, offsets)
+        ctx.save_for_backward(q, k, v, g, cu_seqlens)
         ctx.scale = scale
         ctx.chunk_size = chunk_size
         return o.to(q.dtype), attn
@@ -641,7 +642,7 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, da=None):
-        q, k, v, g, offsets = ctx.saved_tensors
+        q, k, v, g, cu_seqlens = ctx.saved_tensors
         dq, dk, dv, dg = parallel_simple_gla_bwd(
             q=q,
             k=k,
@@ -650,7 +651,7 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
             do=do,
             scale=ctx.scale,
             chunk_size=ctx.chunk_size,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
         return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.dtype) if dg is not None else None, None, None, None
 

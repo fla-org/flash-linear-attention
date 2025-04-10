@@ -13,7 +13,7 @@ from fla.ops.utils.op import exp
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -36,7 +36,7 @@ def chunk_fwd_kernel_h_split(
     hr,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     split_indices,
     T,
     S: tl.constexpr,
@@ -61,7 +61,7 @@ def chunk_fwd_kernel_h_split(
     i_ss, i_h = i_sh // H, i_sh % H
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NS = tl.cdiv(T, S)
     else:
@@ -132,7 +132,7 @@ def chunk_fwd_kernel_h_split(
 
 @triton.heuristics({
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -152,7 +152,7 @@ def chunk_fwd_kernel_h_reduction(
     hs,
     hr,
     ht,
-    offsets,
+    cu_seqlens,
     split_offsets,
     T,
     S: tl.constexpr,
@@ -171,7 +171,7 @@ def chunk_fwd_kernel_h_reduction(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NS = tl.cdiv(T, S)
         boh = tl.load(split_offsets + i_n).to(tl.int32)
@@ -218,7 +218,7 @@ def chunk_fwd_kernel_h_reduction(
 @triton.heuristics({
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -241,7 +241,7 @@ def chunk_bwd_kernel_dh_split(
     dhs,
     dhr,
     dh0,
-    offsets,
+    cu_seqlens,
     split_indices,
     scale,
     T,
@@ -269,7 +269,7 @@ def chunk_bwd_kernel_dh_split(
     i_ss, i_hq = i_sh // HQ, i_sh % HQ
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NS = tl.cdiv(T, S)
     else:
@@ -336,7 +336,7 @@ def chunk_bwd_kernel_dh_split(
 
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -356,7 +356,7 @@ def chunk_bwd_kernel_dh_reduction(
     dhs,
     dhr,
     dh0,
-    offsets,
+    cu_seqlens,
     split_offsets,
     T,
     S: tl.constexpr,
@@ -378,7 +378,7 @@ def chunk_bwd_kernel_dh_reduction(
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NS = tl.cdiv(T, S)
         boh = tl.load(split_offsets + i_n).to(tl.int32)
@@ -427,7 +427,7 @@ def chunk_fwd_h(
     gv: torch.Tensor,
     h0: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     split_offsets: Optional[torch.LongTensor] = None,
     split_indices: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
@@ -443,11 +443,11 @@ def chunk_fwd_h(
     # BT: chunk size
     S, BT = split_size, chunk_size
     assert S % BT == 0, f"The `split_size` (got {S}) must be a multiple of `chunk_size` {BT}"
-    if offsets is None:
+    if cu_seqlens is None:
         N = B
         NS = N * triton.cdiv(T, S)
     else:
-        N = len(offsets) - 1
+        N = len(cu_seqlens) - 1
         NS = split_offsets[-1]
 
     # unreduced kv states per split
@@ -467,7 +467,7 @@ def chunk_fwd_h(
         hr=hr,
         h0=h0,
         ht=ht,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         split_indices=split_indices,
         T=T,
         S=S,
@@ -487,7 +487,7 @@ def chunk_fwd_h(
         hs=hs,
         hr=hr,
         ht=ht,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         split_offsets=split_offsets,
         T=T,
         S=S,
@@ -513,7 +513,7 @@ def chunk_bwd_dh(
     h0: torch.Tensor,
     dht: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     split_offsets: Optional[torch.Tensor] = None,
     split_indices: Optional[torch.Tensor] = None,
     chunk_size: int = 64,
@@ -530,11 +530,11 @@ def chunk_bwd_dh(
     # BT: chunk size
     S, BT = max(chunk_size, min(split_size, triton.next_power_of_2(T))), chunk_size
     assert S % BT == 0, f"The `split_size` (got {S}) must be a multiple of `chunk_size` {BT}"
-    if offsets is None:
+    if cu_seqlens is None:
         N = B
         NS = N * triton.cdiv(T, S)
     else:
-        N = len(offsets) - 1
+        N = len(cu_seqlens) - 1
         NS = split_offsets[-1]
     # number of groups in GQA
     NG = HQ // H
@@ -555,7 +555,7 @@ def chunk_bwd_dh(
         dhs=dhs,
         dhr=dhr,
         dh0=dh0,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         split_indices=split_indices,
         scale=scale,
         T=T,
@@ -579,7 +579,7 @@ def chunk_bwd_dh(
         dhs=dhs,
         dhr=dhr,
         dh0=dh0,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         split_offsets=split_offsets,
         T=T,
         S=S,

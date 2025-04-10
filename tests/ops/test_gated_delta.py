@@ -141,17 +141,17 @@ def chunk_gated_delta_rule_ref(
     return o, S
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
-@pytest.mark.parametrize("scale", [1])
-@pytest.mark.parametrize("use_qk_l2norm_in_kernel", [True, False])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
+@pytest.mark.parametrize('scale', [1])
+@pytest.mark.parametrize('use_qk_l2norm_in_kernel', [True, False])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 def test_recurrent_forward(
     B: int,
@@ -193,20 +193,20 @@ def test_recurrent_forward(
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         output_final_state=True,
     )
-    assert_close("  o", ref, tri, 0.002)
-    assert_close(" ht", ref_ht, tri_ht, 0.002)
+    assert_close('  o', ref, tri, 0.002)
+    assert_close(' ht', ref_ht, tri_ht, 0.002)
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
-@pytest.mark.parametrize("scale", [1, 0.1])
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
+@pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 def test_chunk(
     B: int,
@@ -218,7 +218,7 @@ def test_chunk(
     gate_logit_normalizer: float
 ):
     if is_intel_alchemist and D > 128:
-        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
+        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
@@ -258,26 +258,26 @@ def test_chunk(
 
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
-    assert_close("  o", ref, tri, 0.005)
-    assert_close(" ht", ref_ht, tri_ht, 0.005)
-    assert_close(" dq", ref_dq, tri_dq, 0.008)
-    assert_close(" dk", ref_dk, tri_dk, 0.008)
-    assert_close(" dv", ref_dv, tri_dv, 0.008)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.02)
+    assert_close('  o', ref, tri, 0.005)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.008)
+    assert_close(' dk', ref_dk, tri_dk, 0.008)
+    assert_close(' dv', ref_dv, tri_dv, 0.008)
+    assert_close(' db', ref_dbeta, tri_dbeta, 0.02)
     if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:
-        assert_close(" dg", ref_dg, tri_dg, 0.02)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
+        assert_close(' dg', ref_dg, tri_dg, 0.02)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-@pytest.mark.parametrize("N", test_b_list)
-@pytest.mark.parametrize("T", test_t_varlen_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("scale", [1, 0.1])
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize('N', test_b_list)
+@pytest.mark.parametrize('T', test_t_varlen_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_chunk_varlen(
     N: int,
@@ -288,7 +288,7 @@ def test_chunk_varlen(
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
-        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
+        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
@@ -345,11 +345,11 @@ def test_chunk_varlen(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
 
-    assert_close("  o", ref, tri, 0.005)
-    assert_close(" ht", ref_ht, tri_ht, 0.005)
-    assert_close(" dq", ref_dq, tri_dq, 0.007)
-    assert_close(" dk", ref_dk, tri_dk, 0.008)
-    assert_close(" dv", ref_dv, tri_dv, 0.007)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.015)
-    assert_close(" dg", ref_dg, tri_dg, 0.015)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.007)
+    assert_close('  o', ref, tri, 0.005)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.007)
+    assert_close(' dk', ref_dk, tri_dk, 0.008)
+    assert_close(' dv', ref_dv, tri_dv, 0.007)
+    assert_close(' db', ref_dbeta, tri_dbeta, 0.015)
+    assert_close(' dg', ref_dg, tri_dg, 0.015)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.007)

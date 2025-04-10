@@ -15,7 +15,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -35,7 +35,7 @@ def fused_recurrent_fwd_kernel(
     o,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -52,11 +52,10 @@ def fused_recurrent_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    # indices
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -120,7 +119,7 @@ def fused_recurrent_fwd_kernel(
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -144,7 +143,7 @@ def fused_recurrent_bwd_kernel(
     dv,
     dht,
     dh0,
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -165,7 +164,7 @@ def fused_recurrent_bwd_kernel(
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -291,10 +290,10 @@ def fused_recurrent_fwd(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = min(K, 64), min(V, 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
@@ -313,7 +312,7 @@ def fused_recurrent_fwd(
         o,
         h0,
         ht,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         B=B,
@@ -344,10 +343,10 @@ def fused_recurrent_bwd(
     scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
     BK, BV = min(K, 64), min(V, 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -373,7 +372,7 @@ def fused_recurrent_bwd(
         dv,
         dht,
         dh0,
-        offsets,
+        cu_seqlens,
         scale,
         B=B,
         T=T,
@@ -392,11 +391,11 @@ def fused_recurrent_bwd(
     dv = dv.sum(0)
     dg, dgk, dgv = None, None, None
     if g is not None:
-        dg = chunk_global_cumsum((dq * q.float() - dk * k.float()).sum(-1), reverse=not reverse, cu_seqlens=offsets)
+        dg = chunk_global_cumsum((dq * q.float() - dk * k.float()).sum(-1), reverse=not reverse, cu_seqlens=cu_seqlens)
     if gk is not None:
-        dgk = chunk_global_cumsum(dq * q.float() - dk * k.float(), reverse=not reverse, cu_seqlens=offsets)
+        dgk = chunk_global_cumsum(dq * q.float() - dk * k.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
     if gv is not None:
-        dgv = chunk_global_cumsum(do.float() * o.float() - dv * v.float(), reverse=not reverse, cu_seqlens=offsets)
+        dgv = chunk_global_cumsum(do.float() * o.float() - dv * v.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
 
     return dq, dk, dv, dg, dgk, dgv, dh0
 
@@ -418,7 +417,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        offsets: Optional[torch.LongTensor] = None
+        cu_seqlens: Optional[torch.LongTensor] = None
     ):
         o, ht = fused_recurrent_fwd(
             q=q,
@@ -431,12 +430,12 @@ class FusedRecurrentFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             reverse=reverse,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, g, gk, gv, initial_state, o)
         ctx.scale = scale
         ctx.reverse = reverse
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return o.to(q.dtype), ht
 
     @staticmethod
@@ -466,7 +465,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             scale=ctx.scale,
             initial_state=initial_state,
             reverse=ctx.reverse,
-            offsets=ctx.offsets,
+            cu_seqlens=ctx.cu_seqlens,
         )
         return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, dgk, dgv, None, dh0, None, None, None
 

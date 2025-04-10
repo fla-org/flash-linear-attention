@@ -12,7 +12,7 @@ from fla.utils import input_guard
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -26,8 +26,8 @@ from fla.utils import input_guard
 def solve_tril_16x16_kernel(
     A,
     Ad,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
@@ -36,8 +36,8 @@ def solve_tril_16x16_kernel(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -62,7 +62,7 @@ def solve_tril_16x16_kernel(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -77,8 +77,8 @@ def merge_16x16_to_32x32_inverse_kernel(
     A,
     Ad,
     Ai,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
@@ -87,8 +87,8 @@ def merge_16x16_to_32x32_inverse_kernel(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -114,7 +114,7 @@ def merge_16x16_to_32x32_inverse_kernel(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -129,8 +129,8 @@ def merge_16x16_to_64x64_inverse_kernel(
     A,
     Ad,
     Ai,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     BT: tl.constexpr,
@@ -139,8 +139,8 @@ def merge_16x16_to_64x64_inverse_kernel(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -246,13 +246,13 @@ def solve_tril(
     B, T, H, BT = A.shape
     Ad = torch.empty(B, T, H, 16, device=A.device, dtype=torch.float if BT != 16 else output_dtype)
 
-    indices = prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
-    NT = len(indices) if cu_seqlens is not None else triton.cdiv(T, 16)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, 16)
     solve_tril_16x16_kernel[NT, B * H](
         A=A,
         Ad=Ad,
-        offsets=cu_seqlens,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         BT=BT,
@@ -262,14 +262,14 @@ def solve_tril(
 
     Ai = torch.zeros(B, T, H, BT, device=A.device, dtype=output_dtype)
     merge_fn = merge_16x16_to_32x32_inverse_kernel if BT == 32 else merge_16x16_to_64x64_inverse_kernel
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    NT = len(indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     merge_fn[NT, B * H](
         A=A,
         Ad=Ad,
         Ai=Ai,
-        offsets=cu_seqlens,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         BT=BT,

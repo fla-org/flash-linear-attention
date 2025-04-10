@@ -15,12 +15,12 @@ triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
         triton.Config(triton_config, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV'],
@@ -39,8 +39,8 @@ def bwd_prepare_wy_repr_kernel(
     dag,
     dAak,
     dAab,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -53,8 +53,8 @@ def bwd_prepare_wy_repr_kernel(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -122,15 +122,15 @@ def chunk_dplr_bwd_wy(
     dw: torch.Tensor,
     du: torch.Tensor,
     dv0: torch.Tensor,
-    offsets: Optional[torch.LongTensor],
+    cu_seqlens: Optional[torch.LongTensor],
     chunk_size: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A_ab_inv, A_ak, v, ag, dw, du = map(lambda x: x.contiguous(), [A_ab_inv, A_ak, v, ag, dw, du])
     B, T, H, K, V = *dw.shape, du.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(triton.next_power_of_2(K), 64)
     BV = min(triton.next_power_of_2(V), 64) if check_shared_mem() else min(triton.next_power_of_2(V), 32)
 
@@ -151,8 +151,8 @@ def chunk_dplr_bwd_wy(
         dag=dag,
         dAak=dA_ak,
         dAab=dA_ab,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,

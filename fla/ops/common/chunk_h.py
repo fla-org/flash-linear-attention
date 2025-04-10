@@ -17,7 +17,7 @@ BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -39,7 +39,7 @@ def chunk_fwd_kernel_h(
     gv,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     split_offsets,
     T,
     H: tl.constexpr,
@@ -59,7 +59,7 @@ def chunk_fwd_kernel_h(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         NS = tl.cdiv(T, BS)
@@ -132,7 +132,7 @@ def chunk_fwd_kernel_h(
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -154,7 +154,7 @@ def chunk_bwd_kernel_dh(
     dh,
     dht,
     dh0,
-    offsets,
+    cu_seqlens,
     split_offsets,
     scale,
     T,
@@ -178,7 +178,7 @@ def chunk_bwd_kernel_dh(
     i_n, i_hq = i_nh // HQ, i_nh % HQ
     i_h = i_hq // NG
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         NS = tl.cdiv(T, BS)
@@ -253,7 +253,7 @@ def chunk_fwd_h(
     gv: torch.Tensor,
     h0: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
     states_in_fp32: bool = False
@@ -263,11 +263,11 @@ def chunk_fwd_h(
     BS = BT if split_size is None else min(split_size, max(16, triton.next_power_of_2(T)))
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
+    if cu_seqlens is None:
         N, NS, split_offsets = B, triton.cdiv(T, BS), None
     else:
-        split_offsets = prepare_chunk_offsets(offsets, BS)
-        N, NS = len(offsets) - 1, split_offsets[-1].item()
+        split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
+        N, NS = len(cu_seqlens) - 1, split_offsets[-1].item()
 
     h = k.new_empty(B, NS, H, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
@@ -281,7 +281,7 @@ def chunk_fwd_h(
         gv=gv,
         h0=h0,
         ht=ht,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         split_offsets=split_offsets,
         T=T,
         H=H,
@@ -307,7 +307,7 @@ def chunk_bwd_dh(
     h0: torch.Tensor,
     dht: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
     states_in_fp32: bool = False
@@ -319,11 +319,11 @@ def chunk_bwd_dh(
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
     # N: the actual number of sequences in the batch with either equal or variable lengths
     # NG: number of groups in GQA
-    if offsets is None:
+    if cu_seqlens is None:
         N, NS, split_offsets = B, triton.cdiv(T, BS), None
     else:
-        split_offsets = prepare_chunk_offsets(offsets, BS)
-        N, NS = len(offsets) - 1, split_offsets[-1].item()
+        split_offsets = prepare_chunk_offsets(cu_seqlens, BS)
+        N, NS = len(cu_seqlens) - 1, split_offsets[-1].item()
     NG = HQ // H
 
     dh = k.new_empty(B, NS, HQ, K, V, dtype=k.dtype if not states_in_fp32 else torch.float)
@@ -339,7 +339,7 @@ def chunk_bwd_dh(
         dh=dh,
         dht=dht,
         dh0=dh0,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         split_offsets=split_offsets,
         scale=scale,
         T=T,

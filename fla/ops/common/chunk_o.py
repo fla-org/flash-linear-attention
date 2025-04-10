@@ -17,7 +17,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -37,8 +37,8 @@ def chunk_fwd_kernel_o(
     h,
     g,
     o,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale,
     T,
     H: tl.constexpr,
@@ -55,8 +55,8 @@ def chunk_fwd_kernel_o(
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -112,7 +112,7 @@ def chunk_fwd_kernel_o(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_G': lambda args: args['g'] is not None,
     'USE_DW': lambda args: args['dw'] is not None
 })
@@ -139,8 +139,8 @@ def chunk_bwd_kernel_dqkwg(
     w,
     dv,
     dw,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale,
     B: tl.constexpr,
     T,
@@ -160,8 +160,8 @@ def chunk_bwd_kernel_dqkwg(
         dg += i_k * B * H * T
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -280,7 +280,7 @@ def chunk_bwd_kernel_dqkwg(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_G': lambda args: args['g'] is not None,
 })
 @triton.autotune(
@@ -299,8 +299,8 @@ def chunk_bwd_kernel_dv(
     do,
     dv,
     dh,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale,
     T,
     H: tl.constexpr,
@@ -316,8 +316,8 @@ def chunk_bwd_kernel_dv(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -366,7 +366,7 @@ def chunk_bwd_kernel_dv(
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -383,8 +383,8 @@ def chunk_bwd_kernel_dv_local(
     g,
     do,
     dv,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale,
     T,
     H: tl.constexpr,
@@ -399,8 +399,8 @@ def chunk_bwd_kernel_dv_local(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -445,13 +445,13 @@ def chunk_fwd_o(
     h: torch.Tensor,
     g: Optional[torch.Tensor] = None,  # cumsum of log decay
     scale: Optional[float] = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
@@ -465,8 +465,8 @@ def chunk_fwd_o(
         h,
         g,
         o,
-        offsets,
-        indices,
+        cu_seqlens,
+        chunk_indices,
         scale,
         T=T,
         H=H,
@@ -484,12 +484,12 @@ def chunk_bwd_dv(
     do: torch.Tensor,
     dh: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
@@ -499,7 +499,7 @@ def chunk_bwd_dv(
         CONST_TILING = 32
     BK = min(triton.next_power_of_2(K), CONST_TILING)
     BV = min(triton.next_power_of_2(V), CONST_TILING)
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
 
     dv = torch.empty_like(do)
@@ -511,8 +511,8 @@ def chunk_bwd_dv(
         do,
         dv,
         dh,
-        offsets,
-        indices,
+        cu_seqlens,
+        chunk_indices,
         scale,
         T=T,
         H=H,
@@ -530,14 +530,13 @@ def chunk_bwd_dv_local(
     k: torch.Tensor,
     g: torch.Tensor,
     do: torch.Tensor,
-    dh: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
@@ -547,7 +546,7 @@ def chunk_bwd_dv_local(
         CONST_TILING = 32
     BK = min(triton.next_power_of_2(K), CONST_TILING)
     BV = min(triton.next_power_of_2(V), CONST_TILING)
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dv = torch.empty_like(do)
     grid = (NT, B * H)
@@ -557,8 +556,8 @@ def chunk_bwd_dv_local(
         g,
         do,
         dv,
-        offsets,
-        indices,
+        cu_seqlens,
+        chunk_indices,
         scale,
         T=T,
         H=H,
@@ -581,15 +580,15 @@ def chunk_bwd_dqkwg(
     dh: torch.Tensor,
     dv: Optional[torch.Tensor] = None,
     w: Optional[torch.Tensor] = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     scale: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(triton.next_power_of_2(K), CONST_TILING)
@@ -615,8 +614,8 @@ def chunk_bwd_dqkwg(
         dq=dq,
         dk=dk,
         dg=dg,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         scale=scale,
         B=B,
         T=T,

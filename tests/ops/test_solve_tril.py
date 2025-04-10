@@ -22,17 +22,17 @@ else:
 test_h_list = [2]
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("chunk_size", [16, 32, 64])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('chunk_size', [16, 32, 64])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Pytorch Failure"
+    reason='Intel Pytorch Failure'
 )
 def test_solve_tril(B, T, H, chunk_size):
     # do not randomly intiialize A otherwise the inverse is not stable
@@ -46,19 +46,19 @@ def test_solve_tril(B, T, H, chunk_size):
 
     Ai_ref = torch.inverse(A + torch.eye(A.shape[-1], device=A.device)[None, None, None, ...])
     Ai_ref = Ai_ref.reshape(B, H, -1, chunk_size)[:, :, :T, :]
-    assert_close("solve_tril", Ai, Ai_ref, 0.0001)
+    assert_close('solve_tril', Ai, Ai_ref, 0.0001)
 
 
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("cu_seqlens", test_t_varlen_list)
-@pytest.mark.parametrize("chunk_size", [64, 32, 16])
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('cu_seqlens', test_t_varlen_list)
+@pytest.mark.parametrize('chunk_size', [64, 32, 16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Pytorch Failure"
+    reason='Intel Pytorch Failure'
 )
 def test_solve_tril_varlen(H, cu_seqlens, chunk_size):
     T = cu_seqlens[-1]
@@ -77,4 +77,4 @@ def test_solve_tril_varlen(H, cu_seqlens, chunk_size):
                 A[:, j:j+actual_size, :, :actual_size].transpose(1, 2) +
                 torch.eye(actual_size, device=A.device, dtype=A.dtype)[None, None, ...]
             ).transpose(1, 2)
-    assert_close("solve_tril_varlen", Ai, Ai_ref, 0.0001)
+    assert_close('solve_tril_varlen', Ai, Ai_ref, 0.0001)

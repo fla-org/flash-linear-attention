@@ -15,7 +15,7 @@ from fla.utils import check_shared_mem, use_cuda_graph
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -38,7 +38,7 @@ def chunk_dplr_fwd_kernel_h(
     h,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     T,
     H: tl.constexpr,
@@ -56,7 +56,7 @@ def chunk_dplr_fwd_kernel_h(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -114,17 +114,18 @@ def chunk_dplr_fwd_h(
     gk: torch.Tensor,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *kg.shape, u.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        indices = prepare_chunk_indices(offsets, BT)
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
@@ -159,7 +160,7 @@ def chunk_dplr_fwd_h(
         gk=gk,
         h0=initial_state,
         ht=final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
         H=H,

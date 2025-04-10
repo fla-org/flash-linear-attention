@@ -30,12 +30,12 @@ def chunk_dplr_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
     T = q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets)
+    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, cu_seqlens=cu_seqlens)
 
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
         q=q,
@@ -45,7 +45,7 @@ def chunk_dplr_fwd(
         gi=gi,
         ge=ge,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT,
     )
     del ge
@@ -57,7 +57,7 @@ def chunk_dplr_fwd(
         A_ab=A_ab,
         A_ak=A_ak,
         v=v,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     del A_ab, A_ak
@@ -70,7 +70,7 @@ def chunk_dplr_fwd(
         gk=gi,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     del u, kg, bg, gi
@@ -82,7 +82,7 @@ def chunk_dplr_fwd(
         A_qk=A_qk,
         A_qb=A_qb,
         h=h,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     del v_new, h, A_qk, A_qb
@@ -106,10 +106,9 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        offsets: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ):
         chunk_size = 16
-
         o, final_state = chunk_dplr_fwd(
             q=q,
             k=k,
@@ -120,11 +119,11 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
         ctx.save_for_backward(q, k, v, a, b, gk, initial_state)
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         ctx.scale = scale
         ctx.chunk_size = chunk_size
         return o.to(q.dtype), final_state
@@ -139,11 +138,11 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
     ):
         q, k, v, a, b, gk, initial_state = ctx.saved_tensors
         BT = ctx.chunk_size
-        offsets = ctx.offsets
+        cu_seqlens = ctx.cu_seqlens
         scale = ctx.scale
 
         # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
-        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets)
+        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, cu_seqlens=cu_seqlens)
 
         A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
             q=q,
@@ -153,7 +152,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             gi=gi,
             ge=ge,
             scale=scale,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT,
         )
         w, u, A_ab_inv = fwd_prepare_wy_repr(
@@ -161,7 +160,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             A_ab=A_ab,
             A_ak=A_ak,
             v=v,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
         del A_ab
@@ -173,7 +172,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             u=u,
             gk=gi,
             initial_state=initial_state,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
         del u
@@ -187,7 +186,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             do=do,
             A_qb=A_qb,
             scale=scale,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
 
@@ -200,7 +199,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dht=dht,
             do=do,
             dv=dv_new_intra,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
 
@@ -209,7 +208,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             kg=kg,
             do=do,
             dh=dh,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
         del A_qk
@@ -225,7 +224,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dv=dv_new,
             w=w,
             gk=gi,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT,
             scale=scale,
         )
@@ -239,7 +238,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dw=dw,
             du=dv_new,
             dv0=dv,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
         del A_ak
@@ -262,7 +261,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dbg=dbg,
             chunk_size=BT,
             scale=scale,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
 
         return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None

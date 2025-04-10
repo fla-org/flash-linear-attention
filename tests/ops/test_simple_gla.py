@@ -108,16 +108,16 @@ def parallel_simple_gla_ref(
     return o.to(original_dtype), A
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
-@pytest.mark.parametrize("dtype", [torch.float])
-@pytest.mark.parametrize("scale", [1, 0.1])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
+@pytest.mark.parametrize('dtype', [torch.float])
+@pytest.mark.parametrize('scale', [1, 0.1])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 def test_chunk(
     B: int,
@@ -165,23 +165,23 @@ def test_chunk(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close("  o", ref, tri, 0.004)
-    assert_close(" ht", ref_ht, tri_ht, 0.005)
-    assert_close(" dq", ref_dq, tri_dq, 0.005)
-    assert_close(" dk", ref_dk, tri_dk, 0.005)
-    assert_close(" dv", ref_dv, tri_dv, 0.005)
-    assert_close(" dg", ref_dg, tri_dg, 0.005)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.005)
+    assert_close('  o', ref, tri, 0.004)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
+    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("N", test_b_list)
-@pytest.mark.parametrize("T", test_t_varlen_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize('N', test_b_list)
+@pytest.mark.parametrize('T', test_t_varlen_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_chunk_varlen(
     N: int,
@@ -239,23 +239,23 @@ def test_chunk_varlen(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close("  o", ref, tri, 0.004)
-    assert_close(" ht", ref_ht, tri_ht, 0.005)
-    assert_close(" dq", ref_dq, tri_dq, 0.005)
-    assert_close(" dk", ref_dk, tri_dk, 0.005)
-    assert_close(" dv", ref_dv, tri_dv, 0.005)
-    assert_close(" dg", ref_dg, tri_dg, 0.005)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.005)
+    assert_close('  o', ref, tri, 0.004)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
+    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("N", test_b_list)
-@pytest.mark.parametrize("T", test_t_varlen_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize('N', test_b_list)
+@pytest.mark.parametrize('T', test_t_varlen_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_parallel_varlen(
     N: int,
@@ -306,23 +306,23 @@ def test_parallel_varlen(
     tri_dv, v.grad = v.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None
 
-    assert_close("  o", ref, tri, 0.004)
-    assert_close(" dq", ref_dq, tri_dq, 0.005)
-    assert_close(" dk", ref_dk, tri_dk, 0.005)
-    assert_close(" dv", ref_dv, tri_dv, 0.005)
-    assert_close(" dg", ref_dg, tri_dg, 0.005)
+    assert_close('  o', ref, tri, 0.004)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
+    assert_close(' dg', ref_dg, tri_dg, 0.005)
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
-@pytest.mark.parametrize("scale", [0.1])
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
+@pytest.mark.parametrize('scale', [0.1])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 def test_parallel(
     B: int,
@@ -358,36 +358,27 @@ def test_parallel(
     tri_dv, v.grad = v.grad.clone(), None
     if USE_G:
         tri_dg, g.grad = g.grad.clone(), None
-    assert_close(" o", ref, tri, 0.005)
-    assert_close(" A", ref_A, tri_A, 0.005)
-    assert_close("dq", ref_dq, tri_dq, 0.005)
-    assert_close("dk", ref_dk, tri_dk, 0.005)
-    assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close(' o', ref, tri, 0.005)
+    assert_close(' A', ref_A, tri_A, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
     if USE_G:
-        assert_close("dg", ref_dg, tri_dg, 0.015)
+        assert_close('dg', ref_dg, tri_dg, 0.015)
 
 
-@pytest.mark.parametrize("vary_A", [True, False])
-@pytest.mark.parametrize("dtype", [torch.float, torch.float16])
+@pytest.mark.parametrize('vary_A', [True, False])
+@pytest.mark.parametrize('dtype', [torch.float, torch.float16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 def test_simple_gla_to_mamba2(vary_A, dtype):
-    r"""
-    Map Mamba-2's `mamba_chunk_scan_combined` kernel to FLA's `simple_gla` kernel
-
-    Dependencies:
-    $ pip install mamba-ssm==2.2.2 triton==2.3.1
-
-    Reference: `ssd_minimal_discrete` and `test_correctness` in mamba repository:
-    https://github.com/state-spaces/mamba/blob/v2.2.2/mamba_ssm/modules/ssd_minimal.py#L82
-    """
     try:
         from mamba_ssm.modules.ssd_minimal import ssd_minimal_discrete
         from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
     except ImportError:
-        pytest.skip("mamba_ssm is not installed.")
+        pytest.skip('mamba_ssm is not installed.')
     torch.manual_seed(42)
 
     # Dimensions, Denoted (B, T, Q, D, P) in Mamba2 paper
@@ -413,11 +404,11 @@ def test_simple_gla_to_mamba2(vary_A, dtype):
     if not vary_A:
         # NOTE: fused kernel does not support varying A with time
         y_fuse, final_fuse = mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, return_final_states=True)
-        assert y_ssd.allclose(y_fuse, 0, atol), f"y diff: {torch.abs(y_ssd - y_fuse).max()}"
+        assert y_ssd.allclose(y_fuse, 0, atol), f'y diff: {torch.abs(y_ssd - y_fuse).max()}'
         # fused kernel upcasts state to float32
         # https://github.com/state-spaces/mamba/blob/v2.2.2/mamba_ssm/ops/triton/ssd_combined.py#L650
         final_fuse = final_fuse.to(dtype)
-        assert final_ssd.allclose(final_fuse, 0, atol), f"final diff: {torch.abs(final_ssd - final_fuse).max()}"
+        assert final_ssd.allclose(final_fuse, 0, atol), f'final diff: {torch.abs(final_ssd - final_fuse).max()}'
 
     # mapping inputs Mamba2 -> FLA
     # C, B, X: [batch, seq, head, hidden] -> [batch, head, seq, hidden]
@@ -433,6 +424,6 @@ def test_simple_gla_to_mamba2(vary_A, dtype):
 
     # comparing output results between FLA kernel and Mamba2 kernel
     outputs_gla_fuse, final_gla_fuse = chunk_simple_gla(q, k, v, g, scale=1.0, output_final_state=True)
-    assert y_rearrange.allclose(outputs_gla_fuse, 0, atol), f"y diff: {torch.abs(y_rearrange - outputs_gla_fuse).max()}"
+    assert y_rearrange.allclose(outputs_gla_fuse, 0, atol), f'y diff: {torch.abs(y_rearrange - outputs_gla_fuse).max()}'
     final_gla_fuse = final_gla_fuse.to(dtype)  # states hard-coded to float32 in FLA kernel
-    assert final_rearrange.allclose(final_gla_fuse, 0, atol), f"final diff: {torch.abs(final_ssd - final_gla_fuse).max()}"
+    assert final_rearrange.allclose(final_gla_fuse, 0, atol), f'final diff: {torch.abs(final_ssd - final_gla_fuse).max()}'

@@ -46,7 +46,6 @@ def fused_chunk_linear_attn_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     CHECK: tl.constexpr
 ):
-    # indices
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 

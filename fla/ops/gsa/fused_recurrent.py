@@ -151,14 +151,14 @@ def fused_recurrent_gsa_fwd(
     output_final_state: bool = False,
     scale: float = 1.,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
     if head_first:
         B, H, T, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
     else:
         B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     HQ = q.shape[1] if head_first else q.shape[2]
     if HQ != H:
         raise ValueError("GQA not supported yet.")
@@ -186,7 +186,7 @@ def fused_recurrent_gsa_fwd(
         o=ok,
         h0=hk0,
         ht=hkt,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=scale,
         B=B,
         T=T,
@@ -216,7 +216,7 @@ def fused_recurrent_gsa_fwd(
         o=ov,
         h0=hv0,
         ht=hvt,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=1.,
         B=B,
         T=T,
@@ -249,10 +249,10 @@ def fused_recurrent_gsa_bwd(
     dhvt: Optional[torch.Tensor] = None,
     scale: float = 1.,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor]:
     B, T, H, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
     BK, BV, BM = min(K, 64), min(V, 64), min(M, 64)
     NK, NV, NM = triton.cdiv(K, BK), triton.cdiv(V, BV), triton.cdiv(M, BM)
@@ -279,7 +279,7 @@ def fused_recurrent_gsa_bwd(
         dv=dv,
         dht=dhvt,
         dh0=dhv0,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=1.,
         B=B,
         T=T,
@@ -296,7 +296,7 @@ def fused_recurrent_gsa_bwd(
     dqv = dqv.sum(0)
     dsv = dsv.sum(0)
     dv = dv.sum(0)
-    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(), reverse=not reverse, cu_seqlens=offsets)
+    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
 
     dok = qv * (dqv - (qv * dqv).sum(-1, True))
     dq = q.new_empty(NM, B, T, H, K, dtype=torch.float)
@@ -318,7 +318,7 @@ def fused_recurrent_gsa_bwd(
         dv=dsk,
         dht=dhkt,
         dh0=dhk0,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=scale,
         B=B,
         T=T,
@@ -336,7 +336,7 @@ def fused_recurrent_gsa_bwd(
     dk = dk.sum(0)
     dsk = dsk.sum(0)
 
-    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(), reverse=not reverse, cu_seqlens=offsets)
+    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
 
     ds = dsk.add_(dsv)
     dg = dgk.add_(dgv)
@@ -361,7 +361,7 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         hv0: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        offsets: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
         T = q.shape[1]
         if T == 1 and not q.requires_grad:
@@ -386,12 +386,12 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             scale=scale,
             reverse=reverse,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, s, g, qv, hk0, hv0, ok)
         ctx.scale = scale
         ctx.reverse = reverse
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return ov.to(q.dtype), hkt, hvt
 
     @staticmethod
@@ -401,7 +401,7 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         q, k, v, s, g, qv, hk0, hv0, ok = ctx.saved_tensors
         scale = ctx.scale
         reverse = ctx.reverse
-        offsets = ctx.offsets
+        cu_seqlens = ctx.cu_seqlens
 
         # not supported yet.
         if dhkt is not None or dhvt is not None:
@@ -422,7 +422,7 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
             dhvt=dhvt,
             scale=scale,
             reverse=reverse,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
         return dq.to(q), dk.to(k), dv.to(v), ds.to(s), dg.to(g), None, dhk0, dhv0, None, None, None
 

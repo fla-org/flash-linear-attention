@@ -13,7 +13,7 @@ from fla.utils import is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -40,8 +40,8 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     Aqb,
     Aab,
     Aak,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale: tl.constexpr,
     T,
     H: tl.constexpr,
@@ -55,8 +55,8 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     i_t, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -147,13 +147,13 @@ def chunk_fwd_intra_dplr_fn(
     ge: torch.Tensor,
     scale: float,
     chunk_size: int,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K = k.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     Aqk = q.new_empty(B, T, H, BT, dtype=q.dtype)
     Aqb = q.new_empty(B, T, H, BT, dtype=q.dtype)
@@ -182,8 +182,8 @@ def chunk_fwd_intra_dplr_fn(
         kg=kg,
         ag=ag,
         bg=bg,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         scale=scale,
         T=T,
         H=H,

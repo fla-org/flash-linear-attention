@@ -13,7 +13,7 @@ from fla.utils import check_shared_mem
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -30,8 +30,8 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     beta,
     Aw,
     Au,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -43,8 +43,8 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -87,7 +87,7 @@ def fwd_prepare_wy_repr_kernel_chunk32(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -104,8 +104,8 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     beta,
     Aw,
     Au,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -117,8 +117,8 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -203,7 +203,7 @@ def fwd_prepare_wy_repr_kernel_chunk64(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -222,8 +222,8 @@ def fwd_recompute_w_u_kernel(
     u,
     Aw,
     Au,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -236,8 +236,8 @@ def fwd_recompute_w_u_kernel(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -273,14 +273,14 @@ def fwd_prepare_wy_repr(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    offsets: Optional[torch.LongTensor],
+    cu_seqlens: Optional[torch.LongTensor],
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K = k.shape
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
     BK = min(triton.next_power_of_2(K), 64)
     # bf16 should be good enough.
@@ -294,8 +294,8 @@ def fwd_prepare_wy_repr(
         beta=beta,
         Aw=Aw,
         Au=Au,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,
@@ -309,7 +309,7 @@ def fwd_prepare_wy_repr(
         beta=beta,
         Aw=Aw,
         Au=Au,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     return w, u, Aw, Au
@@ -321,14 +321,14 @@ def fwd_recompute_w_u(
     beta: torch.Tensor,
     Aw: torch.Tensor,
     Au: torch.Tensor,
-    offsets: Optional[torch.LongTensor],
+    cu_seqlens: Optional[torch.LongTensor],
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(triton.next_power_of_2(K), 64)
     BV = min(triton.next_power_of_2(V), 64)
 
@@ -342,8 +342,8 @@ def fwd_recompute_w_u(
         u=u,
         Aw=Aw,
         Au=Au,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,
@@ -356,7 +356,7 @@ def fwd_recompute_w_u(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -380,8 +380,8 @@ def bwd_prepare_wy_repr_kernel(
     dv,
     dbeta,
     dg,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -394,8 +394,8 @@ def bwd_prepare_wy_repr_kernel(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -484,14 +484,14 @@ def bwd_prepare_wy_repr(
     Au: torch.Tensor,
     dw: torch.Tensor,
     du: torch.Tensor,
-    offsets: Optional[torch.LongTensor],
+    cu_seqlens: Optional[torch.LongTensor],
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(triton.next_power_of_2(K), CONST_TILING)
     BV = min(triton.next_power_of_2(V), CONST_TILING)
@@ -513,8 +513,8 @@ def bwd_prepare_wy_repr(
         dv=dv,
         dbeta=dbeta,
         dg=dg,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,

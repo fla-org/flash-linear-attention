@@ -15,7 +15,7 @@ BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -35,8 +35,8 @@ def chunk_dplr_bwd_kernel_dAu(
     dA_qk,
     dA_qb,
     dv_new,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale: tl.constexpr,
     T,
     H: tl.constexpr,
@@ -48,8 +48,8 @@ def chunk_dplr_bwd_kernel_dAu(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
     T = eos - bos
@@ -87,7 +87,7 @@ def chunk_dplr_bwd_kernel_dAu(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -115,8 +115,8 @@ def chunk_dplr_bwd_o_kernel(
     dgk_last,
     k,
     b,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -131,8 +131,8 @@ def chunk_dplr_bwd_o_kernel(
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -214,7 +214,7 @@ def chunk_dplr_bwd_o_kernel(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -234,8 +234,8 @@ def chunk_dplr_bwd_kernel_dv(
     do,
     dv,
     dh,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -249,8 +249,8 @@ def chunk_dplr_bwd_kernel_dv(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -294,14 +294,14 @@ def chunk_dplr_bwd_dv(
     kg: torch.Tensor,
     do: torch.Tensor,
     dh: torch.Tensor,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16
 ) -> torch.Tensor:
     B, T, H, K, V = *kg.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dv = torch.empty_like(do)
 
@@ -312,8 +312,8 @@ def chunk_dplr_bwd_dv(
         do=do,
         dv=dv,
         dh=dh,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,
@@ -334,7 +334,7 @@ def chunk_dplr_bwd_o(
     dh: torch.Tensor,
     dv: torch.Tensor,
     w: torch.Tensor,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16,
     scale: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -342,8 +342,8 @@ def chunk_dplr_bwd_o(
     B, T, H, K, V = *w.shape, v.shape[-1]
 
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BK = min(triton.next_power_of_2(K), 64) if check_shared_mem() else min(triton.next_power_of_2(K), 32)
     BV = min(triton.next_power_of_2(V), 64) if check_shared_mem() else min(triton.next_power_of_2(K), 32)
@@ -372,8 +372,8 @@ def chunk_dplr_bwd_o(
         dv=dv,
         dw=dw,
         gk=gk,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         T=T,
         H=H,
         K=K,
@@ -391,13 +391,13 @@ def chunk_dplr_bwd_dAu(
     do: torch.Tensor,
     A_qb: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16
 ) -> torch.Tensor:
     B, T, H, V = v.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     if check_shared_mem('ampere'):  # A100
         BV = min(triton.next_power_of_2(V), 128)
@@ -418,8 +418,8 @@ def chunk_dplr_bwd_dAu(
         dA_qk=dA_qk,
         dA_qb=dA_qb,
         dv_new=dv_new,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         scale=scale,
         T=T,
         H=H,

@@ -19,7 +19,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_INITIAL_STATE_B': lambda args: args['hb0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -43,7 +43,7 @@ def chunk_ttt_linear_fwd_kernel_h(
     hb0,
     ht,
     hbt,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     T,
     H: tl.constexpr,
@@ -61,7 +61,7 @@ def chunk_ttt_linear_fwd_kernel_h(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -123,7 +123,7 @@ def chunk_ttt_linear_fwd_kernel_h(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -142,8 +142,8 @@ def chunk_ttt_linear_fwd_kernel_o(
     h,
     hb,
     o,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale,
     T,
     H: tl.constexpr,
@@ -159,8 +159,8 @@ def chunk_ttt_linear_fwd_kernel_o(
 
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -216,7 +216,7 @@ def chunk_ttt_linear_fwd_kernel_o(
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_INITIAL_STATE_B': lambda args: args['hb0'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -240,7 +240,7 @@ def chunk_ttt_linear_bwd_kernel_h(
     x,
     y,
     r,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     T,
     H: tl.constexpr,
@@ -257,7 +257,7 @@ def chunk_ttt_linear_bwd_kernel_h(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -317,7 +317,7 @@ def chunk_ttt_linear_bwd_kernel_h(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -333,8 +333,8 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
     eta,
     do,
     dv,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale,
     T,
     H: tl.constexpr,
@@ -348,8 +348,8 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -391,7 +391,7 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
     'USE_FINAL_STATE_GRADIENT_B': lambda args: args['dhbt'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_INITIAL_STATE_B': lambda args: args['dhb0'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -425,7 +425,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
     dk,
     dw,
     db,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     scale,
     T,
@@ -444,7 +444,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -547,7 +547,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -570,8 +570,8 @@ def chunk_bwd_kernel_dqke(
     dq,
     dk,
     de,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     scale,
     T,
     B: tl.constexpr,
@@ -587,8 +587,8 @@ def chunk_bwd_kernel_dqke(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -679,18 +679,18 @@ def chunk_ttt_linear_fwd_h(
     initial_state: Optional[torch.Tensor] = None,
     initial_state_bias: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     BK = triton.next_power_of_2(K)
     BV = triton.next_power_of_2(V)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
@@ -721,7 +721,7 @@ def chunk_ttt_linear_fwd_h(
         hb0=initial_state_bias,
         ht=final_state,
         hbt=final_state_bias,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
         H=H,
@@ -743,7 +743,7 @@ def chunk_ttt_linear_fwd_o(
     h: torch.Tensor,
     hb: torch.Tensor,
     scale: Optional[float] = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
@@ -751,8 +751,8 @@ def chunk_ttt_linear_fwd_o(
         scale = k.shape[-1] ** -0.5
     BT = chunk_size
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = triton.next_power_of_2(K)
     BV = triton.next_power_of_2(V)
     NK = triton.cdiv(K, BK)
@@ -771,8 +771,8 @@ def chunk_ttt_linear_fwd_o(
         h,
         hb,
         o,
-        offsets,
-        indices,
+        cu_seqlens,
+        chunk_indices,
         scale,
         T=T,
         H=H,
@@ -794,18 +794,18 @@ def chunk_ttt_linear_bwd_h(
     eps: float,
     initial_state: Optional[torch.Tensor] = None,
     initial_state_bias: Optional[torch.Tensor] = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     BK = triton.next_power_of_2(K)
     BV = triton.next_power_of_2(V)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
@@ -836,7 +836,7 @@ def chunk_ttt_linear_bwd_h(
         x=x,
         y=y,
         r=rstd,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
         H=H,
@@ -856,14 +856,14 @@ def chunk_ttt_linear_bwd_dv_local(
     eta: torch.Tensor,
     do: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(triton.next_power_of_2(K), 128)
     BV = min(triton.next_power_of_2(V), 128)
 
@@ -875,8 +875,8 @@ def chunk_ttt_linear_bwd_dv_local(
         eta,
         do,
         dv,
-        offsets,
-        indices,
+        cu_seqlens,
+        chunk_indices,
         scale,
         T=T,
         H=H,
@@ -908,19 +908,19 @@ def chunk_ttt_linear_bwd_norm(
     dv_new: Optional[torch.Tensor],  # [B, H, L, D]
     do: torch.Tensor,  # [B, H, L, D]
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # torch implementation of `dkh, dw, db, dk, dv` for LN^2
-    assert offsets is None, "bwd of varlen is not implemented yet."
+    assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *q.shape, do.shape[-1]
     BT = chunk_size
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    if offsets is None:
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     BK = triton.next_power_of_2(K)
     BV = triton.next_power_of_2(V)
@@ -963,7 +963,7 @@ def chunk_ttt_linear_bwd_norm(
         dk=dk,
         dw=dw,
         db=db,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         scale=scale,
         T=T,
@@ -996,11 +996,11 @@ def chunk_ttt_linear_bwd_norm_ref(
     do: torch.Tensor,  # [B, H, L, D]
     scale: float,
     eps: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # torch implementation of `dkh, dw, db, dk, dv` for LN^2
-    assert offsets is None, "bwd of varlen is not implemented yet."
+    assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *q.shape, do.shape[-1]
     # [B, L, H, D] -> [B, H, L, D]
     q, k, v, v_new, kh, y, h, eta, dv_new, do = [
@@ -1009,8 +1009,8 @@ def chunk_ttt_linear_bwd_norm_ref(
     ]
     BT = chunk_size
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     pad_len = (BT - (T % BT)) % BT
     if pad_len > 0:
         q, k, v, v_new, kh, y, eta, dv_new, do = [
@@ -1092,14 +1092,14 @@ def chunk_ttt_linear_bwd_dqke(
     dh: torch.Tensor,
     dhb: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BK = triton.next_power_of_2(K)
     BV = min(triton.next_power_of_2(V), 64)
@@ -1123,8 +1123,8 @@ def chunk_ttt_linear_bwd_dqke(
         dq=dq,
         dk=dk,
         de=de,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         scale=scale,
         B=B,
         T=T,
@@ -1150,9 +1150,10 @@ def chunk_ttt_linear_fwd(
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
-    BT: int = 16
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    chunk_size: int = 16
 ):
+    BT = chunk_size
     h, hb, v_new, final_state, final_state_bias = chunk_ttt_linear_fwd_h(
         k=k,
         v=v,
@@ -1163,7 +1164,7 @@ def chunk_ttt_linear_fwd(
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
         output_final_state=output_final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     o = chunk_ttt_linear_fwd_o(
@@ -1174,7 +1175,7 @@ def chunk_ttt_linear_fwd(
         h=h,
         hb=hb,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     return o, final_state, final_state_bias
@@ -1192,11 +1193,12 @@ def chunk_ttt_linear_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     dhbt: torch.Tensor,
-    BT: int = 16,
+    chunk_size: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
+    BT = chunk_size
     h, v_new, x, y, rstd = chunk_ttt_linear_bwd_h(
         k=k,
         v=v,
@@ -1206,7 +1208,7 @@ def chunk_ttt_linear_bwd(
         eps=eps,
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dv_new = chunk_ttt_linear_bwd_dv_local(
@@ -1215,7 +1217,7 @@ def chunk_ttt_linear_bwd(
         eta=eta,
         do=do,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dh, dhb, dh0, dhb0, dv, dk, dw, db = chunk_ttt_linear_bwd_norm(
@@ -1237,7 +1239,7 @@ def chunk_ttt_linear_bwd(
         dv_new=dv_new,
         do=do,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dq, dk2, de = chunk_ttt_linear_bwd_dqke(
@@ -1250,7 +1252,7 @@ def chunk_ttt_linear_bwd(
         dh=dh,
         dhb=dhb,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dk.add_(dk2)
@@ -1263,10 +1265,20 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, w, b, BT, eta, scale, eps, initial_state,
+        ctx,
+        q,
+        k,
+        v,
+        w,
+        b,
+        chunk_size,
+        eta,
+        scale,
+        eps,
+        initial_state,
         initial_state_bias,
         output_final_state,
-        offsets
+        cu_seqlens
     ):
         o, final_state, final_state_bias = chunk_ttt_linear_fwd(
             q=q,
@@ -1277,17 +1289,17 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
             eta=eta,
             scale=scale,
             eps=eps,
-            BT=BT,
+            chunk_size=chunk_size,
             initial_state=initial_state,
             initial_state_bias=initial_state_bias,
             output_final_state=output_final_state,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, eta, w, b, initial_state, initial_state_bias)
-        ctx.BT = BT
+        ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.eps = eps
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return o.to(q.dtype), final_state, final_state_bias
 
     @staticmethod
@@ -1307,10 +1319,10 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             dhbt=dhbt,
-            BT=ctx.BT,
+            chunk_size=ctx.chunk_size,
             initial_state=initial_state,
             initial_state_bias=initial_state_bias,
-            offsets=ctx.offsets,
+            cu_seqlens=ctx.cu_seqlens,
         )
         return dq.to(q), dk.to(k), dv.to(v), dw.to(w), db.to(b), None, de.to(eta), None, None, dh0, dhb0, None, None, None
 

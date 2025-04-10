@@ -15,7 +15,7 @@ from fla.utils import check_shared_mem, use_cuda_graph
 @triton.heuristics({
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -38,7 +38,7 @@ def chunk_dplr_bwd_kernel_dhu(
     dh,
     dv,
     dv2,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     T,
     H: tl.constexpr,
@@ -55,7 +55,7 @@ def chunk_dplr_bwd_kernel_dhu(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -114,8 +114,8 @@ def chunk_dplr_bwd_dhu(
     dht: Optional[torch.Tensor],
     do: torch.Tensor,
     dv: torch.Tensor,
-    offsets: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    chunk_size: int = 16
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *qg.shape, do.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
@@ -132,12 +132,12 @@ def chunk_dplr_bwd_dhu(
         BV = 16
         BC = 16
 
-    indices = prepare_chunk_indices(offsets, BT) if offsets is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     BC = min(BT, BC)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -159,7 +159,7 @@ def chunk_dplr_bwd_dhu(
         dh=dh,
         dv=dv,
         dv2=dv2,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
         H=H,
