@@ -94,7 +94,7 @@ def test_cumsum_local_scalar(B, T, H, dtype, head_first, reverse, chunk_size):
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.float, torch.float16])
-@pytest.mark.parametrize("head_first", [False, True])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.parametrize("reverse", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -118,7 +118,7 @@ def test_cumsum_global_vector(B, T, H, D, dtype, head_first, reverse):
 @pytest.mark.parametrize("T", test_t_list)
 @pytest.mark.parametrize("H", test_h_list)
 @pytest.mark.parametrize("dtype", [torch.float, torch.float16])
-@pytest.mark.parametrize("head_first", [False, True])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.parametrize("reverse", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",

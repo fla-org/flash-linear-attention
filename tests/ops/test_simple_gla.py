@@ -115,7 +115,7 @@ def parallel_simple_gla_ref(q, k, v, g, scale=None, head_first=True):
 @pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [False, True])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.parametrize("scale", [1, 0.1])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",

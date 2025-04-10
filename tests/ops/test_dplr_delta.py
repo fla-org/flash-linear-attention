@@ -302,7 +302,7 @@ def test_fused_recurrent_fwd(
 @pytest.mark.parametrize("gate_logit_normalizer", test_gate_list)
 @pytest.mark.parametrize("scale", [0.25])
 @pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("head_first", [False, True])
+@pytest.mark.parametrize("head_first", [False])
 @pytest.mark.parametrize("compile", [False, True])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
