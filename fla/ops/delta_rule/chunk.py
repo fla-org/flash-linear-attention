@@ -23,7 +23,7 @@ def chunk_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
     T = q.shape[1]
@@ -33,7 +33,7 @@ def chunk_delta_rule_fwd(
         k=k,
         v=v,
         beta=beta,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
 
@@ -44,7 +44,7 @@ def chunk_delta_rule_fwd(
         g=None,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     o = chunk_fwd_o(
@@ -54,7 +54,7 @@ def chunk_delta_rule_fwd(
         h=h,
         g=None,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     return o, A, final_state
@@ -70,7 +70,7 @@ def chunk_delta_rule_bwd(
     initial_state: torch.Tensor,
     do: torch.Tensor,
     dht: torch.Tensor,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
     T = q.shape[1]
@@ -80,7 +80,7 @@ def chunk_delta_rule_bwd(
         v=v,
         beta=beta,
         A=A,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
@@ -90,7 +90,7 @@ def chunk_delta_rule_bwd(
         g=None,
         initial_state=initial_state,
         output_final_state=False,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dv = chunk_bwd_dv_local(
@@ -98,9 +98,8 @@ def chunk_delta_rule_bwd(
         k=k,
         do=do,
         g=None,
-        dh=None,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -113,7 +112,7 @@ def chunk_delta_rule_bwd(
         do=do,
         dv=dv,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dq, dk, dw, _ = chunk_bwd_dqkwg(
@@ -127,7 +126,7 @@ def chunk_delta_rule_bwd(
         dh=dh,
         g=None,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dk2, dv, db = bwd_prepare_wy_repr(
@@ -137,7 +136,7 @@ def chunk_delta_rule_bwd(
         A=A,
         dw=dw,
         du=dv,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     dk.add_(dk2)
@@ -158,7 +157,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        offsets: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = True
     ):
         T = q.shape[1]
@@ -179,13 +178,13 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
         ctx.save_for_backward(q_orig, k_orig, v, beta, A, initial_state)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
 
@@ -213,7 +212,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             do=do,
             dht=dht,
-            offsets=ctx.offsets,
+            cu_seqlens=ctx.cu_seqlens,
             chunk_size=ctx.chunk_size
         )
         if use_qk_l2norm_in_kernel:

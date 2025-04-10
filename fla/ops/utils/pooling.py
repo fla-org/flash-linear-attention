@@ -12,7 +12,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -26,8 +26,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 def mean_pooling_fwd_kernel(
     x,
     o,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T: tl.constexpr,
     H: tl.constexpr,
     D: tl.constexpr,
@@ -40,8 +40,8 @@ def mean_pooling_fwd_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -59,7 +59,7 @@ def mean_pooling_fwd_kernel(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -73,8 +73,8 @@ def mean_pooling_fwd_kernel(
 def mean_pooling_bwd_kernel(
     do,
     dx,
-    offsets,
-    indices,
+    cu_seqlens,
+    chunk_indices,
     T: tl.constexpr,
     H: tl.constexpr,
     D: tl.constexpr,
@@ -87,8 +87,8 @@ def mean_pooling_bwd_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t
-        i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -108,20 +108,20 @@ def mean_pooling_bwd_kernel(
 def mean_pooling_fwd(
     x: torch.Tensor,
     chunk_size: int,
-    offsets: Optional[torch.LongTensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None
 ) -> torch.Tensor:
     B, T, H, D = x.shape
     BT = chunk_size
-    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = x.new_empty(B, NT, H, D)
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B * H)
     mean_pooling_fwd_kernel[grid](
         x,
         o,
-        offsets,
-        indices,
+        cu_seqlens,
+        chunk_indices,
         T=T,
         H=H,
         D=D,
@@ -136,20 +136,20 @@ def mean_pooling_bwd(
     batch_size: int,
     seq_len: int,
     chunk_size: int,
-    offsets: Optional[torch.LongTensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None
 ) -> torch.Tensor:
     B, T, H, D = batch_size, seq_len, *do.shape[-2:]
     BT = chunk_size
-    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
-    NT = triton.cdiv(T, BT) if offsets is None else len(indices)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dx = do.new_empty(B, T, H, D)
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B * H)
     mean_pooling_bwd_kernel[grid](
         do,
         dx,
-        offsets,
-        indices,
+        cu_seqlens,
+        chunk_indices,
         T=T,
         H=H,
         D=D,
@@ -168,13 +168,13 @@ class MeanPoolingFunction(torch.autograd.Function):
         ctx,
         x: torch.Tensor,
         chunk_size: int,
-        offsets: Optional[torch.LongTensor] = None
+        cu_seqlens: Optional[torch.LongTensor] = None
     ) -> torch.Tensor:
-        o = mean_pooling_fwd(x, chunk_size, offsets)
+        o = mean_pooling_fwd(x, chunk_size, cu_seqlens)
         ctx.batch_size = x.shape[0]
         ctx.seq_len = x.shape[1]
         ctx.chunk_size = chunk_size
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         return o
 
     @staticmethod
@@ -186,8 +186,8 @@ class MeanPoolingFunction(torch.autograd.Function):
         batch_size = ctx.batch_size
         seq_len = ctx.seq_len
         chunk_size = ctx.chunk_size
-        offsets = ctx.offsets
-        dx = mean_pooling_bwd(do, batch_size, seq_len, chunk_size, offsets)
+        cu_seqlens = ctx.cu_seqlens
+        dx = mean_pooling_bwd(do, batch_size, seq_len, chunk_size, cu_seqlens)
         return dx, None, None
 
 

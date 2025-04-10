@@ -16,10 +16,10 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'SAVE_NEW_VALUE': lambda args: args['v_new'] is not None
+    'SAVE_NEW_VALUE': lambda args: args['v_new'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -41,7 +41,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     h,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     T,
     H: tl.constexpr,
@@ -53,13 +53,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -192,7 +192,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     'USE_G': lambda args: args['g'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -216,7 +216,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     dh,
     dv,
     dv2,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     scale,
     T,
@@ -233,7 +233,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -385,8 +385,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_Q': lambda args: args['q'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -407,20 +407,20 @@ def proprocess_qkw(
     q_new,
     k_new,
     w_new,
-    offsets,
+    cu_seqlens,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
+    USE_Q: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_Q: tl.constexpr
 ):
     i_k, i_nh, i_t = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
 
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
@@ -472,19 +472,19 @@ def chunk_gated_delta_rule_fwd_h(
     g: Optional[torch.Tensor] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, u.shape[-1]
     BT = chunk_size
 
-    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     h = k.new_empty(B, NT, H, K, V)
@@ -502,7 +502,7 @@ def chunk_gated_delta_rule_fwd_h(
             q_new=None,
             k_new=k_new,
             w_new=w_new,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             T=T,
             H=H,
             K=K,
@@ -520,7 +520,7 @@ def chunk_gated_delta_rule_fwd_h(
         h=h,
         h0=initial_state,
         ht=final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
         H=H,
@@ -542,7 +542,7 @@ def chunk_gated_delta_rule_bwd_dhu(
     do: torch.Tensor,
     dv: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
@@ -550,11 +550,11 @@ def chunk_gated_delta_rule_bwd_dhu(
     BT = 64
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
-    indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
-    if offsets is None:
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N, NT, chunk_offsets = len(offsets) - 1, len(indices), prepare_chunk_offsets(offsets, BT)
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     dh = q.new_empty(B, NT, H, K, V)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
@@ -573,7 +573,7 @@ def chunk_gated_delta_rule_bwd_dhu(
             q_new=q_new,
             k_new=k_new,
             w_new=w_new,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             T=T,
             H=H,
             K=K,
@@ -592,7 +592,7 @@ def chunk_gated_delta_rule_bwd_dhu(
         dh=dh,
         dv=dv,
         dv2=dv2,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         scale=scale,
         T=T,

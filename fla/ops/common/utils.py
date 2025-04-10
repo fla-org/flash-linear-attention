@@ -18,11 +18,11 @@ from fla.utils import tensor_cache
 @triton.jit
 def prepare_position_ids_kernel(
     y,
-    offsets,
+    cu_seqlens,
     B: tl.constexpr
 ):
     i_n = tl.program_id(0)
-    bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+    bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     T = eos - bos
 
     o = tl.arange(0, B)
@@ -32,13 +32,16 @@ def prepare_position_ids_kernel(
 
 
 @tensor_cache
-def prepare_lens(offsets: torch.LongTensor) -> torch.LongTensor:
-    return offsets[1:] - offsets[:-1]
+def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+    return cu_seqlens[1:] - cu_seqlens[:-1]
 
 
 @tensor_cache
-def prepare_position_ids(offsets: torch.LongTensor) -> torch.LongTensor:
-    return torch.cat([torch.arange(n, dtype=offsets.dtype, device=offsets.device) for n in prepare_lens(offsets).unbind()])
+def prepare_position_ids(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+    return torch.cat([
+        torch.arange(n, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+        for n in prepare_lens(cu_seqlens).unbind()
+    ])
 
 
 @tensor_cache
@@ -47,23 +50,23 @@ def prepare_sequence_ids(position_ids: torch.LongTensor) -> torch.LongTensor:
 
 
 @tensor_cache
-def prepare_token_indices(offsets: torch.LongTensor) -> torch.LongTensor:
-    position_ids = prepare_position_ids(offsets)
-    return torch.stack([prepare_sequence_ids(position_ids), position_ids], 1).to(offsets)
+def prepare_token_indices(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+    position_ids = prepare_position_ids(cu_seqlens)
+    return torch.stack([prepare_sequence_ids(position_ids), position_ids], 1).to(cu_seqlens)
 
 
 @tensor_cache
 def prepare_chunk_indices(
-    offsets: torch.LongTensor,
+    cu_seqlens: torch.LongTensor,
     chunk_size: int
 ) -> torch.LongTensor:
-    indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(offsets), chunk_size).tolist()])
-    return torch.stack([prepare_sequence_ids(indices), indices], 1).to(offsets)
+    indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
+    return torch.stack([prepare_sequence_ids(indices), indices], 1).to(cu_seqlens)
 
 
 @tensor_cache
 def prepare_chunk_offsets(
-    offsets: torch.LongTensor,
+    cu_seqlens: torch.LongTensor,
     chunk_size: int
 ) -> torch.LongTensor:
-    return torch.cat([offsets.new_tensor([0]), triton.cdiv(prepare_lens(offsets), chunk_size)]).cumsum(-1)
+    return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]).cumsum(-1)

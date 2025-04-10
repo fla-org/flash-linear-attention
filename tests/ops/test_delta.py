@@ -23,19 +23,19 @@ else:
 test_h_list = [2]
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("scale", [1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('scale', [1])
+@pytest.mark.parametrize('dtype', [torch.bfloat16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Triton Failure"
+    reason='Intel Triton Failure'
 )
 def test_chunk(
     B: int,
@@ -80,28 +80,28 @@ def test_chunk(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
 
-    assert_close("  o", ref, tri, 0.006)
-    assert_close(" ht", ref_ht, tri_ht, 0.006)
-    assert_close(" dq", ref_dq, tri_dq, 0.008)
-    assert_close(" dk", ref_dk, tri_dk, 0.008)
-    assert_close(" dv", ref_dv, tri_dv, 0.008)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.008)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
+    assert_close('  o', ref, tri, 0.006)
+    assert_close(' ht', ref_ht, tri_ht, 0.006)
+    assert_close(' dq', ref_dq, tri_dq, 0.008)
+    assert_close(' dk', ref_dk, tri_dk, 0.008)
+    assert_close(' dv', ref_dv, tri_dv, 0.008)
+    assert_close(' db', ref_dbeta, tri_dbeta, 0.008)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-@pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", test_t_varlen_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("scale", [1])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize('N', [4])
+@pytest.mark.parametrize('T', test_t_varlen_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('scale', [1])
+@pytest.mark.parametrize('dtype', [torch.bfloat16])
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Triton Failure"
+    reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
     N: int,
@@ -156,24 +156,24 @@ def test_chunk_varlen(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
 
-    assert_close("  o", ref, tri, 0.005)
-    assert_close(" ht", ref_ht, tri_ht, 0.005)
-    assert_close(" dq", ref_dq, tri_dq, 0.008)
-    assert_close(" dk", ref_dk, tri_dk, 0.008)
-    assert_close(" dv", ref_dv, tri_dv, 0.008)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.008)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
+    assert_close('  o', ref, tri, 0.005)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.008)
+    assert_close(' dk', ref_dk, tri_dk, 0.008)
+    assert_close(' dv', ref_dv, tri_dv, 0.008)
+    assert_close(' db', ref_dbeta, tri_dbeta, 0.008)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("scale", [0.1])
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('scale', [0.1])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Triton Failure"
+    reason='Intel Triton Failure'
 )
 def test_l2_in_kernel(
     B: int,
@@ -219,13 +219,13 @@ def test_l2_in_kernel(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = h0.grad = None
-    assert_close("  o", ref, tri, 0.01)
-    assert_close(" ht", ref_ht, tri_ht, 0.01)
-    assert_close(" dq", ref_dq, tri_dq, 0.01)
-    assert_close(" dk", ref_dk, tri_dk, 0.01)
-    assert_close(" dv", ref_dv, tri_dv, 0.01)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.01)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.01)
+    assert_close('  o', ref, tri, 0.01)
+    assert_close(' ht', ref_ht, tri_ht, 0.01)
+    assert_close(' dq', ref_dq, tri_dq, 0.01)
+    assert_close(' dk', ref_dk, tri_dk, 0.01)
+    assert_close(' dv', ref_dv, tri_dv, 0.01)
+    assert_close(' db', ref_dbeta, tri_dbeta, 0.01)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.01)
 
     tri, tri_ht = fused_recurrent_delta_rule(
         F.normalize(q.clone().float(), p=2, dim=-1).to(dtype),
@@ -254,13 +254,13 @@ def test_l2_in_kernel(
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = h0.grad = None
 
-    assert_close("  o", ref, tri, 0.002)
-    assert_close(" ht", ref_ht, tri_ht, 0.002)
-    assert_close(" dq", ref_dq, tri_dq, 0.002)
-    assert_close(" dk", ref_dk, tri_dk, 0.002)
-    assert_close(" dv", ref_dv, tri_dv, 0.002)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.002)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.002)
+    assert_close('  o', ref, tri, 0.002)
+    assert_close(' ht', ref_ht, tri_ht, 0.002)
+    assert_close(' dq', ref_dq, tri_dq, 0.002)
+    assert_close(' dk', ref_dk, tri_dk, 0.002)
+    assert_close(' dv', ref_dv, tri_dv, 0.002)
+    assert_close(' db', ref_dbeta, tri_dbeta, 0.002)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.002)
 
     tri, tri_ht = fused_recurrent_delta_rule(
         F.normalize(q.float().clone(), p=2, dim=-1).to(dtype),
@@ -288,10 +288,10 @@ def test_l2_in_kernel(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = h0.grad = None
-    assert_close("  o", ref, tri, 0.002)
-    assert_close(" ht", ref_ht, tri_ht, 0.002)
-    assert_close(" dq", ref_dq, tri_dq, 0.002)
-    assert_close(" dk", ref_dk, tri_dk, 0.002)
-    assert_close(" dv", ref_dv, tri_dv, 0.002)
-    assert_close(" db", ref_dbeta, tri_dbeta, 0.002)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.002)
+    assert_close('  o', ref, tri, 0.002)
+    assert_close(' ht', ref_ht, tri_ht, 0.002)
+    assert_close(' dq', ref_dq, tri_dq, 0.002)
+    assert_close(' dk', ref_dk, tri_dk, 0.002)
+    assert_close(' dv', ref_dv, tri_dv, 0.002)
+    assert_close(' db', ref_dbeta, tri_dbeta, 0.002)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.002)

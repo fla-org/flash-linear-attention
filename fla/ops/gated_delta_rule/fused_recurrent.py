@@ -16,7 +16,7 @@ from fla.utils import input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
@@ -28,7 +28,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     o,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -46,7 +46,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -121,10 +121,10 @@ def fused_recurrent_gated_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     use_qk_l2norm_in_kernel: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
@@ -147,7 +147,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         o=o,
         h0=initial_state,
         ht=final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=scale,
         T=T,
         B=B,
@@ -179,7 +179,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        offsets: Optional[torch.LongTensor] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
@@ -192,7 +192,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-            offsets=offsets
+            cu_seqlens=cu_seqlens
         )
 
         return o, final_state
