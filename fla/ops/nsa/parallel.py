@@ -28,7 +28,7 @@ except ImportError:
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -44,7 +44,7 @@ def parallel_nsa_kernel_topk(
     lse,
     scale,
     block_indices,
-    offsets,
+    cu_seqlens,
     token_indices,
     chunk_offsets,
     T,
@@ -63,7 +63,7 @@ def parallel_nsa_kernel_topk(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
@@ -160,7 +160,7 @@ def parallel_nsa_kernel_topk(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor),
 })
 @triton.autotune(
@@ -180,7 +180,7 @@ def parallel_nsa_fwd_kernel(
     scale,
     block_indices,
     block_counts,
-    offsets,
+    cu_seqlens,
     token_indices,
     T,
     H: tl.constexpr,
@@ -200,7 +200,7 @@ def parallel_nsa_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -286,7 +286,7 @@ def parallel_nsa_kernel_mask(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor)
 })
 @triton.autotune(
@@ -308,7 +308,7 @@ def parallel_nsa_bwd_kernel_dq(
     scale,
     block_indices,
     block_counts,
-    offsets,
+    cu_seqlens,
     token_indices,
     T,
     B: tl.constexpr,
@@ -329,7 +329,7 @@ def parallel_nsa_bwd_kernel_dq(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -394,7 +394,7 @@ def parallel_nsa_bwd_kernel_dq(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -414,7 +414,7 @@ def parallel_nsa_bwd_kernel_dkv(
     dk,
     dv,
     block_mask,
-    offsets,
+    cu_seqlens,
     chunk_indices,
     scale,
     T,
@@ -435,7 +435,7 @@ def parallel_nsa_bwd_kernel_dkv(
 
     if IS_VARLEN:
         i_n, i_s = tl.load(chunk_indices + i_s * 2).to(tl.int32), tl.load(chunk_indices + i_s * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -492,7 +492,7 @@ def parallel_nsa_topk(
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
     scale: float = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> torch.LongTensor:
     B, T, HQ, K = q.shape
     H = k.shape[2]
@@ -504,8 +504,8 @@ def parallel_nsa_topk(
     BK = triton.next_power_of_2(K)
 
     block_indices = torch.zeros(B, T, H, S, dtype=torch.int32, device=q.device)
-    token_indices = prepare_token_indices(offsets) if offsets is not None else None
-    chunk_offsets = prepare_chunk_offsets(offsets, BS) if offsets is not None else None
+    token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
     grid = (T, B * H)
     parallel_nsa_kernel_topk[grid](
         q=q,
@@ -513,7 +513,7 @@ def parallel_nsa_topk(
         lse=lse,
         scale=scale,
         block_indices=block_indices,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         token_indices=token_indices,
         chunk_offsets=chunk_offsets,
         T=T,
@@ -537,7 +537,7 @@ def parallel_nsa_fwd(
     block_counts: Union[torch.LongTensor, int],
     block_size: int,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
@@ -567,7 +567,7 @@ def parallel_nsa_fwd(
         scale=scale,
         block_indices=block_indices,
         block_counts=block_counts,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         token_indices=token_indices,
         T=T,
         H=H,
@@ -586,13 +586,13 @@ def parallel_nsa_fwd(
 def parallel_nsa_block_mask(
     block_indices: torch.LongTensor,
     block_counts: Union[torch.LongTensor, int],
-    offsets: torch.LongTensor,
+    cu_seqlens: torch.LongTensor,
     block_size: int,
 ):
     B, T, H, S = block_indices.shape
     BS = block_size
-    if offsets is not None:
-        NS = triton.cdiv(prepare_lens(offsets).max().item(), BS)
+    if cu_seqlens is not None:
+        NS = triton.cdiv(prepare_lens(cu_seqlens).max().item(), BS)
     else:
         NS = triton.cdiv(T, BS)
     block_mask = torch.zeros(B, T, H, NS, dtype=torch.bool, device=block_indices.device)
@@ -621,7 +621,7 @@ def parallel_nsa_bwd(
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
     scale: float = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
@@ -646,7 +646,7 @@ def parallel_nsa_bwd(
         dq=dq,
         block_indices=block_indices,
         block_counts=block_counts,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         token_indices=token_indices,
         scale=scale,
         T=T,
@@ -663,15 +663,15 @@ def parallel_nsa_bwd(
     )
     dq = dq.sum(0)
 
-    if offsets is not None:
-        chunk_indices = prepare_chunk_indices(offsets, BS)
+    if cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BS)
         NS = len(chunk_indices)
     else:
         chunk_indices = None
         NS = triton.cdiv(T, BS)
 
     # [B, T, H, M]
-    block_mask = parallel_nsa_block_mask(block_indices, block_counts, offsets, block_size)
+    block_mask = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
     dk = torch.empty(NV, *k.shape, dtype=k.dtype if NV == 1 else torch.float, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
 
@@ -686,7 +686,7 @@ def parallel_nsa_bwd(
         dk=dk,
         dv=dv,
         block_mask=block_mask,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
@@ -711,14 +711,14 @@ class ParallelNSAFunction(torch.autograd.Function):
     @staticmethod
     @contiguous
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, block_indices, block_counts, block_size, scale, offsets):
+    def forward(ctx, q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens):
         ctx.dtype = q.dtype
 
-        # 2-d sequence indices denoting the offsets of tokens in each sequence
-        # for example, if the passed `offsets` is [0, 2, 6],
+        # 2-d sequence indices denoting the cu_seqlens of tokens in each sequence
+        # for example, if the passed `cu_seqlens` is [0, 2, 6],
         # then there are 2 and 4 tokens in the 1st and 2nd sequences respectively, and `token_indices` will be
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        token_indices = prepare_token_indices(offsets) if offsets is not None else None
+        token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
 
         o, lse = parallel_nsa_fwd(
             q=q,
@@ -728,13 +728,13 @@ class ParallelNSAFunction(torch.autograd.Function):
             block_counts=block_counts,
             block_size=block_size,
             scale=scale,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             token_indices=token_indices
         )
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.block_indices = block_indices
         ctx.block_counts = block_counts
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         ctx.token_indices = token_indices
         ctx.block_size = block_size
         ctx.scale = scale
@@ -756,7 +756,7 @@ class ParallelNSAFunction(torch.autograd.Function):
             block_counts=ctx.block_counts,
             block_size=ctx.block_size,
             scale=ctx.scale,
-            offsets=ctx.offsets,
+            cu_seqlens=ctx.cu_seqlens,
             token_indices=ctx.token_indices
         )
         return dq.to(q), dk.to(k), dv.to(v), None, None, None, None, None, None, None, None
@@ -766,9 +766,9 @@ def parallel_nsa(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g_cmp: torch.Tensor,
-    g_slc: torch.Tensor,
-    g_swa: torch.Tensor,
+    g_cmp: Optional[torch.Tensor] = None,
+    g_slc: Optional[torch.Tensor] = None,
+    g_swa: Optional[torch.Tensor] = None,
     block_indices: Optional[torch.LongTensor] = None,
     block_counts: Union[torch.LongTensor, int] = 16,
     block_size: int = 64,
@@ -839,7 +839,7 @@ def parallel_nsa(
             v=v_cmp,
             block_size=block_size,
             scale=scale,
-            offsets=cu_seqlens
+            cu_seqlens=cu_seqlens
         )
         if block_indices is not None:
             warnings.warn("`block_indices` will be ignored when `g_cmp` is provided")
@@ -850,10 +850,11 @@ def parallel_nsa(
             block_counts=block_counts,
             block_size=block_size,
             scale=scale,
-            offsets=cu_seqlens
+            cu_seqlens=cu_seqlens
         )
-    o_slc = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
-    o = o_slc * g_slc.unsqueeze(-1)
+    o = o_slc = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
+    if g_slc is not None:
+        o = o_slc * g_slc.unsqueeze(-1)
     if o_cmp is not None:
         o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
     if window_size > 0:

@@ -8,13 +8,13 @@ import triton
 import triton.language as tl
 
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
-from fla.ops.common.utils import prepare_chunk_offsets, prepare_lens, prepare_token_indices
+from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_token_indices
 from fla.ops.utils.op import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -31,7 +31,7 @@ def parallel_nsa_compression_fwd_kernel(
     o,
     lse,
     scale,
-    offsets,
+    cu_seqlens,
     token_indices,
     chunk_offsets,
     T,
@@ -51,7 +51,7 @@ def parallel_nsa_compression_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
@@ -116,7 +116,7 @@ def parallel_nsa_compression_fwd_kernel(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -135,7 +135,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
     do,
     dq,
     scale,
-    offsets,
+    cu_seqlens,
     token_indices,
     chunk_offsets,
     T,
@@ -156,7 +156,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
@@ -218,7 +218,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -237,7 +237,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     do,
     dk,
     dv,
-    offsets,
+    cu_seqlens,
     chunk_indices,
     chunk_offsets,
     scale,
@@ -259,7 +259,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
 
     if IS_VARLEN:
         i_n, i_c = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
@@ -320,7 +320,7 @@ def parallel_nsa_compression_fwd(
     v: torch.Tensor,
     block_size: int,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
 ):
     B, T, HQ, K, V = *q.shape, v.shape[-1]
@@ -337,7 +337,7 @@ def parallel_nsa_compression_fwd(
     NV = triton.cdiv(V, BV)
     assert NK == 1, "The key dimension can not be larger than 256"
 
-    chunk_offsets = prepare_chunk_offsets(offsets, BS) if offsets is not None else None
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
 
     grid = (T, NV, B * H)
     o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
@@ -350,7 +350,7 @@ def parallel_nsa_compression_fwd(
         o=o,
         lse=lse,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         token_indices=token_indices,
         chunk_offsets=chunk_offsets,
         T=T,
@@ -376,7 +376,7 @@ def parallel_nsa_compression_bwd(
     do: torch.Tensor,
     block_size: int = 64,
     scale: float = None,
-    offsets: Optional[torch.LongTensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
 ):
     B, T, HQ, K, V = *q.shape, v.shape[-1]
@@ -386,11 +386,8 @@ def parallel_nsa_compression_bwd(
     BK = triton.next_power_of_2(K)
     BV = min(128, triton.next_power_of_2(v.shape[-1]))
     NV = triton.cdiv(V, BV)
-    if offsets is not None:
-        lens = prepare_lens(offsets)
-        chunk_indices = torch.cat([torch.arange(n) for n in triton.cdiv(triton.cdiv(lens, BS), BC).tolist()])
-        chunk_indices = torch.stack([chunk_indices.eq(0).cumsum(0) - 1, chunk_indices], 1).to(offsets)
-        chunk_offsets = prepare_chunk_offsets(offsets, BS)
+    if cu_seqlens is not None:
+        chunk_indices, chunk_offsets = prepare_chunk_indices(cu_seqlens, BS), prepare_chunk_offsets(cu_seqlens, BS)
         NC = len(chunk_indices)
     else:
         chunk_indices, chunk_offsets = None, None
@@ -409,7 +406,7 @@ def parallel_nsa_compression_bwd(
         do=do,
         dq=dq,
         scale=scale,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         token_indices=token_indices,
         chunk_offsets=chunk_offsets,
         T=T,
@@ -439,7 +436,7 @@ def parallel_nsa_compression_bwd(
         do=do,
         dk=dk,
         dv=dv,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         scale=scale,
@@ -471,15 +468,15 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
         v,
         block_size,
         scale,
-        offsets
+        cu_seqlens
     ):
         ctx.dtype = q.dtype
 
-        # 2-d sequence indices denoting the offsets of tokens in each sequence
-        # for example, if the passed `offsets` is [0, 2, 6],
+        # 2-d sequence indices denoting the cu_seqlens of tokens in each sequence
+        # for example, if the passed `cu_seqlens` is [0, 2, 6],
         # then there are 2 and 4 tokens in the 1st and 2nd sequences respectively, and `token_indices` will be
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        token_indices = prepare_token_indices(offsets) if offsets is not None else None
+        token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
 
         o, lse = parallel_nsa_compression_fwd(
             q=q,
@@ -487,11 +484,11 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
             v=v,
             block_size=block_size,
             scale=scale,
-            offsets=offsets,
+            cu_seqlens=cu_seqlens,
             token_indices=token_indices
         )
         ctx.save_for_backward(q, k, v, o, lse)
-        ctx.offsets = offsets
+        ctx.cu_seqlens = cu_seqlens
         ctx.token_indices = token_indices
         ctx.block_size = block_size
         ctx.scale = scale
@@ -511,7 +508,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
             do=do,
             block_size=ctx.block_size,
             scale=ctx.scale,
-            offsets=ctx.offsets,
+            cu_seqlens=ctx.cu_seqlens,
             token_indices=ctx.token_indices
         )
         return dq.to(q), dk.to(k), dv.to(v), None, None, None
@@ -523,7 +520,7 @@ def parallel_nsa_compression(
     v: torch.Tensor,
     block_size: int = 64,
     scale: float = None,
-    offsets: Optional[torch.LongTensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None
 ):
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -533,5 +530,5 @@ def parallel_nsa_compression(
         v,
         block_size,
         scale,
-        offsets
+        cu_seqlens
     )
