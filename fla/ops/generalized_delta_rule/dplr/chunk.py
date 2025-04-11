@@ -330,7 +330,6 @@ def chunk_dplr_delta_rule(
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
         )
-
     # use pytorch fast path here, if q, k, v are already in input_precision, nothing to do
     if q.dtype == torch.float32:
         warnings.warn(

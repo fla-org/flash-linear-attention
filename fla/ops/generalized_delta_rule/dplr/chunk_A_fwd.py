@@ -154,6 +154,9 @@ def chunk_fwd_intra_dplr_fn(
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    BC = min(16, BT)
+    NC = triton.cdiv(BT, BC)
+
 
     Aqk = q.new_empty(B, T, H, BT, dtype=q.dtype)
     Aqb = q.new_empty(B, T, H, BT, dtype=q.dtype)

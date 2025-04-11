@@ -306,7 +306,7 @@ def chunk_dplr_bwd_dqk_intra(
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    NK = triton.cdiv(K, BK)
+    NC = triton.cdiv(BT, BC)
 
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
