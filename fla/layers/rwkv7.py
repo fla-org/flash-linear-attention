@@ -206,7 +206,6 @@ class RWKV7Attention(nn.Module):
             output_final_state=use_cache,
             cu_seqlens=cu_seqlens,
             head_first=False,
-            input_precision=r.dtype,
         )
 
         if past_key_values is not None:

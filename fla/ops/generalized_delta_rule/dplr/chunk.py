@@ -281,7 +281,6 @@ def chunk_dplr_delta_rule(
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
-    input_precision: Optional[torch.dtype] = torch.bfloat16,
 ):
     r"""
     Args:
@@ -312,9 +311,6 @@ def chunk_dplr_delta_rule(
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `False`.
-        input_precision (Optional[torch.dtype]):
-            The precision of the input tensors. Default: `torch.bfloat16`.
-            Note: The output tensors will be in the same precision as the input tensors. Use torch.float16 with caution.
 
     Returns:
         o (torch.Tensor):
@@ -337,12 +333,11 @@ def chunk_dplr_delta_rule(
         )
 
     # use pytorch fast path here, if q, k, v are already in input_precision, nothing to do
-    if input_precision == torch.float32:
+    if q.dtype == torch.float32:
         warnings.warn(
             """ChunkDeltaRuleFunction does not support float32. Please use bfloat16.
             If you want to use float32, please solve the issue by yourself."""
         )
-    q, k, v = q.to(input_precision), k.to(input_precision), v.to(input_precision)
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
