@@ -123,7 +123,6 @@ def chunk_dplr_bwd_kernel_intra(
     b_dAqb = tl.load(p_dAqb, boundary_check=(0, 1))
     b_dAak = tl.load(p_dAak, boundary_check=(0, 1))
 
-
     # inter chunk gradient calculation
     o_k = i_k * BK + tl.arange(0, BK)
     m_k = o_k < K
@@ -175,10 +174,10 @@ def chunk_dplr_bwd_kernel_intra(
 
         m_e1 = (o_i[:, None] > j).to(tl.int1)
         m_i1 = (o_i[:, None] >= j).to(tl.int1)
-        b_dq += m_i1* b_dAqk_j * b_kj * tmp1
-        b_dq += m_i1* b_dAqb_j * b_bj * tmp1
-        b_da += m_e1* b_dAab_j * b_bj * tmp2
-        b_da += m_e1* b_dAak_j * b_kj * tmp2
+        b_dq += m_i1 * b_dAqk_j * b_kj * tmp1
+        b_dq += m_i1 * b_dAqb_j * b_bj * tmp1
+        b_da += m_e1 * b_dAab_j * b_bj * tmp2
+        b_da += m_e1 * b_dAak_j * b_kj * tmp2
 
         m_i2 = (o_i[:, None] <= j).to(tl.int1)
         m_e2 = (o_i[:, None] < j).to(tl.int1)
@@ -306,7 +305,7 @@ def chunk_dplr_bwd_dqk_intra(
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    NC = triton.cdiv(BT, BC)
+    NK = triton.cdiv(K, BK)
 
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)

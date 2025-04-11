@@ -131,7 +131,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
         b_A_ak = b_A_ak * m_i2
         b_A_ab = tl.sum(b_a * b_b_j * tmp2, 1)
         b_A_ab = b_A_ab * m_i2
-        
+
         tl.store(Aqk + o_A + j, b_A_qk.to(dtype=Aqk.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
         tl.store(Aqb + o_A + j, b_A_qb.to(dtype=Aqb.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
         tl.store(Aab + o_A + j, b_A_ab.to(dtype=Aqb.dtype.element_ty, fp_downcast_rounding="rtne"), mask=m_A)
@@ -154,9 +154,6 @@ def chunk_fwd_intra_dplr_fn(
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BC = min(16, BT)
-    NC = triton.cdiv(BT, BC)
-
 
     Aqk = q.new_empty(B, T, H, BT, dtype=q.dtype)
     Aqb = q.new_empty(B, T, H, BT, dtype=q.dtype)
