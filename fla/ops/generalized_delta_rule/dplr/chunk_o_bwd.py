@@ -280,7 +280,7 @@ def chunk_dplr_bwd_kernel_dv(
 
     p_Aqk = tl.make_block_ptr(A_qk, (BT, T), (1, stride_A), (0, i_t * BT), (BT, BT), (0, 1))
     m_s = (tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :]).to(tl.int1)
-    b_A = tl.load(p_Aqk, boundary_check=(0, 1)) 
+    b_A = tl.load(p_Aqk, boundary_check=(0, 1))
     b_A = (b_A * m_s).to(b_A.dtype)
     p_do = tl.make_block_ptr(do, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_dv = tl.make_block_ptr(dv, (T, V), (stride_vo, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))

@@ -139,7 +139,8 @@ def addcmul_bwd_kernel1(
     tl.store(gx_ptr + (xindex), g_x.to(gx_ptr.dtype.element_ty), xmask)
 
 
-def addcmul_bwd1(d_oxr, d_oxw, d_oxk, d_oxv, d_oxa, d_oxg, x_r, x_w, x_k, x_v, x_a, x_g, hidden_states, xx, use_xg, inplace=True):
+def addcmul_bwd1(d_oxr, d_oxw, d_oxk, d_oxv, d_oxa, d_oxg,
+                 x_r, x_w, x_k, x_v, x_a, x_g, hidden_states, xx, use_xg, inplace=True):
     d_hiddn = hidden_states if inplace else torch.empty_like(hidden_states)
     d_xx = torch.empty_like(xx)
     numel = hidden_states.numel()
