@@ -127,7 +127,6 @@ class NativeSparseAttention(nn.Module):
             block_counts=self.block_counts,
             window_size=self.window_size,
             cu_seqlens=cu_seqlens,
-            head_first=False
         )
         o = o.reshape(batch_size, seq_len, -1)
         o = self.o_proj(o)

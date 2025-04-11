@@ -205,7 +205,6 @@ class RWKV7Attention(nn.Module):
             initial_state=recurrent_state,
             output_final_state=use_cache,
             cu_seqlens=cu_seqlens,
-            head_first=False,
         )
 
         if past_key_values is not None:

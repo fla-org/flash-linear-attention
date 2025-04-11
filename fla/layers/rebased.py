@@ -73,7 +73,6 @@ class ReBasedLinearAttention(nn.Module):
                 v=v,
                 normalize=True,
                 scale=1,
-                head_first=False
             )
         elif mode == 'chunk':
             o = chunk_linear_attn(
@@ -82,7 +81,6 @@ class ReBasedLinearAttention(nn.Module):
                 v=v,
                 normalize=True,
                 scale=1,
-                head_first=False
             )
         elif mode == 'parallel':
             assert q.shape[-1] <= 128
@@ -93,7 +91,6 @@ class ReBasedLinearAttention(nn.Module):
                 eps=self.eps,
                 use_scale=True,
                 use_normalize=True,
-                head_first=False
             )
         o = self.o_proj(o)
         o = self.dropout(o)

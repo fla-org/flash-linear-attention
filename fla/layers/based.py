@@ -54,21 +54,19 @@ class BasedLinearAttention(nn.Module):
         q, k, v = map(lambda x: rearrange(x, "... (h d) -> ... h d", d=self.head_dim), [q, k, v])
         if mode == "fused_chunk":
             q, k = self.feature_map(q), self.feature_map(k)
-            o, _ = fused_chunk_linear_attn(q, k, v, normalize=True, scale=1, head_first=False)
+            o, _ = fused_chunk_linear_attn(q, k, v, normalize=True, scale=1)
         elif mode == 'chunk':
             q, k = self.feature_map(q), self.feature_map(k)
-            o, _ = chunk_linear_attn(q, k, v, normalize=True, scale=1, head_first=False)
+            o, _ = chunk_linear_attn(q, k, v, normalize=True, scale=1)
         elif mode == 'parallel':
             assert q.shape[-1] <= 128
-            o = parallel_based(q, k, v, scale=1, use_norm=True, head_first=False)
+            o = parallel_based(q, k, v, scale=1, use_norm=True)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
         o = self.dropout(o)
         return o
 
-    # https://github.com/HazyResearch/zoology/blob/main/zoology/mixers/based.py#L119
-
-    def forward_reference(self, hidden_states: torch.Tensor, filters: torch.Tensor = None, *args, **kwargs):
+    def forward_reference(self, hidden_states: torch.Tensor, **kwargs):
         """
         x (torch.Tensor): tensor of shape (b, d, t)
         y (torch.Tensor): tensor of shape (b, d, t)

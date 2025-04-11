@@ -142,7 +142,6 @@ class LinearAttention(nn.Module):
                 k=k,
                 v=v,
                 normalize=self.do_feature_map_norm,
-                head_first=False
             )
         elif mode == 'fused_chunk':
             o, final_state = fused_chunk_linear_attn(

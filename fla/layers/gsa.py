@@ -190,7 +190,6 @@ class GatedSlotAttention(nn.Module):
                 output_final_state=use_cache,
                 scale=self.scale,
                 cu_seqlens=cu_seqlens,
-                head_first=False
             )
         elif mode == 'chunk':
             o, recurrent_state = chunk_gsa(
@@ -203,7 +202,6 @@ class GatedSlotAttention(nn.Module):
                 output_final_state=use_cache,
                 scale=self.scale,
                 cu_seqlens=cu_seqlens,
-                head_first=False
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

@@ -307,7 +307,6 @@ class GatedDeltaProduct(nn.Module):
                     initial_state=recurrent_state,
                     output_final_state=use_cache,
                     cu_seqlens=offsets,
-                    head_first=False,
                     use_qk_l2norm_in_kernel=True
                 )
             else:
@@ -319,7 +318,6 @@ class GatedDeltaProduct(nn.Module):
                     initial_state=recurrent_state,
                     output_final_state=use_cache,
                     cu_seqlens=offsets,
-                    head_first=False,
                     use_qk_l2norm_in_kernel=True
                 )
         else:

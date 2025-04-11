@@ -194,7 +194,6 @@ class ABCAttention(nn.Module):
             s=s,
             initial_state=recurrent_state,
             output_final_state=use_cache,
-            head_first=False
         )
         if past_key_values is not None:
             past_key_values.update(
