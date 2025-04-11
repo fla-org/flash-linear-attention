@@ -213,7 +213,7 @@ def fused_recurrent_dplr_delta_rule(
     reverse: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False,
-    input_precision: Optional[torch.dtype] = torch.bfloat16,
+    **kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
@@ -265,8 +265,6 @@ def fused_recurrent_dplr_delta_rule(
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
         )
-    # use pytorch fast path here, if q, k, v are already in input_precision, nothing to do
-    q, k, v = q.to(input_precision), k.to(input_precision), v.to(input_precision)
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

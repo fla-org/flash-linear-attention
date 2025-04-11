@@ -44,6 +44,7 @@ def fused_addcmul_fwd_kernel(
     xnumel,
     hidden_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    DTYPE: tl.constexpr,
 ):
     xoffset = tl.program_id(0) * BLOCK_SIZE
     xindex = xoffset + tl.arange(0, BLOCK_SIZE)[:]
@@ -51,13 +52,13 @@ def fused_addcmul_fwd_kernel(
     valid_indices = xnumel - xoffset
     xmask = xindex < (xoffset + valid_indices)
     x0 = xindex % hidden_dim
-    b_hiddn = tl.load(hidden_ptr + (xindex), xmask, other=0.).to(tl.float32)
-    b_x = tl.load(x_ptr + (xindex), xmask, other=0.).to(tl.float32)
-    b_ixr = tl.load(ixr_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_ixw = tl.load(ixw_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_ixk = tl.load(ixk_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_ixv = tl.load(ixv_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_ixa = tl.load(ixa_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
+    b_hiddn = tl.load(hidden_ptr + (xindex), xmask, other=0.).to(DTYPE)
+    b_x = tl.load(x_ptr + (xindex), xmask, other=0.).to(DTYPE)
+    b_ixr = tl.load(ixr_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
+    b_ixw = tl.load(ixw_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
+    b_ixk = tl.load(ixk_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
+    b_ixv = tl.load(ixv_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
+    b_ixa = tl.load(ixa_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
     b_oxr = b_hiddn + b_x * b_ixr
     b_oxw = b_hiddn + b_x * b_ixw
     b_oxk = b_hiddn + b_x * b_ixk
@@ -71,7 +72,7 @@ def fused_addcmul_fwd_kernel(
     tl.store(oxa_ptr + (xindex), b_oxa.to(oxa_ptr.dtype.element_ty), xmask)
 
     if use_xg:
-        b_ixg = tl.load(ixg_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
+        b_ixg = tl.load(ixg_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
         b_oxg = b_hiddn + b_x * b_ixg
         tl.store(oxg_ptr + (xindex), b_oxg.to(oxg_ptr.dtype.element_ty), xmask)
 
@@ -105,6 +106,7 @@ def addcmul_bwd_kernel1(
     xnumel,
     hidden_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    DTYPE: tl.constexpr
 ):
     xoffset = tl.program_id(0) * BLOCK_SIZE
     xindex = xoffset + tl.arange(0, BLOCK_SIZE)[:]
@@ -113,20 +115,20 @@ def addcmul_bwd_kernel1(
     xmask = xindex < (xoffset + valid_indices)
     x0 = xindex % hidden_dim
 
-    b_dxr = tl.load(dxr_ptr + (xindex), None).to(tl.float32)
-    b_dxw = tl.load(dxw_ptr + (xindex), None).to(tl.float32)
-    b_dxk = tl.load(dxk_ptr + (xindex), None).to(tl.float32)
-    b_dxv = tl.load(dxv_ptr + (xindex), None).to(tl.float32)
-    b_dxa = tl.load(dxa_ptr + (xindex), None).to(tl.float32)
-    b_ixr = tl.load(ixr_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_ixw = tl.load(ixw_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_iwk = tl.load(ixk_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_ixv = tl.load(ixv_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
-    b_ixa = tl.load(ixa_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
+    b_dxr = tl.load(dxr_ptr + (xindex), None).to(DTYPE)
+    b_dxw = tl.load(dxw_ptr + (xindex), None).to(DTYPE)
+    b_dxk = tl.load(dxk_ptr + (xindex), None).to(DTYPE)
+    b_dxv = tl.load(dxv_ptr + (xindex), None).to(DTYPE)
+    b_dxa = tl.load(dxa_ptr + (xindex), None).to(DTYPE)
+    b_ixr = tl.load(ixr_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
+    b_ixw = tl.load(ixw_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
+    b_iwk = tl.load(ixk_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
+    b_ixv = tl.load(ixv_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
+    b_ixa = tl.load(ixa_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
 
     if use_xg:
-        b_dxg = tl.load(dxg_ptr + (xindex), None).to(tl.float32)
-        b_ixg = tl.load(ixg_ptr + (x0), eviction_policy='evict_last').to(tl.float32)
+        b_dxg = tl.load(dxg_ptr + (xindex), None).to(DTYPE)
+        b_ixg = tl.load(ixg_ptr + (x0), eviction_policy='evict_last').to(DTYPE)
         g_hidden = b_dxr + b_dxw + b_dxk + b_dxv + b_dxa + b_dxg
         g_x = b_dxr * b_ixr + b_dxw * b_ixw + b_dxk * b_iwk + b_dxv * b_ixv + b_dxa * b_ixa + b_dxg * b_ixg
     else:
@@ -137,8 +139,8 @@ def addcmul_bwd_kernel1(
     tl.store(gx_ptr + (xindex), g_x.to(gx_ptr.dtype.element_ty), xmask)
 
 
-def addcmul_bwd1(d_oxr, d_oxw, d_oxk, d_oxv, d_oxa, d_oxg, x_r, x_w, x_k, x_v, x_a, x_g, hidden_states, xx, use_xg):
-    d_hiddn = torch.empty_like(hidden_states)
+def addcmul_bwd1(d_oxr, d_oxw, d_oxk, d_oxv, d_oxa, d_oxg, x_r, x_w, x_k, x_v, x_a, x_g, hidden_states, xx, use_xg, inplace=True):
+    d_hiddn = hidden_states if inplace else torch.empty_like(hidden_states)
     d_xx = torch.empty_like(xx)
     numel = hidden_states.numel()
     def grid(meta): return (triton.cdiv(meta['xnumel'], meta['BLOCK_SIZE']),)
@@ -160,6 +162,7 @@ def addcmul_bwd1(d_oxr, d_oxw, d_oxk, d_oxv, d_oxa, d_oxg, x_r, x_w, x_k, x_v, x
         use_xg=use_xg,
         xnumel=numel,
         hidden_dim=hidden_states.size(-1),
+        DTYPE=tl.float16 if hidden_states.dtype == torch.float16 else tl.float32,
     )
     return d_hiddn, d_xx
 
@@ -178,10 +181,11 @@ def addcmul_bwd2(d_oxr, d_oxw, d_oxk, d_oxv, d_oxa, d_oxg, xx, use_xg: bool):
 class Rwkv7FusedAddcmul(torch.autograd.Function):
     @staticmethod
     @input_guard
-    def forward(ctx, hidden_states, xx,
-                x_r, x_w, x_k, x_v, x_a, x_g,
-                num_elements
-                ):
+    def forward(
+        ctx, hidden_states, xx,
+        x_r, x_w, x_k, x_v, x_a, x_g,
+        num_elements
+    ):
         oxr = torch.empty_like(hidden_states)
         oxw = torch.empty_like(hidden_states)
         oxk = torch.empty_like(hidden_states)
@@ -216,6 +220,7 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
             use_xg,
             num_elements,
             hidden_states.size(-1),
+            DTYPE=tl.float16 if hidden_states.dtype == torch.float16 else tl.float32,
         )
         return oxr, oxw, oxk, oxv, oxa, oxg
 
