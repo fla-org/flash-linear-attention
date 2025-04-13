@@ -10,7 +10,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
+from fla.ops.generalized_delta_rule.iplr.wy_fast import prepare_wy_repr_fwd
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, use_cuda_graph
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -330,7 +330,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
 ):
     T = q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    w, u, _ = fwd_prepare_wy_repr(
+    w, u, _ = prepare_wy_repr_fwd(
         a=a,
         b=b,
         k=k,

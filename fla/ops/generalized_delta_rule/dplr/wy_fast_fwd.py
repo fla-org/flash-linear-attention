@@ -24,7 +24,7 @@ from fla.utils import is_gather_supported, use_cuda_graph
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
-def fwd_prepare_wy_repr_kernel_chunk32(
+def prepare_wy_repr_fwd_kernel_chunk32(
     A_ab,
     A_ab_inv,
     cu_seqlens,
@@ -69,7 +69,7 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
-def fwd_prepare_wy_repr_kernel_chunk64(
+def prepare_wy_repr_fwd_kernel_chunk64(
     A_ab,
     A_ab_inv,
     cu_seqlens,
@@ -148,7 +148,7 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
-def fwd_wu_kernel(
+def wu_fwd_kernel(
     w,
     u,
     ag,
@@ -204,7 +204,7 @@ def fwd_wu_kernel(
         tl.store(p_u, b_u.to(p_u.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
 
-def fwd_wu(
+def wu_fwd(
     ag: torch.Tensor,
     v: torch.Tensor,
     A_ak: torch.Tensor,
@@ -222,7 +222,7 @@ def fwd_wu(
 
     w = torch.empty_like(ag)
     u = torch.empty_like(v)
-    fwd_wu_kernel[(NT, B * H)](
+    wu_fwd_kernel[(NT, B * H)](
         ag=ag,
         v=v,
         A_ak=A_ak,
@@ -242,7 +242,7 @@ def fwd_wu(
     return w, u
 
 
-def fwd_prepare_wy_repr(
+def prepare_wy_repr_fwd(
     ag: torch.Tensor,
     v: torch.Tensor,
     A_ak: torch.Tensor,
@@ -256,7 +256,7 @@ def fwd_prepare_wy_repr(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
-    fwd_fn = fwd_prepare_wy_repr_kernel_chunk64 if BT == 64 else fwd_prepare_wy_repr_kernel_chunk32
+    fwd_fn = prepare_wy_repr_fwd_kernel_chunk64 if BT == 64 else prepare_wy_repr_fwd_kernel_chunk32
     A_ab_inv = torch.empty_like(A_ab)
     fwd_fn[(NT, B * H)](
         A_ab=A_ab,
@@ -268,7 +268,7 @@ def fwd_prepare_wy_repr(
         BT=BT,
         BC=BC,
     )
-    w, u = fwd_wu(
+    w, u = wu_fwd(
         ag=ag,
         v=v,
         A_ak=A_ak,
@@ -277,3 +277,8 @@ def fwd_prepare_wy_repr(
         chunk_size=BT
     )
     return w, u, A_ab_inv
+
+
+fwd_prepare_wy_repr = prepare_wy_repr_fwd
+
+fwd_wu = wu_fwd

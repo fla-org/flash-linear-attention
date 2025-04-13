@@ -25,7 +25,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
     key=['BK']
 )
 @triton.jit(do_not_specialize=['T'])
-def fwd_prepare_wy_repr_kernel_chunk32(
+def prepare_wy_repr_fwd_kernel_chunk32(
     a,
     b,
     A,
@@ -79,7 +79,7 @@ def fwd_prepare_wy_repr_kernel_chunk32(
     key=['BK']
 )
 @triton.jit(do_not_specialize=['T'])
-def fwd_prepare_wy_repr_kernel_chunk64(
+def prepare_wy_repr_fwd_kernel_chunk64(
     a,
     b,
     A,
@@ -159,7 +159,7 @@ def fwd_prepare_wy_repr_kernel_chunk64(
     key=['BT', 'BK', 'BV']
 )
 @triton.jit(do_not_specialize=['T'])
-def fwd_wu_kernel(
+def wu_fwd_kernel(
     w,
     u,
     a,
@@ -213,7 +213,50 @@ def fwd_wu_kernel(
         tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
 
 
-def fwd_wu(
+def prepare_wy_repr_fwd(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    v: torch.Tensor,
+    k: torch.Tensor,
+    cu_seqlens: Optional[torch.LongTensor],
+    chunk_size: int = 64
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, T, H, K = a.shape
+    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    BC = min(BT, 32)
+    BK = min(triton.next_power_of_2(K), 64)
+
+    A = torch.empty(B, T, H, BT, device=a.device, dtype=a.dtype)
+    fwd_fn = prepare_wy_repr_fwd_kernel_chunk64 if BT == 64 else prepare_wy_repr_fwd_kernel_chunk32
+
+    fwd_fn[(NT, B * H)](
+        a=a,
+        b=b,
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        BK=BK,
+        BC=BC,
+    )
+    w, u = wu_fwd(
+        a=a,
+        v=v,
+        k=k,
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
+    )
+    return w, u, A
+
+
+def wu_fwd(
     a: torch.Tensor,
     v: torch.Tensor,
     k: torch.Tensor,
@@ -232,7 +275,7 @@ def fwd_wu(
 
     u = torch.empty_like(v)
     w = torch.empty_like(a)
-    fwd_wu_kernel[(NT, B*H)](
+    wu_fwd_kernel[(NT, B*H)](
         a=a,
         v=v,
         w=w,
@@ -252,44 +295,6 @@ def fwd_wu(
     return w, u
 
 
-def fwd_prepare_wy_repr(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    v: torch.Tensor,
-    k: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    B, T, H, K = a.shape
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+fwd_prepare_wy_repr = prepare_wy_repr_fwd
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BC = min(BT, 32)
-    BK = min(triton.next_power_of_2(K), 64)
-
-    A = torch.empty(B, T, H, BT, device=a.device, dtype=a.dtype)
-    fwd_fn = fwd_prepare_wy_repr_kernel_chunk64 if BT == 64 else fwd_prepare_wy_repr_kernel_chunk32
-
-    fwd_fn[(NT, B * H)](
-        a=a,
-        b=b,
-        A=A,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        T=T,
-        H=H,
-        K=K,
-        BT=BT,
-        BK=BK,
-        BC=BC,
-    )
-    w, u = fwd_wu(
-        a=a,
-        v=v,
-        k=k,
-        A=A,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
-    )
-    return w, u, A
+fwd_wu = wu_fwd

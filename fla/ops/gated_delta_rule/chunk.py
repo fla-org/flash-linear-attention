@@ -11,7 +11,7 @@ from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from fla.ops.gated_delta_rule.wy_fast import bwd_prepare_wy_repr, fwd_recompute_w_u
+from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -46,7 +46,7 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         output_dtype=k.dtype
     )
-    w, u = fwd_recompute_w_u(
+    w, u = recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,
@@ -89,7 +89,7 @@ def chunk_gated_delta_rule_bwd(
     dht: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    w, u = fwd_recompute_w_u(
+    w, u = recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,
@@ -140,7 +140,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-    dk2, dv, db, dg2 = bwd_prepare_wy_repr(
+    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
         k=k,
         v=v,
         beta=beta,

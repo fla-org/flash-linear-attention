@@ -15,7 +15,7 @@ from fla.ops.generalized_delta_rule.dplr.chunk_h_fwd import chunk_dplr_fwd_h
 from fla.ops.generalized_delta_rule.dplr.chunk_o_bwd import chunk_dplr_bwd_dAu, chunk_dplr_bwd_dv, chunk_dplr_bwd_o
 from fla.ops.generalized_delta_rule.dplr.chunk_o_fwd import chunk_dplr_fwd_o
 from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
-from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import fwd_prepare_wy_repr
+from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import prepare_wy_repr_fwd
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -52,7 +52,7 @@ def chunk_dplr_fwd(
 
     # A_ab, A_ak, gi, ge torch.float32
     # A_qk, A_qb, qg, kg, ag, bg, dtype=q.dtype, eg: bf16
-    w, u, _ = fwd_prepare_wy_repr(
+    w, u, _ = prepare_wy_repr_fwd(
         ag=ag,
         A_ab=A_ab,
         A_ak=A_ak,
@@ -155,7 +155,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
         )
-        w, u, A_ab_inv = fwd_prepare_wy_repr(
+        w, u, A_ab_inv = prepare_wy_repr_fwd(
             ag=ag,
             A_ab=A_ab,
             A_ak=A_ak,

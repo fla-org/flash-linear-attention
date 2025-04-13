@@ -27,7 +27,7 @@ triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
-def bwd_prepare_wy_repr_kernel(
+def prepare_wy_repr_bwd_kernel(
     A_ab_inv,
     A_ak,
     ag,
@@ -139,7 +139,7 @@ def chunk_dplr_bwd_wy(
     dv = torch.empty_like(v)
     dag = torch.empty_like(ag)
 
-    bwd_prepare_wy_repr_kernel[(NT, B * H)](
+    prepare_wy_repr_bwd_kernel[(NT, B * H)](
         A_ab_inv=A_ab_inv,
         A_ak=A_ak,
         ag=ag,

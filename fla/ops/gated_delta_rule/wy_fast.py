@@ -24,7 +24,7 @@ from fla.utils import check_shared_mem
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN']
 )
 @triton.jit(do_not_specialize=['T'])
-def bwd_prepare_wy_repr_kernel(
+def prepare_wy_repr_bwd_kernel(
     k,
     v,
     beta,
@@ -144,7 +144,7 @@ def bwd_prepare_wy_repr_kernel(
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
 )
 @triton.jit(do_not_specialize=['T'])
-def fwd_recompute_w_u_kernel(
+def recompute_w_u_fwd_kernel(
     k,
     v,
     beta,
@@ -198,7 +198,7 @@ def fwd_recompute_w_u_kernel(
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
-def fwd_recompute_w_u(
+def recompute_w_u_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
@@ -216,7 +216,7 @@ def fwd_recompute_w_u(
 
     u = torch.empty_like(v)
     w = torch.empty_like(k)
-    fwd_recompute_w_u_kernel[(NT, B*H)](
+    recompute_w_u_fwd_kernel[(NT, B*H)](
         k=k,
         v=v,
         beta=beta,
@@ -237,7 +237,7 @@ def fwd_recompute_w_u(
     return w, u
 
 
-def bwd_prepare_wy_repr(
+def prepare_wy_repr_bwd(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
@@ -260,7 +260,7 @@ def bwd_prepare_wy_repr(
     dv = torch.empty_like(v)
     dbeta = torch.empty_like(beta)
     dg = torch.empty_like(g)
-    bwd_prepare_wy_repr_kernel[(NT, B * H)](
+    prepare_wy_repr_bwd_kernel[(NT, B * H)](
         k=k,
         v=v,
         beta=beta,
@@ -284,3 +284,8 @@ def bwd_prepare_wy_repr(
         BV=BV,
     )
     return dk, dv, dbeta, dg
+
+
+bwd_prepare_wy_repr = prepare_wy_repr_bwd
+
+fwd_recompute_w_u = recompute_w_u_fwd
