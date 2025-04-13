@@ -18,7 +18,7 @@ from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 
 class HGRNAttention(nn.Module):

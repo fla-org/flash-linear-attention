@@ -18,10 +18,10 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.delta_net import DeltaNet
 from fla.models.delta_net.configuration_delta_net import DeltaNetConfig
-from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as DeltaNetMLP
 from fla.modules import RMSNorm
+from fla.utils import Cache
 
 logger = logging.get_logger(__name__)
 

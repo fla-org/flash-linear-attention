@@ -12,13 +12,13 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import pad_input, unpad_input
 from fla.modules import GroupNorm
 from fla.ops.forgetting_attn.decoding import attn_decoding_one_step
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
+from fla.utils import pad_input, unpad_input
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 logger = logging.get_logger(__name__)
 

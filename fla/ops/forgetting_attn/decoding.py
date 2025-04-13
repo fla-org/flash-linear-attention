@@ -7,8 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.cumsum import chunk_global_cumsum
-from fla.ops.utils.op import exp
+from fla.utils.cumsum import chunk_global_cumsum
+from fla.utils import exp
 from fla.utils import check_shared_mem
 
 

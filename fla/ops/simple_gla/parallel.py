@@ -10,8 +10,8 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum
-from fla.ops.utils.op import safe_exp
+from fla.utils import chunk_global_cumsum, chunk_local_cumsum
+from fla.utils import safe_exp
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,

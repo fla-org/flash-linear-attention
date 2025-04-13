@@ -9,7 +9,7 @@ import triton
 from fla.ops.common.utils import prepare_token_indices
 from fla.ops.nsa.naive import naive_nsa
 from fla.ops.nsa.parallel import parallel_nsa
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
+from fla.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device
 
 if COMPILER_MODE:

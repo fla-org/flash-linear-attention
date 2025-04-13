@@ -18,10 +18,10 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.hgrn import HGRNAttention
 from fla.models.hgrn.configuration_hgrn import HGRNConfig
-from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as HGRNMLP
 from fla.modules import RMSNorm
+from fla.utils import Cache
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

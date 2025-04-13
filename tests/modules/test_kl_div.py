@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.modules import FusedKLDivLoss
-from fla.ops.utils.testing import assert_close
+from fla.utils.testing import assert_close
 from fla.utils import device, device_platform
 
 

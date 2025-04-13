@@ -11,16 +11,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import RMSNorm, ShortConvolution
 from fla.modules.feature_map import ReLUFeatureMap, SwishFeatureMap, T2RFeatureMap
 from fla.modules.layernorm import rms_norm_linear
 from fla.ops.gsa import chunk_gsa, fused_recurrent_gsa
+from fla.utils import get_unpad_data, index_first_axis, pad_input
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 
 class GatedSlotAttention(nn.Module):

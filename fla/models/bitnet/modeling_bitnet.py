@@ -17,10 +17,10 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.bitattn import BitAttention
 from fla.models.bitnet.configuration_bitnet import BitNetConfig
-from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.activations import swiglu
 from fla.modules.fused_bitlinear import FusedBitLinear
+from fla.utils import Cache
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

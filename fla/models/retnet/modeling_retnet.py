@@ -18,10 +18,10 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.multiscale_retention import MultiScaleRetention
 from fla.models.retnet.configuration_retnet import RetNetConfig
-from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as RetNetMLP
 from fla.modules import RMSNorm
+from fla.utils import Cache
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

@@ -15,7 +15,7 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 
 def elu_p1(x):

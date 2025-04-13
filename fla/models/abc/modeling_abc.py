@@ -18,10 +18,10 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.abc import ABCAttention
 from fla.layers.attn import Attention
 from fla.models.abc.configuration_abc import ABCConfig
-from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as ABCMLP
 from fla.modules import RMSNorm
+from fla.utils import Cache
 
 logger = logging.get_logger(__name__)
 

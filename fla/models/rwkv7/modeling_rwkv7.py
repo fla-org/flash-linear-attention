@@ -18,9 +18,9 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.rwkv7 import RWKV7Attention
 from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
-from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
 from fla.modules.activations import ACT2FN
+from fla.utils import Cache
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

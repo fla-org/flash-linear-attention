@@ -17,7 +17,7 @@ from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 
 class RWKV7Attention(nn.Module):

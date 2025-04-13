@@ -17,10 +17,10 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.nsa import NativeSparseAttention
 from fla.models.nsa.configuration_nsa import NSAConfig
-from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as NSAMLP
 from fla.modules import RMSNorm
+from fla.utils import Cache
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

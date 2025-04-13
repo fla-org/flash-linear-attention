@@ -17,10 +17,10 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.forgetting_attn import ForgettingAttention
 from fla.models.forgetting_transformer.configuration_forgetting_transformer import ForgettingTransformerConfig
-from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as ForgettingTransformerMLP
 from fla.modules import RMSNorm
+from fla.utils import Cache
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

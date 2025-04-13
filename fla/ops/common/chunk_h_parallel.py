@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.utils import exp
 
 
 @triton.heuristics({

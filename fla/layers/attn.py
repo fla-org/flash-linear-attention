@@ -12,11 +12,11 @@ import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
+from fla.utils import pad_input, unpad_input
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func

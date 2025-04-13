@@ -10,7 +10,7 @@
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import log2
+from fla.utils import log2
 
 
 @triton.jit

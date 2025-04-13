@@ -7,8 +7,8 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from fla.ops.utils.solve_tril import solve_tril
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
+from fla.utils.solve_tril import solve_tril
+from fla.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device, device_platform
 
 if COMPILER_MODE:

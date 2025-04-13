@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
+from fla.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device, device_platform
 
 if COMPILER_MODE:

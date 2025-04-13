@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp, log
+from fla.utils import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, get_multiprocessor_count, input_guard
 
 sigmoid_fwd_codestring = """

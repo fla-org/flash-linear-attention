@@ -19,7 +19,7 @@ from fla.ops.gla import chunk_gla, fused_recurrent_gla
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 
 class LightNetAttention(nn.Module):

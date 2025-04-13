@@ -16,7 +16,7 @@ from fla.modules.activations import ACT2FN
 from fla.ops.rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 
 class RWKV6Attention(nn.Module):

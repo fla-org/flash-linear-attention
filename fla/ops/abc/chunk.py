@@ -7,8 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import logcumsumexp_fwd_kernel, softmax_bwd, softmax_fwd
-from fla.ops.utils.op import exp
+from fla.utils import logcumsumexp_fwd_kernel, softmax_bwd, softmax_fwd
+from fla.utils import exp
 from fla.utils import input_guard
 
 

@@ -9,7 +9,7 @@ import triton.language as tl
 from torch import Tensor
 from torch.autograd.function import Function, FunctionCtx, once_differentiable
 
-from fla.ops.utils.op import exp
+from fla.utils import exp
 
 
 def get_block_size_c(chans: int) -> int:

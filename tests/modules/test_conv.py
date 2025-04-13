@@ -7,7 +7,7 @@ import torch
 
 from fla.modules.convolution import ShortConvolution
 from fla.ops.common.utils import prepare_lens
-from fla.ops.utils.testing import assert_close
+from fla.utils.testing import assert_close
 from fla.utils import device
 
 try:

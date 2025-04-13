@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.ops.utils.op import safe_exp
+from fla.utils import safe_exp
 from fla.utils import check_shared_mem
 
 

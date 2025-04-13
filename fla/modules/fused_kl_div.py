@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp, log
+from fla.utils import exp, log
 from fla.utils import input_guard
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576

@@ -10,15 +10,15 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from transformers.activations import ACT2FN
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.rotary import RotaryEmbedding
 from fla.ops.retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
+from fla.utils import get_unpad_data, index_first_axis, pad_input
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 
 class MultiScaleRetention(nn.Module):

@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.ops.utils.solve_tril import solve_tril
+from fla.utils.solve_tril import solve_tril
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]

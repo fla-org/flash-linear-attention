@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp, log
+from fla.utils import exp, log
 
 
 @triton.heuristics({

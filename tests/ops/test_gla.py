@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.gla import chunk_gla, fused_recurrent_gla
 from fla.ops.gla.naive import naive_recurrent_gla
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
+from fla.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device, device_platform
 
 if COMPILER_MODE:

@@ -14,7 +14,7 @@ from fla.modules import RotaryEmbedding
 from fla.ops.nsa.parallel import parallel_nsa
 
 if TYPE_CHECKING:
-    from fla.models.utils import Cache
+    from fla.utils import Cache
 
 logger = logging.get_logger(__name__)
 
