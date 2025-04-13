@@ -18,6 +18,7 @@ from .logsumexp import logsumexp_fwd, logsumexp_fwd_kernel
 from .matmul import addmm, matmul, matmul_kernel
 from .pooling import mean_pooling
 from .softmax import softmax_bwd, softmax_bwd_kernel, softmax_fwd, softmax_fwd_kernel
+from .solve_tril import solve_tril
 
 __all__ = [
     'chunk_global_cumsum',
@@ -42,4 +43,5 @@ __all__ = [
     'softmax_fwd',
     'softmax_fwd_kernel',
     'fp32_to_tf32_asm',
+    'solve_tril',
 ]
