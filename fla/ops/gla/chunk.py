@@ -11,9 +11,7 @@ from einops import rearrange
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.utils import chunk_local_cumsum
-from fla.utils import exp, safe_exp
-from fla.utils import check_shared_mem, input_guard
+from fla.utils import check_shared_mem, chunk_local_cumsum, exp, input_guard, safe_exp
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]

@@ -8,8 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.utils import exp, gather
-from fla.utils import check_shared_mem, is_gather_supported, use_cuda_graph
+from fla.utils import check_shared_mem, exp, gather, is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({

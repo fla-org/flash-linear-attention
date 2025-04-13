@@ -10,9 +10,7 @@ import triton.language as tl
 from einops import rearrange
 from packaging import version
 
-from fla.utils import chunk_local_cumsum
-from fla.utils import exp, safe_exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, chunk_local_cumsum, exp, input_guard, safe_exp
 
 
 @triton.jit(do_not_specialize=['T'])

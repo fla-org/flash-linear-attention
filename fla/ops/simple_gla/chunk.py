@@ -10,8 +10,7 @@ from einops import rearrange
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv, chunk_fwd_o
-from fla.utils import chunk_local_cumsum
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, chunk_local_cumsum, input_guard
 
 
 def chunk_simple_gla_fwd(

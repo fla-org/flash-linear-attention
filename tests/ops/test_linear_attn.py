@@ -7,8 +7,8 @@ import torch
 
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from fla.ops.linear_attn.naive import naive_chunk_linear_attn
-from fla.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device
+from fla.utils.testing import COMPILER_MODE, assert_close
 
 if COMPILER_MODE:
     test_b_list = [1]

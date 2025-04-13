@@ -15,9 +15,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from fla.utils import logsumexp_fwd
-from fla.utils import exp
-from fla.utils import input_guard
+from fla.utils import exp, input_guard, logsumexp_fwd
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19

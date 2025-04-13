@@ -8,8 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.utils import exp, safe_exp
-from fla.utils import check_shared_mem, is_nvidia_hopper
+from fla.utils import check_shared_mem, exp, is_nvidia_hopper, safe_exp
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]

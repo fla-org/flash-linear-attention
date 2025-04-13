@@ -10,9 +10,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
-from fla.utils import chunk_global_cumsum
-from fla.utils import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, chunk_global_cumsum, exp, input_guard
 
 
 @triton.jit

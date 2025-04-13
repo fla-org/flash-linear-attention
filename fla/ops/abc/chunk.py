@@ -7,9 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import logcumsumexp_fwd_kernel, softmax_bwd, softmax_fwd
-from fla.utils import exp
-from fla.utils import input_guard
+from fla.utils import exp, input_guard, logcumsumexp_fwd_kernel, softmax_bwd, softmax_fwd
 
 
 @triton.jit(do_not_specialize=['T'])

@@ -9,8 +9,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from fla.utils import exp, log
-from fla.utils import input_guard
+from fla.utils import exp, input_guard, log
 
 # `all_gather_into_tensor` and `reduce_scatter_tensor` are new placeholders for
 # `_all_gather_base` and `_reduce_scatter_base`. They require the most recent

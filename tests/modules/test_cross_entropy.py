@@ -6,8 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.utils.testing import assert_close
 from fla.utils import device, device_platform
+from fla.utils.testing import assert_close
 
 
 @pytest.mark.parametrize("B", [2])

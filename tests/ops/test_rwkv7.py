@@ -7,8 +7,8 @@ import torch
 
 from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rwkv7_torch
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
-from fla.utils.testing import assert_close
 from fla.utils import device, is_intel_alchemist
+from fla.utils.testing import assert_close
 
 
 @pytest.mark.parametrize("B", [2])

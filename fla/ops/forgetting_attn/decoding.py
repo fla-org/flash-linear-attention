@@ -7,9 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.utils import check_shared_mem, exp
 from fla.utils.cumsum import chunk_global_cumsum
-from fla.utils import exp
-from fla.utils import check_shared_mem
 
 
 @triton.heuristics({

@@ -8,8 +8,8 @@ import torch.nn.functional as F
 
 # from fla.ops.titans.fused_chunk import fused_chunk_titans_linear
 from fla.ops.titans.naive import chunk_titans_linear_ref
-from fla.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device
+from fla.utils.testing import COMPILER_MODE, assert_close
 
 if COMPILER_MODE:
     test_b_list = [1]

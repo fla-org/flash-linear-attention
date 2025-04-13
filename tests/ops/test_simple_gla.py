@@ -11,8 +11,8 @@ from einops import rearrange
 from fla.ops.simple_gla import chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.ops.simple_gla.parallel import parallel_simple_gla
-from fla.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import device
+from fla.utils.testing import COMPILER_MODE, assert_close
 
 if COMPILER_MODE:
     test_b_list = [1]

@@ -5,9 +5,9 @@ import os
 import pytest
 import torch
 
+from fla.utils import device, device_platform
 from fla.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.utils.testing import COMPILER_MODE, assert_close
-from fla.utils import device, device_platform
 
 if COMPILER_MODE:
     test_b_list = [1]

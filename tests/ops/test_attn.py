@@ -7,8 +7,8 @@ import torch
 
 from fla.ops.attn.parallel import parallel_attn
 from fla.ops.common.utils import prepare_lens
-from fla.utils.testing import COMPILER_MODE, assert_close
 from fla.utils import check_shared_mem, device
+from fla.utils.testing import COMPILER_MODE, assert_close
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func

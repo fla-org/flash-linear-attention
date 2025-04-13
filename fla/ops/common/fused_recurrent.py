@@ -7,9 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import chunk_global_cumsum
-from fla.utils import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, chunk_global_cumsum, exp, input_guard
 
 
 @triton.heuristics({
