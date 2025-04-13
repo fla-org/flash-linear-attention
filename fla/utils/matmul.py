@@ -10,7 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils.op import exp, input_guard
+from fla.utils.op import exp
+from fla.utils.utils import input_guard
 
 
 # `triton.jit`'ed functions can be auto-tuned by using the `triton.autotune` decorator, which consumes:
