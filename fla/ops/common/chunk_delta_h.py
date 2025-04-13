@@ -316,19 +316,19 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         b_dv += tl.dot(b_k, b_dh1.to(b_k.dtype))
 
         if K > 64:
-            p_k2 = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 64), (BT, 64), (1, 0))
-            b_k2 = tl.load(p_k2, boundary_check=(0, 1))
-            b_dv += tl.dot(b_k2, b_dh2.to(b_k.dtype))
+            p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 64), (BT, 64), (1, 0))
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
 
         if K > 128:
-            p_k3 = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 128), (BT, 64), (1, 0))
-            b_k3 = tl.load(p_k3, boundary_check=(0, 1))
-            b_dv += tl.dot(b_k3, b_dh3.to(b_k.dtype))
+            p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 128), (BT, 64), (1, 0))
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
 
         if K > 192:
-            p_k4 = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 192), (BT, 64), (1, 0))
-            b_k4 = tl.load(p_k4, boundary_check=(0, 1))
-            b_dv += tl.dot(b_k4, b_dh4.to(b_k.dtype))
+            p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 192), (BT, 64), (1, 0))
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
 
         tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
@@ -342,33 +342,31 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dh1 *= bg_last
         b_dh1 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_d, b_dv.to(b_d.dtype))
         if K > 64:
-            p_q2 = tl.make_block_ptr(q, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-            p_d2 = tl.make_block_ptr(d, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-            b_q2 = tl.load(p_q2, boundary_check=(0, 1))
-            b_q2 = (b_q2 * scale).to(b_q.dtype)
-            b_d2 = tl.load(p_d2, boundary_check=(0, 1))
+            p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
+            p_d = tl.make_block_ptr(d, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = (b_q * scale).to(b_q.dtype)
+            b_d = tl.load(p_d, boundary_check=(0, 1))
             if USE_G:
                 b_dh2 *= bg_last
-            b_dh2 += tl.dot(b_q2, b_do.to(b_q.dtype))-tl.dot(b_d2, b_dv.to(b_d.dtype))
+            b_dh2 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_d, b_dv.to(b_d.dtype))
         if K > 128:
-            p_d3 = tl.make_block_ptr(d, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-            p_q3 = tl.make_block_ptr(q, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-            b_q3 = tl.load(p_q3, boundary_check=(0, 1))
-            b_q3 = (b_q3 * scale).to(b_q.dtype)
+            p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
+            p_d = tl.make_block_ptr(d, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = (b_q * scale).to(b_q.dtype)
+            b_d = tl.load(p_d, boundary_check=(0, 1))
             if USE_G:
                 b_dh3 *= bg_last
-            b_d3 = tl.load(p_d3, boundary_check=(0, 1))
-            b_dh3 += tl.dot(b_q3, b_do.to(b_q.dtype))-tl.dot(b_d3, b_dv.to(b_d.dtype))
+            b_dh3 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_d, b_dv.to(b_d.dtype))
         if K > 192:
-            p_d4 = tl.make_block_ptr(d, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-            b_d4 = tl.load(p_d4, boundary_check=(0, 1))
-            p_q4 = tl.make_block_ptr(q, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-            b_q4 = tl.load(p_q4, boundary_check=(0, 1))
-            b_q4 = (b_q4 * scale).to(b_q.dtype)
+            p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = (b_q * scale).to(b_q.dtype)
+            b_d = tl.load(p_d, boundary_check=(0, 1))
             if USE_G:
                 b_dh4 *= bg_last
-            b_d4 = tl.load(p_d4, boundary_check=(0, 1))
-            b_dh4 += tl.dot(b_q4, b_do.to(b_q.dtype))-tl.dot(b_d4, b_dv.to(b_d.dtype))
+            b_dh4 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_d, b_dv.to(b_d.dtype))
 
     if USE_INITIAL_STATE:
         p_dh0 = tl.make_block_ptr(dh0, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
