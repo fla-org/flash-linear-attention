@@ -361,6 +361,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dh3 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_d, b_dv.to(b_d.dtype))
         if K > 192:
             p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
+            p_d = tl.make_block_ptr(d, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_q = (b_q * scale).to(b_q.dtype)
             b_d = tl.load(p_d, boundary_check=(0, 1))
