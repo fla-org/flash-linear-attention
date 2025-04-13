@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from fla.utils import device_platform
+from fla.utils.utils import device_platform
 
 
 def fp32_to_tf32_asm() -> str:

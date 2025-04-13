@@ -7,8 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_chunk_indices
-from fla.utils import check_shared_mem, exp, use_cuda_graph
+from fla.utils import check_shared_mem, exp, prepare_chunk_indices, use_cuda_graph
 
 BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
 

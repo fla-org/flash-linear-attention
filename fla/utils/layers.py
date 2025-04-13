@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from fla.utils import tensor_cache
+from fla.utils.utils import tensor_cache
 
 
 class IndexFirstAxis(torch.autograd.Function):

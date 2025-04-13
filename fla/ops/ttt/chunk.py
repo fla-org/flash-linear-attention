@@ -11,7 +11,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.modules.layernorm import group_norm
-from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 

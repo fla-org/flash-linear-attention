@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
-from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.generalized_delta_rule.iplr.wy_fast import fwd_prepare_wy_repr
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, use_cuda_graph
 

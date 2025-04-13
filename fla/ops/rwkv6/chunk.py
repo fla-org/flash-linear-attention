@@ -10,9 +10,17 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.common.chunk_h import chunk_fwd_h
-from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_bwd_dv, chunk_gla_fwd_o_gk
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, exp, input_guard, use_cuda_graph
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    check_shared_mem,
+    exp,
+    input_guard,
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+    use_cuda_graph
+)
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [32, 64] if check_shared_mem() else [16, 32]

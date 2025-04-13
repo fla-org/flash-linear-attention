@@ -6,8 +6,7 @@ import pytest
 import torch
 
 from fla.ops.attn.parallel import parallel_attn
-from fla.ops.common.utils import prepare_lens
-from fla.utils import check_shared_mem, device
+from fla.utils import check_shared_mem, device, prepare_lens
 from fla.utils.testing import COMPILER_MODE, assert_close
 
 try:

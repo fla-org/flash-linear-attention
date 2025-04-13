@@ -8,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_chunk_indices
+from fla.utils import prepare_chunk_indices
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]

@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 from einops import rearrange, repeat
 
-from fla.ops.common.utils import prepare_chunk_indices
+from fla.utils import prepare_chunk_indices
 from fla.utils import get_multiprocessor_count, input_guard
 
 

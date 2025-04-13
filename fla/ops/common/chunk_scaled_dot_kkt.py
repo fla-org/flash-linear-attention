@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_chunk_indices
+from fla.utils import prepare_chunk_indices
 
 
 @triton.heuristics({

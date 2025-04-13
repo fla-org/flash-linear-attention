@@ -9,8 +9,16 @@ import triton
 import triton.language as tl
 from einops import rearrange, reduce
 
-from fla.ops.common.utils import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous, exp, log, safe_exp
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    check_shared_mem,
+    contiguous,
+    exp,
+    log,
+    prepare_chunk_indices,
+    safe_exp
+)
 from fla.utils.cumsum import chunk_global_cumsum
 
 

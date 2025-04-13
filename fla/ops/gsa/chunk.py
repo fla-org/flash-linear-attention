@@ -10,9 +10,8 @@ import triton.language as tl
 from einops import rearrange, reduce
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
-from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
-from fla.utils import chunk_local_cumsum, exp, input_guard, safe_exp, softmax_bwd, softmax_fwd
+from fla.utils import chunk_local_cumsum, exp, input_guard, prepare_chunk_indices, safe_exp, softmax_bwd, softmax_fwd
 
 
 @triton.heuristics({

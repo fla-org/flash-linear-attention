@@ -1,4 +1,12 @@
 from .asm import fp32_to_tf32_asm
+from .common import (
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+    prepare_lens,
+    prepare_position_ids,
+    prepare_sequence_ids,
+    prepare_token_indices
+)
 from .cumsum import (
     chunk_global_cumsum,
     chunk_global_cumsum_scalar,
@@ -44,6 +52,13 @@ from .utils import (
 )
 
 __all__ = [
+    'fp32_to_tf32_asm',
+    'prepare_chunk_indices',
+    'prepare_chunk_offsets',
+    'prepare_lens',
+    'prepare_position_ids',
+    'prepare_token_indices',
+    'prepare_sequence_ids',
     'autocast_custom_bwd',
     'autocast_custom_fwd',
     'check_pytorch_version',
@@ -86,7 +101,6 @@ __all__ = [
     'softmax_bwd_kernel',
     'softmax_fwd',
     'softmax_fwd_kernel',
-    'fp32_to_tf32_asm',
     'div',
     'exp',
     'log',

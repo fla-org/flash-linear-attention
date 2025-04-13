@@ -8,8 +8,17 @@ import triton
 import triton.language as tl
 
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
-from fla.ops.common.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_token_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous, exp, log
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    check_shared_mem,
+    contiguous,
+    exp,
+    log,
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+    prepare_token_indices
+)
 
 
 @triton.heuristics({

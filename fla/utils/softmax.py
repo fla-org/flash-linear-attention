@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import exp
+from fla.utils.op import exp
 
 
 @triton.autotune(

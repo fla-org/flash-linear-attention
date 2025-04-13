@@ -14,7 +14,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.modules.activations import ACT2FN
-from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
+from fla.utils import prepare_position_ids, prepare_sequence_ids
 from fla.utils import checkpoint, input_guard
 
 try:

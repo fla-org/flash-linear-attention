@@ -7,8 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_chunk_indices
-from fla.utils import check_shared_mem, safe_exp
+from fla.utils import check_shared_mem, prepare_chunk_indices, safe_exp
 
 
 @triton.heuristics({

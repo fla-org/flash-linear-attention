@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_chunk_indices
+from fla.utils import prepare_chunk_indices
 from fla.utils import check_shared_mem, is_intel_alchemist, use_cuda_graph
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449

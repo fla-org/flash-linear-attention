@@ -6,10 +6,9 @@ import pytest
 import torch
 import triton
 
-from fla.ops.common.utils import prepare_token_indices
 from fla.ops.nsa.naive import naive_nsa
 from fla.ops.nsa.parallel import parallel_nsa
-from fla.utils import device
+from fla.utils import device, prepare_token_indices
 from fla.utils.testing import COMPILER_MODE, assert_close
 
 if COMPILER_MODE:

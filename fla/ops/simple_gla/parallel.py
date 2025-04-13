@@ -9,7 +9,6 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
-from fla.ops.common.utils import prepare_chunk_indices
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
@@ -19,6 +18,7 @@ from fla.utils import (
     input_guard,
     is_intel_alchemist,
     is_nvidia_hopper,
+    prepare_chunk_indices,
     safe_exp
 )
 

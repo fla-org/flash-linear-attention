@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.libdevice as tldevice
 
-from fla.utils import is_gather_supported
+from fla.utils.utils import is_gather_supported
 
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     div = tldevice.fast_dividef
