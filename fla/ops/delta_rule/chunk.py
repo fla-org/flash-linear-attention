@@ -5,7 +5,6 @@ import warnings
 from typing import Optional
 
 import torch
-import triton
 from einops import rearrange
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -24,19 +23,14 @@ def chunk_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
 ):
-    T = q.shape[1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     # obtain WY representation. u is actually the new v.
     w, u, A = fwd_prepare_wy_repr(
         k=k,
         v=v,
         beta=beta,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
     )
-
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,
@@ -44,9 +38,9 @@ def chunk_delta_rule_fwd(
         g=None,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        cu_seqlens=cu_seqlens
     )
+
     o = chunk_fwd_o(
         q=q,
         k=k,
@@ -54,8 +48,7 @@ def chunk_delta_rule_fwd(
         h=h,
         g=None,
         scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        cu_seqlens=cu_seqlens
     )
     return o, A, final_state
 
@@ -71,17 +64,13 @@ def chunk_delta_rule_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
 ):
-    T = q.shape[1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     w, u = fwd_recompute_w_u(
         k=k,
         v=v,
         beta=beta,
         A=A,
-        cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        cu_seqlens=cu_seqlens
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -91,7 +80,6 @@ def chunk_delta_rule_bwd(
         initial_state=initial_state,
         output_final_state=False,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -99,8 +87,7 @@ def chunk_delta_rule_bwd(
         do=do,
         g=None,
         scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        cu_seqlens=cu_seqlens
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
@@ -112,8 +99,7 @@ def chunk_delta_rule_bwd(
         do=do,
         dv=dv,
         scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        cu_seqlens=cu_seqlens
     )
     dq, dk, dw, _ = chunk_bwd_dqkwg(
         q=q,
@@ -126,8 +112,7 @@ def chunk_delta_rule_bwd(
         dh=dh,
         g=None,
         scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        cu_seqlens=cu_seqlens
     )
     dk2, dv, db = bwd_prepare_wy_repr(
         k=k,
@@ -136,8 +121,7 @@ def chunk_delta_rule_bwd(
         A=A,
         dw=dw,
         du=dv,
-        cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        cu_seqlens=cu_seqlens
     )
     dk.add_(dk2)
     return dq, dk, dv, db, dh0
@@ -160,9 +144,6 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = True
     ):
-        T = q.shape[1]
-        chunk_size = min(64, max(triton.next_power_of_2(T), 16))
-
         q_orig = q
         k_orig = k
 
@@ -179,10 +160,8 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
         )
         ctx.save_for_backward(q_orig, k_orig, v, beta, A, initial_state)
-        ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -212,8 +191,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             do=do,
             dht=dht,
-            cu_seqlens=ctx.cu_seqlens,
-            chunk_size=ctx.chunk_size
+            cu_seqlens=ctx.cu_seqlens
         )
         if use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q_orig, dq)

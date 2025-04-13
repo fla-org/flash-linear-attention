@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.common.utils import prepare_chunk_indices
-from fla.ops.utils.solve_tril import solve_tril
+from fla.ops.utils import solve_tril
 from fla.utils import check_shared_mem, is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
@@ -182,28 +182,26 @@ def fwd_prepare_wy_repr(
     v: torch.Tensor,
     beta: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    A = chunk_scaled_dot_kkt_fwd(
+    A, _ = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
+        g_cumsum=None,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        output_dtype=torch.float32
+        output_dtype=torch.float32,
+        chunk_size=64,
     )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
         output_dtype=k.dtype
     )
-
     w, u = fwd_recompute_w_u(
         k=k,
         v=v,
         beta=beta,
         A=A,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
     )
     return w, u, A
 
@@ -214,10 +212,9 @@ def fwd_recompute_w_u(
     beta: torch.Tensor,
     A: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = 64
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(triton.next_power_of_2(K), CONST_TILING)
     BV = min(triton.next_power_of_2(V), CONST_TILING)
@@ -254,11 +251,10 @@ def bwd_prepare_wy_repr(
     A: torch.Tensor,
     dw: torch.Tensor,
     du: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int
+    cu_seqlens: Optional[torch.LongTensor]
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = A.shape[-1]
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(triton.next_power_of_2(K), CONST_TILING)
     BV = min(triton.next_power_of_2(V), CONST_TILING)
