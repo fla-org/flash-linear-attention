@@ -47,6 +47,7 @@ from .utils import (
     is_nvidia,
     is_nvidia_hopper,
     is_tf32_supported,
+    require_version,
     tensor_cache,
     use_cuda_graph
 )
@@ -78,6 +79,7 @@ __all__ = [
     'is_nvidia',
     'is_nvidia_hopper',
     'is_tf32_supported',
+    'require_version',
     'tensor_cache',
     'use_cuda_graph',
     'chunk_global_cumsum',
