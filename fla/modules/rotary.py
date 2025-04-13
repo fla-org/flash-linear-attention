@@ -9,8 +9,7 @@ import triton
 import triton.language as tl
 from einops import rearrange, repeat
 
-from fla.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils import get_multiprocessor_count, input_guard, prepare_chunk_indices
 
 
 def rotate_half(x, interleaved=False):

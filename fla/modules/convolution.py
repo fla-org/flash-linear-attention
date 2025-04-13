@@ -14,8 +14,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.modules.activations import ACT2FN
-from fla.utils import prepare_position_ids, prepare_sequence_ids
-from fla.utils import checkpoint, input_guard
+from fla.utils import checkpoint, input_guard, prepare_position_ids, prepare_sequence_ids
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
