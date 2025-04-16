@@ -224,7 +224,7 @@ def chunk_dplr_bwd_o_kernel(
         for BK in BK_LIST
         for BV in BK_LIST
     ],
-    key=['BT', 'BK', 'BV'],
+    key=['BT'],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit
