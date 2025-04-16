@@ -347,13 +347,8 @@ def fused_recurrent_rwkv4_backward_kernel(
     tl.store(geps_ptr + gstate_s_c * cs, geps, mask=cmask)
 
     # Stores final gradients for w and u.
-    gw_temp = tl.load(gw_ptr + gw_s_c * cs, mask=cmask).to(tl.float32)
-    gw_temp += gw
-    tl.store(gw_ptr + gw_s_c * cs, gw_temp, mask=cmask)
-    gu_temp = tl.load(gu_ptr + gu_s_c * cs, mask=cmask).to(tl.float32)
-    gu_temp += gu
-    tl.store(gu_ptr + gu_s_c * cs, gu_temp, mask=cmask)
-
+    tl.atomic_add(gw_ptr + gw_s_c * cs, gw*w, mask=cmask)
+    tl.atomic_add(gu_ptr + gu_s_c * cs, gu, mask=cmask)
 
 def fused_recurrent_rwkv4_backward(
     w: Tensor,
@@ -366,8 +361,8 @@ def fused_recurrent_rwkv4_backward(
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     bsz, tsz, chans = k.shape
 
-    gw = torch.zeros_like(w)  # New tensors to output.
-    gu = torch.zeros_like(u)
+    gw = torch.zeros_like(w, dtype=torch.float32)  # New tensors to output.
+    gu = torch.zeros_like(u, dtype=torch.float32)
     gk = torch.empty_like(k)
     gv = torch.empty_like(v)
     gstate = k.new_empty(bsz, 3, 1, chans)
