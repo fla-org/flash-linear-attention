@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
 
@@ -29,6 +29,11 @@ else:
 @triton.jit
 def safe_exp(x):
     return exp(tl.where(x <= 0, x, float('-inf')))
+
+
+@triton.jit
+def safe_exp2(x):
+    return exp2(tl.where(x <= 0, x, float('-inf')))
 
 
 if not is_gather_supported:
