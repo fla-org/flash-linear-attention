@@ -52,7 +52,6 @@ def chunk_ttt_linear_fwd_kernel_h(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_INITIAL_STATE_B: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
@@ -730,7 +729,6 @@ def chunk_ttt_linear_fwd_h(
         BT=BT,
         BK=BK,
         BV=BV,
-        NT=NT,
     )
     return h, hb, v_new, final_state, final_state_bias
 
