@@ -59,6 +59,19 @@ class RWKV7FeedForward(nn.Module):
 
         self.layer_idx = layer_idx
 
+    def _initialize_weights(self, module: nn.Module):
+        if isinstance(module, RWKV7FeedForward):
+            with torch.no_grad():
+                ratio_1_to_almost0 = 1.0 - (module.layer_idx / self.config.num_hidden_layers)  # 1 to ~0
+                ddd = torch.ones(1, 1, module.hidden_size)
+                for i in range(module.hidden_size):
+                    ddd[0, 0, i] = i / module.hidden_size
+                module.x_k.data = 1.0 - torch.pow(ddd, ratio_1_to_almost0**4).squeeze()
+
+            # Initialize key and value weights as in CMix_x070
+            module.key.weight.data.uniform_(-0.5/(module.hidden_size**0.5), 0.5/(module.hidden_size**0.5))
+            module.value.weight.data.zero_()
+
     def forward(
         self,
         x: torch.Tensor,
@@ -194,15 +207,6 @@ class RWKV7PreTrainedModel(PreTrainedModel):
         rescale_prenorm_residual: bool = True,
         num_residuals_per_layer: int = 2,
     ):
-        warnings.warn(
-            "RWKV-7 employs a carefully designed initialization strategy tailored to its architecture. "
-            "The detailed initialization scheme is currently not implemented here but can be found in the "
-            "official code repository. We emphasize that using the recommended initialization is essential "
-            "for replicating the results in RWKV-7 paper. Deviations from the prescribed initialization "
-            "may lead to performance degradation.\n"
-            "Alternatively, please generate initial weights from the official RWKV code repository, and "
-            "convert the PyTorch checkpoint into FLA supported format."
-        )
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
