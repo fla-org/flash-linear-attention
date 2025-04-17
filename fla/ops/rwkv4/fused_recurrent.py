@@ -208,9 +208,11 @@ def fused_recurrent_rwkv4_backward_kernel(
     gstate_out_s_c,
     # W grad
     gw_ptr,
+    gw_s_b,
     gw_s_c,
     # U grad
     gu_ptr,
+    gu_s_b,
     gu_s_c,
     # K grad
     gk_ptr,
@@ -348,8 +350,8 @@ def fused_recurrent_rwkv4_backward_kernel(
     tl.store(geps_ptr + gstate_s_c * cs, geps, mask=cmask)
 
     # Stores final gradients for w and u.
-    tl.atomic_add(gw_ptr + gw_s_c * cs, gw*w, mask=cmask)
-    tl.atomic_add(gu_ptr + gu_s_c * cs, gu, mask=cmask)
+    tl.store(gw_ptr + gw_s_b * b_idx + gw_s_c * cs, gw*w, mask=cmask)
+    tl.store(gu_ptr + gu_s_b * b_idx + gu_s_c * cs, gu, mask=cmask)
 
 def fused_recurrent_rwkv4_backward(
     w: Tensor,
@@ -362,8 +364,8 @@ def fused_recurrent_rwkv4_backward(
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     bsz, tsz, chans = k.shape
 
-    gw = torch.zeros_like(w, dtype=torch.float32)  # New tensors to output.
-    gu = torch.zeros_like(u, dtype=torch.float32)
+    gw = w.new_empty(bsz, chans, dtype=torch.float)  # New tensors to output.
+    gu = u.new_empty(bsz, chans, dtype=torch.float)
     gk = torch.empty_like(k)
     gv = torch.empty_like(v)
     gstate = k.new_empty(bsz, 3, 1, chans)
@@ -409,9 +411,11 @@ def fused_recurrent_rwkv4_backward(
         # W grad
         gw,
         gw.stride(0),
+        gw.stride(1),
         # U grad
         gu,
         gu.stride(0),
+        gu.stride(1),
         # K grad
         gk,
         gk.stride(0),
@@ -433,7 +437,7 @@ def fused_recurrent_rwkv4_backward(
         BLOCK_SIZE_C=block_size_c,
     )
 
-    return gw, gu, gk, gv, gstate
+    return gw.sum(0), gu.sum(0), gk, gv, gstate
 
 
 class FusedRecurrentRWKV4Function(Function):
@@ -465,7 +469,7 @@ class FusedRecurrentRWKV4Function(Function):
     def backward(ctx: FunctionCtx, gwkv: Tensor, gstate: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         w, u, k, v, state = cast(tuple[Tensor, ...], ctx.saved_tensors)
         gw, gu, gk, gv, gstate = fused_recurrent_rwkv4_backward(w, u, k, v, state, gwkv, gstate)
-        return gw, gu, gk, gv, gstate
+        return gw.to(w), gu.to(u), gk, gv, gstate
 
 
 def fused_recurrent_rwkv4(w: Tensor, u: Tensor, k: Tensor, v: Tensor, state: Tensor) -> tuple[Tensor, Tensor]:
