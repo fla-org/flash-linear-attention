@@ -124,6 +124,7 @@ def mean_pooling_fwd(
         T=T,
         H=H,
         D=D,
+        BT=BT,
     )
     return o
 
