@@ -220,6 +220,7 @@ class LoRA(nn.Module):
             self.activation,
             nn.Linear(low_rank_dim, output_dim, bias=bias)
         )
+        self.apply(self._initialize_weights)
 
     def __repr__(self) -> str:
         s = f"{self.__class__.__name__}("

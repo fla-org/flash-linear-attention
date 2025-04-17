@@ -140,7 +140,6 @@ class RWKV7Attention(nn.Module):
             nn.init.constant_(self.k_a, 1.0)
             nn.init.zeros_(self.r_k)
 
-            self.w_lora._initialize_weights(self.w_lora)
             self.w_lora.set_bias_value(decay_speed + 0.5)
 
             # v0 initialization - ones (for non-first layers)
@@ -148,8 +147,10 @@ class RWKV7Attention(nn.Module):
                 self.v_lora._initialize_weights(self.v_lora)
                 self.v_lora.set_bias_value(1.0)
 
-            self.a_lora._initialize_weights(self.a_lora)
-            self.g_lora._initialize_weights(self.g_lora)
+            self.r_proj.weight.data.uniform_(-0.5/(self.hidden_size**0.5), 0.5/(self.hidden_size**0.5))
+            self.k_proj.weight.data.uniform_(-0.05/(self.hidden_size**0.5), 0.05/(self.hidden_size**0.5))
+            self.v_proj.weight.data.uniform_(-0.5/(self.hidden_size**0.5), 0.5/(self.hidden_size**0.5))
+            self.o_proj.weight.data.zero_()
 
         module._is_hf_initialized = True
 
