@@ -121,27 +121,25 @@ class RWKV7Attention(nn.Module):
                 for i in range(self.hidden_size):
                     ddd[0, 0, i] = i / self.hidden_size
 
-            # Initialize x_* parameters directly
-            self.x_r.data = (1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)).to(self.x_r.dtype)
-            self.x_w.data = (1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)).to(self.x_w.dtype)
-            self.x_k.data = (1.0 - (torch.pow(ddd, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1)).to(self.x_k.dtype)
-            self.x_v.data = (1.0 - (torch.pow(ddd, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1)).to(self.x_v.dtype)
-            self.x_a.data = (1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)).to(self.x_a.dtype)
-            self.x_g.data = (1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)).to(self.x_g.dtype)
-
-            # Initialize k_k, k_a, r_k
-            nn.init.constant_(self.k_k, 0.85)
-            nn.init.constant_(self.k_a, 1.0)
-            nn.init.zeros_(self.r_k)
-
-            # Set specific bias values for LoRA modules
-            # w0 initialization - complex decay speed
-            with torch.no_grad():
+                # Initialize x_* parameters directly
+                self.x_r.data = (1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)).to(self.x_r.dtype)
+                self.x_w.data = (1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)).to(self.x_w.dtype)
+                self.x_k.data = (1.0 - (torch.pow(ddd, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1)).to(self.x_k.dtype)
+                self.x_v.data = (1.0 - (torch.pow(ddd, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1)).to(self.x_v.dtype)
+                self.x_a.data = (1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)).to(self.x_a.dtype)
+                self.x_g.data = (1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)).to(self.x_g.dtype)
+                # Set specific bias values for LoRA modules
+                # w0 initialization - complex decay speed
                 decay_speed = torch.ones(self.hidden_size)
                 for n in range(self.hidden_size):
                     decay_speed[n] = -7 + 5 * (n / (self.hidden_size - 1)) ** (
                         0.85 + 1.0 * ratio_0_to_1**0.5
                     )
+            # Initialize k_k, k_a, r_k
+            nn.init.constant_(self.k_k, 0.85)
+            nn.init.constant_(self.k_a, 1.0)
+            nn.init.zeros_(self.r_k)
+
             self.w_lora._initialize_weights(self.w_lora)
             self.w_lora.set_bias_value(decay_speed + 0.5)
 
