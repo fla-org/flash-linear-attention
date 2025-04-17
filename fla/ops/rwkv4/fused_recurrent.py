@@ -452,13 +452,8 @@ class FusedRecurrentRWKV4Function(Function):
         v: Tensor,
         state: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        ctx.input_dtype = k.dtype
-
+        ctx.w_dtype = w.dtype
         w = -torch.exp(w.float())
-        if k.dtype == torch.float16:
-            u = u.float()
-            k = k.float()
-            v = v.float()
         wkv, state_out = fused_recurrent_rwkv4_forward(w, u, k, v, state)
         ctx.save_for_backward(w, u, k, v, state_out[:, :, :-1])
         return wkv, state_out[:, :, -1:]
@@ -469,7 +464,7 @@ class FusedRecurrentRWKV4Function(Function):
     def backward(ctx: FunctionCtx, gwkv: Tensor, gstate: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         w, u, k, v, state = cast(tuple[Tensor, ...], ctx.saved_tensors)
         gw, gu, gk, gv, gstate = fused_recurrent_rwkv4_backward(w, u, k, v, state, gwkv, gstate)
-        return gw.to(w), gu.to(u), gk, gv, gstate
+        return gw.to(ctx.w_dtype), gu.to(u), gk.to(k), gv.to(v), gstate.to(state)
 
 
 def fused_recurrent_rwkv4(w: Tensor, u: Tensor, k: Tensor, v: Tensor, state: Tensor) -> tuple[Tensor, Tensor]:
