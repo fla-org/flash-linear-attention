@@ -49,7 +49,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     V: tl.constexpr,
     BT: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
@@ -525,8 +524,7 @@ def chunk_gated_delta_rule_fwd_h(
         H=H,
         K=K,
         V=V,
-        BT=BT,
-        NT=NT,
+        BT=BT
     )
     return h, v_new, final_state
 
