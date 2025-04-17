@@ -37,6 +37,7 @@ class RWKV7Attention(nn.Module):
         layer_idx: int = None,
         fuse_norm: bool = False,
         value_dim: int = None,
+        num_hidden_layers: int = None,
         **kwargs
     ) -> RWKV7Attention:
         super().__init__()
@@ -62,6 +63,7 @@ class RWKV7Attention(nn.Module):
         self.a_low_rank_dim = a_low_rank_dim
         self.v_low_rank_dim = v_low_rank_dim
         self.layer_idx = layer_idx
+        self.num_hidden_layers = num_hidden_layers
         self.fuse_norm = fuse_norm
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
@@ -111,9 +113,8 @@ class RWKV7Attention(nn.Module):
 
         # Initialize only when we're processing the RWKV7Attention module itself
         if isinstance(module, RWKV7Attention) and self.layer_idx is not None:
-            num_layers = getattr(self, "num_layers", 32)  # Default if not specified
-            ratio_0_to_1 = self.layer_idx / (num_layers - 1)  # 0 to 1
-            ratio_1_to_almost0 = 1.0 - (self.layer_idx / num_layers)  # 1 to ~0
+            ratio_0_to_1 = self.layer_idx / (self.num_hidden_layers - 1)  # 0 to 1
+            ratio_1_to_almost0 = 1.0 - (self.layer_idx / self.num_hidden_layers)  # 1 to ~0
 
             # Create position-based initialization tensor
             with torch.no_grad():

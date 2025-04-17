@@ -36,7 +36,8 @@ class RWKV7FeedForward(nn.Module):
         hidden_ratio: Optional[int] = None,
         intermediate_size: Optional[int] = None,
         hidden_act: str = 'sqrelu',
-        layer_idx: int = None
+        layer_idx: int = None,
+        num_hidden_layers: int = None,
     ) -> RWKV7FeedForward:
         super().__init__()
 
@@ -58,11 +59,12 @@ class RWKV7FeedForward(nn.Module):
         self.act_fn = ACT2FN[hidden_act]
 
         self.layer_idx = layer_idx
+        self.num_hidden_layers = num_hidden_layers
 
     def _initialize_weights(self, module: nn.Module):
         if isinstance(module, RWKV7FeedForward):
             with torch.no_grad():
-                ratio_1_to_almost0 = 1.0 - (module.layer_idx / self.config.num_hidden_layers)  # 1 to ~0
+                ratio_1_to_almost0 = 1.0 - (module.layer_idx / module.num_hidden_layers)  # 1 to ~0
                 ddd = torch.ones(1, 1, module.hidden_size)
                 for i in range(module.hidden_size):
                     ddd[0, 0, i] = i / module.hidden_size
@@ -139,7 +141,8 @@ class RWKV7Block(nn.Module):
                 norm_eps=config.norm_eps,
                 fuse_norm=config.fuse_norm,
                 layer_idx=layer_idx,
-                value_dim=config.value_dim[layer_idx]
+                value_dim=config.value_dim[layer_idx],
+                num_hidden_layers=config.num_hidden_layers
             )
         self.ffn_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
             config.hidden_size,
@@ -151,7 +154,8 @@ class RWKV7Block(nn.Module):
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            layer_idx=layer_idx
+            layer_idx=layer_idx,
+            num_hidden_layers=config.num_hidden_layers
         )
 
     def forward(
