@@ -50,7 +50,6 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     BC: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -311,7 +310,6 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
         BC=BC,
         BK=BK,
         BV=BV,
-        NT=NT,
     )
     return h, v_new, final_state
 

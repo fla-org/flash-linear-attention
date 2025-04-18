@@ -38,7 +38,7 @@ def rotary_embedding_ref(x, cos, sin, interleaved=False):
     ],
     key=['B', 'H', 'D', 'INTERLEAVED'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def rotary_embedding_kernel(
     x,
     cos,
@@ -47,8 +47,8 @@ def rotary_embedding_kernel(
     cu_seqlens,
     chunk_indices,
     seq_offsets,
+    T,
     B: tl.constexpr,
-    T: tl.constexpr,
     H: tl.constexpr,
     D: tl.constexpr,
     R: tl.constexpr,

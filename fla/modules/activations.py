@@ -58,12 +58,12 @@ sigmoid = SigmoidFunction.apply
     ],
     key=['D']
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def logsigmoid_fwd_kernel(
     x,
     y,
     temperature,
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,
     B: tl.constexpr
 ):
@@ -85,13 +85,13 @@ def logsigmoid_fwd_kernel(
     ],
     key=['D']
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def logsigmoid_bwd_kernel(
     x,
     dx,
     dy,
     temperature,
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,
     B: tl.constexpr
 ):

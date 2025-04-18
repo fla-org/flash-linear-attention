@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -219,6 +220,7 @@ class LoRA(nn.Module):
             self.activation,
             nn.Linear(low_rank_dim, output_dim, bias=bias)
         )
+        self.apply(self._initialize_weights)
 
     def __repr__(self) -> str:
         s = f"{self.__class__.__name__}("
@@ -227,6 +229,41 @@ class LoRA(nn.Module):
             s += f", bias={self.bias}"
         s += ")"
         return s
+
+    def _initialize_weights(self, module: nn.Module):
+        if getattr(module, "_is_hf_initialized", False):
+            return
+
+        # Initialize weights to zero as in original code
+        nn.init.zeros_(self.lora[0].weight)
+        original_dtype = self.lora[2].weight.dtype
+        shape = self.lora[2].weight.shape
+        # Convert to float32 for numerical stability in orthogonal init
+        weight_fp32 = self.lora[2].weight.float()
+
+        # Calculate gain based on dimensions
+        gain = math.sqrt(shape[1] / shape[0]) if shape[1] > shape[0] else 1
+
+        # Apply orthogonal initialization with scaling factor 0.1
+        nn.init.orthogonal_(weight_fp32, gain=gain * 0.1)
+
+        # Convert back to original dtype
+        self.lora[2].weight.data.copy_(weight_fp32.to(original_dtype))
+        # Set Lora[2] bias to zero
+        if self.lora[2].bias is not None:
+            nn.init.zeros_(self.lora[2].bias)
+
+        module._is_hf_initialized = True
+
+    def set_bias_value(self, value):
+        """Set bias to a specific value (for v0, w0 etc.)"""
+        if self.bias and self.lora[2].bias is not None:
+            if isinstance(value, torch.Tensor):
+                # Handle tensor values
+                self.lora[2].bias.data.copy_(value.to(self.lora[2].bias.dtype))
+            else:
+                # Handle scalar values
+                nn.init.constant_(self.lora[2].bias, value)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.lora(x)

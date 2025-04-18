@@ -28,12 +28,11 @@ def mean_pooling_fwd_kernel(
     o,
     cu_seqlens,
     chunk_indices,
-    T: tl.constexpr,
+    T,
     H: tl.constexpr,
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    NT: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
     i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -75,12 +74,11 @@ def mean_pooling_bwd_kernel(
     dx,
     cu_seqlens,
     chunk_indices,
-    T: tl.constexpr,
+    T,
     H: tl.constexpr,
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    NT: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
     i_d, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -126,7 +124,6 @@ def mean_pooling_fwd(
         H=H,
         D=D,
         BT=BT,
-        NT=NT,
     )
     return o
 
