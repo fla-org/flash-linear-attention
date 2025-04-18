@@ -260,12 +260,12 @@ def parallel_nsa_fwd_kernel(
 @triton.heuristics({
     'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor)
 })
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def parallel_nsa_kernel_mask(
     block_indices,
     block_counts,
     block_mask,
-    T: tl.constexpr,
+    T,
     H: tl.constexpr,
     S: tl.constexpr,
     BS: tl.constexpr,
