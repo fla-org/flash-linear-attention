@@ -50,6 +50,8 @@ from fla.models import (
     RWKV6Model,
     RWKV7ForCausalLM,
     RWKV7Model,
+    RodimusForCausalLM,
+    RodimusModel,
     TransformerForCausalLM,
     TransformerModel
 )
@@ -103,6 +105,8 @@ __all__ = [
     'RWKV6Model',
     'RWKV7ForCausalLM',
     'RWKV7Model',
+    'RodimusForCausalLM',
+    'RodimusModel',
     'TransformerForCausalLM',
     'TransformerModel',
 ]

@@ -20,6 +20,7 @@ from .nsa import NativeSparseAttention
 from .rebased import ReBasedLinearAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
+from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 
 __all__ = [
     'ABCAttention',
@@ -41,4 +42,6 @@ __all__ = [
     'ReBasedLinearAttention',
     'RWKV6Attention',
     'RWKV7Attention',
+    'RodimusAttention', 
+    'SlidingWindowSharedKeyAttention',
 ]

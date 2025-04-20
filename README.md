@@ -28,6 +28,7 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 * [Acknowledgments](#acknowledgments)
 
 ## News
+- **$\texttt{[2025-04]}$:** 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://openreview.net/pdf?id=IIVYiJ1ggK)).
 - **$\texttt{[2025-04]}$:** 🎉 Add DeltaProduct implementation to `fla` ([paper](https://arxiv.org/abs/2502.10297)).
 - **$\texttt{[2025-04]}$:** 🎉 Add FoX implementation to `fla` ([paper](https://arxiv.org/abs/2503.02130)).
 - **$\texttt{[2025-03]}$:** We have changed the default `initializer_range` to the magic 🐳 0.006, leading to great improvements across all models.
@@ -70,6 +71,7 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 | 2025 |         | NSA            | [Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention](https://arxiv.org/abs/2502.11089)                         |                                                                                                 |            [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/nsa)             |
 | 2025 |         | FoX            | [Forgetting Transformer: Softmax Attention with a Forget Gate](https://arxiv.org/abs/2503.02130)                                              |                [official](https://github.com/zhixuan-lin/forgetting-transformer)                |      [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/forgetting_attn)       |
 | 2025 |         | DeltaProduct   | [DeltaProduct: Improving State-Tracking in Linear RNNs via Householder Products](https://arxiv.org/abs/2502.10297)   |    |  [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/layers/gated_deltaproduct.py)  |
+| 2025 | ICLR    | Rodimus&ast;          | [Rodimus*: Breaking the Accuracy-Efficiency Trade-Off with Efficient Attentions](https://openreview.net/pdf?id=IIVYiJ1ggK)                 |                         [official](https://github.com/codefuse-ai/rodimus)                          |          [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/rodimus)          |
 
 ## Installation
 
