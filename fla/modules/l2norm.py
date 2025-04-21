@@ -10,6 +10,8 @@ import triton.language as tl
 
 from fla.utils import input_guard
 
+BT_LIST = [1, 8, 16, 32, 64, 128]
+
 
 @triton.autotune(
     configs=[
@@ -77,7 +79,7 @@ def l2norm_bwd_kernel(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16]
-        for BT in [32, 64, 128]
+        for BT in BT_LIST
     ],
     key=['D', 'num_blocks']
 )
@@ -95,8 +97,8 @@ def l2norm_fwd_kernel_small_N(
     i_t = tl.program_id(0)
     p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
-    var = tl.sum(b_x * b_x, axis=1)
-    b_y = b_x / tl.sqrt(var + eps)[:, None]
+    b_var = tl.sum(b_x * b_x, axis=1)
+    b_y = b_x / tl.sqrt(b_var + eps)[:, None]
     p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
 
@@ -105,7 +107,7 @@ def l2norm_fwd_kernel_small_N(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16]
-        for BT in [32, 64, 128]
+        for BT in BT_LIST
     ],
     key=['D', 'NB']
 )

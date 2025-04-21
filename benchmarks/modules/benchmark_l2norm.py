@@ -14,7 +14,7 @@ from fla.modules.l2norm import l2norm
         # argument names to use as an x-axis for the plot
         x_names=['B', 'T', 'H', 'D'],
         # different possible values for `x_name`
-        x_vals=[(16, 128 * 2 ** i, h, 1024//h) for h in [1, 2, 4, 8] for i in range(1, 8)],
+        x_vals=[(16, 128 * 2 ** i, h, 2048//h) for h in [1, 2, 4, 8, 16] for i in range(1, 8)],
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``
