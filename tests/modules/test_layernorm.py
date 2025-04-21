@@ -55,14 +55,12 @@ def test_layernorm(B: int, H: int, T: int, D: int, elementwise_affine: bool, bia
 @pytest.mark.parametrize("is_rms_norm", [True, False])
 def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
     torch.manual_seed(42)
-    x = torch.randn(B, T, D).to(device).requires_grad_(True).bfloat16()
+    x = torch.randn(B, T, D).to(device).requires_grad_(True)
     if is_rms_norm:
-        ref = GroupNormRef(
-            num_groups=G, hidden_size=D, bias=True, is_rms_norm=True
-        ).to(device).bfloat16()
+        ref = GroupNormRef(num_groups=G, hidden_size=D, bias=True, is_rms_norm=True).to(device)
     else:
-        ref = nn.GroupNorm(G, D).to(device).bfloat16()
-    tri = GroupNorm(G, D, bias=True, is_rms_norm=is_rms_norm).to(device).bfloat16()
+        ref = nn.GroupNorm(G, D).to(device)
+    tri = GroupNorm(G, D, bias=True, is_rms_norm=is_rms_norm).to(device)
     nn.init.normal_(ref.weight)
     nn.init.normal_(ref.bias)
     tri.weight.data.copy_(ref.weight.data)
@@ -71,13 +69,13 @@ def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
 
     ref_x = rearrange(x, 'b t d -> (b t) d').to(dtype=torch.float32)
     ref_y = rearrange(ref(ref_x), '(b t) d -> b t d', b=B)
-    tri_y = tri(x.bfloat16()).float()
-    ref_dx = torch.autograd.grad(ref(ref_x).sum(), x)[0].float()
-    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0].float()
-    ref_dw = torch.autograd.grad(ref(ref_x).sum(), ref.weight)[0].float()
-    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0].float()
-    ref_db = torch.autograd.grad(ref(ref_x).sum(), ref.bias)[0].float()
-    tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0].float()
+    tri_y = tri(x)
+    ref_dx = torch.autograd.grad(ref(ref_x).sum(), x)[0]
+    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
+    ref_dw = torch.autograd.grad(ref(ref_x).sum(), ref.weight)[0]
+    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
+    ref_db = torch.autograd.grad(ref(ref_x).sum(), ref.bias)[0]
+    tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0]
 
     assert_close(' y', ref_y, tri_y, 5e-3)
     assert_close('dx', ref_dx, tri_dx, 5e-3)
