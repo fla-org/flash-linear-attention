@@ -13,6 +13,7 @@ from fla.modules.fused_norm_gate import (
     FusedRMSNormSwishGate,
     FusedRMSNormSwishGateLinear
 )
+from fla.modules.l2norm import L2Norm
 from fla.modules.layernorm import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
 from fla.modules.mlp import GatedMLP
 from fla.modules.rotary import RotaryEmbedding
@@ -21,6 +22,7 @@ __all__ = [
     'ImplicitLongConvolution', 'LongConvolution', 'ShortConvolution',
     'BitLinear', 'FusedBitLinear',
     'FusedCrossEntropyLoss', 'FusedLinearCrossEntropyLoss', 'FusedKLDivLoss',
+    'L2Norm',
     'GroupNorm', 'GroupNormLinear', 'LayerNorm', 'LayerNormLinear', 'RMSNorm', 'RMSNormLinear',
     'FusedLayerNormGated', 'FusedLayerNormSwishGate', 'FusedLayerNormSwishGateLinear',
     'FusedRMSNormGated', 'FusedRMSNormSwishGate', 'FusedRMSNormSwishGateLinear',
