@@ -79,7 +79,12 @@ class RWKV6Attention(nn.Module):
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
         self.gate_fn = ACT2FN[gate_fn]
 
-        self.apply(self._initialize_weights)
+        try:
+            from transformers.modeling_utils import _init_weights
+        except ImportError:
+            _init_weights = True
+        if _init_weights:
+            self.apply(self._initialize_weights)
 
     def _initialize_weights(self, module: nn.Module):
         if getattr(module, "_is_hf_initialized", False):
@@ -220,7 +225,12 @@ class LoRA(nn.Module):
             self.activation,
             nn.Linear(low_rank_dim, output_dim, bias=bias)
         )
-        self.apply(self._initialize_weights)
+        try:
+            from transformers.modeling_utils import _init_weights
+        except ImportError:
+            _init_weights = True
+        if _init_weights:
+            self.apply(self._initialize_weights)
 
     def __repr__(self) -> str:
         s = f"{self.__class__.__name__}("
