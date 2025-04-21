@@ -10,7 +10,7 @@ import triton.language as tl
 
 from fla.utils import input_guard
 
-BT_LIST = [1, 8, 16, 32, 64, 128]
+BT_LIST = [8, 16, 32, 64, 128]
 
 
 @triton.autotune(
