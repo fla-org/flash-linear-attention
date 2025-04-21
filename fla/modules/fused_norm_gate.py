@@ -14,13 +14,11 @@ import triton.language as tl
 
 from fla.utils import get_multiprocessor_count, input_guard
 
-BT_LIST = [8, 16, 32, 64, 128]
-
 
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
-        for BT in BT_LIST
+        for BT in [8, 16, 32, 64, 128]
         for num_warps in [1, 2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
@@ -179,94 +177,132 @@ def layer_norm_gated_fwd_kernel1(
     tl.store(y + o_d, b_y, mask=m_d)
 
 
-def layer_norm_gated_fwd(
-    x: torch.Tensor,
-    g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = 'swish',
-    eps: float = 1e-5,
-    residual: torch.Tensor = None,
-    out_dtype: torch.dtype = None,
-    residual_dtype: torch.dtype = None,
-    is_rms_norm: bool = False
+@triton.heuristics({
+    'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None
+})
+@triton.autotune(
+    configs=[
+        triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
+        for BT in [8, 16, 32, 64]
+        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['D', 'NB', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM', 'HAS_BIAS'],
+)
+@triton.jit
+def layer_norm_gated_bwd_kernel(
+    x,  # pointer to the input
+    g,  # pointer to the gate
+    w,  # pointer to the weights
+    b,  # pointer to the biases
+    y,  # pointer to the output to be recomputed
+    dy,  # pointer to the output gradient
+    dx,  # pointer to the input gradient
+    dg,  # pointer to the gate gradient
+    dw,  # pointer to the partial sum of weights gradient
+    db,  # pointer to the partial sum of biases gradient
+    dres,
+    dres_in,
+    mean,  # pointer to the mean
+    rstd,  # pointer to the 1/std
+    T,  # number of rows in x
+    D,  # number of columns in x
+    BS,
+    BT: tl.constexpr,
+    BD: tl.constexpr,
+    NB: tl.constexpr,
+    ACTIVATION: tl.constexpr,
+    IS_RMS_NORM: tl.constexpr,
+    HAS_DRESIDUAL: tl.constexpr,
+    STORE_DRESIDUAL: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    RECOMPUTE_OUTPUT: tl.constexpr,
 ):
-    if residual is not None:
-        residual_dtype = residual.dtype
-    T, D = x.shape
-    if residual is not None:
-        assert residual.shape == (T, D)
-    if weight is not None:
-        assert weight.shape == (D,)
-    if bias is not None:
-        assert bias.shape == (D,)
-    # allocate output
-    y = torch.empty_like(x, dtype=x.dtype if out_dtype is None else out_dtype)
-    if residual is not None or (residual_dtype is not None and residual_dtype != x.dtype):
-        residual_out = torch.empty(T, D, device=x.device, dtype=residual_dtype)
-    else:
-        residual_out = None
-    mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
-    rstd = torch.empty((T,), dtype=torch.float, device=x.device)
-    # Less than 64KB per feature: enqueue fused kernel
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
-    if D > BD:
-        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # heuristics for number of warps
+    i_s = tl.program_id(0)
+    o_d = tl.arange(0, BD)
+    m_d = o_d < D
+    if HAS_WEIGHT:
+        b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
+        b_dw = tl.zeros((BT, BD), dtype=tl.float32)
+    if HAS_BIAS:
+        b_b = tl.load(b + o_d, mask=m_d, other=0.0).to(tl.float32)
+        b_db = tl.zeros((BT, BD), dtype=tl.float32)
 
-    if D <= 512:
-        NB = triton.cdiv(T, 2048)
-        def grid(meta): return (triton.cdiv(T, meta['BT']), )
-        layer_norm_gated_fwd_kernel[grid](
-            x,
-            g,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            eps,
-            T=T,
-            D=D,
-            BD=BD,
-            NB=NB,
-            ACTIVATION=activation,
-            IS_RMS_NORM=is_rms_norm,
-            HAS_RESIDUAL=residual is not None,
-            STORE_RESIDUAL_OUT=residual_out is not None,
-            HAS_WEIGHT=weight is not None,
-            HAS_BIAS=bias is not None,
-        )
-    else:
-        layer_norm_gated_fwd_kernel1[(T,)](
-            x,
-            g,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            eps,
-            D=D,
-            BD=BD,
-            ACTIVATION=activation,
-            IS_RMS_NORM=is_rms_norm,
-            HAS_RESIDUAL=residual is not None,
-            STORE_RESIDUAL_OUT=residual_out is not None,
-            HAS_WEIGHT=weight is not None,
-            HAS_BIAS=bias is not None,
-        )
-    # residual_out is None if residual is None and residual_dtype == input_dtype
-    return y, mean, rstd, residual_out if residual_out is not None else x
+    T = min(i_s * BS + BS, T)
+    for i_t in range(i_s * BS, T, BT):
+        p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+        p_g = tl.make_block_ptr(g, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+        p_dy = tl.make_block_ptr(dy, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+        p_dx = tl.make_block_ptr(dx, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+        p_dg = tl.make_block_ptr(dg, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+        # [BT, BD]
+        b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+        b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+
+        if not IS_RMS_NORM:
+            p_mean = tl.make_block_ptr(mean, (T,), (1,), (i_t,), (BT,), (0,))
+            b_mean = tl.load(p_mean, boundary_check=(0,))
+        p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t,), (BT,), (0,))
+        b_rstd = tl.load(p_rstd, boundary_check=(0,))
+        # Compute dx
+        b_xhat = (b_x - b_mean[:, None]) * b_rstd[:, None] if not IS_RMS_NORM else b_x * b_rstd[:, None]
+        b_xhat = tl.where(m_d[None, :], b_xhat, 0.0)
+
+        b_y = b_xhat * b_w[None, :] if HAS_WEIGHT else b_xhat
+        if HAS_BIAS:
+            b_y = b_y + b_b[None, :]
+        if RECOMPUTE_OUTPUT:
+            p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+            tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+
+        b_sigmoid_g = tl.sigmoid(b_g)
+        if ACTIVATION == 'swish':
+            b_dg = b_dy * b_y * (b_sigmoid_g + b_g * b_sigmoid_g * (1 - b_sigmoid_g))
+            b_dy = b_dy * b_g * b_sigmoid_g
+        elif ACTIVATION == 'silu':
+            b_dg = b_dy * b_y * (b_sigmoid_g + b_g * b_sigmoid_g * (1 - b_sigmoid_g))
+            b_dy = b_dy * b_g * b_sigmoid_g
+        elif ACTIVATION == 'sigmoid':
+            b_dg = b_dy * b_y * b_sigmoid_g * (1 - b_sigmoid_g)
+            b_dy = b_dy * b_sigmoid_g
+        b_wdy = b_dy
+
+        if HAS_WEIGHT or HAS_BIAS:
+            m_t = (i_t + tl.arange(0, BT)) < T
+        if HAS_WEIGHT:
+            b_wdy = b_dy * b_w
+            b_dw += tl.where(m_t[:, None], b_dy * b_xhat, 0.0)
+        if HAS_BIAS:
+            b_db += tl.where(m_t[:, None], b_dy, 0.0)
+        if not IS_RMS_NORM:
+            b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
+            b_c2 = tl.sum(b_wdy, axis=1) / D
+            b_dx = (b_wdy - (b_xhat * b_c1[:, None] + b_c2[:, None])) * b_rstd[:, None]
+        else:
+            b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
+            b_dx = (b_wdy - b_xhat * b_c1[:, None]) * b_rstd[:, None]
+        if HAS_DRESIDUAL:
+            p_dres = tl.make_block_ptr(dres, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+            b_dres = tl.load(p_dres, boundary_check=(0, 1)).to(tl.float32)
+            b_dx += b_dres
+        # Write dx
+        if STORE_DRESIDUAL:
+            p_dres_in = tl.make_block_ptr(dres_in, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+            tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), boundary_check=(0, 1))
+
+        tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+
+    if HAS_WEIGHT:
+        tl.store(dw + i_s * D + o_d, tl.sum(b_dw, axis=0), mask=m_d)
+    if HAS_BIAS:
+        tl.store(db + i_s * D + o_d, tl.sum(b_db, axis=0), mask=m_d)
 
 
 @triton.heuristics({
-    'RECOMPUTE_OUTPUT': lambda args: args["y"] is not None
+    'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None
 })
 @triton.autotune(
     configs=[
@@ -292,7 +328,6 @@ def layer_norm_gated_bwd_kernel1(
     dres_in,
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
-    eps,  # epsilon to avoid division by zero
     T,  # number of rows in x
     D,  # number of columns in x
     BS,
@@ -394,6 +429,92 @@ def layer_norm_gated_bwd_kernel1(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
+def layer_norm_gated_fwd(
+    x: torch.Tensor,
+    g: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    activation: str = 'swish',
+    eps: float = 1e-5,
+    residual: torch.Tensor = None,
+    out_dtype: torch.dtype = None,
+    residual_dtype: torch.dtype = None,
+    is_rms_norm: bool = False
+):
+    if residual is not None:
+        residual_dtype = residual.dtype
+    T, D = x.shape
+    if residual is not None:
+        assert residual.shape == (T, D)
+    if weight is not None:
+        assert weight.shape == (D,)
+    if bias is not None:
+        assert bias.shape == (D,)
+    # allocate output
+    y = torch.empty_like(x, dtype=x.dtype if out_dtype is None else out_dtype)
+    if residual is not None or (residual_dtype is not None and residual_dtype != x.dtype):
+        residual_out = torch.empty(T, D, device=x.device, dtype=residual_dtype)
+    else:
+        residual_out = None
+    mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
+    rstd = torch.empty((T,), dtype=torch.float, device=x.device)
+    # Less than 64KB per feature: enqueue fused kernel
+    MAX_FUSED_SIZE = 65536 // x.element_size()
+    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
+    if D > BD:
+        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+    # heuristics for number of warps
+
+    if D <= 512:
+        NB = triton.cdiv(T, 2048)
+        def grid(meta): return (triton.cdiv(T, meta['BT']), )
+        layer_norm_gated_fwd_kernel[grid](
+            x,
+            g,
+            y,
+            weight,
+            bias,
+            residual,
+            residual_out,
+            mean,
+            rstd,
+            eps,
+            T=T,
+            D=D,
+            BD=BD,
+            NB=NB,
+            ACTIVATION=activation,
+            IS_RMS_NORM=is_rms_norm,
+            HAS_RESIDUAL=residual is not None,
+            STORE_RESIDUAL_OUT=residual_out is not None,
+            HAS_WEIGHT=weight is not None,
+            HAS_BIAS=bias is not None,
+        )
+    else:
+        layer_norm_gated_fwd_kernel1[(T,)](
+            x,
+            g,
+            y,
+            weight,
+            bias,
+            residual,
+            residual_out,
+            mean,
+            rstd,
+            eps,
+            D=D,
+            BD=BD,
+            ACTIVATION=activation,
+            IS_RMS_NORM=is_rms_norm,
+            HAS_RESIDUAL=residual is not None,
+            STORE_RESIDUAL_OUT=residual_out is not None,
+            HAS_WEIGHT=weight is not None,
+            HAS_BIAS=bias is not None,
+        )
+    # residual_out is None if residual is None and residual_dtype == input_dtype
+    return y, mean, rstd, residual_out if residual_out is not None else x
+
+
 def layer_norm_gated_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,
@@ -430,37 +551,68 @@ def layer_norm_gated_bwd(
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     NS = get_multiprocessor_count(x.device.index)
+    BS = math.ceil(T / NS)
+
     dw = torch.empty((NS, D), dtype=torch.float, device=weight.device) if weight is not None else None
     db = torch.empty((NS, D), dtype=torch.float, device=bias.device) if bias is not None else None
-    BS = math.ceil(T / NS)
     grid = (NS,)
-    layer_norm_gated_bwd_kernel1[grid](
-        x,
-        g,
-        weight,
-        bias,
-        y,
-        dy,
-        dx,
-        dg,
-        dw,
-        db,
-        dres,
-        dres_in,
-        mean,
-        rstd,
-        eps,
-        T=T,
-        D=D,
-        BS=BS,
-        BD=BD,
-        ACTIVATION=activation,
-        IS_RMS_NORM=is_rms_norm,
-        HAS_DRESIDUAL=dres is not None,
-        STORE_DRESIDUAL=dres_in is not None,
-        HAS_WEIGHT=weight is not None,
-        HAS_BIAS=bias is not None,
-    )
+
+    if D <= 512:
+        NB = triton.cdiv(T, 2048)
+        layer_norm_gated_bwd_kernel[grid](
+            x,
+            g,
+            weight,
+            bias,
+            y,
+            dy,
+            dx,
+            dg,
+            dw,
+            db,
+            dres,
+            dres_in,
+            mean,
+            rstd,
+            T=T,
+            D=D,
+            BS=BS,
+            BD=BD,
+            NB=NB,
+            ACTIVATION=activation,
+            IS_RMS_NORM=is_rms_norm,
+            HAS_DRESIDUAL=dres is not None,
+            STORE_DRESIDUAL=dres_in is not None,
+            HAS_WEIGHT=weight is not None,
+            HAS_BIAS=bias is not None,
+        )
+    else:
+        layer_norm_gated_bwd_kernel1[grid](
+            x,
+            g,
+            weight,
+            bias,
+            y,
+            dy,
+            dx,
+            dg,
+            dw,
+            db,
+            dres,
+            dres_in,
+            mean,
+            rstd,
+            T=T,
+            D=D,
+            BS=BS,
+            BD=BD,
+            ACTIVATION=activation,
+            IS_RMS_NORM=is_rms_norm,
+            HAS_DRESIDUAL=dres is not None,
+            STORE_DRESIDUAL=dres_in is not None,
+            HAS_WEIGHT=weight is not None,
+            HAS_BIAS=bias is not None,
+        )
     dw = dw.sum(0).to(weight.dtype) if weight is not None else None
     db = db.sum(0).to(bias.dtype) if bias is not None else None
     # Don't need to compute dres_in separately in this case

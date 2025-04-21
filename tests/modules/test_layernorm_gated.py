@@ -11,8 +11,8 @@ from fla.utils import assert_close, device
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("T", [1, 50, 512])
-@pytest.mark.parametrize("D", [50, 64, 128])
+@pytest.mark.parametrize("T", [1, 50, 512, 1000, 2048])
+@pytest.mark.parametrize("D", [50, 64, 128, 1200])
 @pytest.mark.parametrize("elementwise_affine", [False, True])
 @pytest.mark.parametrize("activation", ["silu", "sigmoid"])
 @pytest.mark.parametrize("bias", [False])
@@ -54,8 +54,8 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("T", [1, 50, 512])
-@pytest.mark.parametrize("D", [50, 64, 128])
+@pytest.mark.parametrize("T", [1, 50, 512, 1000, 2048])
+@pytest.mark.parametrize("D", [50, 64, 128, 1200])
 @pytest.mark.parametrize("activation", ["silu", "sigmoid"])
 def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     torch.manual_seed(42)
