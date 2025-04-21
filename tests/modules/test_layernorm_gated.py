@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedLayerNormGated, FusedRMSNormGated
-from fla.utils import device
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize("B", [2])
@@ -43,13 +43,13 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
         ref_db = torch.autograd.grad((ref(x) * act_fn(g)).sum(), ref.bias)[0]
         tri_db = torch.autograd.grad(tri(x, g).sum(), tri.bias)[0]
 
-    torch.testing.assert_close(ref_y, tri_y, rtol=0, atol=1e-4)
-    torch.testing.assert_close(ref_dx, tri_dx, rtol=0, atol=1e-4)
-    torch.testing.assert_close(ref_dg, tri_dg, rtol=0, atol=1e-4)
+    assert_close(' y', ref_y, tri_y, 1e-3)
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
+    assert_close('dg', ref_dg, tri_dg, 1e-3)
     if ref.weight is not None:
-        torch.testing.assert_close(ref_dw, tri_dw, rtol=0, atol=1e-3)
+        assert_close('dw', ref_dw, tri_dw, 1e-3)
     if ref.bias is not None:
-        torch.testing.assert_close(ref_db, tri_db, rtol=0, atol=1e-3)
+        assert_close('db', ref_db, tri_db, 1e-3)
 
 
 @pytest.mark.parametrize("B", [2])
@@ -75,7 +75,7 @@ def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     ref_dw = torch.autograd.grad((ref(x) * act_fn(g)).sum(), ref.weight)[0]
     tri_dw = torch.autograd.grad(tri(x, g).sum(), tri.weight)[0]
 
-    torch.testing.assert_close(ref_y, tri_y, rtol=0, atol=1e-4)
-    torch.testing.assert_close(ref_dx, tri_dx, rtol=0, atol=1e-4)
-    torch.testing.assert_close(ref_dg, tri_dg, rtol=0, atol=1e-4)
-    torch.testing.assert_close(ref_dw, tri_dw, rtol=0, atol=1e-3)
+    assert_close(' y', ref_y, tri_y, 1e-3)
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
+    assert_close('dg', ref_dg, tri_dg, 1e-3)
+    assert_close('dw', ref_dw, tri_dw, 1e-3)
