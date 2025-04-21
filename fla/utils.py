@@ -2,6 +2,7 @@
 
 import contextlib
 import functools
+import logging
 import os
 from enum import Enum
 from functools import lru_cache
@@ -11,6 +12,7 @@ import torch
 import triton
 from packaging import version
 
+logger = logging.getLogger(__name__)
 COMPILER_MODE = os.getenv("FLA_COMPILER_MODE") == "1"
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 
@@ -28,7 +30,7 @@ def get_err_ratio(x, y):
 def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
     abs_atol = get_abs_err(ref, tri)
     msg = f"{prefix} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
+    logger.info(msg)
     error_rate = get_err_ratio(ref, tri)
     if abs_atol <= err_atol:
         return
