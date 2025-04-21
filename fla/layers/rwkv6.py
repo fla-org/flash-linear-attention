@@ -86,7 +86,6 @@ class RWKV6Attention(nn.Module):
         if _init_weights:
             self.apply(self._initialize_weights)
 
-    @torch.compiler.disable
     def _initialize_weights(self, module: nn.Module):
         if getattr(module, "_is_hf_initialized", False):
             return
