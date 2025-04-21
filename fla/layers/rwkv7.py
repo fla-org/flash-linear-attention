@@ -105,8 +105,14 @@ class RWKV7Attention(nn.Module):
                 affine=elementwise_affine
             )
 
-        self.apply(self._initialize_weights)
+        try:
+            from transformers.modeling_utils import _init_weights
+        except ImportError:
+            _init_weights = True
+        if _init_weights:
+            self.apply(self._initialize_weights)
 
+    @torch.compiler.disable
     def _initialize_weights(self, module: nn.Module):
         if getattr(module, "_is_hf_initialized", False):
             return
