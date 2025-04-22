@@ -44,11 +44,13 @@ def convert_config(ckpt_dir, out_dir):
         config = json.load(f)
 
     new_config = {}
+    new_config['model_type'] = 'rodimus'
     new_config['block_type'] = config['block_type']
     new_config['hidden_size'] = config['d_model']
     new_config['num_hidden_layers'] = config['n_layer']
-    new_config['attn_mode'] = config['mixer_cfg']['mode']
+    new_config['attn_mode'] = 'chunk' if config['mixer_cfg']['mode'] == 'fused_chunk' else config['mixer_cfg']['mode']
     new_config['residual_in_fp32'] = config['residual_in_fp32']
+    new_config['block_residual_in_fp32'] = True  # Set `True` in order to restore the original performance
     new_config['expand_ratio'] = config['mixer_cfg']['mem_size']
     new_config['input_gate_low_rank'] = config['mixer_cfg']['input_gate_low_rank']
     new_config['use_short_conv'] = hasvalue(config['mixer_cfg'], 'use_short_conv', True)

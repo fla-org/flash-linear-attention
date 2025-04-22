@@ -37,7 +37,9 @@ class RodimusBlock(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
         self.block_type = config.block_type
+        self.block_residual_in_fp32 = config.residual_in_fp32
         self.residual_in_fp32 = config.residual_in_fp32
+        self.fuse_norm = config.fuse_norm
 
         self._is_ori_attn = False
 
@@ -55,7 +57,7 @@ class RodimusBlock(nn.Module):
             fuse_swiglu=config.fuse_swiglu
         )
         norm_cls = partial(
-            RMSNorm if config.fuse_norm else nn.RMSNorm,
+            RMSNorm if self.fuse_norm else nn.RMSNorm,
             config.hidden_size,
             eps=config.norm_eps,
         )
@@ -115,12 +117,25 @@ class RodimusBlock(nn.Module):
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        residual: Optional[torch.Tensor] = None,
         **kwargs: Unpack[Dict]
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
 
+        if self.block_residual_in_fp32 and self.layer_idx > 0:
+            assert residual is not None, 'Residual must be passed in when setting `block_residual_in_fp32=True`'
+
         if self._is_ori_attn:
-            residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
-            hidden_states = self.attn_norm(hidden_states)
+            if self.block_residual_in_fp32:
+                hidden_states, residual = self.attn_norm(
+                    hidden_states,
+                    residual=residual,
+                    prenorm=True,
+                    residual_in_fp32=self.residual_in_fp32
+                )
+            else:
+                residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
+                hidden_states = self.attn_norm(hidden_states)
+
             hidden_states, attentions, past_key_values = self.attn(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -129,7 +144,7 @@ class RodimusBlock(nn.Module):
                 output_attentions=output_attentions,
                 **kwargs
             )
-            if self.config.fuse_norm:
+            if self.fuse_norm:
                 hidden_states, residual = self.mlp_norm(
                     hidden_states,
                     residual,
@@ -137,15 +152,23 @@ class RodimusBlock(nn.Module):
                     residual_in_fp32=self.residual_in_fp32
                 )
             else:
-                hidden_states = (residual + hidden_states).to(dtype=hidden_states.dtype)
+                hidden_states = residual + hidden_states
                 residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
-                hidden_states = self.mlp_norm(hidden_states)
+                hidden_states = self.mlp_norm(hidden_states.to(self.mlp_norm.weight.dtype))
 
             hidden_states = self.mlp(hidden_states, **kwargs)
-            hidden_states = (residual + hidden_states).to(dtype=hidden_states.dtype)
         else:
-            residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
-            hidden_states = self.mixer_norm(hidden_states)
+            if self.block_residual_in_fp32:
+                hidden_states, residual = self.mixer_norm(
+                    hidden_states,
+                    residual=residual,
+                    prenorm=True,
+                    residual_in_fp32=self.residual_in_fp32
+                )
+            else:
+                residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
+                hidden_states = self.mixer_norm(hidden_states)
+
             hidden_states, attentions, past_key_values = self.mixer(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -157,8 +180,8 @@ class RodimusBlock(nn.Module):
 
             if self.block_type == "rodimus_plus":
                 past_key_values, rodimus_caches = past_key_values
-                
-                if self.config.fuse_norm:
+
+                if self.fuse_norm:
                     hidden_states, residual = self.ska_attn_norm(
                         hidden_states,
                         residual,
@@ -166,9 +189,9 @@ class RodimusBlock(nn.Module):
                         residual_in_fp32=self.residual_in_fp32
                     )
                 else:
-                    hidden_states = (residual + hidden_states).to(dtype=hidden_states.dtype)
+                    hidden_states = residual + hidden_states
                     residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
-                    hidden_states = self.ska_attn_norm(hidden_states)
+                    hidden_states = self.ska_attn_norm(hidden_states.to(dtype=self.ska_attn_norm.weight.dtype))
 
                 hidden_states, attentions, past_key_values = self.ska_attn(
                     hidden_states=hidden_states,
@@ -180,7 +203,7 @@ class RodimusBlock(nn.Module):
                     **kwargs
                 )
 
-                if self.config.fuse_norm:
+                if self.fuse_norm:
                     hidden_states = self.mlp_norm(
                         hidden_states,
                         residual=residual,
@@ -188,12 +211,15 @@ class RodimusBlock(nn.Module):
                         residual_in_fp32=self.residual_in_fp32
                     )
                 else:
-                    hidden_states = (residual + hidden_states).to(dtype=hidden_states.dtype)
-                    hidden_states = self.mlp_norm(hidden_states)
+                    hidden_states = residual + hidden_states
+                    hidden_states = self.mlp_norm(hidden_states.to(dtype=self.mlp_norm.weight.dtype))
 
                 hidden_states = self.mlp(hidden_states, **kwargs)
 
-            hidden_states = (hidden_states + residual).to(dtype=hidden_states.dtype)
+        if self.block_residual_in_fp32:
+            hidden_states = (hidden_states, residual)
+        else:
+            hidden_states = (residual + hidden_states).to(dtype=hidden_states.dtype)
 
         outputs = (hidden_states, attentions, past_key_values)
         return outputs
@@ -298,6 +324,15 @@ class RodimusModel(RodimusPreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self.block_residual_in_fp32 = config.block_residual_in_fp32
+        
+        if config.block_residual_in_fp32:
+            if not config.residual_in_fp32:
+                logger.warning_once('`residual_in_fp32=False` is incompatible with `block_residual_in_fp32=True` Setting `residual_in_fp32=True`...')
+                config.residual_in_fp32 = True
+            if not config.fuse_norm:
+                logger.warning_once('`fuse_norm=False` is incompatible with `block_residual_in_fp32=True` Setting `fuse_norm=True`...')
+                config.fuse_norm = True
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([RodimusBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
@@ -353,6 +388,7 @@ class RodimusModel(RodimusPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
+        residual = None
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -365,6 +401,7 @@ class RodimusModel(RodimusPreTrainedModel):
                     past_key_values,
                     use_cache,
                     output_attentions,
+                    residual,
                     **kwargs
                 )
             else:
@@ -374,13 +411,27 @@ class RodimusModel(RodimusPreTrainedModel):
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    residual=residual,
                     **kwargs
                 )
+                
+            if self.block_residual_in_fp32:
+                hidden_states, residual = hidden_states
+            else:
+                residual = None
 
             if output_attentions:
                 all_attns += (attentions,)
 
-        hidden_states = self.norm(hidden_states)
+        if self.block_residual_in_fp32:
+            hidden_states = self.norm(
+                hidden_states,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=True,
+            )
+        else:
+            hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:

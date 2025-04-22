@@ -125,7 +125,9 @@ class RodimusAttention(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        # mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        mode = 'fused_recurrent' if hidden_states.shape[1] == 1 else self.mode
+        # TODO: When using the setting of `if hidden_states.shape[1] <= 64`, it will output different answers from the official version.
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
@@ -167,7 +169,7 @@ class RodimusAttention(nn.Module):
         rt_gate_log = rt_gate_log * tau_gate
 
         k = F.normalize(k.float(), dim=-1, eps=self.k_norm_eps) * it_gate
-        q, k, v, rt_gate_log = map(lambda x: x.unsqueeze(-2), (q, k, v, rt_gate_log))
+        q, k, v, rt_gate_log = map(lambda x: x.unsqueeze(1).transpose(1, 2), (q, k, v, rt_gate_log))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'fused_recurrent':
@@ -179,6 +181,7 @@ class RodimusAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_first=False,
             )
         elif mode == 'fused_chunk':
             o, recurrent_state = fused_chunk_gla(
@@ -188,6 +191,7 @@ class RodimusAttention(nn.Module):
                 g=rt_gate_log,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                head_first=False,
             )
         elif mode == 'chunk':
             q, k, rt_gate_log = map(lambda x: x.to(v.dtype), (q, k, rt_gate_log))
@@ -199,6 +203,7 @@ class RodimusAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_first=False,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
@@ -215,7 +220,7 @@ class RodimusAttention(nn.Module):
             else:
                 rodimus_caches = (recurrent_state, conv_state if self.use_short_conv else None)
 
-        o = (o.squeeze(-2) + (shift_hidden_states.float() if self.residual_in_fp32 else shift_hidden_states) * self.residual_weight).to(o.dtype)
+        o = (o.transpose(1, 2).squeeze(1) + (shift_hidden_states.float() if self.residual_in_fp32 else shift_hidden_states) * self.residual_weight).to(o.dtype)
 
         o = self.activation_norm(o, final_gate)
         o = self.down_proj(o)

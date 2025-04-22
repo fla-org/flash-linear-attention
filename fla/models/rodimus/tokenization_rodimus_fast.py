@@ -75,6 +75,8 @@ class RodimusTokenizer(PreTrainedTokenizerFast):
             if isinstance(eos_token, str)
             else eos_token
         )
+        if 'pad_token' not in kwargs:
+            kwargs['pad_token'] = eos_token
 
         super().__init__(
             vocab_file=vocab_file,
@@ -84,7 +86,6 @@ class RodimusTokenizer(PreTrainedTokenizerFast):
             bos_token=bos_token,
             eos_token=eos_token,
             cls_token=cls_token,
-            pad_token=eos_token,
             gmask_token=gmask_token,
             add_bos_token=add_bos_token,
             add_eos_token=add_eos_token,

@@ -17,6 +17,7 @@ class RodimusConfig(PretrainedConfig):
         num_hidden_layers: int = 24,
         attn_mode: str = "fused_chunk",
         residual_in_fp32: bool = True,
+        block_residual_in_fp32: bool = False,
         expand_ratio: Optional[int] = 64,
         input_gate_low_rank: Optional[Union[float, str]] = 'auto',
         use_short_conv: bool = True,
@@ -46,6 +47,7 @@ class RodimusConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.attn_mode = attn_mode
         self.residual_in_fp32 = residual_in_fp32
+        self.block_residual_in_fp32 = block_residual_in_fp32
         self.expand_ratio = expand_ratio
         self.input_gate_low_rank = input_gate_low_rank
 
