@@ -15,14 +15,20 @@ import triton.language as tl
 from fla.utils import get_multiprocessor_count, input_guard
 
 
+@triton.heuristics({
+    'STORE_RESIDUAL_OUT': lambda args: args['residual_out'] is not None,
+    'HAS_RESIDUAL': lambda args: args['residual'] is not None,
+    'HAS_WEIGHT': lambda args: args['w'] is not None,
+    'HAS_BIAS': lambda args: args['b'] is not None,
+})
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
-        for BT in [8, 16, 32, 64, 128]
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for BT in [8, 16, 32, 64]
+        for num_warps in [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
-    key=['D', 'NB', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM', 'HAS_BIAS'],
+    key=['D', 'NB', 'IS_RMS_NORM', 'STORE_RESIDUAL_OUT', 'HAS_RESIDUAL', 'HAS_WEIGHT'],
 )
 @triton.jit
 def layer_norm_gated_fwd_kernel(
@@ -37,14 +43,14 @@ def layer_norm_gated_fwd_kernel(
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
     T,  # number of rows in x
-    D,  # number of columns in x
+    D: tl.constexpr,  # number of columns in x
     BT: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
-    HAS_RESIDUAL: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
+    HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr
 ):
@@ -56,11 +62,11 @@ def layer_norm_gated_fwd_kernel(
     p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
     if HAS_RESIDUAL:
-        p_residual = tl.make_block_ptr(residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-        b_x += tl.load(p_residual, boundary_check=(0, 1)).to(tl.float32)
+        p_res = tl.make_block_ptr(residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+        b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
     if STORE_RESIDUAL_OUT:
-        p_residual_out = tl.make_block_ptr(residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-        tl.store(p_residual_out, b_x.to(p_residual_out.dtype.element_ty), boundary_check=(0, 1))
+        p_res_out = tl.make_block_ptr(residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), boundary_check=(0, 1))
     if not IS_RMS_NORM:
         b_mean = tl.sum(b_x, axis=1) / D
         p_mean = tl.make_block_ptr(mean, (T,), (1,), (i_t * BT,), (BT,), (0,))
@@ -99,13 +105,19 @@ def layer_norm_gated_fwd_kernel(
     tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
 
 
+@triton.heuristics({
+    'STORE_RESIDUAL_OUT': lambda args: args['residual_out'] is not None,
+    'HAS_RESIDUAL': lambda args: args['residual'] is not None,
+    'HAS_WEIGHT': lambda args: args['w'] is not None,
+    'HAS_BIAS': lambda args: args['b'] is not None,
+})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
-    key=['D', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM', 'HAS_BIAS'],
+    key=['D', 'IS_RMS_NORM', 'STORE_RESIDUAL_OUT', 'HAS_RESIDUAL', 'HAS_WEIGHT'],
 )
 @triton.jit
 def layer_norm_gated_fwd_kernel1(
@@ -119,12 +131,12 @@ def layer_norm_gated_fwd_kernel1(
     mean,  # pointer to the mean
     rstd,  # pointer to the 1/std
     eps,  # epsilon to avoid division by zero
-    D,  # number of columns in x
+    D: tl.constexpr,  # number of columns in x
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
-    HAS_RESIDUAL: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
+    HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr
 ):
@@ -178,16 +190,19 @@ def layer_norm_gated_fwd_kernel1(
 
 
 @triton.heuristics({
+    'HAS_DRESIDUAL': lambda args: args['dresidual'] is not None,
+    'HAS_WEIGHT': lambda args: args['w'] is not None,
+    'HAS_BIAS': lambda args: args['b'] is not None,
     'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None
 })
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
         for BT in [8, 16, 32, 64]
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
-    key=['D', 'NB', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM', 'HAS_BIAS'],
+    key=['D', 'NB', 'IS_RMS_NORM', 'HAS_DRESIDUAL', 'HAS_WEIGHT'],
 )
 @triton.jit
 def layer_norm_gated_bwd_kernel(
@@ -201,20 +216,20 @@ def layer_norm_gated_bwd_kernel(
     dg,  # pointer to the gate gradient
     dw,  # pointer to the partial sum of weights gradient
     db,  # pointer to the partial sum of biases gradient
-    dres,
-    dres_in,
-    mean,  # pointer to the mean
-    rstd,  # pointer to the 1/std
-    T,  # number of rows in x
-    D,  # number of columns in x
-    BS,
+    dresidual,
+    dresidual_in,
+    mean,
+    rstd,
+    T,
+    D: tl.constexpr,
+    BS: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
-    HAS_DRESIDUAL: tl.constexpr,
     STORE_DRESIDUAL: tl.constexpr,
+    HAS_DRESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
@@ -284,12 +299,12 @@ def layer_norm_gated_bwd_kernel(
             b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
             b_dx = (b_wdy - b_xhat * b_c1[:, None]) * b_rstd[:, None]
         if HAS_DRESIDUAL:
-            p_dres = tl.make_block_ptr(dres, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+            p_dres = tl.make_block_ptr(dresidual, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
             b_dres = tl.load(p_dres, boundary_check=(0, 1)).to(tl.float32)
             b_dx += b_dres
         # Write dx
         if STORE_DRESIDUAL:
-            p_dres_in = tl.make_block_ptr(dres_in, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
+            p_dres_in = tl.make_block_ptr(dresidual_in, (T, D), (D, 1), (i_t, 0), (BT, BD), (1, 0))
             tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), boundary_check=(0, 1))
 
         tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
@@ -302,15 +317,18 @@ def layer_norm_gated_bwd_kernel(
 
 
 @triton.heuristics({
+    'HAS_DRESIDUAL': lambda args: args['dresidual'] is not None,
+    'HAS_WEIGHT': lambda args: args['w'] is not None,
+    'HAS_BIAS': lambda args: args['b'] is not None,
     'RECOMPUTE_OUTPUT': lambda args: args['y'] is not None
 })
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
-    key=['D', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM', 'HAS_BIAS'],
+    key=['D', 'IS_RMS_NORM', 'STORE_DRESIDUAL', 'HAS_DRESIDUAL', 'HAS_WEIGHT'],
 )
 @triton.jit
 def layer_norm_gated_bwd_kernel1(
@@ -324,18 +342,18 @@ def layer_norm_gated_bwd_kernel1(
     dg,  # pointer to the gate gradient
     dw,  # pointer to the partial sum of weights gradient
     db,  # pointer to the partial sum of biases gradient
-    dres,
-    dres_in,
-    mean,  # pointer to the mean
-    rstd,  # pointer to the 1/std
-    T,  # number of rows in x
-    D,  # number of columns in x
-    BS,
+    dresidual,
+    dresidual_in,
+    mean,
+    rstd,
+    T,
+    D: tl.constexpr,
+    BS: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
-    HAS_DRESIDUAL: tl.constexpr,
     STORE_DRESIDUAL: tl.constexpr,
+    HAS_DRESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
@@ -346,9 +364,9 @@ def layer_norm_gated_bwd_kernel1(
     x += i_s * BS * D
     g += i_s * BS * D
     if HAS_DRESIDUAL:
-        dres += i_s * BS * D
+        dresidual += i_s * BS * D
     if STORE_DRESIDUAL:
-        dres_in += i_s * BS * D
+        dresidual_in += i_s * BS * D
     dy += i_s * BS * D
     dx += i_s * BS * D
     dg += i_s * BS * D
@@ -404,20 +422,20 @@ def layer_norm_gated_bwd_kernel1(
             b_c1 = tl.sum(b_xhat * b_wdy, axis=0) / D
             b_dx = (b_wdy - b_xhat * b_c1) * b_rstd
         if HAS_DRESIDUAL:
-            b_dres = tl.load(dres + o_d, mask=mask, other=0).to(tl.float32)
+            b_dres = tl.load(dresidual + o_d, mask=mask, other=0).to(tl.float32)
             b_dx += b_dres
         # Write dx
         if STORE_DRESIDUAL:
-            tl.store(dres_in + o_d, b_dx, mask=mask)
+            tl.store(dresidual_in + o_d, b_dx, mask=mask)
         tl.store(dx + o_d, b_dx, mask=mask)
         tl.store(dg + o_d, b_dg, mask=mask)
 
         x += D
         g += D
         if HAS_DRESIDUAL:
-            dres += D
+            dresidual += D
         if STORE_DRESIDUAL:
-            dres_in += D
+            dresidual_in += D
         if RECOMPUTE_OUTPUT:
             y += D
         dy += D
@@ -467,49 +485,41 @@ def layer_norm_gated_fwd(
 
     if D <= 512:
         NB = triton.cdiv(T, 2048)
-        def grid(meta): return (triton.cdiv(T, meta['BT']), )
+        def grid(meta): return (triton.cdiv(T, meta['BT']),)
         layer_norm_gated_fwd_kernel[grid](
-            x,
-            g,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            eps,
+            x=x,
+            g=g,
+            y=y,
+            w=weight,
+            b=bias,
+            residual=residual,
+            residual_out=residual_out,
+            mean=mean,
+            rstd=rstd,
+            eps=eps,
             T=T,
             D=D,
             BD=BD,
             NB=NB,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
-            HAS_RESIDUAL=residual is not None,
-            STORE_RESIDUAL_OUT=residual_out is not None,
-            HAS_WEIGHT=weight is not None,
-            HAS_BIAS=bias is not None,
         )
     else:
         layer_norm_gated_fwd_kernel1[(T,)](
-            x,
-            g,
-            y,
-            weight,
-            bias,
-            residual,
-            residual_out,
-            mean,
-            rstd,
-            eps,
+            x=x,
+            g=g,
+            y=y,
+            w=weight,
+            b=bias,
+            residual=residual,
+            residual_out=residual_out,
+            mean=mean,
+            rstd=rstd,
+            eps=eps,
             D=D,
             BD=BD,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
-            HAS_RESIDUAL=residual is not None,
-            STORE_RESIDUAL_OUT=residual_out is not None,
-            HAS_WEIGHT=weight is not None,
-            HAS_BIAS=bias is not None,
         )
     # residual_out is None if residual is None and residual_dtype == input_dtype
     return y, mean, rstd, residual_out if residual_out is not None else x
@@ -525,7 +535,7 @@ def layer_norm_gated_bwd(
     eps: float = 1e-5,
     mean: torch.Tensor = None,
     rstd: torch.Tensor = None,
-    dres: torch.Tensor = None,
+    dresidual: torch.Tensor = None,
     has_residual: bool = False,
     is_rms_norm: bool = False,
     x_dtype: torch.dtype = None,
@@ -533,8 +543,8 @@ def layer_norm_gated_bwd(
 ):
     T, D = x.shape
     assert dy.shape == (T, D)
-    if dres is not None:
-        assert dres.shape == (T, D)
+    if dresidual is not None:
+        assert dresidual.shape == (T, D)
     if weight is not None:
         assert weight.shape == (D,)
     if bias is not None:
@@ -542,7 +552,7 @@ def layer_norm_gated_bwd(
     # allocate output
     dx = torch.empty_like(x) if x_dtype is None else torch.empty(T, D, dtype=x_dtype, device=x.device)
     dg = torch.empty_like(g) if x_dtype is None else torch.empty(T, D, dtype=x_dtype, device=x.device)
-    dres_in = torch.empty_like(x) if has_residual and dx.dtype != x.dtype else None
+    dresidual_in = torch.empty_like(x) if has_residual and dx.dtype != x.dtype else None
     y = torch.empty(T, D, dtype=dy.dtype, device=dy.device) if recompute_output else None
 
     # Less than 64KB per feature: enqueue fused kernel
@@ -560,20 +570,20 @@ def layer_norm_gated_bwd(
     if D <= 512:
         NB = triton.cdiv(T, 2048)
         layer_norm_gated_bwd_kernel[grid](
-            x,
-            g,
-            weight,
-            bias,
-            y,
-            dy,
-            dx,
-            dg,
-            dw,
-            db,
-            dres,
-            dres_in,
-            mean,
-            rstd,
+            x=x,
+            g=g,
+            w=weight,
+            b=bias,
+            y=y,
+            dy=dy,
+            dx=dx,
+            dg=dg,
+            dw=dw,
+            db=db,
+            dresidual=dresidual,
+            dresidual_in=dresidual_in,
+            mean=mean,
+            rstd=rstd,
             T=T,
             D=D,
             BS=BS,
@@ -581,44 +591,38 @@ def layer_norm_gated_bwd(
             NB=NB,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
-            HAS_DRESIDUAL=dres is not None,
-            STORE_DRESIDUAL=dres_in is not None,
-            HAS_WEIGHT=weight is not None,
-            HAS_BIAS=bias is not None,
+            STORE_DRESIDUAL=dresidual_in is not None,
         )
     else:
         layer_norm_gated_bwd_kernel1[grid](
-            x,
-            g,
-            weight,
-            bias,
-            y,
-            dy,
-            dx,
-            dg,
-            dw,
-            db,
-            dres,
-            dres_in,
-            mean,
-            rstd,
+            x=x,
+            g=g,
+            w=weight,
+            b=bias,
+            y=y,
+            dy=dy,
+            dx=dx,
+            dg=dg,
+            dw=dw,
+            db=db,
+            dresidual=dresidual,
+            dresidual_in=dresidual_in,
+            mean=mean,
+            rstd=rstd,
             T=T,
             D=D,
             BS=BS,
             BD=BD,
             ACTIVATION=activation,
             IS_RMS_NORM=is_rms_norm,
-            HAS_DRESIDUAL=dres is not None,
-            STORE_DRESIDUAL=dres_in is not None,
-            HAS_WEIGHT=weight is not None,
-            HAS_BIAS=bias is not None,
+            STORE_DRESIDUAL=dresidual_in is not None,
         )
     dw = dw.sum(0).to(weight.dtype) if weight is not None else None
     db = db.sum(0).to(bias.dtype) if bias is not None else None
-    # Don't need to compute dres_in separately in this case
+    # Don't need to compute dresidual_in separately in this case
     if has_residual and dx.dtype == x.dtype:
-        dres_in = dx
-    return (dx, dg, dw, db, dres_in) if not recompute_output else (dx, dg, dw, db, dres_in, y)
+        dresidual_in = dx
+    return (dx, dg, dw, db, dresidual_in) if not recompute_output else (dx, dg, dw, db, dresidual_in, y)
 
 
 class LayerNormGatedFunction(torch.autograd.Function):
@@ -681,11 +685,11 @@ class LayerNormGatedFunction(torch.autograd.Function):
         dy = dy.reshape(-1, dy.shape[-1])
         assert dy.shape == x.shape
         if ctx.prenorm:
-            dres = args[0]
-            dres = dres.reshape(-1, dres.shape[-1])
-            assert dres.shape == x.shape
+            dresidual = args[0]
+            dresidual = dresidual.reshape(-1, dresidual.shape[-1])
+            assert dresidual.shape == x.shape
         else:
-            dres = None
+            dresidual = None
         dx, dg, dw, db, dres_in = layer_norm_gated_bwd(
             dy=dy,
             x=x,
@@ -696,7 +700,7 @@ class LayerNormGatedFunction(torch.autograd.Function):
             eps=ctx.eps,
             mean=mean,
             rstd=rstd,
-            dres=dres,
+            dresidual=dresidual,
             has_residual=ctx.has_residual,
             is_rms_norm=ctx.is_rms_norm,
             x_dtype=ctx.x_dtype,
@@ -782,11 +786,11 @@ class LayerNormGatedLinearFunction(torch.autograd.Function):
         dlinear_bias = None if ctx.linear_bias_is_none else dout.sum(0)
         assert dy.shape == x.shape
         if ctx.prenorm:
-            dres = args[0]
-            dres = dres.reshape(-1, dres.shape[-1])
-            assert dres.shape == x.shape
+            dresidual = args[0]
+            dresidual = dresidual.reshape(-1, dresidual.shape[-1])
+            assert dresidual.shape == x.shape
         else:
-            dres = None
+            dresidual = None
         dx, dg, dnorm_weight, dnorm_bias, dres_in, y = layer_norm_gated_bwd(
             dy=dy,
             x=x,
@@ -796,7 +800,7 @@ class LayerNormGatedLinearFunction(torch.autograd.Function):
             eps=ctx.eps,
             mean=mean,
             rstd=rstd,
-            dres=dres,
+            dresidual=dresidual,
             has_residual=ctx.has_residual,
             is_rms_norm=ctx.is_rms_norm,
             x_dtype=ctx.x_dtype,
