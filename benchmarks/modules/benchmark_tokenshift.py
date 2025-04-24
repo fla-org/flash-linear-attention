@@ -10,6 +10,7 @@ def token_shift(x):
     delta = shifted - x
     return delta
 
+
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         # argument names to use as an x-axis for the plot
@@ -52,6 +53,7 @@ def benchmark(T, provider):
         grad_output = torch.randn_like(x)
         results = triton.testing.do_bench(lambda: fused_token_shift(x).backward(grad_output), quantiles=quantiles)
     return results
+
 
 if __name__ == '__main__':
     benchmark.run(print_data=True)
