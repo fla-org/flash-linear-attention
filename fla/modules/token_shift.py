@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, custom_device_ctx
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.autotune(
@@ -22,11 +22,9 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, custom_device_ct
 def token_shift_fwd_kernel(
     x,
     y,
+    T,
     H,
     cu_seqlens,
-    stride_b,
-    stride_t,
-    stride_h,
     IS_VARLEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -43,17 +41,14 @@ def token_shift_fwd_kernel(
     else:
         is_first_pos = (i_t == 0)
 
-    # Process the entire hidden dimension
     h_offsets = tl.arange(0, BLOCK_SIZE)
     h_mask = h_offsets < H
 
-    # Calculate offset to current position
     if IS_VARLEN:
-        base_offset = i_t * stride_t + h_offsets * stride_h
+        base_offset = i_t * H + h_offsets
     else:
-        base_offset = i_b * stride_b + i_t * stride_t + h_offsets * stride_h
+        base_offset = i_b * T*H + i_t * H + h_offsets
 
-    # Load current values
     curr_values = tl.load(x + base_offset, mask=h_mask)
 
     if is_first_pos:
@@ -62,9 +57,9 @@ def token_shift_fwd_kernel(
     else:
         # Other positions: delta = prev - curr
         if IS_VARLEN:
-            prev_offset = (i_t-1) * stride_t + h_offsets * stride_h
+            prev_offset = (i_t-1) * H + h_offsets
         else:
-            prev_offset = i_b * stride_b + (i_t-1) * stride_t + h_offsets * stride_h
+            prev_offset = i_b * T*H + (i_t-1) * H + h_offsets
 
         prev_values = tl.load(x + prev_offset, mask=h_mask)
         delta = prev_values - curr_values
@@ -83,12 +78,9 @@ def token_shift_fwd_kernel(
 def token_shift_bwd_kernel(
     grad_input,
     grad_output,
-    H,
     T,
+    H,
     cu_seqlens,
-    stride_b,
-    stride_t,
-    stride_h,
     IS_VARLEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -105,17 +97,14 @@ def token_shift_bwd_kernel(
     else:
         is_last_pos = (i_t == T - 1)
 
-    # Process the entire hidden dimension
     h_offsets = tl.arange(0, BLOCK_SIZE)
     h_mask = h_offsets < H
 
-    # Calculate offset to current position
     if IS_VARLEN:
-        base_offset = i_t * stride_t + h_offsets * stride_h
+        base_offset = i_t * H + h_offsets
     else:
-        base_offset = i_b * stride_b + i_t * stride_t + h_offsets * stride_h
+        base_offset = i_b * T*H + i_t * H + h_offsets
 
-    # Load current gradient
     curr_grad = tl.load(grad_output + base_offset, mask=h_mask)
 
     if is_last_pos:
@@ -124,14 +113,13 @@ def token_shift_bwd_kernel(
     else:
         # Other positions: grad = -grad_delta[t] + grad_delta[t+1]
         if IS_VARLEN:
-            next_offset = (i_t+1) * stride_t + h_offsets * stride_h
+            next_offset = (i_t+1) * H + h_offsets
         else:
-            next_offset = i_b * stride_b + (i_t+1) * stride_t + h_offsets * stride_h
+            next_offset = i_b * T*H + (i_t+1) * H + h_offsets
 
         next_grad = tl.load(grad_output + next_offset, mask=h_mask)
         grad = -curr_grad + next_grad
 
-    # Store the result
     tl.store(grad_input + base_offset, grad, mask=h_mask)
 
 
@@ -166,11 +154,9 @@ def token_shift_forward_triton(
     token_shift_fwd_kernel[grid](
         x=x,
         y=y,
+        T=T,
         H=H,
         cu_seqlens=cu_seqlens,
-        stride_b=x.stride(0),
-        stride_t=x.stride(1),
-        stride_h=x.stride(2),
         IS_VARLEN=IS_VARLEN,
         BLOCK_SIZE=block_size,
     )
@@ -209,12 +195,9 @@ def token_shift_backward_triton(
     token_shift_bwd_kernel[grid](
         grad_output=grad_output,
         grad_input=grad_input,
-        H=H,
         T=T,
+        H=H,
         cu_seqlens=cu_seqlens,
-        stride_b=grad_output.stride(0),
-        stride_t=grad_output.stride(1),
-        stride_h=grad_output.stride(2),
         IS_VARLEN=IS_VARLEN,
         BLOCK_SIZE=block_size,
     )
@@ -270,19 +253,18 @@ def token_shift_forward_pytorch(
 
 class TokenShift(torch.autograd.Function):
     @staticmethod
+    @input_guard
     @autocast_custom_fwd
     def forward(ctx, x, cu_seqlens=None):
         ctx.save_for_backward(cu_seqlens)
-        with custom_device_ctx(x.device.index):
-            delta = token_shift_forward_triton(x, cu_seqlens)
-        return delta
+        return token_shift_forward_triton(x, cu_seqlens)
 
     @staticmethod
+    @input_guard
     @autocast_custom_bwd
     def backward(ctx, grad_output):
         cu_seqlens, = ctx.saved_tensors
-        with custom_device_ctx(grad_output.device.index):
-            grad_input = token_shift_backward_triton(grad_output, cu_seqlens)
+        grad_input = token_shift_backward_triton(grad_output, cu_seqlens)
         return grad_input, None
 
 
