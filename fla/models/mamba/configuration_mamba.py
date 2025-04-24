@@ -58,7 +58,7 @@ class MambaConfig(PretrainedConfig):
         hidden_act (`str`, *optional*):
             The non-linear activation function (function or string) in the decoder. Default: `"silu"`.
         initializer_range (`float`, *optional*):
-            The standard deviation of the truncated_normal_initializer for initializing all weight matrices. Default: 0.1.
+            The standard deviation of the truncated_normal_initializer for initializing all weight matrices. Default: 0.02.
         residual_in_fp32 (`bool`, *optional*):
             Whether or not residuals should be in `float32`.
             If set to `False` residuals will keep the same `dtype` as the rest of the model. Default: `True`.
@@ -115,7 +115,7 @@ class MambaConfig(PretrainedConfig):
         use_bias: bool = False,
         use_conv_bias: bool = True,
         hidden_act: str = "silu",
-        initializer_range: str = 0.1,
+        initializer_range: str = 0.02,
         residual_in_fp32: bool = False,
         time_step_rank: str = "auto",
         time_step_scale: float = 1.0,
