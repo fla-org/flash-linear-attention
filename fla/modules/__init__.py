@@ -17,6 +17,7 @@ from fla.modules.l2norm import L2Norm
 from fla.modules.layernorm import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
 from fla.modules.mlp import GatedMLP
 from fla.modules.rotary import RotaryEmbedding
+from fla.modules.token_shift import TokenShift
 
 __all__ = [
     'ImplicitLongConvolution', 'LongConvolution', 'ShortConvolution',
@@ -27,5 +28,6 @@ __all__ = [
     'FusedLayerNormGated', 'FusedLayerNormSwishGate', 'FusedLayerNormSwishGateLinear',
     'FusedRMSNormGated', 'FusedRMSNormSwishGate', 'FusedRMSNormSwishGateLinear',
     'GatedMLP',
-    'RotaryEmbedding'
+    'RotaryEmbedding',
+    'TokenShift'
 ]
