@@ -13,6 +13,7 @@ from torch.nn import functional as F
 from fla.layers.rwkv6 import LoRA
 from fla.modules import GroupNorm
 from fla.modules.l2norm import l2_norm
+from fla.modules.token_shift import fused_token_shift
 from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7
 
@@ -193,15 +194,17 @@ class RWKV7Attention(nn.Module):
 
         if attention_mask is not None:
             hidden_states = hidden_states.mul(attention_mask[:, -hidden_states.shape[-2]:, None])
+        cu_seqlens = kwargs.get('cu_seqlens', None)
+        # [batch_size, seq_len, hidden_size]
         if hidden_states.shape[1] == 1 and last_state is not None:
             shifted = last_state['conv_state'].unsqueeze(1)
+            delta = shifted - hidden_states
+        elif last_state is None:
+            delta = fused_token_shift(hidden_states, cu_seqlens)
         else:
             shifted = self.time_shift(hidden_states)
-            if last_state is not None:
-                shifted[:, 0] = last_state['conv_state']
-
-        # [batch_size, seq_len, hidden_size]
-        delta = shifted - hidden_states
+            shifted[:, 0] = last_state['conv_state']
+            delta = shifted - hidden_states
 
         xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
                                                      self.x_k, self.x_v, self.x_a, self.x_g)
@@ -250,7 +253,6 @@ class RWKV7Attention(nn.Module):
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
 
         rwkv7_fn = chunk_rwkv7 if mode == 'chunk' else fused_recurrent_rwkv7
-        cu_seqlens = kwargs.get('cu_seqlens', None)
         o, recurrent_state = rwkv7_fn(
             r=r,
             w=w,
