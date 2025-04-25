@@ -140,5 +140,5 @@ class KUpdateFunction(torch.autograd.Function):
         return grad_k, grad_a, grad_ka
 
 
-def fused_k_update(k, a, ka):
+def fused_k_rwkv7(k, a, ka):
     return KUpdateFunction.apply(k, a, ka)
