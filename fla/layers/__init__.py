@@ -15,6 +15,8 @@ from .hgrn import HGRNAttention
 from .hgrn2 import HGRN2Attention
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
+from .mamba import Mamba
+from .mamba2 import Mamba2
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
 from .rebased import ReBasedLinearAttention
@@ -36,6 +38,8 @@ __all__ = [
     'HGRN2Attention',
     'LightNetAttention',
     'LinearAttention',
+    'Mamba',
+    'Mamba2',
     'MultiScaleRetention',
     'NativeSparseAttention',
     'ReBasedLinearAttention',

@@ -15,7 +15,8 @@ from transformers.utils import ModelOutput, logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
-from fla.models.mamba.modeling_mamba import MambaCache, MambaMixer
+from fla.layers.mamba import Mamba
+from fla.models.mamba.modeling_mamba import MambaCache
 from fla.models.samba.configuration_samba import SambaConfig
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as SambaMLP
@@ -47,7 +48,15 @@ class SambaBlock(nn.Module):
                 layer_idx=layer_idx
             )
         else:
-            self.mixer = MambaMixer(config, layer_idx=layer_idx)
+            self.mixer = Mamba(
+                hidden_size=config.hidden_size,
+                state_size=config.state_size,
+                conv_kernel=config.conv_kernel,
+                intermediate_size=config.intermediate_size,
+                time_step_rank=config.time_step_rank,
+                use_bias=config.use_bias,
+                layer_idx=layer_idx
+            )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = SambaMLP(
             hidden_size=config.hidden_size,
@@ -65,7 +74,7 @@ class SambaBlock(nn.Module):
 
         residual = hidden_states
         hidden_states = self.mixer_norm(hidden_states)
-        if isinstance(self.mixer, MambaMixer):
+        if isinstance(self.mixer, Mamba):
             hidden_states = self.mixer(hidden_states, cache_params=cache_params, **kwargs)
         else:
             hidden_states, _, cache_params = self.mixer(hidden_states=hidden_states, past_key_values=cache_params, **kwargs)
@@ -98,7 +107,7 @@ class SambaPreTrainedModel(PreTrainedModel):
             if module.bias is not None:
                 if not getattr(module.bias, "_no_reinit", False):
                     nn.init.zeros_(module.bias)
-        elif isinstance(module, MambaMixer):
+        elif isinstance(module, Mamba):
             module.A_log._no_weight_decay = True
             module.D._no_weight_decay = True
 
