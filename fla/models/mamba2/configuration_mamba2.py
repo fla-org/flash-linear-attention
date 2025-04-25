@@ -40,7 +40,7 @@ class Mamba2Config(PretrainedConfig):
         state_size (`int`, *optional*, defaults to 128): shape of the state space latents.
         num_hidden_layers (`int`, *optional*, defaults to 48):
             Number of hidden layers in the model.
-        layer_norm_epsilon (`float`, *optional*, defaults to 1e-05):
+        norm_eps (`float`, *optional*, defaults to 1e-05):
             The epsilon to use in the layer normalization layers.
         pad_token_id (`int`, *optional*, defaults to 0):
             Padding token id.
@@ -95,7 +95,7 @@ class Mamba2Config(PretrainedConfig):
         hidden_size: int = 2048,
         state_size: int = 128,
         num_hidden_layers: int = 48,
-        layer_norm_epsilon: float = 1e-5,
+        norm_eps: float = 1e-5,
         pad_token_id: int = 0,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
@@ -125,7 +125,7 @@ class Mamba2Config(PretrainedConfig):
         self.hidden_size = hidden_size
         self.state_size = state_size
         self.num_hidden_layers = num_hidden_layers
-        self.layer_norm_epsilon = layer_norm_epsilon
+        self.norm_eps = norm_eps
         self.conv_kernel = conv_kernel
         self.expand = expand
 
