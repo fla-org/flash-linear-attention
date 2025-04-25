@@ -9,7 +9,7 @@ from fla.utils import device, device_torch_lib
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [16, 32, 4096])
-@pytest.mark.parametrize("V", [32000, 100000])
+@pytest.mark.parametrize("V", [32000, 65536, 131072])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("inplace", [True, False])
 def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool):
