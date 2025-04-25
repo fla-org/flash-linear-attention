@@ -229,7 +229,8 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
                  dxw, dxk, dxv, dxa, dxg):
         hidden_states, delta, x_r, x_w, x_k, x_v, x_a, x_g = ctx.saved_tensors
 
-        d_hiddn, d_xx = addcmul_bwd1(dxr, dxw, dxk, dxv, dxa, dxg, x_r, x_w, x_k, x_v, x_a, x_g, hidden_states, delta, ctx.use_xg)
+        d_hiddn, d_xx = addcmul_bwd1(dxr, dxw, dxk, dxv, dxa, dxg, x_r, x_w, x_k, x_v, x_a, x_g,
+                                     hidden_states, delta, ctx.use_xg)
 
         d_ixr, d_ixw, d_ixk, d_ixv, d_ixa, d_ixg = addcmul_bwd2(dxr, dxw, dxk, dxv, dxa, dxg, delta, ctx.use_xg)
 
