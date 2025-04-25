@@ -281,7 +281,8 @@ class GrpoLoss(torch.autograd.Function):
         return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 
 
-def fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta=0.1, completion_mask=None, save_kl=False, inplace=False) -> torch.Tensor:
+def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
+                    beta=0.1, completion_mask=None, save_kl=False, inplace=False) -> torch.Tensor:
     '''
     compute grpo loss, save memory(no addition usage) and fast speed(6X for A800)
 
