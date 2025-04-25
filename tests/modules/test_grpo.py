@@ -8,10 +8,11 @@ from fla.utils import device, device_torch_lib
 
 
 @pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [16, 32])
+@pytest.mark.parametrize("T", [16, 32, 4096])
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype):
+@pytest.mark.parametrize("inplace", [True, False])
+def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool):
     device_torch_lib.manual_seed(42)
 
     def get_random_ref_log_probs(logits, input_ids):
@@ -39,7 +40,7 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype):
     gold_logits.requires_grad_(True)
     gold_ref_logp = ref_logp.clone().float()
     device_torch_lib.empty_cache()
-    y1 = fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl=save_kl)
+    y1 = fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl=save_kl, inplace=inplace)
     y2 = grpo_loss_torch(gold_logits, gold_ref_logp, input_ids, advantages, beta, completion_mask, save_kl)
     if save_kl:
         y1, kl2 = y1

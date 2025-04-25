@@ -57,11 +57,13 @@ from fla.utils import input_guard
 
 
 @triton.autotune(
-    [triton.Config({'BLOCK_SIZE': BLOCK_SIZE},  num_warps=NUM_WARPS, num_stages=NUM_STAGES)
-     for BLOCK_SIZE in [1024, 2048, 4096, 8192]
-     for NUM_WARPS in [8, 16, 32]
-     for NUM_STAGES in [1, 2, 4]
-     ], key=['B', 'N']
+    configs=[
+        triton.Config({'BLOCK_SIZE': BLOCK_SIZE},  num_warps=NUM_WARPS, num_stages=NUM_STAGES)
+        for BLOCK_SIZE in [1024, 2048, 4096, 8192]
+        for NUM_WARPS in [8, 16, 32]
+        for NUM_STAGES in [1, 2, 4]
+    ],
+    key=['B', 'N']
 )
 @triton.jit
 def grpo_fwd_kernel(
@@ -131,11 +133,12 @@ def grpo_fwd_kernel(
 
 
 @triton.autotune(
-    [triton.Config({'BLOCK_SIZE': BLOCK_SIZE},  num_warps=NUM_WARPS, num_stages=NUM_STAGES)
-     for BLOCK_SIZE in [1024, 2048, 4096, 8192]
-     for NUM_WARPS in [8, 16, 32]
-     for NUM_STAGES in [1, 2, 4]
-     ], key=['B', 'N']
+    configs=[
+        triton.Config({},  num_warps=NUM_WARPS, num_stages=NUM_STAGES)
+        for NUM_WARPS in [32]
+        for NUM_STAGES in [4]
+    ],
+    key=['B', 'N']
 )
 @triton.jit
 def grpo_bwd_kernel(
@@ -204,7 +207,7 @@ class GrpoLoss(torch.autograd.Function):
 
     @input_guard
     @staticmethod
-    def forward(ctx, logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl):
+    def forward(ctx, logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl, inplace=True):
         ctx.input_shape = logits.shape
         B, L_ADD_1, N = ctx.input_shape
         L = L_ADD_1 - 1
@@ -239,6 +242,7 @@ class GrpoLoss(torch.autograd.Function):
         ctx.beta = beta
         ctx.save_for_backward(lse, logits, input_ids, advantages, completion_mask)
         ctx.ref_logp = ref_logp
+        ctx.inplace = inplace
         return loss
 
     @input_guard
@@ -246,13 +250,16 @@ class GrpoLoss(torch.autograd.Function):
     def backward(ctx, dloss):
         # The grad of logits comes from two parts, the reward part and the kl part
         lse, logits, input_ids, advantages, completion_mask = ctx.saved_tensors
+        inplace = ctx.inplace
         B, L_ADD_1, N = ctx.input_shape
         L = L_ADD_1 - 1
         M = B * L
 
         input_ids_start_index = input_ids.size(1) - L
 
-        dlogits = torch.empty_like(logits)  # B, L_ADD_1, N
+        # B, L_ADD_1, N
+        dlogits = logits if inplace else torch.empty_like(logits)
+        BN = triton.next_power_of_2(N)
 
         grpo_bwd_kernel[(M,)](
             dloss_ptr=dloss,
@@ -265,15 +272,16 @@ class GrpoLoss(torch.autograd.Function):
             lse_ptr=lse,
             beta=ctx.beta,
             B=B, N=N, L=L,
+            BLOCK_SIZE=BN,
             start_idx=input_ids_start_index,
         )
         # The last token in the completion is not used in the loss computation
         # and therefore its gradient should be set to 0
         dlogits[:, -1, :].fill_(0.0)
-        return dlogits.view(*ctx.input_shape), None, None, None, None, None, None
+        return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 
 
-def fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta=0.1, completion_mask=None, save_kl=False) -> torch.Tensor:
+def fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta=0.1, completion_mask=None, save_kl=False, inplace=False) -> torch.Tensor:
     '''
     compute grpo loss, save memory(no addition usage) and fast speed(6X for A800)
 
@@ -301,7 +309,7 @@ def fused_grpo_loss(logits, ref_logp, input_ids, advantages, beta=0.1, completio
 
         logits = get_per_token_logits(model, prompt_completion_ids, attention_mask, logits_to_keep)
     '''
-    out = GrpoLoss.apply(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl)
+    out = GrpoLoss.apply(logits, ref_logp, input_ids, advantages, beta, completion_mask, save_kl, inplace)
     if not save_kl:
         return out
     else:
