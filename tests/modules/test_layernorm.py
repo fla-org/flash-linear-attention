@@ -8,7 +8,7 @@ from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from fla.modules import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
 from fla.modules.layernorm import GroupNormRef
-from fla.utils import device
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize("B", [2])
@@ -40,12 +40,12 @@ def test_layernorm(B: int, H: int, T: int, D: int, elementwise_affine: bool, bia
         ref_db = torch.autograd.grad(ref(x).sum(), ref.bias)[0]
         tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0]
 
-    torch.testing.assert_close(ref_y, tri_y, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dx, tri_dx, rtol=1e-3, atol=3e-3)
+    assert_close(' y', ref_y, tri_y, 1e-3)
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
     if ref.weight is not None:
-        torch.testing.assert_close(ref_dw, tri_dw, rtol=1e-3, atol=1e-3)
+        assert_close('dw', ref_dw, tri_dw, 1e-3)
     if ref.bias is not None:
-        torch.testing.assert_close(ref_db, tri_db, rtol=1e-3, atol=3e-3)
+        assert_close('db', ref_db, tri_db, 1e-3)
 
 
 @pytest.mark.parametrize("B", [2])
@@ -55,14 +55,12 @@ def test_layernorm(B: int, H: int, T: int, D: int, elementwise_affine: bool, bia
 @pytest.mark.parametrize("is_rms_norm", [True, False])
 def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
     torch.manual_seed(42)
-    x = torch.randn(B, T, D).to(device).requires_grad_(True).bfloat16()
+    x = torch.randn(B, T, D).to(device).requires_grad_(True)
     if is_rms_norm:
-        ref = GroupNormRef(
-            num_groups=G, hidden_size=D, bias=True, is_rms_norm=True
-        ).to(device).bfloat16()
+        ref = GroupNormRef(num_groups=G, hidden_size=D, bias=True, is_rms_norm=True).to(device)
     else:
-        ref = nn.GroupNorm(G, D).to(device).bfloat16()
-    tri = GroupNorm(G, D, bias=True, is_rms_norm=is_rms_norm).to(device).bfloat16()
+        ref = nn.GroupNorm(G, D).to(device)
+    tri = GroupNorm(G, D, bias=True, is_rms_norm=is_rms_norm).to(device)
     nn.init.normal_(ref.weight)
     nn.init.normal_(ref.bias)
     tri.weight.data.copy_(ref.weight.data)
@@ -71,17 +69,18 @@ def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
 
     ref_x = rearrange(x, 'b t d -> (b t) d').to(dtype=torch.float32)
     ref_y = rearrange(ref(ref_x), '(b t) d -> b t d', b=B)
-    tri_y = tri(x.bfloat16()).float()
-    ref_dx = torch.autograd.grad(ref(ref_x).sum(), x)[0].float()
-    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0].float()
-    ref_dw = torch.autograd.grad(ref(ref_x).sum(), ref.weight)[0].float()
-    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0].float()
-    ref_db = torch.autograd.grad(ref(ref_x).sum(), ref.bias)[0].float()
-    tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0].float()
-    torch.testing.assert_close(ref_y, tri_y, rtol=5e-3, atol=5e-2)
-    torch.testing.assert_close(ref_dx, tri_dx, rtol=5e-3, atol=5e-2)
-    torch.testing.assert_close(ref_dw, tri_dw, rtol=5e-3, atol=5e-2)
-    torch.testing.assert_close(ref_db, tri_db, rtol=5e-3, atol=5e-2)
+    tri_y = tri(x)
+    ref_dx = torch.autograd.grad(ref(ref_x).sum(), x)[0]
+    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
+    ref_dw = torch.autograd.grad(ref(ref_x).sum(), ref.weight)[0]
+    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
+    ref_db = torch.autograd.grad(ref(ref_x).sum(), ref.bias)[0]
+    tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0]
+
+    assert_close(' y', ref_y, tri_y, 1e-3)
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
+    assert_close('dw', ref_dw, tri_dw, 1e-3)
+    assert_close('db', ref_db, tri_db, 1e-3)
 
 
 @pytest.mark.parametrize("B", [2])
@@ -103,9 +102,9 @@ def test_rmsnorm(B: int, H: int, T: int, D: int):
     ref_dw = torch.autograd.grad(ref(x).sum(), ref.weight)[0]
     tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
 
-    torch.testing.assert_close(ref_y, tri_y, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dx, tri_dx, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dw, tri_dw, rtol=1e-3, atol=1e-3)
+    assert_close(' y', ref_y, tri_y, 1e-3)
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
+    assert_close('dw', ref_dw, tri_dw, 1e-3)
 
 
 @pytest.mark.parametrize("N", [1, 16, 128])
@@ -136,12 +135,12 @@ def test_layernorm_linear(N: int, D: int):
     ref_dlb = torch.autograd.grad(ref(x).sum(), ref[1].bias)[0]
     tri_dlb = torch.autograd.grad(tri(x, weight, bias).sum(), bias)[0]
 
-    torch.testing.assert_close(ref_y, tri_y, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dx, tri_dx, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dw, tri_dw, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(ref_db, tri_db, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(ref_dlw, tri_dlw, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dlb, tri_dlb, rtol=1e-3, atol=3e-3)
+    assert_close('  y', ref_y, tri_y, 1e-3)
+    assert_close(' dx', ref_dx, tri_dx, 1e-3)
+    assert_close(' dw', ref_dw, tri_dw, 1e-3)
+    assert_close(' db', ref_db, tri_db, 1e-3)
+    assert_close('dlw', ref_dlw, tri_dlw, 1e-3)
+    assert_close('dlb', ref_dlb, tri_dlb, 1e-3)
 
 
 @pytest.mark.parametrize("N", [1, 16, 128])
@@ -180,12 +179,12 @@ def test_groupnorm_linear(N: int, D: int, G: int, is_rms_norm: bool):
     ref_dlb = torch.autograd.grad(ref(x).sum(), ref[1].bias)[0]
     tri_dlb = torch.autograd.grad(tri(x, weight, bias).sum(), bias)[0]
 
-    torch.testing.assert_close(ref_y, tri_y, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dx, tri_dx, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dw, tri_dw, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(ref_db, tri_db, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(ref_dlw, tri_dlw, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dlb, tri_dlb, rtol=1e-3, atol=3e-3)
+    assert_close('  y', ref_y, tri_y, 1e-3)
+    assert_close(' dx', ref_dx, tri_dx, 1e-3)
+    assert_close(' dw', ref_dw, tri_dw, 1e-3)
+    assert_close(' db', ref_db, tri_db, 1e-3)
+    assert_close('dlw', ref_dlw, tri_dlw, 1e-3)
+    assert_close('dlb', ref_dlb, tri_dlb, 1e-3)
 
 
 @pytest.mark.parametrize("N", [1, 16, 128])
@@ -212,8 +211,8 @@ def test_rmsnorm_linear(N: int, D: int):
     ref_dlb = torch.autograd.grad(ref(x).sum(), ref[1].bias)[0]
     tri_dlb = torch.autograd.grad(tri(x, weight, bias).sum(), bias)[0]
 
-    torch.testing.assert_close(ref_y, tri_y, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dx, tri_dx, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dw, tri_dw, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(ref_dlw, tri_dlw, rtol=1e-3, atol=3e-3)
-    torch.testing.assert_close(ref_dlb, tri_dlb, rtol=1e-3, atol=3e-3)
+    assert_close('  y', ref_y, tri_y, 1e-3)
+    assert_close(' dx', ref_dx, tri_dx, 1e-3)
+    assert_close(' dw', ref_dw, tri_dw, 1e-3)
+    assert_close('dlw', ref_dlw, tri_dlw, 1e-3)
+    assert_close('dlb', ref_dlb, tri_dlb, 1e-3)

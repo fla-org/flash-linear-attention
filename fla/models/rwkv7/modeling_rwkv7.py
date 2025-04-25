@@ -21,6 +21,7 @@ from fla.models.rwkv7.configuration_rwkv7 import RWKV7Config
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
 from fla.modules.activations import ACT2FN
+from fla.modules.token_shift import token_shift
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -78,20 +79,25 @@ class RWKV7FeedForward(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        state: Optional[Cache] = None
+        state: Optional[Cache] = None,
+        **kwargs
     ) -> torch.Tensor:
         if attention_mask is not None:
             x = x.mul(attention_mask[:, -x.shape[-2]:, None])
         if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
-        else:
+            delta = shifted - x
+        elif state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = self.time_shift(x)
-            if state is not None and state[self.layer_idx]['ffn_state'] is not None:
-                shifted[:, 0] = state[self.layer_idx]['ffn_state'][-1]
+            shifted[:, 0] = state[self.layer_idx]['ffn_state'][-1]
+            delta = shifted - x
+        else:
+            cu_seqlens = kwargs.get('cu_seqlens', None)
+            delta = token_shift(x, cu_seqlens)
         if state is not None:
             # no need to update the offset twice
             state.update(ffn_state=x[:, -1], layer_idx=self.layer_idx, offset=0)
-        return self.value(self.act_fn(self.key(x.addcmul(shifted - x, self.x_k)))), state
+        return self.value(self.act_fn(self.key(x.addcmul(delta, self.x_k)))), state
 
 
 class RWKV7Block(nn.Module):
@@ -185,7 +191,7 @@ class RWKV7Block(nn.Module):
             hidden_states = residual + hidden_states
             residual = hidden_states
             hidden_states = self.ffn_norm(hidden_states)
-        hidden_states, past_key_values = self.ffn(hidden_states, attention_mask, past_key_values)
+        hidden_states, past_key_values = self.ffn(hidden_states, attention_mask, past_key_values, **kwargs)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states, attentions, past_key_values, v_first)

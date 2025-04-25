@@ -26,8 +26,7 @@ from fla.models import (
     SambaConfig,
     TransformerConfig
 )
-from fla.ops.utils.testing import assert_close
-from fla.utils import device, device_platform
+from fla.utils import assert_close, device, device_platform
 
 
 @pytest.mark.parametrize("L", [2])

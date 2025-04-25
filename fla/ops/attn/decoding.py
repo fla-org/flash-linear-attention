@@ -110,26 +110,26 @@ def attn_decoding_one_step(
     r"""
     Args:
         q (torch.Tensor):
-            query of shape `[B, 1, HQ, K]`.
+            query of shape `[1, B, HQ, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
-            GQA will be applied if HQ is divisible by H.
+            keys of shape `[1, T, H, K]`.
+            GQA will be applied if HQ is divisible by H. T is the cumulative length for all batch.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            values of shape `[1, T, H, V]`.
         g (Optional[torch.Tensor]):
-            log decay factors of shape `[B, T, H]`. Default: `None`.
+            log decay factors of shape `[1, T, H]`. Default: `None`.
         scale (Optional[int]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
+            consistent with the FlashAttention API. 
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, 1, HQ, V]`.
     """
-    assert cu_seqlens is not None, "The cu_seqlens should be provided"
+    assert cu_seqlens is not None, "The cu_seqlens must be provided for varlen decoding"
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = len(cu_seqlens) - 1
     HQ = q.shape[2]

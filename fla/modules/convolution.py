@@ -14,7 +14,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.modules.activations import ACT2FN
-from fla.ops.utils import prepare_position_ids, prepare_sequence_ids
+from fla.ops.utils import prepare_sequence_ids
 from fla.utils import checkpoint, input_guard
 
 try:
@@ -249,7 +249,7 @@ class ShortConvolution(nn.Conv1d):
             # [B, T]
             seq_idx = kwargs.get('seq_idx', None)
             if cu_seqlens is not None and seq_idx is None:
-                seq_idx = prepare_sequence_ids(prepare_position_ids(cu_seqlens)).to(torch.int32).unsqueeze(0)
+                seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
             x = causal_conv1d_fn(
                 x=x,
                 weight=rearrange(self.weight, "d 1 w -> d w"),

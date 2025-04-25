@@ -30,8 +30,6 @@ class Mamba2Config(PretrainedConfig):
 
 
     Args:
-        num_heads (`int`, *optional*, defaults to 64):
-            Number of heads for the evolution matrices of mamba 2.
         head_dim (`int`, *optional*, defaults to 64):
             Dimension of each head.
         vocab_size (`int`, *optional*, defaults to 32768):
@@ -60,7 +58,7 @@ class Mamba2Config(PretrainedConfig):
             Whether or not to use bias in the convolution layer of the mixer block.
         hidden_act (`str`, *optional*, defaults to `"silu"`):
             The non-linear activation function (function or string) in the decoder.
-        initializer_range (`float`, *optional*, defaults to 0.1):
+        initializer_range (`float`, *optional*, defaults to 0.02):
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
         residual_in_fp32 (`bool`, *optional*, defaults to `True`):
             Whether or not residuals should be in `float32`.
@@ -92,7 +90,6 @@ class Mamba2Config(PretrainedConfig):
 
     def __init__(
         self,
-        num_heads: int = 64,
         head_dim: int = 64,
         vocab_size: int = 32000,
         hidden_size: int = 2048,
@@ -108,7 +105,7 @@ class Mamba2Config(PretrainedConfig):
         use_bias: bool = False,
         use_conv_bias: bool = True,
         hidden_act: str = "silu",
-        initializer_range: float = 0.1,
+        initializer_range: float = 0.02,
         residual_in_fp32: bool = True,
         time_step_rank: str = "auto",
         time_step_min: float = 0.001,
@@ -151,8 +148,8 @@ class Mamba2Config(PretrainedConfig):
         self.residual_in_fp32 = residual_in_fp32
         self.use_cache = use_cache
         self.n_groups = n_groups
-        self.num_heads = num_heads
         self.head_dim = head_dim
+        self.num_heads = int(self.expand * self.hidden_size / self.head_dim)
         self.rms_norm = rms_norm
         self.state_size = state_size
         self.chunk_size = chunk_size

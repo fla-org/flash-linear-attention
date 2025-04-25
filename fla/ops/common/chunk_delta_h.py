@@ -397,7 +397,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
-def proprocess_qkw(
+def preprocess_qkw(
     q,
     k,
     w,
@@ -492,7 +492,7 @@ def chunk_gated_delta_rule_fwd_h(
         k_new = torch.empty_like(k)
         w_new = torch.empty_like(w)
         def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
-        proprocess_qkw[grid](
+        preprocess_qkw[grid](
             q=None,
             k=k,
             w=w,
@@ -562,7 +562,7 @@ def chunk_gated_delta_rule_bwd_dhu(
         k_new = torch.empty_like(k)
         w_new = torch.empty_like(w)
         def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
-        proprocess_qkw[grid](
+        preprocess_qkw[grid](
             q=q,
             k=k,
             w=w,

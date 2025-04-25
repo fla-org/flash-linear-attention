@@ -8,8 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.rwkv6 import chunk_rwkv6
 from fla.ops.rwkv6.fused_recurrent import fused_recurrent_rwkv6
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
-from fla.utils import device, device_platform
+from fla.utils import COMPILER_MODE, assert_close, device, device_platform
 
 if COMPILER_MODE:
     test_b_list = [1]

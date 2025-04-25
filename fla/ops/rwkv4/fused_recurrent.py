@@ -10,6 +10,7 @@ from torch import Tensor
 from torch.autograd.function import Function, FunctionCtx, once_differentiable
 
 from fla.ops.utils.op import exp
+from fla.utils import input_guard
 
 
 def get_block_size_c(chans: int) -> int:
@@ -207,9 +208,11 @@ def fused_recurrent_rwkv4_backward_kernel(
     gstate_out_s_c,
     # W grad
     gw_ptr,
+    gw_s_b,
     gw_s_c,
     # U grad
     gu_ptr,
+    gu_s_b,
     gu_s_c,
     # K grad
     gk_ptr,
@@ -347,12 +350,8 @@ def fused_recurrent_rwkv4_backward_kernel(
     tl.store(geps_ptr + gstate_s_c * cs, geps, mask=cmask)
 
     # Stores final gradients for w and u.
-    gw_temp = tl.load(gw_ptr + gw_s_c * cs, mask=cmask).to(tl.float32)
-    gw_temp += gw
-    tl.store(gw_ptr + gw_s_c * cs, gw_temp, mask=cmask)
-    gu_temp = tl.load(gu_ptr + gu_s_c * cs, mask=cmask).to(tl.float32)
-    gu_temp += gu
-    tl.store(gu_ptr + gu_s_c * cs, gu_temp, mask=cmask)
+    tl.store(gw_ptr + gw_s_b * b_idx + gw_s_c * cs, gw*w, mask=cmask)
+    tl.store(gu_ptr + gu_s_b * b_idx + gu_s_c * cs, gu, mask=cmask)
 
 
 def fused_recurrent_rwkv4_backward(
@@ -366,8 +365,8 @@ def fused_recurrent_rwkv4_backward(
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     bsz, tsz, chans = k.shape
 
-    gw = torch.zeros_like(w)  # New tensors to output.
-    gu = torch.zeros_like(u)
+    gw = w.new_empty(bsz, chans, dtype=torch.float)  # New tensors to output.
+    gu = u.new_empty(bsz, chans, dtype=torch.float)
     gk = torch.empty_like(k)
     gv = torch.empty_like(v)
     gstate = k.new_empty(bsz, 3, 1, chans)
@@ -413,9 +412,11 @@ def fused_recurrent_rwkv4_backward(
         # W grad
         gw,
         gw.stride(0),
+        gw.stride(1),
         # U grad
         gu,
         gu.stride(0),
+        gu.stride(1),
         # K grad
         gk,
         gk.stride(0),
@@ -437,11 +438,13 @@ def fused_recurrent_rwkv4_backward(
         BLOCK_SIZE_C=block_size_c,
     )
 
-    return gw, gu, gk, gv, gstate
+    return gw.sum(0), gu.sum(0), gk, gv, gstate
 
 
 class FusedRecurrentRWKV4Function(Function):
+
     @staticmethod
+    @input_guard
     def forward(
         ctx: FunctionCtx,
         w: Tensor,
@@ -450,26 +453,19 @@ class FusedRecurrentRWKV4Function(Function):
         v: Tensor,
         state: Tensor,
     ) -> tuple[Tensor, Tensor]:
-        ctx.input_dtype = k.dtype
-
-        w = -torch.exp(w.float().contiguous())
-        if k.dtype == torch.float16:
-            u = u.float()
-            k = k.float()
-            v = v.float()
-        u = u.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
+        ctx.w_dtype = w.dtype
+        w = -torch.exp(w.float())
         wkv, state_out = fused_recurrent_rwkv4_forward(w, u, k, v, state)
         ctx.save_for_backward(w, u, k, v, state_out[:, :, :-1])
         return wkv, state_out[:, :, -1:]
 
     @staticmethod
     @once_differentiable
+    @input_guard
     def backward(ctx: FunctionCtx, gwkv: Tensor, gstate: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         w, u, k, v, state = cast(tuple[Tensor, ...], ctx.saved_tensors)
         gw, gu, gk, gv, gstate = fused_recurrent_rwkv4_backward(w, u, k, v, state, gwkv, gstate)
-        return gw, gu, gk, gv, gstate
+        return gw.to(ctx.w_dtype), gu.to(u), gk.to(k), gv.to(v), gstate.to(state)
 
 
 def fused_recurrent_rwkv4(w: Tensor, u: Tensor, k: Tensor, v: Tensor, state: Tensor) -> tuple[Tensor, Tensor]:
