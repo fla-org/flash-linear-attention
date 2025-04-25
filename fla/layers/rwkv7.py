@@ -16,6 +16,7 @@ from fla.modules.l2norm import l2_norm
 from fla.modules.token_shift import token_shift
 from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7
+from fla.ops.rwkv7.fused_k_update import fused_k_update
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -242,7 +243,8 @@ class RWKV7Attention(nn.Module):
         # 2. Mathematically equivalent to k*(1 + (a-1)*self.k_a)
         #    but with better precision preservation
         # 3. Particularly crucial for bf16 where intermediate values easily lose precision
-        k = k.addcmul(k * (a - 1), self.k_a)
+        # k = k.addcmul(k * (a - 1), self.k_a)
+        k = fused_k_update(k, a, self.k_a)
 
         # dealing with left-padding
         if attention_mask is not None:
