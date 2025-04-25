@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from fla.modules.grpo import fused_grpo_loss, grpo_loss_torch
-from fla.utils import device, device_torch_lib
+from fla.utils import device, device_torch_lib, is_intel_alchemist
 
 
 @pytest.mark.parametrize("B", [2])
@@ -14,6 +14,8 @@ from fla.utils import device, device_torch_lib
 @pytest.mark.parametrize("inplace", [True, False])
 def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool):
     device_torch_lib.manual_seed(42)
+    if is_intel_alchemist and T == 4096:
+        pytest.skip("Skip test for T=4096 on Intel Alchemist")
 
     def get_random_ref_log_probs(logits, input_ids):
         with torch.inference_mode():
