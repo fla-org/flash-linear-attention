@@ -255,7 +255,6 @@ def fused_addcmul_rwkv7(
         return Rwkv7FusedAddcmul.apply(hidden_states, xx, xr, xw, xk, xv, xa, xg, num_elements)
 
 
-@torch.jit.script
 def torch_addcmul_rwkv7(hidden_states, xx, xr, xw, xk, xv, xa, xg=None):
     oxr = torch.addcmul(hidden_states, xx, xr)
     oxw = torch.addcmul(hidden_states, xx, xw)
