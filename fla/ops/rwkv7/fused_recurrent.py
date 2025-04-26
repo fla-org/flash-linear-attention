@@ -128,6 +128,7 @@ def fused_recurrent_rwkv7_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
+@input_guard
 def fused_recurrent_rwkv7_fwd(
     r: torch.Tensor,
     w: torch.Tensor,
@@ -176,51 +177,6 @@ def fused_recurrent_rwkv7_fwd(
         IS_DECODE=IS_DECODE
     )
     return o, ht
-
-
-class FusedRecurrentRWKV7Function(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_fwd
-    def forward(
-        ctx,
-        r: torch.Tensor,
-        w: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        kk: torch.Tensor,
-        a: torch.Tensor,
-        scale: Optional[float] = 1.0,
-        initial_state: Optional[torch.Tensor] = None,
-        output_final_state: bool = False,
-        reverse: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-    ):
-        o, ht = fused_recurrent_rwkv7_fwd(
-            r=r,
-            w=w,
-            k=k,
-            v=v,
-            kk=kk,
-            a=a,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            reverse=reverse,
-            cu_seqlens=cu_seqlens,
-        )
-        return o, ht
-
-    @staticmethod
-    @input_guard
-    @autocast_custom_bwd
-    def backward(ctx, do, dht):
-        raise NotImplementedError(
-            "Backward pass for fused_recurrent_rwkv7 is not implemented and will not be supported. "
-            "This kernel is only for inference. "
-            "For training, please use `chunk_dplr_delta_rule`."
-        )
 
 
 def fused_recurrent_rwkv7(
@@ -354,7 +310,7 @@ def fused_recurrent_rwkv7_v2(
         scale = r.shape[-1] ** -0.5
     else:
         assert scale > 0, "scale must be positive"
-    o, final_state = FusedRecurrentRWKV7Function.apply(
+    o, final_state = fused_recurrent_rwkv7_fwd(
         r,
         w,
         k,
