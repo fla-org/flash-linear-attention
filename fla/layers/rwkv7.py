@@ -245,7 +245,7 @@ class RWKV7Attention(nn.Module):
         # dealing with left-padding
         if attention_mask is not None:
             v = v * attention_mask[:, -seq_len:, None]
-   
+
         r, w, k, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, a))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
 
