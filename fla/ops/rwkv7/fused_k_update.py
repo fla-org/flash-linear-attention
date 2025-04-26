@@ -7,6 +7,7 @@ import triton.language as tl
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
+@torch.jit.script
 def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Tensor:
     """
     k: [batch_size, seq_len, key_dim]

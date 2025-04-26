@@ -187,18 +187,21 @@ class RWKV7Attention(nn.Module):
             last_state = past_key_values[self.layer_idx]
 
         if attention_mask is not None:
-            hidden_states = hidden_states.mul(attention_mask[:, -hidden_states.shape[-2]:, None])
+            hidden_states = hidden_states.mul(attention_mask[:, -seq_len:, None])
         cu_seqlens = kwargs.get('cu_seqlens', None)
-        # [batch_size, seq_len, hidden_size]
-        if hidden_states.shape[1] == 1 and last_state is not None:
+        # delta [batch_size, seq_len, hidden_size]
+        if last_state is None:
+            delta = token_shift(hidden_states, cu_seqlens)
+            recurrent_state = None
+        elif hidden_states.shape[1] == 1:
             shifted = last_state['conv_state'].unsqueeze(1)
             delta = shifted - hidden_states
-        elif last_state is None:
-            delta = token_shift(hidden_states, cu_seqlens)
+            recurrent_state = last_state['recurrent_state']
         else:
             shifted = self.time_shift(hidden_states)
             shifted[:, 0] = last_state['conv_state']
             delta = shifted - hidden_states
+            recurrent_state = last_state['recurrent_state']
 
         xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
                                                      self.x_k, self.x_v, self.x_a, self.x_g)
@@ -241,12 +244,12 @@ class RWKV7Attention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            v = v * attention_mask[:, -v.shape[-2]:, None]
+            v = v * attention_mask[:, -seq_len:, None]
+   
         r, w, k, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, a))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
 
-        recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        if self.training or hidden_states.shape[1] >= 64:
+        if self.training or seq_len >= 64:
             # if training, use chunk mode no matter how short the sequence is
             # launching the triton kernel for just one token will actually be slower
             o, recurrent_state = chunk_rwkv7(
