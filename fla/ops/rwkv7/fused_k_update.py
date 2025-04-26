@@ -109,11 +109,12 @@ class KUpdateFunction(torch.autograd.Function):
         ka: [key_dim]
         """
         ctx.save_for_backward(k, a, ka)
-        out = torch.empty_like(k)
 
         def grid(meta): return (triton.cdiv(meta['xnumel'], meta['BLOCK_SIZE']),)
 
+        out = torch.empty_like(k)
         k_update_fwd_kernel[grid](k, a, ka, out, k.numel(), k.shape[2])
+
         return out
 
     @staticmethod
@@ -141,4 +142,6 @@ class KUpdateFunction(torch.autograd.Function):
 
 
 def fused_k_rwkv7(k, a, ka):
+    if k.shape[1] == 1:
+        return k_update_ref(k, a, ka)
     return KUpdateFunction.apply(k, a, ka)
