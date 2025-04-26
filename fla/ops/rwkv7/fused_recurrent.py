@@ -11,7 +11,7 @@ from einops import rearrange
 
 from fla.ops.generalized_delta_rule import fused_recurrent_dplr_delta_rule
 from fla.ops.utils.op import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use_cuda_graph
+from fla.utils import input_guard, use_cuda_graph
 
 
 @triton.heuristics({

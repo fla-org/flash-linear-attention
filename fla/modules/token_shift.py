@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import input_guard
 
 
 def token_shift_ref(
