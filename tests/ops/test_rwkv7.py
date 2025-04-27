@@ -47,18 +47,18 @@ def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdi
     K_2 = K_.clone().detach().requires_grad_(True)
     V_2 = V_.clone().detach().requires_grad_(True)
 
-    out1, last1 = channel_mixing_rwkv7_torch(
+    o1, last1 = channel_mixing_rwkv7_torch(
         x.to(torch.float32),
         x_prev.to(torch.float32),
         x_k.to(torch.float32),
         K_.to(torch.float32),
         V_.to(torch.float32),
     )
-    loss1 = out1.mean() + last1.mean()
+    loss1 = o1.mean() + last1.mean()
     loss1.backward()
 
-    out2, last2 = channel_mixing_rwkv7(x2, x_prev2, x_k2, K_2, V_2, inplace)
-    loss2 = out2.mean() + last2.mean()
+    o2, last2 = channel_mixing_rwkv7(x2, x_prev2, x_k2, K_2, V_2, inplace)
+    loss2 = o2.mean() + last2.mean()
     loss2.backward()
 
     assert_close(" dx", x.grad, x2.grad, ratio=5e-3)
@@ -174,13 +174,13 @@ def test_fused_k_update(
 
     ref = k_update_ref(k, a, ka)
     ref.sum().backward()
-    k_grad_ref, k.grad = k.grad.clone(), None
-    a_grad_ref, a.grad = a.grad.clone(), None
-    ka_grad_ref, ka.grad = ka.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_da, a.grad = a.grad.clone(), None
+    ref_dka, ka.grad = ka.grad.clone(), None
     tri = fused_k_rwkv7(k, a, ka)
     tri.sum().backward()
 
-    assert_close("    out", tri, ref, ratio=5e-5)
-    assert_close(" k_grad", k_grad_ref, k.grad, ratio=5e-5)
-    assert_close(" a_grad", a_grad_ref, a.grad, ratio=5e-5)
-    assert_close("ka_grad", ka_grad_ref, ka.grad, ratio=5e-5)
+    assert_close("  o", tri, ref, ratio=5e-5)
+    assert_close(" dk", ref_dk, k.grad, ratio=5e-5)
+    assert_close(" da", ref_da, a.grad, ratio=5e-5)
+    assert_close("dka", ref_dka, ka.grad, ratio=5e-5)
