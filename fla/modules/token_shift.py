@@ -224,4 +224,20 @@ class TokenShift(torch.autograd.Function):
         return dx, None
 
 
-token_shift = TokenShift.apply
+def token_shift(
+    x: torch.Tensor,
+    cu_seqlens: Optional[torch.Tensor] = None
+):
+    """
+    Implementation of token shift using Triton kernels
+    Args:
+        x: Input tensor of shape [B, T, D]
+        cu_seqlens: Cumulative sequence lengths (optional)
+    Returns:
+        Tensor of same shape as input with token shift applied
+    """
+    if cu_seqlens is not None:
+        assert x.dim() == 3, "Input must be [B, T, D]"
+        assert x.shape[0] == 1, "Batch size must be 1 when using cu_seqlens"
+
+    return TokenShift.apply(x, cu_seqlens)

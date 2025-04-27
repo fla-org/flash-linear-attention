@@ -13,7 +13,7 @@ def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Te
     k: [batch_size, seq_len, key_dim]
     a: [batch_size, seq_len, key_dim]
     ka: [key_dim]
-    k*(1 + (a-1)*self.k_a)
+    Equals to k * (1 + (a-1) * k_a)
     """
     return k.addcmul(k * (a - 1), ka)
 
@@ -68,9 +68,9 @@ def k_update_bwd_kernel(
     k,
     a,
     ka,
-    grad_k,
-    grad_a,
-    grad_ka_full,
+    dk,
+    da,
+    dka,
     xnumel,
     hidden_dim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -89,13 +89,13 @@ def k_update_bwd_kernel(
     b_a = tl.load(a + xindex, xmask, other=0.).to(tl.float32)
     b_ka = tl.load(ka + x0, eviction_policy='evict_last').to(tl.float32)
 
-    b_grad_k = b_grad_output * (1 + (b_a - 1) * b_ka)
-    b_grad_a = b_grad_output * b_k * b_ka
-    b_grad_ka_full = b_grad_output * b_k * (b_a - 1)
+    b_dk = b_grad_output * (1 + (b_a - 1) * b_ka)
+    b_da = b_grad_output * b_k * b_ka
+    b_dka = b_grad_output * b_k * (b_a - 1)
 
-    tl.store(grad_k + xindex, b_grad_k.to(grad_k.dtype.element_ty), xmask)
-    tl.store(grad_a + xindex, b_grad_a.to(grad_a.dtype.element_ty), xmask)
-    tl.store(grad_ka_full + xindex, b_grad_ka_full.to(grad_ka_full.dtype.element_ty), xmask)
+    tl.store(dk + xindex, b_dk.to(dk.dtype.element_ty), xmask)
+    tl.store(da + xindex, b_da.to(da.dtype.element_ty), xmask)
+    tl.store(dka + xindex, b_dka.to(dka.dtype.element_ty), xmask)
 
 
 class KUpdateFunction(torch.autograd.Function):
@@ -124,22 +124,22 @@ class KUpdateFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         k, a, ka = ctx.saved_tensors
 
-        grad_k = torch.empty_like(k)
-        grad_a = torch.empty_like(a)
-        grad_ka_full = torch.empty_like(k)
+        dk = torch.empty_like(k)
+        da = torch.empty_like(a)
+        dka = torch.empty_like(k)
 
         def grid(meta):
             return (triton.cdiv(meta['xnumel'], meta['BLOCK_SIZE']),)
 
         k_update_bwd_kernel[grid](
             grad_output, k, a, ka,
-            grad_k, grad_a, grad_ka_full,
+            dk, da, dka,
             k.numel(), k.shape[2]
         )
 
-        grad_ka = grad_ka_full.sum(dim=(0, 1))
+        dka = dka.sum(dim=(0, 1))
 
-        return grad_k, grad_a, grad_ka
+        return dk, da, dka
 
 
 def fused_k_rwkv7(k, a, ka):
