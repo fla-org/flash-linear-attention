@@ -7,6 +7,7 @@ import torch
 
 from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rwkv7_torch
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
+from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
 from fla.utils import assert_close, device, is_intel_alchemist
 
 
@@ -153,3 +154,33 @@ def test_fused_rwkv7_addcmul(
         torch.testing.assert_close(d_ixg, d_ixg1, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(d_hidden, d_hidden1, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(d_xx, d_xx1, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("B", [4])
+@pytest.mark.parametrize("T", [4096])
+@pytest.mark.parametrize("H", [64])
+@pytest.mark.parametrize("D", [64])
+@pytest.mark.parametrize("dtype", [torch.float32])
+def test_fused_k_update(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    k = torch.randn(B, T, H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    a = torch.randn(B, T, H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    ka = torch.randn(H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+
+    ref = k_update_ref(k, a, ka)
+    ref.sum().backward()
+    k_grad_ref, k.grad = k.grad.clone(), None
+    a_grad_ref, a.grad = a.grad.clone(), None
+    ka_grad_ref, ka.grad = ka.grad.clone(), None
+    tri = fused_k_rwkv7(k, a, ka)
+    tri.sum().backward()
+
+    assert_close("    out", tri, ref, ratio=5e-5)
+    assert_close(" k_grad", k_grad_ref, k.grad, ratio=5e-5)
+    assert_close(" a_grad", a_grad_ref, a.grad, ratio=5e-5)
+    assert_close("ka_grad", ka_grad_ref, ka.grad, ratio=5e-5)
