@@ -20,7 +20,7 @@ The gradient is: **$∂L/∂S = S_k^T k - v^T k$**
 
 Therefore, the gradient descent update (with weight decay factors $d_t = \exp(-\exp(w_t))$ and learning rate parameters) is: $$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot (k_t^T k_t S_{t-1} - k_t^T v_t)$$ This simplifies to:
 
-$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot k_t^T k_t \cdot S_{t-1} + \eta_t \cdot k_t^T v_t$$ 
+$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot k_t^T k_t \cdot S_{t-1} + \eta_t \cdot k_t^T v_t$$
 
 $$S_t = S_{t-1} \cdot (\text{Diag}(d_t) - \eta_t \cdot k_t^T k_t) + \eta_t \cdot k_t^T v_t$$
 
@@ -28,7 +28,7 @@ In the full RWKV-7 implementation, this gradient descent update is generalized b
 
 - $\text{Diag}(d_t)$ becomes $D_t$ (the diagonal decay matrix)
 - The term $-\eta_t \cdot k_t^T k_t$ is generalized to $\alpha_t \beta_t^T$, where:
-  - $\alpha_t$ can be initialized as $-\eta_t \cdot k_t$ 
+  - $\alpha_t$ can be initialized as $-\eta_t \cdot k_t$
   - $\beta_t$ can be initialized as $k_t$
 - The term $\eta_t \cdot k_t^T v_t$ becomes $v_t k_t^T$ with appropriate scaling of $k_t$
 
@@ -185,7 +185,7 @@ def elementwise_rwkv7_forward(
 ):
     """
     ElementWise implementation of RWKV7 (Goose) attention mechanism.
-    
+
     Args:
         q: Query tensor of shape [B, H, L, N]
         k: Key tensor of shape [B, H, L, N]
@@ -196,33 +196,33 @@ def elementwise_rwkv7_forward(
         scale: Scaling factor for attention scores
         initial_state: Initial state for the recurrent computation
         output_final_state: Whether to output the final state
-        
+
     Returns:
         output: Attention output of shape [B, H, L, V]
         final_state: Final state if requested
     """
     torch_dtype = q.dtype if q.dtype in [torch.float64, torch.float32] else torch.float32
     orig_dtype = q.dtype
-    
+
     B, H, L, N = q.shape
     V = v.shape[-1]
-    
+
     # Convert all inputs to the computation dtype
     q, k, v, w, a, b = (x.to(dtype=torch_dtype) for x in (q, k, v, w, a, b))
-    
+
     # Initialize state and output
     state = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
     output = torch.zeros(B, H, L, V, dtype=torch_dtype, device=q.device)
-    
+
     # Apply scaling to query
     if scale == -1.0:
         scale = N ** -0.5
     q = q * scale
-    
+
     # Use initial state if provided
     if initial_state is not None:
         state = state + initial_state.to(dtype=torch_dtype)
-    
+
     # Process each timestep
     for t in range(L):
         for bi in range(B):
@@ -234,43 +234,43 @@ def elementwise_rwkv7_forward(
                 w_t = torch.exp(-torch.exp(w[bi, hi, t]))  # [N]
                 a_t = a[bi, hi, t]  # [N]
                 b_t = b[bi, hi, t]  # [N]
-                
+
                 # Current state
                 s_t = state[bi, hi]  # [N, V]
-                
+
                 # Compute state update components
                 # 1. Decay the current state: S_{t-1} * D_t
                 decayed_state = s_t * w_t.unsqueeze(-1)  # [N, V]
-                
+
                 # 2. Compute S_{t-1} * a_t
                 sa = torch.zeros(V, dtype=torch_dtype, device=q.device)
                 for n in range(N):
                     for v_idx in range(V):
                         sa[v_idx] += s_t[n, v_idx] * a_t[n]
-                
+
                 # 3. Compute (S_{t-1} * a_t) * b_t^T
                 sab = torch.zeros_like(s_t)
                 for n in range(N):
                     for v_idx in range(V):
                         sab[n, v_idx] = sa[v_idx] * b_t[n]
-                
+
                 # 4. Compute v_t * k_t^T
                 kv = torch.zeros_like(s_t)
                 for n in range(N):
                     for v_idx in range(V):
                         kv[n, v_idx] = k_t[n] * v_t[v_idx]
-                
+
                 # 5. Update state: S_t = S_{t-1} * D_t + sab + v_t * k_t^T
                 state[bi, hi] = decayed_state + sab + kv
-                
+
                 # 6. Compute output: o_t = q_t^T * S_t
                 o_t = torch.zeros(V, dtype=torch_dtype, device=q.device)
                 for n in range(N):
                     for v_idx in range(V):
                         o_t[v_idx] += q_t[n] * state[bi, hi, n, v_idx]
-                
+
                 output[bi, hi, t] = o_t
-    
+
     # Return output and final state if requested
     if output_final_state:
         return output.to(orig_dtype), state.to(orig_dtype)
@@ -292,23 +292,23 @@ def elementwise_rwkv7_backward(
 ):
     """
     ElementWise implementation of RWKV7 backward pass.
-    
+
     Args:
         q, k, v, w, a, b: Forward pass inputs
         doutput: Gradient of the loss with respect to the output
         dh_t: Gradient of the loss with respect to the final state
         scale: Scaling factor used in the forward pass
-        
+
     Returns:
         dq, dk, dv, dw, da, db: Gradients with respect to inputs
     """
     torch_dtype = q.dtype if q.dtype in [torch.float64, torch.float32] else torch.float32
     B, H, L, N = q.shape
     V = v.shape[-1]
-    
+
     # Convert all inputs and gradients to computation dtype
     q, k, v, w, a, b, doutput = (x.to(dtype=torch_dtype) for x in (q, k, v, w, a, b, doutput))
-    
+
     # Initialize gradient tensors
     dq = torch.zeros_like(q)
     dk = torch.zeros_like(k)
@@ -316,24 +316,24 @@ def elementwise_rwkv7_backward(
     dw = torch.zeros_like(w)
     da = torch.zeros_like(a)
     db = torch.zeros_like(b)
-    
+
     # Apply scaling to query
     if scale == -1.0:
         scale = N ** -0.5
-    
+
     # Initialize state and state gradient
     states = []
     state = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
     dstate = torch.zeros_like(state)
-    
+
     # If gradient with respect to final state is provided, use it
     if dh_t is not None:
         dstate = dstate + dh_t.to(dtype=torch_dtype)
-    
+
     # Forward pass to store all intermediate states
     for t in range(L):
         states.append(state.clone())  # Store the state BEFORE update
-        
+
         for bi in range(B):
             for hi in range(H):
                 # Get current timestep values
@@ -342,16 +342,16 @@ def elementwise_rwkv7_backward(
                 w_t = torch.exp(-torch.exp(w[bi, hi, t]))
                 a_t = a[bi, hi, t]
                 b_t = b[bi, hi, t]
-                
+
                 # Current state before update
                 s_t = state[bi, hi]
-                
+
                 # Compute intermediate values
                 sa = torch.zeros(V, dtype=torch_dtype, device=q.device)
                 for n in range(N):
                     for v_idx in range(V):
                         sa[v_idx] += s_t[n, v_idx] * a_t[n]
-                
+
                 # Update state
                 for n in range(N):
                     for v_idx in range(V):
@@ -360,10 +360,10 @@ def elementwise_rwkv7_backward(
                             sa[v_idx] * b_t[n] +
                             k_t[n] * v_t[v_idx]
                         )
-    
+
     # Save the final state for output computation
     final_states = state.clone()
-    
+
     # Backward pass
     for t in range(L-1, -1, -1):
         for bi in range(B):
@@ -376,50 +376,50 @@ def elementwise_rwkv7_backward(
                 w_t = torch.exp(-torch.exp(w_t_param))
                 a_t = a[bi, hi, t]
                 b_t = b[bi, hi, t]
-                
+
                 # Get the state before update at time t
                 prev_state = states[t][bi, hi]
-                
+
                 # Get the state after update at time t (for output computation)
                 if t < L-1:
                     current_state = states[t+1][bi, hi]
                 else:
                     current_state = final_states[bi, hi]
-                
+
                 dout_t = doutput[bi, hi, t]
-                
+
                 # Gradient with respect to query
                 for n in range(N):
                     for v_idx in range(V):
                         # Use current state (after update) for output computation
                         dq[bi, hi, t, n] += dout_t[v_idx] * current_state[n, v_idx] * scale
-                
+
                 # Gradient with respect to state from output
                 for n in range(N):
                     for v_idx in range(V):
                         dstate[bi, hi, n, v_idx] += dout_t[v_idx] * q_t[n] * scale
-                
+
                 # Compute intermediate gradients
                 for n in range(N):
                     for v_idx in range(V):
                         # Gradient with respect to key
                         dk[bi, hi, t, n] += dstate[bi, hi, n, v_idx] * v_t[v_idx]
-                        
+
                         # Gradient with respect to value
                         dv[bi, hi, t, v_idx] += dstate[bi, hi, n, v_idx] * k_t[n]
-                
+
                 # Gradient with respect to decay parameter
                 w_t_grad = torch.exp(w_t_param) * (-w_t)
                 for n in range(N):
                     for v_idx in range(V):
                         dw[bi, hi, t, n] += dstate[bi, hi, n, v_idx] * prev_state[n, v_idx] * w_t_grad[n]
-                
+
                 # Compute sa for backprop (S_{t-1} * a_t)
                 sa = torch.zeros(V, dtype=torch_dtype, device=q.device)
                 for n in range(N):
                     for v_idx in range(V):
                         sa[v_idx] += prev_state[n, v_idx] * a_t[n]
-                
+
                 # Gradient with respect to a
                 for n in range(N):
                     sum_grad = 0.0
@@ -427,33 +427,33 @@ def elementwise_rwkv7_backward(
                         for k_idx in range(N):
                             sum_grad += dstate[bi, hi, k_idx, v_idx] * prev_state[n, v_idx] * b_t[k_idx]
                     da[bi, hi, t, n] += sum_grad
-                
+
                 # Gradient with respect to b
                 for n in range(N):
                     for v_idx in range(V):
                         db[bi, hi, t, n] += dstate[bi, hi, n, v_idx] * sa[v_idx]
-                
+
                 # Gradient for previous state
                 dprev_state = torch.zeros_like(prev_state)
                 for n in range(N):
                     for v_idx in range(V):
                         # From decay term
                         dprev_state[n, v_idx] += dstate[bi, hi, n, v_idx] * w_t[n]
-                
+
                 # From (S_{t-1} * a_t) * b_t^T term
                 for n in range(N):
                     for v_idx in range(V):
                         # First, compute ∂sa/∂S_{t-1}[n,v_idx] = a_t[n]
                         sa_grad = a_t[n]
-                        
+
                         # Then, for each dimension k_idx of the state:
                         # multiply by b_t[k_idx] and dstate[bi,hi,k_idx,v_idx]
                         for k_idx in range(N):
                             dprev_state[n, v_idx] += dstate[bi, hi, k_idx, v_idx] * sa_grad * b_t[k_idx]
-                
+
                 # Update dstate for next iteration (previous timestep)
                 dstate[bi, hi] = dprev_state
-    
+
     return dq, dk, dv, dw, da, db, dstate
 
 class ElementwiseRWKV7Function(torch.autograd.Function):
@@ -465,16 +465,16 @@ class ElementwiseRWKV7Function(torch.autograd.Function):
             q, k, v, w, a, b, scale, initial_state, output_final_state=True
         )
         return output, final_state
-    
+
     @staticmethod
     def backward(ctx, doutput, dfinal_state):
         q, k, v, w, a, b = ctx.saved_tensors
         scale = ctx.scale
-        
+
         dq, dk, dv, dw, da, db, _ = elementwise_rwkv7_backward(
             q, k, v, w, a, b, doutput, dfinal_state, scale
         )
-        
+
         return dq, dk, dv, dw, da, db, None, None
 
 
@@ -490,7 +490,7 @@ def elementwise_rwkv7(
 ):
     """
     Differentiable ElementWise implementation of RWKV7 attention.
-    
+
     Args:
         q: Query tensor of shape [B, H, L, N]
         k: Key tensor of shape [B, H, L, N]
@@ -500,7 +500,7 @@ def elementwise_rwkv7(
         b: State update modulator of shape [B, H, L, N]
         scale: Scaling factor for attention scores
         initial_state: Initial state for the recurrent computation
-        
+
     Returns:
         output: Attention output of shape [B, H, L, V]
         final_state: Final state
@@ -523,7 +523,7 @@ def naive_recurrent_rwkv7(
     orig_dtype = q.dtype
     B, H, L, N, V = q.shape[0], q.shape[1], q.shape[2], q.shape[3], v.shape[-1]
     q, k, v, w, a, b = (x.to(dtype=torch_dtype) for x in (q, k, v, w, a, b))
-    
+
     state = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
     o = torch.zeros_like(v)
 
@@ -558,10 +558,10 @@ def test_forward_equivalence():
     """Test that elementwise and vectorized implementations give same results"""
     # Set random seed for reproducibility
     torch.manual_seed(42)
-    
+
     # Define test dimensions
     B, H, L, N, V = 2, 2, 3, 4, 5
-    
+
     # Create random test inputs
     q = torch.randn(B, H, L, N, requires_grad=True)
     k = torch.randn(B, H, L, N, requires_grad=True)
@@ -569,30 +569,30 @@ def test_forward_equivalence():
     w = torch.randn(B, H, L, N, requires_grad=True)
     a = torch.randn(B, H, L, N, requires_grad=True)
     b = torch.randn(B, H, L, N, requires_grad=True)
-    
+
     # Create initial state
     initial_state = torch.randn(B, H, N, V)
-    
+
     # Run both implementations
     output1, state1 = naive_recurrent_rwkv7(q, k, v, w, a, b, initial_state=initial_state)
     output2, state2 = elementwise_rwkv7_forward(q, k, v, w, a, b, initial_state=initial_state)
-    
+
     # Check if outputs are close
     output_diff = torch.max(torch.abs(output1 - output2)).item()
     state_diff = torch.max(torch.abs(state1 - state2)).item()
-    
+
     print(f"Forward pass test:")
     print(f"  Max output difference: {output_diff:.6e}")
     print(f"  Max state difference: {state_diff:.6e}")
-    
+
     # Define what's considered close enough (adjust as needed)
     tolerance = 1e-5
-    
+
     if output_diff < tolerance and state_diff < tolerance:
         print("  ✓ Forward pass test PASSED: Implementations are equivalent")
     else:
         print("  ✗ Forward pass test FAILED: Implementations are different")
-    
+
     return output_diff < tolerance and state_diff < tolerance
 
 
@@ -600,10 +600,10 @@ def test_backward_against_autograd():
     """Test elementwise backward implementation against PyTorch autograd"""
     # Set random seed for reproducibility
     torch.manual_seed(42)
-    
+
     # Define test dimensions (smaller for faster testing)
     B, H, L, N, V = 1, 1, 16, 64, 64
-    
+
     # Create random test inputs
     q = torch.randn(B, H, L, N, requires_grad=True)
     k = torch.randn(B, H, L, N, requires_grad=True)
@@ -611,10 +611,10 @@ def test_backward_against_autograd():
     w = torch.randn(B, H, L, N, requires_grad=True)
     a = torch.randn(B, H, L, N, requires_grad=True)
     b = torch.randn(B, H, L, N, requires_grad=True)
-    
+
     # Create initial state
     initial_state = torch.randn(B, H, N, V)
-    
+
     # For autograd version, ensure inputs require gradients
     q_auto = q.clone().detach().requires_grad_(True)
     k_auto = k.clone().detach().requires_grad_(True)
@@ -622,20 +622,20 @@ def test_backward_against_autograd():
     w_auto = w.clone().detach().requires_grad_(True)
     a_auto = a.clone().detach().requires_grad_(True)
     b_auto = b.clone().detach().requires_grad_(True)
-    
+
     # Run forward pass with autograd tracking
     output_auto, state_auto = naive_recurrent_rwkv7(
         q_auto, k_auto, v_auto, w_auto, a_auto, b_auto, initial_state=initial_state
     )
-    
+
     # Create random gradients for output and final state
     grad_output = torch.randn_like(output_auto)
     grad_state = torch.randn_like(state_auto)
-    
+
     # Compute gradients using autograd
     output_auto.backward(grad_output, retain_graph=True)
     state_auto.backward(grad_state)
-    
+
     # Get autograd gradients
     dq_auto = q_auto.grad.clone()
     dk_auto = k_auto.grad.clone()
@@ -643,7 +643,7 @@ def test_backward_against_autograd():
     dw_auto = w_auto.grad.clone()
     da_auto = a_auto.grad.clone()
     db_auto = b_auto.grad.clone()
-    
+
     # Reset gradients for manual backward test
     q_auto.grad.zero_()
     k_auto.grad.zero_()
@@ -651,12 +651,12 @@ def test_backward_against_autograd():
     w_auto.grad.zero_()
     a_auto.grad.zero_()
     b_auto.grad.zero_()
-    
+
     # Run manual backward pass
     dq, dk, dv, dw, da, db, _ = elementwise_rwkv7_backward(
         q, k, v, w, a, b, grad_output, grad_state
     )
-    
+
     # Compare gradients
     differences = {
         'dq': torch.max(torch.abs(dq - dq_auto)).item(),
@@ -666,20 +666,20 @@ def test_backward_against_autograd():
         'da': torch.max(torch.abs(da - da_auto)).item(),
         'db': torch.max(torch.abs(db - db_auto)).item(),
     }
-    
+
     print(f"\nBackward pass test:")
     for param, diff in differences.items():
         print(f"  Max {param} difference: {diff:.6e}")
-    
+
     # Define what's considered close enough
     tolerance = 1e-5
     all_close = all(diff < tolerance for diff in differences.values())
-    
+
     if all_close:
         print("  ✓ Backward pass test PASSED: Manual backward matches autograd")
     else:
         print("  ✗ Backward pass test FAILED: Manual backward differs from autograd")
-    
+
     return all_close
 
 
@@ -687,10 +687,10 @@ def test_autograd_function():
     """Test the custom autograd function implementation"""
     # Set random seed for reproducibility
     torch.manual_seed(42)
-    
+
     # Define test dimensions
     B, H, L, N, V = 2, 2, 3, 5, 5
-    
+
     # Create random test inputs
     q = torch.randn(B, H, L, N, requires_grad=True)
     k = torch.randn(B, H, L, N, requires_grad=True)
@@ -698,42 +698,42 @@ def test_autograd_function():
     w = torch.randn(B, H, L, N, requires_grad=True)
     a = torch.randn(B, H, L, N, requires_grad=True)
     b = torch.randn(B, H, L, N, requires_grad=True)
-    
+
     # Create initial state
     initial_state = torch.zeros(B, H, N, V)
-    
+
        # Clone inputs for the two paths we're testing
     q1, k1, v1, w1, a1, b1 = q.clone().detach().requires_grad_(True), k.clone().detach().requires_grad_(True), v.clone().detach().requires_grad_(True), w.clone().detach().requires_grad_(True), a.clone().detach().requires_grad_(True), b.clone().detach().requires_grad_(True)
     q2, k2, v2, w2, a2, b2 = q.clone().detach().requires_grad_(True), k.clone().detach().requires_grad_(True), v.clone().detach().requires_grad_(True), w.clone().detach().requires_grad_(True), a.clone().detach().requires_grad_(True), b.clone().detach().requires_grad_(True)
-    
-    
-    # Path 1: Using naive implementation with autograd
-    
-    output1, state1 = naive_recurrent_rwkv7(q1, k1, v1, w1, a1, b1, initial_state=initial_state)
-    
 
-    
+
+    # Path 1: Using naive implementation with autograd
+
+    output1, state1 = naive_recurrent_rwkv7(q1, k1, v1, w1, a1, b1, initial_state=initial_state)
+
+
+
     output2, state2 = ElementwiseRWKV7Function.apply(q2, k2, v2, w2, a2, b2, 1.0, initial_state)
-    
+
     # Check forward pass equivalence
     output_diff = torch.max(torch.abs(output1 - output2)).item()
     state_diff = torch.max(torch.abs(state1 - state2.transpose(-1, -2))).item()
-    
+
     print(f"\nAutograd Function test (forward):")
     print(f"  Max output difference: {output_diff:.6e}")
     print(f"  Max state difference: {state_diff:.6e}")
-    
+
     # Create loss function to test backward pass
     def compute_loss(output, state):
         return output.sum() #+ state.sum()
-    
+
     # Compute loss and gradients for both paths
     loss1 = compute_loss(output1, state1)
     loss1.backward()
-    
+
     loss2 = compute_loss(output2, state2)
     loss2.backward()
-    
+
     # Compare gradients
     grad_diffs = {
         'q': torch.max(torch.abs(q1.grad - q2.grad)).item(),
@@ -743,16 +743,16 @@ def test_autograd_function():
         'a': torch.max(torch.abs(a1.grad - a2.grad)).item(),
         'b': torch.max(torch.abs(b1.grad - b2.grad)).item(),
     }
-    
+
     print(f"\nAutograd Function test (backward):")
     for param, diff in grad_diffs.items():
         print(f"  Max {param} gradient difference: {diff:.6e}")
-    
+
     # Define what's considered close enough
     tolerance = 1e-5
     forward_ok = output_diff < tolerance and state_diff < tolerance
     backward_ok = all(diff < tolerance for diff in grad_diffs.values())
-    
+
     if forward_ok and backward_ok:
         print("  ✓ Autograd Function test PASSED: Custom implementation matches PyTorch autograd")
     else:
@@ -760,7 +760,7 @@ def test_autograd_function():
             print("  ✗ Forward pass failed")
         if not backward_ok:
             print("  ✗ Backward pass failed")
-    
+
     return forward_ok and backward_ok
 
 test_autograd_function()
