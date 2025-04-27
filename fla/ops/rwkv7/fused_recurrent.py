@@ -234,7 +234,7 @@ def fused_recurrent_rwkv7(
     )
 
 
-def fused_recurrent_rwkv7_v2(
+def fused_mul_recurrent_rwkv7(
     r: torch.Tensor,
     w: torch.Tensor,
     k: torch.Tensor,

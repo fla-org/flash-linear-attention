@@ -14,7 +14,7 @@ from fla.layers.rwkv6 import LoRA
 from fla.modules import GroupNorm
 from fla.modules.l2norm import l2_norm
 from fla.modules.token_shift import token_shift
-from fla.ops.rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7_v2
+from fla.ops.rwkv7 import chunk_rwkv7, fused_mul_recurrent_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
 
@@ -265,7 +265,7 @@ class RWKV7Attention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
         else:
-            o, recurrent_state = fused_recurrent_rwkv7_v2(
+            o, recurrent_state = fused_mul_recurrent_rwkv7(
                 r=r,
                 w=w,
                 k=k,
