@@ -34,7 +34,7 @@ In the full RWKV-7 implementation, this gradient descent update is generalized b
 
 This leads to the final recurrence equation[^2]:
 
-[^2]: For a more detailed explanation of, see the triton codes: https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/rwkv7/fused_recurrent.py#L94
+[^2]: For a more detailed explanation, see the triton codes. Note: In the optimized Triton implementation, `w` is already the log of the decay factor, so there's only one exponential operation needed.  https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/rwkv7/fused_recurrent.py#L94
 
 $$S_t = S_{t-1} \cdot D_t + S_{t-1} \cdot \alpha_t \beta_t^T + v_t k_t^T \in \mathbb{R}^{d_v \times d_k}$$
 
@@ -765,4 +765,3 @@ def test_autograd_function():
 
 test_autograd_function()
 ```
-
