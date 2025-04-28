@@ -331,6 +331,9 @@ def naive_recurrent_rwkv7_2_bwd(
     state = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
     states.append(state.clone())
 
+    # In practice, we don't compute state from begin,
+    # but from the last state ckpt
+    # state_pre = (state_current - (sa[:, None] * b_t[None, :] + k_t[None, :] * v_t[:, None]))/w_t[None, :]
     for t in range(L):
         for bi in range(B):
             for hi in range(H):
@@ -344,12 +347,9 @@ def naive_recurrent_rwkv7_2_bwd(
                 sa = (state[bi, hi] * a_t[None, :]).sum(dim=1)
 
                 state[bi, hi] = w_t[None, :] * state[bi, hi] + sa[:, None] * b_t[None, :] + k_t[None, :] * v_t[:, None]
-        # In practice, we don't compute state from begin,
-        # but from the last state ckpt
-        # state_pre = (state_current - (sa[:, None] * b_t[None, :] + k_t[None, :] * v_t[:, None]))/w_t[None, :]
         states.append(state.clone())
 
-      # Backward pass through time
+    # Backward pass through time
     for t in range(L-1, -1, -1):
         for bi in range(B):
             for hi in range(H):
