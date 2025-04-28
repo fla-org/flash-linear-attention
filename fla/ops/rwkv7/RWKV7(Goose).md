@@ -181,7 +181,7 @@ def naive_recurrent_rwkv7(
     q, k, v, w, a, b = (x.to(dtype=torch_dtype) for x in (q, k, v, w, a, b))
     # q, k, v, a, b, w,
     # shape: (B, H, L, D), (B, H, L, D), (B, H, T, V), (B, H, L, D), (B, H, L, D), (B, H, L, D)
-    state = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
+    state = torch.zeros(B, H, V, N, dtype=torch_dtype, device=q.device)
     o = torch.zeros_like(v)
 
     if scale == -1.0:
@@ -245,7 +245,7 @@ def naive_recurrent_rwkv7_2(
     q, k, v, w, a, b = (x.to(dtype=torch_dtype) for x in (q, k, v, w, a, b))
     # q, k, v, a, b, w,
     # shape: (B, H, L, D), (B, H, L, D), (B, H, T, V), (B, H, L, D), (B, H, L, D), (B, H, L, D)
-    state = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
+    state = torch.zeros(B, H, V, N, dtype=torch_dtype, device=q.device)
     o = torch.zeros_like(v)
 
     if scale == -1.0:
@@ -319,7 +319,7 @@ def naive_recurrent_rwkv7_2_bwd(
     db = torch.zeros_like(b)
 
     # Initialize state gradients
-    dstate = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
+    dstate = torch.zeros(B, H, V, N, dtype=torch_dtype, device=q.device)
     if dh_t is not None:
         dstate += dh_t
 
@@ -328,7 +328,7 @@ def naive_recurrent_rwkv7_2_bwd(
 
     # First rebuild all states from forward pass
     states = []
-    state = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
+    state = torch.zeros(B, H, V, N, dtype=torch_dtype, device=q.device)
     states.append(state.clone())
 
     # In practice, we don't recompute all states from the beginning.
@@ -511,7 +511,7 @@ def test_autograd_function():
     b = (kk * a_scale).requires_grad_(True)  # kk*a
 
     # Create initial state
-    initial_state = torch.zeros(B, H, D, D).to(torch.float64)
+    initial_state = torch.zeros(B, H, V, N).to(torch.float64)
 
     # Clone inputs for the two paths we're testing
     q1, k1, v1, w1, a1, b1 = q.clone().detach().requires_grad_(True), k.clone().detach().requires_grad_(True), v.clone().detach().requires_grad_(
