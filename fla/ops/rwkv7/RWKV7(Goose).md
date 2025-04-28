@@ -46,19 +46,17 @@ $$o_t = q_t^T \cdot S_t$$ Where $q_t \in \mathbb{R}^{d_k}$ is the query vector (
 
 ## 1. Forward Pass Recurrence Equation
 
-In the Triton or Ascend C implementation, the state update is defined as:
+In the implementation, the state update is defined as:
 
 For each batch (bi) and head (hi), at time step t:
 
 ```python
-w_t = torch.exp(-torch.exp(w[bi, hi, t]))  # shape [N]
-sa = (a_t[:, None] * state[bi, hi]).sum(dim=0)  # shape [V]
-state[bi, hi] = (state[bi, hi] * w_t[:, None] +  # [N,V] * [N,1]
-                k_t[:, None] * v_t[None, :] +   # [N,1] * [1,V]
-                sa * b_t[:, None])              # [V] * [N,1]
+w_t = torch.exp(-torch.exp(w[bi, hi, t]))  # shape [K]
+sa = (state[bi, hi] * a_t[None, :]).sum(dim=1)  # shape [V]
+state[bi, hi] = w_t[None, :] * state[bi, hi] + sa[:, None] * b_t[None, :] + k_t[None, :] * v_t[:, None]
 ```
 
-Where state[bi, hi] has shape [N, V], representing a state matrix of N keys and V-dimensional values.
+Where state[bi, hi] has shape [V, K], representing a state matrix that maps from K-dimensional keys to V-dimensional values.
 
 ## 2. Backward Pass Derivation
 
@@ -67,68 +65,68 @@ Where state[bi, hi] has shape [N, V], representing a state matrix of N keys and 
 For time step t, if L is the loss function, dstate_curr = ∂L/∂state[bi, hi, t+1] is the gradient of the current state:
 
 ```
-dstate_curr = dstate[bi, hi] + q_t[:, None] * doutput[bi, hi, t, None]
+dstate_curr = dstate[bi, hi] + q_t[None, :] * doutput[bi, hi, t][:, None]
 ```
 
-This includes gradients propagated from future time steps dstate[bi, hi] and gradients from the current output q_t[:, None] * doutput[bi, hi, t, None].
+This includes gradients propagated from future time steps dstate[bi, hi] and gradients from the current output.
 
 ### 2.2 Gradient w.r.t. Query q_t
 
 ```
-dq[bi, hi, t] = torch.matmul(doutput[bi, hi, t], curr_state.t()) * scale
+dq[bi, hi, t] = torch.matmul(doutput[bi, hi, t], curr_state) * scale
 ```
 
 ### 2.3 Gradient w.r.t. Decay Parameter w_t
 
 For the gradient of w_t, we need to consider how it affects the state update:
 
-1. For the `state[bi, hi] * w_t[:, None]` component of the state update:
+1. For the `w_t[None, :] * state[bi, hi]` component of the state update:
 
 First, compute the derivative of L with respect to w_t:
 ```
-∂L/∂w_t[n] = ∑_v (dstate_curr[n,v] * prev_state[n,v])
+∂L/∂w_t[k] = ∑_v (dstate_curr[v,k] * prev_state[v,k])
 ```
 
-This equation sums over the v dimension for each position n, resulting in a vector of shape [N].
+This equation sums over the v dimension for each position k, resulting in a vector of shape [K].
 
 Then, compute the derivative of w_t with respect to w:
 ```
-∂w_t[n]/∂w[n] = -exp(w[n]) * exp(-exp(w[n])) = -exp(w[n]) * w_t[n]
+∂w_t[k]/∂w[k] = -exp(w[k]) * exp(-exp(w[k])) = -exp(w[k]) * w_t[k]
 ```
 
 Finally, apply the chain rule:
 ```
-∂L/∂w[n] = ∂L/∂w_t[n] * ∂w_t[n]/∂w[n]
-         = (∑_v dstate_curr[n,v] * prev_state[n,v]) * (-exp(w[n]) * w_t[n])
+∂L/∂w[k] = ∂L/∂w_t[k] * ∂w_t[k]/∂w[k]
+         = (∑_v dstate_curr[v,k] * prev_state[v,k]) * (-exp(w[k]) * w_t[k])
 ```
 
 In code, this is expressed as:
 ```python
-dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=1) * torch.exp(w[bi, hi, t]) * w_t
+dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=0) * torch.exp(w[bi, hi, t]) * w_t
 ```
 
 Or equivalently:
 ```python
-dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=1) * torch.exp(w[bi, hi, t]) * torch.exp(-torch.exp(w[bi, hi, t]))
+dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=0) * torch.exp(w[bi, hi, t]) * torch.exp(-torch.exp(w[bi, hi, t]))
 ```
 
 ### 2.4 Gradient w.r.t. k_t and v_t
 
-For the `k_t[:, None] * v_t[None, :]` component:
+For the `k_t[None, :] * v_t[:, None]` component:
 
 ```python
-dk[bi, hi, t] += (dstate_curr * v_t[None, :]).sum(dim=1)
-dv[bi, hi, t] += (dstate_curr * k_t[:, None]).sum(dim=0)
+dk[bi, hi, t] += torch.sum(dstate_curr * v_t[:, None], dim=0)
+dv[bi, hi, t] += torch.sum(dstate_curr * k_t[None, :], dim=1)
 ```
 
 ### 2.5 Gradient w.r.t. α_t and β_t (a_t and b_t in code)
 
-For the `sa * b_t[:, None]` component, where `sa = (a_t[:, None] * prev_state).sum(dim=0)`:
+For the `sa[:, None] * b_t[None, :]` component, where `sa = (state[bi, hi] * a_t[None, :]).sum(dim=1)`:
 
 ```python
-db[bi, hi, t] += (dstate_curr * sa[None, :]).sum(dim=1)
-dsa = (dstate_curr * b_t[:, None]).sum(dim=0)
-da[bi, hi, t] += (prev_state * dsa[None, :]).sum(dim=1)
+db[bi, hi, t] += torch.sum(dstate_curr * sa[:, None], dim=0)
+dsa = torch.sum(dstate_curr * b_t[None, :], dim=1)
+da[bi, hi, t] += torch.sum(prev_state * dsa[:, None], dim=0)
 ```
 
 ### 2.6 Gradient w.r.t. Previous State S_{t-1}
@@ -136,19 +134,10 @@ da[bi, hi, t] += (prev_state * dsa[None, :]).sum(dim=1)
 Finally, we compute the gradient of the previous state for backpropagation:
 
 ```python
-dstate_from_sa = a_t[:, None] * dsa[None, :]
-dstate_from_decay = dstate_curr * w_t[:, None]
+dstate_from_sa = a_t[None, :] * dsa[:, None]
+dstate_from_decay = dstate_curr * w_t[None, :]
 dstate[bi, hi] = dstate_from_sa + dstate_from_decay
 ```
-
-## 3. Vectorized Implementation Considerations
-
-In practical implementations, special attention must be paid to dimension handling to ensure correct broadcasting operations. In particular:
-
-1. w_t has shape [N] and needs to be expanded to [N,1] when multiplied with the state matrix [N,V]
-2. When computing gradients, the summation dimensions must be handled correctly - for w_t, summation should only be along the V dimension
-
-This gradient computation approach ensures that derivatives for each dimension are correctly calculated and accumulated while maintaining the efficiency of vectorized operations.
 
 ```python
 # -*- coding: utf-8 -*-
@@ -233,6 +222,7 @@ def naive_recurrent_rwkv7_2(
     scale: float = 1.0,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = True,
+    ckpt_times=16
 ):
     """
     Naive recurrent implementation of RWKV-7 (Goose) attention mechanism.
@@ -274,13 +264,12 @@ def naive_recurrent_rwkv7_2(
                 b_t = b[bi, hi, t]
                 w_t = torch.exp(-torch.exp(w[bi, hi, t]))
 
-                sa = (a_t[:, None] * state[bi, hi]).sum(dim=0)
+                # h: [V, K], a_t [K] -> [1, K]
+                # sa: [V]
+                sa = (state[bi, hi] * a_t[None, :]).sum(dim=1)
 
-                state[bi, hi] = (state[bi, hi] * w_t[:, None] +  # [N,V] * [N,1]
-                                 k_t[:, None] * v_t[None, :] +     # [N,1] * [1,V]
-                                 sa * b_t[:, None])                # [V] * [N,1]
-
-                y = (state[bi, hi] * q_t[:, None]).sum(dim=0)
+                state[bi, hi] = w_t[None, :] * state[bi, hi] + sa[:, None] * b_t[None, :] + k_t[None, :] * v_t[:, None]
+                y = (state[bi, hi] * q_t[None, :]).sum(dim=1)
 
                 o[bi, hi, t] = y
 
@@ -352,15 +341,15 @@ def naive_recurrent_rwkv7_2_bwd(
                 b_t = b[bi, hi, t]
                 w_t = torch.exp(-torch.exp(w[bi, hi, t]))
 
-                sa = (a_t[:, None] * state[bi, hi]).sum(dim=0)
+                sa = (state[bi, hi] * a_t[None, :]).sum(dim=1)
 
-                state[bi, hi] = (state[bi, hi] * w_t[:, None] +  # [N,V] * [N,1]
-                                 k_t[:, None] * v_t[None, :] +   # [N,1] * [1,V]
-                                 sa * b_t[:, None])              # [V] * [N,1]
-
+                state[bi, hi] = w_t[None, :] * state[bi, hi] + sa[:, None] * b_t[None, :] + k_t[None, :] * v_t[:, None]
+        # In practice, we don't compute state from begin,
+        # but from the last state ckpt
+        # state_pre = (state_current - (sa[:, None] * b_t[None, :] + k_t[None, :] * v_t[:, None]))/w_t[None, :]
         states.append(state.clone())
 
-    # Backward pass through time
+      # Backward pass through time
     for t in range(L-1, -1, -1):
         for bi in range(B):
             for hi in range(H):
@@ -373,55 +362,36 @@ def naive_recurrent_rwkv7_2_bwd(
                 w_exp = torch.exp(w_scalar)
                 w_t = torch.exp(-w_exp)
 
-                curr_state = states[t+1][bi, hi]  # State after update
-                prev_state = states[t][bi, hi]    # State before update
+                curr_state = states[t+1][bi, hi]  # State after update [V, K]
+                prev_state = states[t][bi, hi]    # State before update [V, K]
 
-                # Gradient w.r.t. output
-                # o[bi, hi, t] = (curr_state * q_t[:, None]).sum(dim=0)
-                dq[bi, hi, t] += torch.matmul(doutput[bi, hi, t], curr_state.t()) * scale
-                dstate_from_out = q_t[:, None] * doutput[bi, hi, t, None]
+                dq[bi, hi, t] += torch.matmul(doutput[bi, hi, t], curr_state) * scale
 
-                # Apply gradients from future steps (dstate) and from current output
+                dstate_from_out = q_t[None, :] * doutput[bi, hi, t][:, None]  # [V, K]
+
                 dstate_curr = dstate[bi, hi] + dstate_from_out
 
-                # Calculate intermediate values for gradient computation
-                sa = (a_t[:, None] * prev_state).sum(dim=0)  # [V]
+                sa = (prev_state * a_t[None, :]).sum(dim=1)  # [V]
 
-                # Gradient for each component in the state update
-
-                # 1. Gradient w.r.t w:
-                # w_t = torch.exp(-torch.exp(w[bi, hi, t]))
-
-                # sa = (a_t[:, None] * state[bi, hi]).sum(dim=0)
-
-                # state[bi, hi] = (state[bi, hi] * w_t[:, None] +  # [N,V] * [N,1]
-                #                  k_t[:, None] * v_t[None, :] +   # [N,1] * [1,V]
-                #                  sa * b_t[:, None])
-
-                # Accumulate gradient
-                dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=1) * \
+                # state[bi, hi] = w_t[None, :] * prev_state + ...
+                dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=0) * \
                     torch.exp(-torch.exp(w[bi, hi, t])) * torch.exp(w[bi, hi, t])
 
-                # 2. Gradient w.r.t k_t and v_t:
-                # k_t[:, None] * v_t[None, :]
-                dk[bi, hi, t] += (dstate_curr * v_t[None, :]).sum(dim=1)
-                dv[bi, hi, t] += (dstate_curr * k_t[:, None]).sum(dim=0)
+                # k_t[None, :] * v_t[:, None] -> [V, K]
+                dk[bi, hi, t] += torch.sum(dstate_curr * v_t[:, None], dim=0)
+                dv[bi, hi, t] += torch.sum(dstate_curr * k_t[None, :], dim=1)
 
-                # 3. Gradient w.r.t sa and b_t:
-                # sa * b_t[:, None]
-                db[bi, hi, t] += (dstate_curr * sa[None, :]).sum(dim=1)
-                dsa = (dstate_curr * b_t[:, None]).sum(dim=0)  # Gradient w.r.t sa
+                # sa[:, None] * b_t[None, :] -> [V, K]
+                db[bi, hi, t] += torch.sum(dstate_curr * sa[:, None], dim=0)
+                dsa = torch.sum(dstate_curr * b_t[None, :], dim=1)  # [V]
 
-                # 4. Gradient w.r.t a_t and prev_state through sa:
-                # sa = (a_t[:, None] * prev_state).sum(dim=0)
-                da[bi, hi, t] += (prev_state * dsa[None, :]).sum(dim=1)
-                dstate_from_sa = a_t[:, None] * dsa[None, :]
+                # sa = (prev_state * a_t[None, :]).sum(dim=1)
+                da[bi, hi, t] += torch.sum(prev_state * dsa[:, None], dim=0)
+                dstate_from_sa = a_t[None, :] * dsa[:, None]  # [V, K]
 
-                # 5. Gradient w.r.t prev_state directly:
-                # prev_state * w_t[:, None]
-                dstate_from_decay = dstate_curr * w_t[:, None]
+                # w_t[None, :] * prev_state
+                dstate_from_decay = dstate_curr * w_t[None, :]  # [V, K]
 
-                # Total gradient for previous state
                 dstate[bi, hi] = dstate_from_sa + dstate_from_decay
 
     return dq, dk, dv, dw, da, db, dstate
@@ -548,7 +518,7 @@ def test_autograd_function():
 
     # Check forward pass equivalence
     output_diff = torch.max(torch.abs(output1 - output2)).item()
-    state_diff = torch.max(torch.abs(state1 - state2.transpose(-1, -2))).item()
+    state_diff = torch.max(torch.abs(state1 - state2)).item()
 
     print(f"\nAutograd Function test (forward):")
     print(f"  Max output difference: {output_diff:.6e}")
@@ -558,14 +528,14 @@ def test_autograd_function():
     def compute_loss(output, state):
         return output.sum()  # + state.sum()
 
-    # # Compute loss and gradients for both paths
+    # # # Compute loss and gradients for both paths
     loss1 = compute_loss(output1, state1)
     loss1.backward()
 
     loss2 = compute_loss(output2, state2)
     loss2.backward()
 
-    # Compare gradients
+    # # Compare gradients
     grad_diffs = {
         'q': torch.max(torch.abs(q1.grad - q2.grad)).item(),
         'k': torch.max(torch.abs(k1.grad - k2.grad)).item(),
