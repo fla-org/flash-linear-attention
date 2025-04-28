@@ -42,7 +42,9 @@ This formulation allows more flexibility in how the state evolves while maintain
 
 The output at each timestep is computed as:
 
-$o_t = q_t^T \cdot S_t$ Where $q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology), typically scaled by a factor of $\frac{1}{\sqrt{d_k}}$. This formulation allows RWKV-7 to continuously adapt its internal representation based on context, transcending the limitations of traditional attention mechanisms.
+$o_t = S_t \cdot q_t$
+
+Where $q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology), typically scaled by a factor of $\frac{1}{\sqrt{d_k}}$. This formulation allows RWKV-7 to continuously adapt its internal representation based on context, transcending the limitations of traditional attention mechanisms.
 
 ## 1. Forward Pass Recurrence Equation
 
