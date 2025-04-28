@@ -337,7 +337,7 @@ def naive_recurrent_rwkv7_2_bwd(
     # Instead, we use checkpointing: we save states at regular intervals (e.g., every 16 tokens)
     # during the forward pass, then reconstruct intermediate states during the backward pass
     # by working backwards from the nearest checkpoint.
-    # 
+    #
     # For example, to get state[t-1] from state[t]:
     # state[t-1] = (state[t] - (sa * b_t + k_t * v_t)) / w_t
     #
