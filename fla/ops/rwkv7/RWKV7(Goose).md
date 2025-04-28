@@ -331,9 +331,18 @@ def naive_recurrent_rwkv7_2_bwd(
     state = torch.zeros(B, H, N, V, dtype=torch_dtype, device=q.device)
     states.append(state.clone())
 
-    # In practice, we don't compute state from begin,
-    # but from the last state ckpt
-    # state_pre = (state_current - (sa[:, None] * b_t[None, :] + k_t[None, :] * v_t[:, None]))/w_t[None, :]
+    # In practice, we don't recompute all states from the beginning.
+    # Instead, we use checkpointing: we save states at regular intervals (e.g., every 16 tokens)
+    # during the forward pass, then reconstruct intermediate states during the backward pass
+    # by working backwards from the nearest checkpoint.
+    # 
+    # For example, to get state[t-1] from state[t]:
+    # state[t-1] = (state[t] - (sa * b_t + k_t * v_t)) / w_t
+    #
+    # This approach balances memory usage and computational efficiency:
+    # - Reduces memory by not storing every state
+    # - Maintains numerical stability by limiting the number of backward steps from each checkpoint
+    # - Allows efficient gradient computation without recomputing the entire sequence
     for t in range(L):
         for bi in range(B):
             for hi in range(H):
