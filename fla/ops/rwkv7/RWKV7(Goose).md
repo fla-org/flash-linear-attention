@@ -164,6 +164,8 @@ def naive_recurrent_rwkv7(
 ):
     """
     Naive recurrent implementation of RWKV-7 (Goose) attention mechanism.
+    Modified from bo's code.
+    https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/rwkv_v7_demo.py#L170
 
     Args:
         q, k, v: Query, Key, and Value tensors
