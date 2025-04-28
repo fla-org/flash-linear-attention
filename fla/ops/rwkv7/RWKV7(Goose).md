@@ -224,7 +224,6 @@ def naive_recurrent_rwkv7_2(
     scale: float = 1.0,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = True,
-    ckpt_times=16
 ):
     """
     Naive recurrent implementation of RWKV-7 (Goose) attention mechanism.
