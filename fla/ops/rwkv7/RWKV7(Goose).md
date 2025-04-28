@@ -42,7 +42,7 @@ This formulation allows more flexibility in how the state evolves while maintain
 
 The output at each timestep is computed as:
 
-$$o_t = q_t^T \cdot S_t$$ Where $q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology), typically scaled by a factor of $\frac{1}{\sqrt{d_k}}$. This formulation allows RWKV-7 to continuously adapt its internal representation based on context, transcending the limitations of traditional attention mechanisms.
+$o_t = q_t^T \cdot S_t$ Where $q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology), typically scaled by a factor of $\frac{1}{\sqrt{d_k}}$. This formulation allows RWKV-7 to continuously adapt its internal representation based on context, transcending the limitations of traditional attention mechanisms.
 
 ## 1. Forward Pass Recurrence Equation
 
@@ -375,7 +375,7 @@ def naive_recurrent_rwkv7_2_bwd(
 
                 # state[bi, hi] = w_t[None, :] * prev_state + ...
                 dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=0) * \
-                    torch.exp(-torch.exp(w[bi, hi, t])) * torch.exp(w[bi, hi, t])
+                    w_t * w_exp
 
                 # k_t[None, :] * v_t[:, None] -> [V, K]
                 dk[bi, hi, t] += torch.sum(dstate_curr * v_t[:, None], dim=0)
