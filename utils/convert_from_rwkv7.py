@@ -119,7 +119,13 @@ def convert(
         if shape1 == [1, 1, config.hidden_size]:
             weight.squeeze_()
 
-        assert model_dict[fla_name].shape == weight.shape
+        if "attn.x_" in fla_name:
+            assert model_dict[fla_name].shape[2:] == weight.shape, \
+                f"Shape mismatch for {fla_name}: model_dict={model_dict[fla_name].shape}, weight={weight.shape}"
+        else:
+            assert model_dict[fla_name].shape == weight.shape, \
+                f"Shape mismatch for {fla_name}: model_dict={model_dict[fla_name].shape}, weight={weight.shape}"
+
         model_dict[fla_name].data.copy_(weight)
         model_names.remove(fla_name)
 
