@@ -45,15 +45,10 @@ jobs:
         name: Check latest version
         working-directory: triton
         run: |
-          export PACKAGE_DATE=$(python3 -m pip install --user --index-url https://pypi.fla-org.com/simple/ --dry-run -U triton-nightly --force-reinstall |& grep -oP '(?<=\.dev)[0-9]{12}(?=[^0-9]|$)')
-          export LATEST_DATE=$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%d%H%M' --format="%cd")
-          if [[ "$PACKAGE_DATE" -ge "$LATEST_DATE" ]]; then
-              echo "new_commit=false" >> "$GITHUB_OUTPUT"
-          else
-              echo "new_commit=true" >> "$GITHUB_OUTPUT"
-              export BUILD_DATE=$(date -u +"%Y%m%d%H%M")
-              echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
-          fi
+          conda activate fla
+          echo "new_commit=true" >> "$GITHUB_OUTPUT"
+          export BUILD_DATE=$(date -u +"%Y%m%d%H%M")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
 
       - name: Patch setup.py
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
