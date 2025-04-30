@@ -48,6 +48,7 @@ jobs:
           echo "new_commit=true" >> "$GITHUB_OUTPUT"
           export BUILD_DATE=$(date -u +"%Y%m%d%H%M")
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          python3 -m pip install wheel -U
           HEEL_PATH=$(whereis wheel | cut -d: -f2 | xargs)
           if [ -z "$WHEEL_PATH" ]; then
             echo "ERROR: wheel command not found. This will cause the build to fail later."
@@ -87,7 +88,7 @@ jobs:
         working-directory: triton
         run: |
           # Make sure cibuildwheel is updated to latest, this will enable latest python builds
-          python3 -m pip install cibuildwheel -U --user
+          python3 -m pip install cibuildwheel -U
           # Pass MAX_JOBS=16 because, at time of writing, the VM "only" has 64GB
           # of RAM and OOMs while building if we give it the default number of
           # workers (2 * NUM_CPUs).
