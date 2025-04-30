@@ -100,6 +100,9 @@ if __name__ == "__main__":
     # Skip fla/utils.py
     BLACKLIST = [
         'fla/utils.py',
+        'utils/convert_from_llama.py',
+        'utils/convert_from_rwkv6.py',
+        'utils/convert_from_rwkv7.py',
     ]
     changed_files = [
         file for file in changed_files
