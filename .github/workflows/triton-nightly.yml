@@ -42,10 +42,9 @@ jobs:
 
       # The LATEST_DATE here should be kept in sync with the one in Patch setup.py
       - id: check-version
-        name: Check latest version
+        name: Set up version
         working-directory: triton
         run: |
-          conda activate fla
           echo "new_commit=true" >> "$GITHUB_OUTPUT"
           export BUILD_DATE=$(date -u +"%Y%m%d%H%M")
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
