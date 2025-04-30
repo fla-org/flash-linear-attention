@@ -48,6 +48,13 @@ jobs:
           echo "new_commit=true" >> "$GITHUB_OUTPUT"
           export BUILD_DATE=$(date -u +"%Y%m%d%H%M")
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          HEEL_PATH=$(whereis wheel | cut -d: -f2 | xargs)
+          if [ -z "$WHEEL_PATH" ]; then
+            echo "ERROR: wheel command not found. This will cause the build to fail later."
+            exit 1
+          else
+            echo "wheel command found at: $WHEEL_PATH"
+          fi
 
       - name: Patch setup.py
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
