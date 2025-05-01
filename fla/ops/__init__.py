@@ -18,6 +18,7 @@ from .hgrn import fused_recurrent_hgrn
 from .lightning_attn import chunk_lightning_attn, fused_recurrent_lightning_attn
 from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from .nsa import parallel_nsa
+from .path_attn import parallel_path_attention
 from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
@@ -42,4 +43,5 @@ __all__ = [
     'chunk_rwkv6', 'fused_recurrent_rwkv6',
     'chunk_rwkv7', 'fused_recurrent_rwkv7',
     'chunk_simple_gla', 'fused_recurrent_simple_gla', 'parallel_simple_gla',
+    'parallel_path_attention',
 ]
