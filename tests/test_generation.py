@@ -27,7 +27,7 @@ from fla.models import (
     SambaConfig,
     TransformerConfig
 )
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device, is_nvidia_hopper
 
 
 @pytest.mark.parametrize("L", [2])
@@ -60,8 +60,8 @@ from fla.utils import assert_close, device, device_platform
 ])
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure"
+    is_nvidia_hopper is False,
+    reason="Only run on Hopper GPUs"
 )
 def test_generation(
     L: int,
