@@ -16,6 +16,7 @@ from fla.layers import (
     LinearAttention,
     MultiScaleRetention,
     NativeSparseAttention,
+    PaTHAttention,
     ReBasedLinearAttention,
     RWKV6Attention,
     RWKV7Attention
@@ -44,6 +45,8 @@ from fla.models import (
     LinearAttentionModel,
     NSAForCausalLM,
     NSAModel,
+    PaTHAttentionForCausalLM,
+    PaTHAttentionModel,
     RetNetForCausalLM,
     RetNetModel,
     RWKV6ForCausalLM,
@@ -105,6 +108,9 @@ __all__ = [
     'RWKV7Model',
     'TransformerForCausalLM',
     'TransformerModel',
+    'PaTHAttentionForCausalLM',
+    'PaTHAttentionModel',
+    'PaTHAttention'
 ]
 
 __version__ = '0.2.1'
