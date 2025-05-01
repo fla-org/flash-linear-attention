@@ -8,16 +8,16 @@ from einops import reduce
 
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from fla.ops.path_attn.varlen_kernels.cumprod_householder_bwd import chunk_cumprod_householder_bwd_fn
-from fla.ops.path_attn.varlen_kernels.cumprod_householder_fwd import chunk_cumprod_householder_fwd_fn
-from fla.ops.path_attn.varlen_kernels.intra_chunk_preprocess_bwd import intra_chunk_preprocess_bwd_fn
-from fla.ops.path_attn.varlen_kernels.intra_chunk_preprocess_bwd_prepare import intra_chunk_preprocess_bwd_prepare_fn
-from fla.ops.path_attn.varlen_kernels.intra_chunk_preprocess_fwd import intra_chunk_preprocess_fwd_fn
-from fla.ops.path_attn.varlen_kernels.parallel_path_bwd_inter_dkv import parallel_path_bwd_dkv_fn
-from fla.ops.path_attn.varlen_kernels.parallel_path_bwd_inter_dqh import parallel_path_bwd_dq_fn
-from fla.ops.path_attn.varlen_kernels.parallel_path_bwd_intra import parallel_path_bwd_intra_chunk_fn
-from fla.ops.path_attn.varlen_kernels.parallel_path_fwd import parallel_path_fwd_fn
-from fla.ops.path_attn.varlen_kernels.prepare_k_cache import prepare_k_cache_fn
+from fla.ops.path_attn.cumprod_householder_bwd import chunk_cumprod_householder_bwd_fn
+from fla.ops.path_attn.cumprod_householder_fwd import chunk_cumprod_householder_fwd_fn
+from fla.ops.path_attn.intra_chunk_preprocess_bwd import intra_chunk_preprocess_bwd_fn
+from fla.ops.path_attn.intra_chunk_preprocess_bwd_prepare import intra_chunk_preprocess_bwd_prepare_fn
+from fla.ops.path_attn.intra_chunk_preprocess_fwd import intra_chunk_preprocess_fwd_fn
+from fla.ops.path_attn.parallel_path_bwd_inter_dkv import parallel_path_bwd_dkv_fn
+from fla.ops.path_attn.parallel_path_bwd_inter_dqh import parallel_path_bwd_dq_fn
+from fla.ops.path_attn.parallel_path_bwd_intra import parallel_path_bwd_intra_chunk_fn
+from fla.ops.path_attn.parallel_path_fwd import parallel_path_fwd_fn
+from fla.ops.path_attn.prepare_k_cache import prepare_k_cache_fn
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
