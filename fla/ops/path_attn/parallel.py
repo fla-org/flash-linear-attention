@@ -158,6 +158,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
                 None, None, None)
 
 
+@torch.compiler.disable
 def parallel_path_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -169,6 +170,34 @@ def parallel_path_attention(
     cu_seqlens: Optional[torch.Tensor] = None,
     use_cache: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    r"""
+    Args:
+        q (torch.Tensor):
+            queries of shape `[B, T, HQ, K]`
+        k (torch.Tensor):
+            keys of shape `[B, T, H, K]`
+        v (torch.Tensor):
+            values of shape `[B, T, H, V]`
+        w (torch.Tensor):
+            weights of shape `[B, T, H, K]`
+        beta (torch.Tensor):
+            beta of shape `[B, T, H]`
+        g (torch.Tensor):
+            g of shape `[B, T, HQ]`
+        scale (float):
+            Scale factor for attention scores.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+        use_cache (bool):
+            Whether to transform and cache the key values for decoding. Default: `False`.
+    Returns:
+        o (torch.Tensor):
+            output of shape `[B, T, HQ, V]`
+        k_cache (torch.Tensor):
+            k_cache of shape `[B, T, H, K]`
+    """
     if scale is None:
         scale = k.shape[-1]**-0.5
     assert q.shape[-1] in [16, 32, 64], "only support head_dim in [16, 32, 64] for now. Stay tuned!"
