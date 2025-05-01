@@ -20,6 +20,7 @@ from fla.models import (
     Mamba2Config,
     MambaConfig,
     NSAConfig,
+    PaTHAttentionConfig,
     RetNetConfig,
     RWKV6Config,
     RWKV7Config,
@@ -54,7 +55,8 @@ from fla.utils import assert_close, device, device_platform
     RWKV6Config,
     RWKV7Config,
     SambaConfig,
-    TransformerConfig
+    TransformerConfig,
+    PaTHAttentionConfig
 ])
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
