@@ -42,7 +42,7 @@ def copy_kernel(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [4, 8, 16, 32]
     ],
-    key=['S', 'D', 'PADDING_SIDE', 'PACK']
+    key=['D', 'PADDING_SIDE', 'PACK']
 )
 @triton.jit
 def packunpack_sequence_kernel(
