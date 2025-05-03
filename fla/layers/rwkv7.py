@@ -113,6 +113,8 @@ class RWKV7Attention(nn.Module):
             _init_weights = True
         if _init_weights:
             self.apply(self._initialize_weights)
+        for name, module in self.named_modules():
+            module._in_rwkv_module = True
 
     @torch.compiler.disable
     def _initialize_weights(self, module: nn.Module):

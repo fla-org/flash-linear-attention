@@ -61,6 +61,8 @@ class RWKV7FeedForward(nn.Module):
 
         self.layer_idx = layer_idx
         self.num_hidden_layers = num_hidden_layers
+        for name, module in self.named_modules():
+            module._in_rwkv_module = True
 
     def _initialize_weights(self, module: nn.Module):
         if isinstance(module, RWKV7FeedForward):
@@ -217,7 +219,19 @@ class RWKV7PreTrainedModel(PreTrainedModel):
         rescale_prenorm_residual: bool = True,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
+        if isinstance(module, nn.Embedding):
+            # https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp/src/model.py#L396C12-L399C58
+            scale = -1e-4
+            nn.init.uniform_(module.weight, a=scale, b=-scale)
+        elif isinstance(module, nn.Linear) and hasattr(self, 'lm_head') and module is self.lm_head:
+            # https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/train_temp/src/model.py#L403
+            if self.config.vocab_size > self.config.hidden_size:
+                scale = 0.5 * math.sqrt(self.config.vocab_size / self.config.hidden_size)
+            else:
+                scale = 0.5
+            nn.init.orthogonal_(module.weight, gain=scale)
+        # Init Attention parameters
+        elif isinstance(module, (nn.Linear, nn.Conv1d)) and getattr(module, '_in_rwkv_module', False) is False:
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
@@ -225,9 +239,7 @@ class RWKV7PreTrainedModel(PreTrainedModel):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Parameter):
             nn.init.normal_(module, mean=0.0, std=self.config.initializer_range)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-        elif hasattr(module, 'reset_parameters'):
+        elif hasattr(module, 'reset_parameters') and getattr(module, '_in_rwkv_module', False) is False:
             module.reset_parameters()
 
         if rescale_prenorm_residual:
