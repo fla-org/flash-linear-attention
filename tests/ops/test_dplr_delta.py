@@ -207,6 +207,7 @@ def test_recurrent_fwd(
 @pytest.mark.parametrize('D', test_d_list)
 @pytest.mark.parametrize('scale', [0.25])
 @pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize('save_ckpt', [False, True])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
     reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
@@ -218,6 +219,7 @@ def test_fused_recurrent_fwd(
     D: int,
     scale: float,
     dtype: torch.dtype,
+    save_ckpt: bool,
 ):
     torch.manual_seed(42)
     q = torch.randn(B, T, H, D, dtype=dtype)
@@ -254,6 +256,8 @@ def test_fused_recurrent_fwd(
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
+        training=True if save_ckpt else False,
+        ckpt_steps=16
     )
     assert_close(' o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)

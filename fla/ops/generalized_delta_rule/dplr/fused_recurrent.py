@@ -39,9 +39,11 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     o,
     h0,
     ht,
+    hckpt,
     cu_seqlens,
     scale,
     T,
+    NUM_CKPT,
     B: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -52,6 +54,8 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    SAVE_CKPT: tl.constexpr,
+    SAVE_CKPT_T: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -81,7 +85,7 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
         p_h0 = h0 + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
-    for _ in range(0, T):
+    for t in range(0, T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32) * scale
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_a = tl.load(p_a, mask=mask_k, other=0).to(tl.float32)
@@ -102,6 +106,12 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
         p_v += (-1 if REVERSE else 1) * H*V
         p_o += (-1 if REVERSE else 1) * H*V
 
+        if SAVE_CKPT and ((t + 1) % SAVE_CKPT_T == 0 and t != T - 1):
+            ckpt_idx = (t + 1) // SAVE_CKPT_T - 1
+            p_hckpt = hckpt + i_n * H * NUM_CKPT * K*V + i_h * NUM_CKPT * \
+                K*V + ckpt_idx * K*V + o_k[None, :] * V + o_v[:, None]
+            tl.store(p_hckpt, b_h.to(p_hckpt.dtype.element_ty), mask=mask_h)
+
     if STORE_FINAL_STATE:
         p_ht = ht + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
@@ -119,16 +129,29 @@ def fused_recurrent_dplr_delta_rule_fwd(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    SAVE_CKPT: bool = False,
+    SAVE_CKPT_T: int = 16,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
 
     h0 = initial_state
-    if output_final_state:
+    if output_final_state or SAVE_CKPT:
         ht = q.new_empty(N, H, K, V, dtype=torch.float32)
     else:
         ht = None
+
+    if SAVE_CKPT:
+        # calculate the number of checkpoints
+        # Save checkpoints at timesteps: SAVE_CKPT_T, 2*SAVE_CKPT_T, ...,
+        # and do not save the last timestep
+        num_ckpt = max(triton.cdiv(T, SAVE_CKPT_T) - 1, 1)
+        hckpt = q.new_empty(N, H, num_ckpt, K, V, dtype=torch.float32)
+    else:
+        num_ckpt = 0
+        hckpt = None
+
     o = torch.empty_like(v)
 
     def grid(meta): return (triton.cdiv(V, meta['BV']), N * H)
@@ -142,17 +165,21 @@ def fused_recurrent_dplr_delta_rule_fwd(
         o,
         h0,
         ht,
+        hckpt,
         cu_seqlens,
         scale,
         T=T,
+        NUM_CKPT=num_ckpt,
         B=B,
         H=H,
         K=K,
         V=V,
         BK=BK,
         REVERSE=reverse,
+        SAVE_CKPT=SAVE_CKPT,
+        SAVE_CKPT_T=SAVE_CKPT_T,
     )
-    return o, ht
+    return o, ht, hckpt
 
 
 class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
@@ -173,8 +200,10 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool = False,
         reverse: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
+        training: bool = False,
+        ckpt_steps: int = 16,
     ):
-        o, ht = fused_recurrent_dplr_delta_rule_fwd(
+        o, ht, hckpt = fused_recurrent_dplr_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -186,7 +215,14 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             reverse=reverse,
             cu_seqlens=cu_seqlens,
+            SAVE_CKPT=training,
+            SAVE_CKPT_T=ckpt_steps,
         )
+        if training:
+            ctx.save_for_backward(q, k, v, a, b, gk, ht, hckpt)
+            ctx.scale = scale
+            ctx.reverse = reverse
+            ctx.cu_seqlens = cu_seqlens
         return o, ht
 
     @staticmethod
@@ -213,6 +249,8 @@ def fused_recurrent_dplr_delta_rule(
     reverse: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False,
+    training: bool = False,
+    ckpt_steps: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
@@ -247,6 +285,11 @@ def fused_recurrent_dplr_delta_rule(
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
             Default: `False`.
+        training (Optional[bool]):
+            Whether to use the training mode. Default: `False`.
+        ckpt_steps (Optional[int]):
+            Number of steps to checkpoint the intermediate states.
+            This is only used when `training=True`. Default: 16.
     """
     if head_first:
         raise DeprecationWarning(
@@ -288,6 +331,8 @@ def fused_recurrent_dplr_delta_rule(
         output_final_state,
         reverse,
         cu_seqlens,
+        training,
+        ckpt_steps,
     )
     if head_first:
         o = rearrange(o, 'b t h ... -> b h t ...')
