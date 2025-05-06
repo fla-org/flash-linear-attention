@@ -22,11 +22,11 @@ from fla.utils import get_multiprocessor_count, input_guard
 @triton.autotune(
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
-        for BD in [128, 256, 512]
-        for num_warps in [2, 4, 8, 16, 32]
-        for num_stages in [1, 2, 3, 4]
+        for BD in [128, 256]
+        for num_warps in [4, 8, 16, 32]
+        for num_stages in [2, 3, 4, 5]
     ],
-    key=['B', 'D', 'W'],
+    key=['B', 'D', 'W', 'NB'],
 )
 @triton.jit
 def canon_fwd_kernel(
@@ -43,13 +43,14 @@ def canon_fwd_kernel(
     W: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
+    NB: tl.constexpr,
     ACTIVATION: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_b, i_t = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -98,12 +99,13 @@ def canon_fwd(
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
     B, T, D, W = *x.shape, weight.shape[1]
-    BT = min(128, triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index))))
+    BT = min(64, triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index))))
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+    NB = triton.cdiv(T, 1024)
 
     y = torch.empty_like(x)
-    def grid(meta): return (triton.cdiv(D, meta['BD']), B, NT)
+    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     canon_fwd_kernel[grid](
         x=x,
         y=y,
@@ -117,6 +119,7 @@ def canon_fwd(
         D=D,
         W=W,
         BT=BT,
+        NB=NB,
         ACTIVATION=activation,
     )
     return y.view(shape)
