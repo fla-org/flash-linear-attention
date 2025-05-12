@@ -116,6 +116,7 @@ class RWKV7Attention(nn.Module):
         for name, module in self.named_modules():
             module._in_rwkv_module = True
 
+    @torch.no_grad()
     @torch.compiler.disable
     def _initialize_weights(self, module: nn.Module):
         if getattr(module, "_is_hf_initialized", False):
@@ -127,41 +128,47 @@ class RWKV7Attention(nn.Module):
             ratio_1_to_almost0 = 1.0 - (self.layer_idx / self.num_hidden_layers)  # 1 to ~0
 
             # Create position-based initialization tensor
-            with torch.no_grad():
-                ddd = torch.ones(1, 1, self.hidden_size)
-                for i in range(self.hidden_size):
-                    ddd[0, 0, i] = i / self.hidden_size
+            ddd = torch.ones(1, 1, self.hidden_size, device=self.x_r.device)
+            www = torch.zeros(self.hidden_size, device=self.x_r.device)
+            zigzag = torch.zeros(self.hidden_size, device=self.x_r.device)
+            linear = torch.zeros(self.hidden_size, device=self.x_r.device)
+            for n in range(self.hidden_size):
+                linear[n] = n / (self.hidden_size-1) - 0.5
+                zigzag[n] = ((n % self.head_dim) - ((self.head_dim-1) / 2)) / ((self.head_dim-1) / 2)
+                zigzag[n] = zigzag[n] * abs(zigzag[n])
+                www[n] = -6 + 6 * (n / (self.hidden_size - 1)) ** (1 + 1 * ratio_0_to_1 ** 0.3)
+                ddd[0, 0, n] = n / self.hidden_size
 
-                # Initialize x_* parameters directly
-                self.x_r.data = (1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)).to(self.x_r.dtype)
-                self.x_w.data = (1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)).to(self.x_w.dtype)
-                self.x_k.data = (1.0 - (torch.pow(ddd, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1)).to(self.x_k.dtype)
-                self.x_v.data = (1.0 - (torch.pow(ddd, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1)).to(self.x_v.dtype)
-                self.x_a.data = (1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)).to(self.x_a.dtype)
-                self.x_g.data = (1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)).to(self.x_g.dtype)
-                # Set specific bias values for LoRA modules
-                # w0 initialization - complex decay speed
-                decay_speed = torch.ones(self.hidden_size)
-                for n in range(self.hidden_size):
-                    decay_speed[n] = -7 + 5 * (n / (self.hidden_size - 1)) ** (
-                        0.85 + 1.0 * ratio_0_to_1**0.5
-                    )
+            # Initialize x_* parameters directly
+            self.x_r.data = (1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)).to(self.x_r.dtype)
+            self.x_w.data = (1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)).to(self.x_w.dtype)
+            self.x_k.data = (1.0 - torch.pow(ddd, 0.7 * ratio_1_to_almost0)).to(self.x_k.dtype)
+            self.x_v.data = (1.0 - torch.pow(ddd, 0.7 * ratio_1_to_almost0)).to(self.x_v.dtype)
+            self.x_a.data = (1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0)).to(self.x_a.dtype)
+            self.x_g.data = (1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0)).to(self.x_g.dtype)
+
             # Initialize k_k, k_a, r_k
-            nn.init.constant_(self.k_k, 0.85)
-            nn.init.constant_(self.k_a, 1.0)
-            nn.init.zeros_(self.r_k)
-
-            self.w_lora.set_bias_value(decay_speed + 0.5)
+            nn.init.constant_(self.k_a, 1.02)
+            nn.init.constant_(self.r_k, -0.04)
+            self.k_k.data.copy_((torch.zeros(self.hidden_size, device=self.k_k.device) +
+                                0.71 - linear*0.1).to(self.k_k.dtype))
+            # Set specific bias values for LoRA modules
+            # 0.5 comes from F.softplus
+            self.w_lora.set_bias_value(www + 0.5 + zigzag*2.5)
+            self.a_lora.set_bias_value(-0.19 + zigzag*0.3 + linear*0.4)
 
             # v0 initialization - ones (for non-first layers)
             if self.layer_idx != 0:
                 self.v_lora._initialize_weights(self.v_lora)
-                self.v_lora.set_bias_value(1.0)
+                self.v_lora.set_bias_value(0.73 - linear*0.4)
 
             self.r_proj.weight.data.uniform_(-0.5/(self.hidden_size**0.5), 0.5/(self.hidden_size**0.5))
             self.k_proj.weight.data.uniform_(-0.05/(self.hidden_size**0.5), 0.05/(self.hidden_size**0.5))
             self.v_proj.weight.data.uniform_(-0.5/(self.hidden_size**0.5), 0.5/(self.hidden_size**0.5))
             self.o_proj.weight.data.zero_()
+
+            # Clean up temporary tensors to free memory
+            del ddd, www, zigzag, linear
 
         module._is_hf_initialized = True
 

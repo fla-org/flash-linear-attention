@@ -213,6 +213,7 @@ class RWKV7PreTrainedModel(PreTrainedModel):
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
 
+    @torch.no_grad()
     def _init_weights(
         self,
         module: nn.Module,
@@ -229,7 +230,8 @@ class RWKV7PreTrainedModel(PreTrainedModel):
                 scale = 0.5 * math.sqrt(self.config.vocab_size / self.config.hidden_size)
             else:
                 scale = 0.5
-            nn.init.orthogonal_(module.weight, gain=scale)
+            original_dtype = module.weight.dtype
+            module.weight.data = nn.init.orthogonal_(module.weight.data.to(torch.float32), gain=scale).to(original_dtype)
         # Init Attention parameters
         elif isinstance(module, (nn.Linear, nn.Conv1d)) and getattr(module, '_in_rwkv_module', False) is False:
             # Slightly different from the TF version which uses truncated_normal for initialization
