@@ -32,7 +32,9 @@ The gradient of the L2 loss function with respect to the state matrix $S$ is: $\
 
 Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate:
 
-$$S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} \bigg |_{S=S_{t-1}}$$
+$$
+S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} \bigg |_{S=S_{t-1}}
+$$
 
 Incorporating weight decay factors $d_t = \exp(-\exp(w_t))$ as a form of time-dependent regularization and learning rate $\eta_t$, the gradient descent update becomes:
 
@@ -63,7 +65,10 @@ In the full RWKV-7 implementation, this update rule is generalized through sever
 4. The term $\eta_t \cdot v_t k_t^{\top}$ is directly implemented as the outer product between the value vector $v_t$ and key vector $k_t$, resulting in a rank-1 update matrix
 
 This leads to the final recurrence equation[^2]:
-$$ S_t = S_{t-1} D_t + S_{t-1} \alpha_t \beta_t^{\top} + v_t k_t^{\top} \in \mathbb{R}^{d_v \times d_k} $$
+
+$$
+S_t = S_{t-1} D_t + S_{t-1} \alpha_t \beta_t^{\top} + v_t k_t^{\top} \in \mathbb{R}^{d_v \times d_k}
+$$
 
 The output at each timestep is computed as:
 $o_t = S_t r_t$
