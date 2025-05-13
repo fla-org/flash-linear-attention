@@ -1,33 +1,25 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-""" Implementing the Deepseek Multi Latent Attention (MLA) module
+""" Implementing the Deepseek Multi Latent Attention (MLA) module. Reference:
 
-Reference: https://github.com/huggingface/transformers/blob/main/src/transformers/models/deepseek_v3/modeling_deepseek_v3.py#L328
+https://github.com/huggingface/transformers/blob/main/src/transformers/models/deepseek_v3/modeling_deepseek_v3.py#L328
 """
 
 from __future__ import annotations
 
 import math
-import warnings
-from functools import partial
-from typing import TYPE_CHECKING, Optional, Tuple
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from functools import partial
+from typing import TYPE_CHECKING, Optional, Tuple
 from transformers.utils import logging
+from flash_attn import flash_attn_varlen_func
 
 from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.utils.index import prepare_lens_from_mask
-
-try:
-    from flash_attn import flash_attn_varlen_func
-except ImportError:
-    warnings.warn(
-        "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
-        category=ImportWarning
-    )
 
 
 if TYPE_CHECKING:
@@ -139,9 +131,9 @@ class MultiheadLatentAttention(nn.Module):
             )
 
         # prepare q k v projections
-        batch_size, seq_length = hidden_states.shape[:-1]
-        query_shape = (batch_size, seq_length, -1, self.qk_head_dim)
-        key_shape = (batch_size, seq_length, -1, self.qk_nope_head_dim + self.v_head_dim)
+        batch_size, q_len = hidden_states.shape[:-1]
+        query_shape = (batch_size, q_len, -1, self.qk_head_dim)
+        key_shape = (batch_size, q_len, -1, self.qk_nope_head_dim + self.v_head_dim)
 
         if self.q_lora_rank is not None:
             q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states))).view(query_shape).transpose(1, 2)
@@ -155,10 +147,10 @@ class MultiheadLatentAttention(nn.Module):
         k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
         k_pass, v = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        k_rot = k_rot.view(batch_size, 1, seq_length, self.qk_rope_head_dim)
+        k_rot = k_rot.view(batch_size, 1, q_len, self.qk_rope_head_dim)
 
         # apply rotary position embedding
-        seqlen_offset, max_seqlen = 0, seq_length
+        seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q_pass.shape[2] + seqlen_offset
@@ -185,7 +177,7 @@ class MultiheadLatentAttention(nn.Module):
             compressed_kv_cached, k_rot_cached = past_key_values.update(
                 attn_state=(compressed_kv, k_rot),
                 layer_idx=self.layer_idx,
-                offset=seq_length,
+                offset=q_len,
             )['attn_state']
             if cache_has_content:
                 compressed_kv, k_rot = compressed_kv_cached, k_rot_cached
@@ -208,11 +200,12 @@ class MultiheadLatentAttention(nn.Module):
             max_seqlen_q=max_seqlen,
             max_seqlen_k=max_seqlen,
             causal=True,
+            softmax_scale=self.scaling,
         )
 
         if self.qk_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, :, : self.v_head_dim]
 
-        attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
+        attn_output = attn_output.reshape(batch_size, q_len, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, past_key_values
