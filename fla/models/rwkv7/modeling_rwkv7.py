@@ -543,7 +543,7 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
         loss, logits = None, None
         has_labels = (labels is not None) or (shift_labels is not None)

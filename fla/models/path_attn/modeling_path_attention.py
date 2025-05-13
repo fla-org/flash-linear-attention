@@ -371,7 +371,7 @@ class PaTHAttentionForCausalLM(PaTHAttentionPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
         logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None

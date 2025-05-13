@@ -383,7 +383,7 @@ class GatedDeltaProductForCausalLM(GatedDeltaProductPreTrainedModel, GenerationM
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:
