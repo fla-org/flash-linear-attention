@@ -12,38 +12,51 @@ RWKV-7 takes a different approach - rather than directly storing {k,v} pairs, it
 
 [^1]: For a more detailed explanation of this approach, see the original article by the RWKV author: https://mp.weixin.qq.com/s/kC_Z3vuQ5B4PiRwZVeIvHQ
 
-Specifically, RWKV-7 maintains an internal model $v≈kS^⊤$. It aims to fit a simple objective: for given vector sequences {kt} and {vt}, use state S to transform ki into vi, making the output v as close as possible to the target v.
+Specifically, RWKV-7 maintains an internal model $v≈k^T S$. It aims to fit a simple objective: for given vector sequences {kt} and {vt}, use state S to transform ki into vi, making the output v as close as possible to the target v.
 
-To achieve this, during inference with an L2 loss function $L=\frac{1}{2}‖v−kS^⊤‖²$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v≈kS^⊤$.
+For clarity on dimensions:
+* S ∈ $ℝ^(d_v×d_k)$ is the state matrix
+* k ∈ $ℝ^(d_k)$ is the key vector
+* v ∈ $ℝ^(d_v)$ is the value vector
+* q ∈ $ℝ^(d_k)$ is the query vector (named r in RWKV terminology)
+
+To achieve this, during inference with an L2 loss function $L=\frac{1}{2}‖v−k^T S‖²$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v≈k^T S$.
 
 The gradient of the L2 loss function with respect to the state matrix S is:
-**$∂L/∂S = S k^T k - v k^T$**
+**$∂L/∂S = S k k^T - v k^T$**
 
-Where $S \in \mathbb{R}^{d_v \times d_k}$ is the state matrix, $k \in \mathbb{R}^{d_k}$ is the key vector, and $v \in \mathbb{R}^{d_v}$ is the value vector. Note that $k^T k$ is a scalar (inner product), while $v k^T$ is a $d_v \times d_k$ matrix (outer product).
+Where $S \in \mathbb{R}^{d_v \times d_k}$ is the state matrix, $k \in \mathbb{R}^{d_k}$ is the key vector, and $v \in \mathbb{R}^{d_v}$ is the value vector. Note that $k_t k_t^T$ is outer product, and $v k^T$ is a $d_v \times d_k$ matrix (outer product).
 
-Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate: $S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S}|_{S=S_{t-1}}$.
+Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate: 
+
+$$S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S}|_{S=S_{t-1}}$$
 
 Incorporating weight decay factors $d_t = \exp(-\exp(w_t))$ as a form of time-dependent regularization and learning rate $\eta_t$, the gradient descent update becomes:
 
-$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot (S_{t-1}k_t^Tk_t - v_t k_t^T)$$
+$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot (S_{t-1}k_tk_t^T - v_t k_t^T)$$
 
 This can be expanded and rearranged as follows:
 
-$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot S_{t-1}k_t^Tk_t + \eta_t \cdot v_t k_t^T$$
+$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot S_{t-1}k_tk_t^T + \eta_t \cdot v_t k_t^T$$
 
 For notational simplicity, we denote $\text{Diag}(d_t)$ as $D_t$ (the diagonal decay matrix):
 
-$$S_t = S_{t-1} \cdot D_t - \eta_t \cdot S_{t-1}k_t^Tk_t + \eta_t \cdot v_t k_t^T$$
+$$S_t = S_{t-1} \cdot D_t - \eta_t \cdot S_{t-1}k_tk_t^T + \eta_t \cdot v_t k_t^T$$
 
 In the full RWKV-7 implementation, this update rule is generalized through several key transformations:
 
 1. The diagonal decay term $D_t$ remains as a component-wise multiplication with $S_{t-1}$
 
-2. The term $-\eta_t \cdot S_{t-1}k_t^Tk_t$ is generalized to $S_{t-1} \cdot \alpha_t \beta_t^T$, where:
+
+2. The term $-\eta_t \cdot S_{t-1}k_tk_t^T$ is generalized to $S_{t-1} \cdot \alpha_t \beta_t^T$, where:
    - $\alpha_t$ can be initialized as $-k_t$
    - $\beta_t$ can be initialized as $k_t \cdot \eta_t$
 
-3. The term $\eta_t \cdot v_t k_t^T$ is directly implemented as the outer product between the value vector $v_t$ and key vector $k_t$, resulting in a rank-1 update matrix
+3. The term $-\eta_t \cdot S_{t-1}k_tk_t^T$ can be factorized and computed efficiently:
+   - First compute $u_t = S_{t-1}k_t$ (matrix-vector product)
+   - Then compute $-\eta_t \cdot u_tk_t^T$ (scaled outer product)
+
+4. The term $\eta_t \cdot v_t k_t^T$ is directly implemented as the outer product between the value vector $v_t$ and key vector $k_t$, resulting in a rank-1 update matrix
 
 This leads to the final recurrence equation[^2]:
 $$S_t = S_{t-1} \cdot D_t + S_{t-1} \cdot \alpha_t \beta_t^T + v_t k_t^T \in \mathbb{R}^{d_v \times d_k}$$
