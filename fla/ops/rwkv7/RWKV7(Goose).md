@@ -14,37 +14,50 @@ RWKV-7 takes a different approach - rather than directly storing {k,v} pairs, it
 
 Specifically, RWKV-7 maintains an internal model $v≈kS^⊤$. It aims to fit a simple objective: for given vector sequences {kt} and {vt}, use state S to transform ki into vi, making the output v as close as possible to the target v.
 
-To achieve this, during inference with an L2 loss function $L=½‖v−kS^⊤‖²$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v≈kS^⊤$.
+To achieve this, during inference with an L2 loss function $L=\frac{1}{2}‖v−kS^⊤‖²$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v≈kS^⊤$.
 
-The gradient is: **$∂L/∂S = S_k^T k - v^T k$**
+The gradient of the L2 loss function with respect to the state matrix S is:
+**$∂L/∂S = S k^T k - v k^T$**
 
-Therefore, the gradient descent update (with weight decay factors $d_t = \exp(-\exp(w_t))$ and learning rate parameters) is: $$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot (k_t^T k_t S_{t-1} - k_t^T v_t)$$ This simplifies to:
+Where $S \in \mathbb{R}^{d_v \times d_k}$ is the state matrix, $k \in \mathbb{R}^{d_k}$ is the key vector, and $v \in \mathbb{R}^{d_v}$ is the value vector. Note that $k^T k$ is a scalar (inner product), while $v k^T$ is a $d_v \times d_k$ matrix (outer product).
 
-$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot k_t^T k_t \cdot S_{t-1} + \eta_t \cdot k_t^T v_t$$
+Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate: $S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S}|_{S=S_{t-1}}$.
 
-$$S_t = S_{t-1} \cdot (\text{Diag}(d_t) - \eta_t \cdot k_t^T k_t) + \eta_t \cdot k_t^T v_t$$
+Incorporating weight decay factors $d_t = \exp(-\exp(w_t))$ as a form of time-dependent regularization and learning rate $\eta_t$, the gradient descent update becomes:
 
-In the full RWKV-7 implementation, this gradient descent update is generalized by replacing the terms as follows:
+$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot (S_{t-1}k_t^Tk_t - v_t k_t^T)$$
 
-- $\text{Diag}(d_t)$ becomes $D_t$ (the diagonal decay matrix)
-- The term $-\eta_t \cdot k_t^T k_t$ is generalized to $\alpha_t \beta_t^T$, where:
-  - $\alpha_t$ can be initialized as $-\eta_t \cdot k_t$
-  - $\beta_t$ can be initialized as $k_t$
-- The term $\eta_t \cdot k_t^T v_t$ becomes $v_t k_t^T$ with appropriate scaling of $k_t$
+This can be expanded and rearranged as follows:
+
+$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot S_{t-1}k_t^Tk_t + \eta_t \cdot v_t k_t^T$$
+
+For notational simplicity, we denote $\text{Diag}(d_t)$ as $D_t$ (the diagonal decay matrix):
+
+$$S_t = S_{t-1} \cdot D_t - \eta_t \cdot S_{t-1}k_t^Tk_t + \eta_t \cdot v_t k_t^T$$
+
+In the full RWKV-7 implementation, this update rule is generalized through several key transformations:
+
+1. The diagonal decay term $D_t$ remains as a component-wise multiplication with $S_{t-1}$
+
+2. The term $-\eta_t \cdot S_{t-1}k_t^Tk_t$ is generalized to $S_{t-1} \cdot \alpha_t \beta_t^T$, where:
+   - $\alpha_t$ can be initialized as $-k_t$
+   - $\beta_t$ can be initialized as $k_t \cdot \eta_t$
+
+3. The term $\eta_t \cdot v_t k_t^T$ is directly implemented as the outer product between the value vector $v_t$ and key vector $k_t$, resulting in a rank-1 update matrix
 
 This leads to the final recurrence equation[^2]:
-
-[^2]: For a more detailed explanation, see the triton codes. Note: In the optimized Triton implementation, `w` is already the log of the decay factor, so there's only one exponential operation needed.  https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/rwkv7/fused_recurrent.py#L94
-
 $$S_t = S_{t-1} \cdot D_t + S_{t-1} \cdot \alpha_t \beta_t^T + v_t k_t^T \in \mathbb{R}^{d_v \times d_k}$$
 
-This formulation allows more flexibility in how the state evolves while maintaining the core gradient descent learning dynamics.
-
 The output at each timestep is computed as:
-
 $o_t = S_t \cdot q_t$
 
 Where $q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology), typically scaled by a factor of $\frac{1}{\sqrt{d_k}}$. This formulation allows RWKV-7 to continuously adapt its internal representation based on context, transcending the limitations of traditional attention mechanisms.
+
+
+[^2]: For a more detailed explanation, see the triton codes. Note: In the optimized Triton implementation, `w` is already the log of the decay factor, so there's only one exponential operation needed.  https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/rwkv7/fused_recurrent.py#L94
+
+
+This formulation allows more flexibility in how the state evolves while maintaining the core gradient descent learning dynamics.
 
 ## 1. Forward Pass Recurrence Equation
 
