@@ -2,7 +2,7 @@
 
 Zhiyuan Li
 
->Special thanks to [Sonta](https://github.com/sustcsonglin) and [Beortust](), Sonta pointed out the correct notation for the outer product in the formulas, and Beortust corrected a considerable number of typos and also helped to improve the formatting.
+>Special thanks to [Sonta](https://github.com/sustcsonglin) and [Beortust](https://github.com/Beortext), Sonta pointed out the correct notation for the outer product in the formulas, and Beortust corrected a considerable number of typos and also helped to improve the formatting.
 
 ## Introduction to RWKV-7 Architecture
 
