@@ -32,7 +32,9 @@ The gradient of the L2 loss function with respect to the state matrix $S$ is: $\
 
 Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate:
 
-<math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><msub><mi>S</mi><mi>t</mi></msub><mo>=</mo><msub><mi>S</mi><mrow><mi>t</mi><mo>−</mo><mn>1</mn></mrow></msub><mo>−</mo><msub><mi>η</mi><mi>t</mi></msub><mo>⋅</mo><mfrac><mrow><mi mathvariant="normal">∂</mi><mi>L</mi></mrow><mrow><mi mathvariant="normal">∂</mi><mi>S</mi></mrow></mfrac><msub><mrow data-mjx-texclass="ORD"><mo minsize="2.047em" maxsize="2.047em">|</mo></mrow><mrow><mi>S</mi><mo>=</mo><msub><mi>S</mi><mrow><mi>t</mi><mo>−</mo><mn>1</mn></mrow></msub></mrow></msub></math>
+$$
+S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} , \text{ where } S=S_{t-1}
+$$
 
 Incorporating weight decay factors $d_t = \exp(-\exp(w_t))$ as a form of time-dependent regularization and learning rate $\eta_t$, the gradient descent update becomes:
 
