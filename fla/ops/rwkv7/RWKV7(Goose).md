@@ -18,13 +18,13 @@ Specifically, RWKV-7 maintains an internal model $v \approx k^{\top} S$. It aims
 
 For clarity on dimensions:
 
-$ S_t \in \mathbb{R}^{d_v \times d_k}$ is the state matrix
+$S_t \in \mathbb{R}^{d_v \times d_k}$ is the state matrix
 
-$ k_t \in \mathbb{R}^{d_k}$ is the key vector
+$k_t \in \mathbb{R}^{d_k}$ is the key vector
 
-$ v_t \in \mathbb{R}^{d_v}$ is the value vector
+$v_t \in \mathbb{R}^{d_v}$ is the value vector
 
-$ q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology)
+$q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology)
 
 To achieve this, during inference with an L2 loss function $L=\frac{1}{2}\left \| v−k^{\top} S \right \|^2$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v \approx k^{\top} S$.
 
@@ -32,15 +32,15 @@ The gradient of the L2 loss function with respect to the state matrix $S$ is: $\
 
 Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate:
 
-$$ S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} \bigg |_{S=S_{t-1}} $$
+$$S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} \bigg |_{S=S_{t-1}}$$
 
 Incorporating weight decay factors $d_t = \exp(-\exp(w_t))$ as a form of time-dependent regularization and learning rate $\eta_t$, the gradient descent update becomes:
 
-$$ S_t = S_{t-1} \text{Diag}(d_t) - \eta_t \cdot (S_{t-1} k_t k_t^{\top} - v_t k_t^{\top}) $$
+$$S_t = S_{t-1} \text{Diag}(d_t) - \eta_t \cdot (S_{t-1} k_t k_t^{\top} - v_t k_t^{\top})$$
 
 This can be expanded and rearranged as follows:
 
-$$ S_t = S_{t-1} \text{Diag}(d_t) - \eta_t \cdot S_{t-1} k_t k_t^{\top} + \eta_t \cdot v_t k_t^{\top} $$
+$$S_t = S_{t-1} \text{Diag}(d_t) - \eta_t \cdot S_{t-1} k_t k_t^{\top} + \eta_t \cdot v_t k_t^{\top}$$
 
 For notational simplicity, we denote $\text{Diag}(d_t)$ as $D_t$ (the diagonal decay matrix):
 
