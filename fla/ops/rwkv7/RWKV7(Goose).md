@@ -32,9 +32,7 @@ The gradient of the L2 loss function with respect to the state matrix $S$ is: $\
 
 Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate:
 
-$$
-S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} \bigg |_{S=S_{t-1}}
-$$
+$$ S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} |_{S=S_{t-1}} $$
 
 Incorporating weight decay factors $d_t = \exp(-\exp(w_t))$ as a form of time-dependent regularization and learning rate $\eta_t$, the gradient descent update becomes:
 
@@ -181,7 +179,6 @@ dstate[bi, hi] = dstate_from_sa + dstate_from_decay
 
 ```python
 # -*- coding: utf-8 -*-
-
 from typing import Optional, Tuple
 
 import torch
@@ -352,12 +349,12 @@ def naive_recurrent_rwkv7_2_bwd(
     B, H, L, N, V = q.shape[0], q.shape[1], q.shape[2], q.shape[3], v.shape[-1]
 
     # Initialize gradients
-    dq = torch.zeros_like(q)
-    dk = torch.zeros_like(k)
-    dv = torch.zeros_like(v)
-    dw = torch.zeros_like(w)
-    da = torch.zeros_like(a)
-    db = torch.zeros_like(b)
+    dq = torch.empty_like(q)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    dw = torch.empty_like(w)
+    da = torch.empty_like(a)
+    db = torch.empty_like(b)
 
     # Initialize state gradients
     dstate = torch.zeros(B, H, V, N, dtype=torch_dtype, device=q.device)
@@ -424,19 +421,19 @@ def naive_recurrent_rwkv7_2_bwd(
                 sa = (prev_state * a_t[None, :]).sum(dim=1)  # [V]
 
                 # state[bi, hi] = w_t[None, :] * prev_state + ...
-                dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=0) * \
+                dw[bi, hi, t] = -torch.sum(dstate_curr * prev_state, dim=0) * \
                     w_t * w_exp
 
                 # k_t[None, :] * v_t[:, None] -> [V, K]
-                dk[bi, hi, t] += torch.sum(dstate_curr * v_t[:, None], dim=0)
-                dv[bi, hi, t] += torch.sum(dstate_curr * k_t[None, :], dim=1)
+                dk[bi, hi, t] = torch.sum(dstate_curr * v_t[:, None], dim=0)
+                dv[bi, hi, t] = torch.sum(dstate_curr * k_t[None, :], dim=1)
 
                 # sa[:, None] * b_t[None, :] -> [V, K]
-                db[bi, hi, t] += torch.sum(dstate_curr * sa[:, None], dim=0)
+                db[bi, hi, t] = torch.sum(dstate_curr * sa[:, None], dim=0)
                 dsa = torch.sum(dstate_curr * b_t[None, :], dim=1)  # [V]
 
                 # sa = (prev_state * a_t[None, :]).sum(dim=1)
-                da[bi, hi, t] += torch.sum(prev_state * dsa[:, None], dim=0)
+                da[bi, hi, t] = torch.sum(prev_state * dsa[:, None], dim=0)
                 dstate_from_sa = a_t[None, :] * dsa[:, None]  # [V, K]
 
                 # w_t[None, :] * prev_state
@@ -533,18 +530,18 @@ def test_autograd_function():
     torch.manual_seed(42)
 
     # Define test dimensions
-    B, H, T, D = 1, 1, 64, 64
+    B, H, T, D = 1, 1, 128, 64
+    V = N = D
     device = 'cpu'
     dtype = torch.float64
 
     # Create random test inputs
-
-    q = torch.empty(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
-    k = torch.empty(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
-    v = torch.empty(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
+    q = torch.empty(B, H, T, D, device=device).uniform_(-8, 8).to(dtype=dtype).requires_grad_(True)
+    k = torch.empty(B, H, T, D, device=device).uniform_(-8, 8).to(dtype=dtype).requires_grad_(True)
+    v = torch.empty(B, H, T, D, device=device).uniform_(-8, 8).to(dtype=dtype).requires_grad_(True)
     w = torch.empty(B, H, T, D, device=device).uniform_(-8, -6).to(dtype=dtype).requires_grad_(True)
 
-    kk = torch.empty(B, H, T, D, device=device).uniform_(-1, 1)
+    kk = torch.empty(B, H, T, D, device=device).uniform_(-8, 8)
     kk = torch.nn.functional.normalize(kk, dim=-1).to(dtype=dtype)
 
     a = -kk.clone().requires_grad_(True)  # -kk
@@ -578,14 +575,14 @@ def test_autograd_function():
     def compute_loss(output, state):
         return output.sum()  # + state.sum()
 
-    # # # Compute loss and gradients for both paths
+    # Compute loss and gradients for both paths
     loss1 = compute_loss(output1, state1)
     loss1.backward()
 
     loss2 = compute_loss(output2, state2)
     loss2.backward()
 
-    # # Compare gradients
+    # Compare gradients
     grad_diffs = {
         'q': torch.max(torch.abs(q1.grad - q2.grad)).item(),
         'k': torch.max(torch.abs(k1.grad - k2.grad)).item(),
@@ -601,5 +598,4 @@ def test_autograd_function():
 
 
 test_autograd_function()
-
 ```
