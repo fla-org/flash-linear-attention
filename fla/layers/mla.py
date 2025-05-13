@@ -9,22 +9,18 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/de
 from __future__ import annotations
 
 import math
+from functools import partial
+from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from functools import partial
-from typing import TYPE_CHECKING, Optional, Tuple
-from transformers.utils import logging
 from flash_attn import flash_attn_varlen_func
+from transformers.utils import logging
 
+from fla.models.utils import Cache
 from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.utils.index import prepare_lens_from_mask
-
-
-if TYPE_CHECKING:
-    from fla.models.utils import Cache
-
 
 logger = logging.get_logger(__name__)
 
