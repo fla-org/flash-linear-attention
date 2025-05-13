@@ -2,6 +2,8 @@
 
 Zhiyuan Li
 
+>Special thanks to [Sonta](https://github.com/sustcsonglin) and [Beortust](), Sonta pointed out the correct notation for the outer product in the formulas, and Beortust corrected a considerable number of typos and also helped to improve the formatting.
+
 ## Introduction to RWKV-7 Architecture
 
 RWKV-7 employs **Dynamic State Evolution** that transcends the fundamental TC0 expressivity limitations of attention/linear attention paradigms. RWKV-7 possesses NC1 expressivity, allowing it to solve many problems that attention mechanisms cannot.
