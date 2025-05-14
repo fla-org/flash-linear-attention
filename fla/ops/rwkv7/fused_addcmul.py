@@ -17,11 +17,10 @@ if not check_pytorch_version('2.4'):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': block_size}, num_warps=num_warps)
-        for block_size in [128, 256, 512, 1024, 2048, 4096, 8192]
+        triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16, 32]
     ],
-    key=['hidden_dim'],
+    key=['D', 'T'],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit
@@ -41,23 +40,21 @@ def fused_addcmul_fwd_kernel(
     oxa,
     oxg,
     use_xg: tl.constexpr,
-    xnumel,
-    hidden_dim: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    T: tl.constexpr,
+    D: tl.constexpr,
+    BD: tl.constexpr,
 ):
-    xoffset = tl.program_id(0) * BLOCK_SIZE
-    xindex = xoffset + tl.arange(0, BLOCK_SIZE)[:]
-
-    valid_indices = xnumel - xoffset
-    xmask = xindex < (xoffset + valid_indices)
-    x0 = xindex % hidden_dim
-    b_hiddn = tl.load(hidden + xindex, xmask, other=0.)
-    b_x = tl.load(delta + xindex, xmask, other=0.)
-    b_ixr = tl.load(ixr + x0, eviction_policy='evict_last')
-    b_ixw = tl.load(ixw + x0, eviction_policy='evict_last')
-    b_ixk = tl.load(ixk + x0, eviction_policy='evict_last')
-    b_ixv = tl.load(ixv + x0, eviction_policy='evict_last')
-    b_ixa = tl.load(ixa + x0, eviction_policy='evict_last')
+    xoffset = tl.program_id(0) * D
+    indices = tl.arange(0, BD)
+    xindex = xoffset + indices
+    xmask = indices < D
+    b_hiddn = tl.load(hidden + xindex, xmask)
+    b_x = tl.load(delta + xindex, xmask)
+    b_ixr = tl.load(ixr + indices, xmask)
+    b_ixw = tl.load(ixw + indices, xmask)
+    b_ixk = tl.load(ixk + indices, xmask)
+    b_ixv = tl.load(ixv + indices, xmask)
+    b_ixa = tl.load(ixa + indices, xmask)
     b_oxr = tl.fma(b_x, b_ixr, b_hiddn)
     b_oxw = tl.fma(b_x, b_ixw, b_hiddn)
     b_oxk = tl.fma(b_x, b_ixk, b_hiddn)
@@ -71,18 +68,17 @@ def fused_addcmul_fwd_kernel(
     tl.store(oxa + xindex, b_oxa.to(oxa.dtype.element_ty), xmask)
 
     if use_xg:
-        b_ixg = tl.load(ixg + x0, eviction_policy='evict_last')
+        b_ixg = tl.load(ixg + indices)
         b_oxg = tl.fma(b_x, b_ixg, b_hiddn)
-        tl.store(oxg + xindex, b_oxg, xmask)
+        tl.store(oxg + xindex, b_oxg.to(oxg.dtype.element_ty), xmask)
 
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': block_size}, num_warps=num_warps)
-        for block_size in [128, 256, 512, 1024, 2048, 4096, 8192]
+        triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16, 32]
     ],
-    key=['hidden_dim'],
+    key=['D', 'T'],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit
@@ -102,32 +98,29 @@ def addcmul_bwd_kernel1(
     ghidden,
     gx,
     use_xg: tl.constexpr,
-    xnumel,
-    hidden_dim: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    T: tl.constexpr,
+    D: tl.constexpr,
+    BD: tl.constexpr,
     DTYPE: tl.constexpr
 ):
-    xoffset = tl.program_id(0) * BLOCK_SIZE
-    xindex = xoffset + tl.arange(0, BLOCK_SIZE)[:]
-
-    valid_indices = xnumel - xoffset
-    xmask = xindex < (xoffset + valid_indices)
-    x0 = xindex % hidden_dim
-
-    b_dxr = tl.load(dxr + xindex, None).to(DTYPE)
-    b_dxw = tl.load(dxw + xindex, None).to(DTYPE)
-    b_dxk = tl.load(dxk + xindex, None).to(DTYPE)
-    b_dxv = tl.load(dxv + xindex, None).to(DTYPE)
-    b_dxa = tl.load(dxa + xindex, None).to(DTYPE)
-    b_ixr = tl.load(ixr + x0, eviction_policy='evict_last').to(DTYPE)
-    b_ixw = tl.load(ixw + x0, eviction_policy='evict_last').to(DTYPE)
-    b_iwk = tl.load(ixk + x0, eviction_policy='evict_last').to(DTYPE)
-    b_ixv = tl.load(ixv + x0, eviction_policy='evict_last').to(DTYPE)
-    b_ixa = tl.load(ixa + x0, eviction_policy='evict_last').to(DTYPE)
+    xoffset = tl.program_id(0) * BD
+    indices = tl.arange(0, BD)
+    xindex = xoffset + indices
+    xmask = indices < D
+    b_dxr = tl.load(dxr + xindex, xmask).to(DTYPE)
+    b_dxw = tl.load(dxw + xindex, xmask).to(DTYPE)
+    b_dxk = tl.load(dxk + xindex, xmask).to(DTYPE)
+    b_dxv = tl.load(dxv + xindex, xmask).to(DTYPE)
+    b_dxa = tl.load(dxa + xindex, xmask).to(DTYPE)
+    b_ixr = tl.load(ixr + indices, xmask).to(DTYPE)
+    b_ixw = tl.load(ixw + indices, xmask).to(DTYPE)
+    b_iwk = tl.load(ixk + indices, xmask).to(DTYPE)
+    b_ixv = tl.load(ixv + indices, xmask).to(DTYPE)
+    b_ixa = tl.load(ixa + indices, xmask).to(DTYPE)
 
     if use_xg:
-        b_dxg = tl.load(dxg + xindex, None).to(DTYPE)
-        b_ixg = tl.load(ixg + x0, eviction_policy='evict_last').to(DTYPE)
+        b_dxg = tl.load(dxg + xindex, xmask).to(DTYPE)
+        b_ixg = tl.load(ixg + indices, xmask).to(DTYPE)
         g_hidden = b_dxr + b_dxw + b_dxk + b_dxv + b_dxa + b_dxg
         g_x = b_dxr * b_ixr + b_dxw * b_ixw + b_dxk * b_iwk + b_dxv * b_ixv + b_dxa * b_ixa + b_dxg * b_ixg
     else:
@@ -140,11 +133,10 @@ def addcmul_bwd_kernel1(
 
 def addcmul_bwd1(d_xr, d_xw, d_xk, d_xv, d_xa, d_xg,
                  x_r, x_w, x_k, x_v, x_a, x_g, hidden_states, delta, use_xg, inplace=True):
+    B, T, D = hidden_states.size()
     g_hiddn = hidden_states if inplace else torch.empty_like(hidden_states)
     g_delta = torch.empty_like(delta)
-    numel = hidden_states.numel()
-    def grid(meta): return (triton.cdiv(meta['xnumel'], meta['BLOCK_SIZE']),)
-    addcmul_bwd_kernel1[grid](
+    addcmul_bwd_kernel1[(B*T,)](
         ixr=x_r,
         ixw=x_w,
         ixk=x_k,
@@ -160,8 +152,9 @@ def addcmul_bwd1(d_xr, d_xw, d_xk, d_xv, d_xa, d_xg,
         ghidden=g_hiddn,
         gx=g_delta,
         use_xg=use_xg,
-        xnumel=numel,
-        hidden_dim=hidden_states.size(-1),
+        T=T // 32,
+        D=D,
+        BD=triton.next_power_of_2(D),
         DTYPE=tl.float16 if hidden_states.dtype == torch.float16 else tl.float32,
     )
     return g_hiddn, g_delta
@@ -184,8 +177,8 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
     def forward(
         ctx, hidden_states, delta,
         x_r, x_w, x_k, x_v, x_a, x_g,
-        num_elements
     ):
+        B, T, D = hidden_states.size()
         oxr = torch.empty_like(hidden_states)
         oxw = torch.empty_like(hidden_states)
         oxk = torch.empty_like(hidden_states)
@@ -197,12 +190,8 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
         else:
             use_xg = False
             oxg = None
-        ctx.save_for_backward(hidden_states, delta,
-                              x_r, x_w, x_k, x_v, x_a, x_g)
-        ctx.use_xg = use_xg
 
-        def grid(meta): return (triton.cdiv(meta['xnumel'], meta['BLOCK_SIZE']),)
-        fused_addcmul_fwd_kernel[grid](
+        fused_addcmul_fwd_kernel[(B*T,)](
             hidden_states,
             delta,
             x_r,
@@ -218,9 +207,13 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
             oxa,
             oxg,
             use_xg,
-            num_elements,
-            hidden_states.size(-1),
+            T // 32,
+            D,
+            BD=triton.next_power_of_2(D),
         )
+        ctx.save_for_backward(hidden_states, delta,
+                              x_r, x_w, x_k, x_v, x_a, x_g)
+        ctx.use_xg = use_xg
         return oxr, oxw, oxk, oxv, oxa, oxg
 
     @staticmethod
@@ -234,7 +227,7 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
 
         d_ixr, d_ixw, d_ixk, d_ixv, d_ixa, d_ixg = addcmul_bwd2(dxr, dxw, dxk, dxv, dxa, dxg, delta, ctx.use_xg)
 
-        return d_hiddn, d_xx, d_ixr, d_ixw, d_ixk, d_ixv, d_ixa, d_ixg, None
+        return d_hiddn, d_xx, d_ixr, d_ixw, d_ixk, d_ixv, d_ixa, d_ixg
 
 
 def fused_addcmul_rwkv7(
@@ -248,10 +241,10 @@ def fused_addcmul_rwkv7(
     xg: Optional[torch.Tensor] = None
 ):
     num_elements = hidden_states.numel()
-    if num_elements < 16777216 and device == "cuda":
+    if num_elements < 16777216:
         return torch_addcmul_rwkv7(hidden_states, delta, xr, xw, xk, xv, xa, xg)
     else:
-        return Rwkv7FusedAddcmul.apply(hidden_states, delta, xr, xw, xk, xv, xa, xg, num_elements)
+        return Rwkv7FusedAddcmul.apply(hidden_states, delta, xr, xw, xk, xv, xa, xg)
 
 
 def torch_addcmul_rwkv7(hidden_states, delta, xr, xw, xk, xv, xa, xg=None):
