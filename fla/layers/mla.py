@@ -9,6 +9,7 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/de
 from __future__ import annotations
 
 import math
+from einops import rearrange, repeat
 from functools import partial
 from typing import Optional, Tuple
 
@@ -52,6 +53,8 @@ class MultiheadLatentAttention(nn.Module):
         layer_idx: int = None
     ) -> MultiheadLatentAttention:
         super().__init__()
+
+        # TODO: support window attn
 
         # sanity check
         if qk_head_dim is not None:
@@ -116,6 +119,8 @@ class MultiheadLatentAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
         past_key_values: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # if attention_mask is not None, this is doing inference
@@ -127,33 +132,32 @@ class MultiheadLatentAttention(nn.Module):
             )
 
         # prepare q k v projections
-        batch_size, q_len = hidden_states.shape[:-1]
-        query_shape = (batch_size, q_len, -1, self.qk_head_dim)
-        key_shape = (batch_size, q_len, -1, self.qk_nope_head_dim + self.v_head_dim)
+        # Shape: hidden_states [B T D] -> q, k, v [B T H HD]
+        batch_size, q_len, _ = hidden_states.shape
 
         if self.q_lora_rank is not None:
-            q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states))).view(query_shape).transpose(1, 2)
+            q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
         else:
-            q_states = self.q_proj(hidden_states).view(query_shape).transpose(1, 2)
+            q_states = self.q_proj(hidden_states)
+        q_states = rearrange(q_states, '... (h d) -> ... h d', d=self.qk_head_dim)
         q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
         k_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-
-        k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
+        k_rot = rearrange(k_rot, 'B T D -> B T 1 D')  # squeeze as 1 head for rotary embedding
+        k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass))
+        k_pass = rearrange(k_pass, '... (h d) -> ... h d', d=self.qk_nope_head_dim + self.v_head_dim)
         k_pass, v = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-        k_rot = k_rot.view(batch_size, 1, q_len, self.qk_rope_head_dim)
 
         # apply rotary position embedding
         seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
-            max_seqlen = q_pass.shape[2] + seqlen_offset
+            max_seqlen = q_len + seqlen_offset
 
             if attention_mask is not None:
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q_pass.shape[2] + max(seqlen_offset)
+                max_seqlen = q_len + max(seqlen_offset)
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
@@ -162,32 +166,27 @@ class MultiheadLatentAttention(nn.Module):
             q_rot, k_rot, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
         )
 
-        # TODO: original Deepseek directly caches the final key_states and value states,
-        # which actually does not save any memory?
-        # if past_key_value is not None:
-        #    key_states, v = past_key_value.update(key_states, v, self.layer_idx, cache_kwargs)
+        k_rot = repeat(k_rot, 'B T 1 D -> B T H D', H=self.num_heads)
+        q = torch.cat((q_pass, q_rot), dim=-1)
+        k = torch.cat((k_pass, k_rot), dim=-1)
 
-        # get and update from cache, then recover k_pass
+        # TODO: instead of caching the full k, v, we can actually only cache the compressed_kv and k_rot
+        # and recover the full k, v from compressed_kv and k_rot
         if past_key_values is not None:
             cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
-            compressed_kv_cached, k_rot_cached = past_key_values.update(
-                attn_state=(compressed_kv, k_rot),
+            k_cached, v_cached = past_key_values.update(
+                attn_state=(k, v),
                 layer_idx=self.layer_idx,
                 offset=q_len,
             )['attn_state']
             if cache_has_content:
-                compressed_kv, k_rot = compressed_kv_cached, k_rot_cached
-                k_pass, _ = torch.split(compressed_kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-                k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
+                k, v = k_cached, v_cached
 
         # perform attention
-        q = torch.cat((q_pass, q_rot), dim=-1)
-        k = torch.cat((k_pass, k_rot), dim=-1)
-
         if self.qk_head_dim != self.v_head_dim:
             v = F.pad(v, [0, self.qk_head_dim - self.v_head_dim])
 
-        attn_output = flash_attn_varlen_func(
+        o = flash_attn_varlen_func(
             q,
             k,
             v,
@@ -200,8 +199,8 @@ class MultiheadLatentAttention(nn.Module):
         )
 
         if self.qk_head_dim != self.v_head_dim:
-            attn_output = attn_output[:, :, :, : self.v_head_dim]
+            o = o[:, :, :, : self.v_head_dim]
 
-        attn_output = attn_output.reshape(batch_size, q_len, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output, past_key_values
+        o = o.reshape(batch_size, q_len, -1).contiguous()
+        o = self.o_proj(o)
+        return o, None, past_key_values
