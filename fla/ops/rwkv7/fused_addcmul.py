@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import check_pytorch_version, device, input_guard, use_cuda_graph
+from fla.utils import check_pytorch_version, input_guard, use_cuda_graph
 
 logger = logging.getLogger(__name__)
 

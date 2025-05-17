@@ -17,6 +17,7 @@ def torch_compile_addcmul(hidden_states, delta, x_r, x_w, x_k, x_v, x_a, x_g):
     xg = torch.addcmul(hidden_states, delta, x_g)
     return xr, xw, xk, xv, xa, xg
 
+
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         # argument names to use as an x-axis for the plot
