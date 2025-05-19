@@ -26,14 +26,14 @@ $v_t \in \mathbb{R}^{d_v}$ is the value vector
 
 $q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology)
 
-To achieve this, during inference with an L2 loss function $L=\frac{1}{2}\left \| v−k^{\top} S \right \|^2$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v \approx k^{\top} S$.
+To achieve this, during inference with an L2 loss function $L=\frac{1}{2} \left\Vert v − k^{\top} S \right\Vert^2$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v \approx k^{\top} S$.
 
-The gradient of the L2 loss function with respect to the state matrix $S$ is: $\frac{\partial L}{\partial S}$
+The gradient of the L2 loss function with respect to the state matrix $S$ is: $\frac{\partial L}{\partial S} = S k k^{\top} - v k^{\top}$
 
 Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate:
 
 $$
-S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} , \text{ where } S=S_{t-1}
+S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} , \text{ where } L=L_t \quad S=S_{t-1}
 $$
 
 Incorporating weight decay factors $d_t = \exp(-\exp(w_t))$ as a form of time-dependent regularization and learning rate $\eta_t$, the gradient descent update becomes:
