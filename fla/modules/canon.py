@@ -112,7 +112,6 @@ def causal_conv1d_bwd_kernel(
     dx,
     dw,
     db,
-    dr,
     cu_seqlens,
     chunk_indices,
     T,
@@ -171,11 +170,6 @@ def causal_conv1d_bwd_kernel(
 
     if ACTIVATION == 'swish' or ACTIVATION == 'silu':
         b_dx = b_dx * tl.sigmoid(b_dx)
-
-    if HAS_RESIDUAL:
-        p_residual = tl.make_block_ptr(residual + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        b_residual = tl.load(p_residual, boundary_check=(0, 1))
-        b_dx += b_residual
 
     p_dx = tl.make_block_ptr(dx + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
     tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
@@ -240,7 +234,7 @@ def causal_conv1d_bwd(
     dx = torch.empty_like(x)
     dw = weight.new_empty(B*NT, *weight.shape) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape) if bias is not None else None
-    dr = torch.empty_like(residual) if residual is not None else None
+    dr = dy if residual is not None else None
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
         x=x,
@@ -251,7 +245,6 @@ def causal_conv1d_bwd(
         dx=dx,
         dw=dw,
         db=db,
-        dr=dr,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         B=B,
@@ -432,3 +425,4 @@ class CausalConv1d(nn.Conv1d):
     @property
     def state_size(self) -> int:
         return self.hidden_size * self.kernel_size
+
