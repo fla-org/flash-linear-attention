@@ -8,9 +8,9 @@ from fla.models.forgetting_transformer.modeling_forgetting_transformer import (
     ForgettingTransformerModel
 )
 
-AutoConfig.register(ForgettingTransformerConfig.model_type, ForgettingTransformerConfig)
-AutoModel.register(ForgettingTransformerConfig, ForgettingTransformerModel)
-AutoModelForCausalLM.register(ForgettingTransformerConfig, ForgettingTransformerForCausalLM)
+AutoConfig.register(ForgettingTransformerConfig.model_type, ForgettingTransformerConfig, exist_ok=True)
+AutoModel.register(ForgettingTransformerConfig, ForgettingTransformerModel, exist_ok=True)
+AutoModelForCausalLM.register(ForgettingTransformerConfig, ForgettingTransformerForCausalLM, exist_ok=True)
 
 
 __all__ = ['ForgettingTransformerConfig', 'ForgettingTransformerForCausalLM', 'ForgettingTransformerModel']

@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import input_guard
+from fla.utils import input_guard, tensor_cache
 
 
 def token_shift_ref(
@@ -71,21 +71,23 @@ def token_shift_fwd_kernel(
     if IS_VARLEN:
         i_n = i_b
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        g_t = i_t + bos
 
-        if i_t < bos or i_t >= eos:
+        if g_t >= eos:
             return
 
-        is_first_pos = (i_t - bos == 0)
-    else:
         is_first_pos = (i_t == 0)
+    else:
+        g_t = i_t
+        is_first_pos = (g_t == 0)
 
     o_d = tl.arange(0, BD)
     m_d = o_d < D
 
     if IS_VARLEN:
-        base_offset = i_t * D + o_d
+        base_offset = g_t * D + o_d
     else:
-        base_offset = i_b * T*D + i_t * D + o_d
+        base_offset = i_b * T*D + g_t * D + o_d
 
     b_x = tl.load(x + base_offset, mask=m_d)
 
@@ -95,9 +97,9 @@ def token_shift_fwd_kernel(
     else:
         # Other positions: delta = prev - curr
         if IS_VARLEN:
-            prev_offset = (i_t - 1) * D + o_d
+            prev_offset = (g_t-1) * D + o_d
         else:
-            prev_offset = i_b * T*D + (i_t-1) * D + o_d
+            prev_offset = i_b * T*D + (g_t-1) * D + o_d
 
         prev_values = tl.load(x + prev_offset, mask=m_d)
         delta = prev_values - b_x
@@ -129,22 +131,22 @@ def token_shift_bwd_kernel(
     if IS_VARLEN:
         i_n = i_b
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-
-        if i_t < bos or i_t >= eos:
+        g_t = i_t + bos
+        if g_t >= eos:
             return
 
-        local_pos = i_t - bos
-        is_last_pos = (local_pos == eos - bos - 1)
+        is_last_pos = (g_t == eos - 1)
     else:
-        is_last_pos = (i_t == T - 1)
+        g_t = i_t
+        is_last_pos = (g_t == T - 1)
 
     o_d = tl.arange(0, BD)
     m_d = o_d < D
 
     if IS_VARLEN:
-        base_offset = i_t * D + o_d
+        base_offset = g_t * D + o_d
     else:
-        base_offset = i_b * T*D + i_t * D + o_d
+        base_offset = i_b * T*D + g_t * D + o_d
 
     b_dy = tl.load(dy + base_offset, mask=m_d)
 
@@ -154,13 +156,18 @@ def token_shift_bwd_kernel(
     else:
         # Other positions: b_dx = -grad_delta[t] + grad_delta[t+1]
         if IS_VARLEN:
-            next_offset = (i_t+1) * D + o_d
+            next_offset = (g_t+1) * D + o_d
         else:
-            next_offset = i_b * T*D + (i_t+1) * D + o_d
+            next_offset = i_b * T*D + (g_t+1) * D + o_d
 
         b_dx = -b_dy + tl.load(dy + next_offset, mask=m_d)
 
     tl.store(dx + base_offset, b_dx, mask=m_d)
+
+
+@tensor_cache
+def prepare_maxlens(cu_seqlens: torch.LongTensor) -> int:
+    return torch.max(cu_seqlens[1:] - cu_seqlens[:-1]).item()
 
 
 def token_shift_fwd(
@@ -168,9 +175,12 @@ def token_shift_fwd(
     cu_seqlens: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     B, T, D = x.shape
-    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    if cu_seqlens is not None:
+        T = prepare_maxlens(cu_seqlens)
+        N = len(cu_seqlens) - 1
+    else:
+        N = B
     BD = triton.next_power_of_2(D)
-
     y = torch.empty_like(x)
 
     grid = (N, T)
@@ -183,17 +193,17 @@ def token_shift_fwd(
         BD=BD,
     )
 
-    return y
+    return y, N, T
 
 
 def token_shift_bwd(
     dy: torch.Tensor,
+    N: int,
+    T: int,
     cu_seqlens: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
-    B, T, D = dy.shape
-    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    D = dy.shape[2]
     BD = triton.next_power_of_2(D)
-
     dx = torch.empty_like(dy)
 
     grid = (N, T)
@@ -213,20 +223,22 @@ class TokenShift(torch.autograd.Function):
     @staticmethod
     @input_guard
     def forward(ctx, x: torch.Tensor, cu_seqlens: Optional[torch.Tensor] = None):
+        output, N, T = token_shift_fwd(x, cu_seqlens)
         ctx.cu_seqlens = cu_seqlens
-        return token_shift_fwd(x, cu_seqlens)
+        ctx.N = N
+        ctx.T = T
+        return output
 
     @staticmethod
     @input_guard
     def backward(ctx, dy: torch.Tensor):
-        cu_seqlens = ctx.cu_seqlens
-        dx = token_shift_bwd(dy, cu_seqlens)
+        dx = token_shift_bwd(dy, ctx.N, ctx.T, ctx.cu_seqlens)
         return dx, None
 
 
 def token_shift(
     x: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None
+    cu_seqlens: Optional[torch.LongTensor] = None
 ):
     """
     Implementation of token shift using Triton kernels

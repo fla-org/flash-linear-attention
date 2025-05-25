@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.utils import input_guard
 
@@ -398,22 +396,21 @@ def fused_recurrent_iplr_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
-    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
 
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]`
+            queries of shape `[B, T, H, K]`
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]`
+            keys of shape `[B, T, H, K]`
         v (torch.Tensor):
-            values of shape `[B, H, T, V]`
+            values of shape `[B, T, H, V]`
         a (torch.Tensor):
-            as of shape `[B, H, T, K]`
+            as of shape `[B, T, H, K]`
         b (torch.Tensor):
-             bs of shape `[B, H, T, K]`
+            bs of shape `[B, T, H, K]`
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -426,19 +423,6 @@ def fused_recurrent_iplr_delta_rule(
             consistent with the FlashAttention API.
 
     """
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-        q, k, v, a, b = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, a, b))
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -465,6 +449,4 @@ def fused_recurrent_iplr_delta_rule(
         output_final_state,
         cu_seqlens
     )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

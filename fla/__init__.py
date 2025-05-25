@@ -39,6 +39,7 @@ from fla.models import (
     HGRN2ForCausalLM,
     HGRN2Model,
     HGRNForCausalLM,
+    HGRNModel,
     LightNetForCausalLM,
     LightNetModel,
     LinearAttentionForCausalLM,

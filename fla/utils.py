@@ -4,6 +4,7 @@ import contextlib
 import functools
 import logging
 import os
+import sys
 from enum import Enum
 from functools import lru_cache
 from typing import Any, Callable, Dict, Literal, Optional, Tuple
@@ -16,6 +17,47 @@ logger = logging.getLogger(__name__)
 
 COMPILER_MODE = os.getenv("FLA_COMPILER_MODE") == "1"
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
+
+
+@lru_cache(maxsize=1)
+def check_environments():
+    """
+    Checks the current operating system, Triton version, and Python version,
+    issuing warnings if they don't meet recommendations.
+    This function's body only runs once due to lru_cache.
+    """
+    # Check Operating System
+    if sys.platform == 'win32':
+        logger.warning(
+            "Detected Windows operating system. Triton does not have an official Windows release, "
+            "thus FLA will not be adapted for Windows, and any potential errors will not be fixed. "
+            "Please consider using a Linux environment for compatibility."
+        )
+
+    triton_version = version.parse(triton.__version__)
+    required_triton_version = version.parse("3.2.0")
+
+    if triton_version < required_triton_version:
+        logger.warning(
+            f"Current Triton version {triton_version} is below the recommended 3.2.0 version. "
+            "Errors may occur and these issues will not be fixed. "
+            "Please consider upgrading Triton."
+        )
+
+    # Check Python version
+    py_version = version.parse(f"{sys.version_info.major}.{sys.version_info.minor}")
+    required_py_version = version.parse("3.11")
+
+    if py_version < required_py_version:
+        logger.warning(
+            f"Current Python version {py_version} is below the recommended 3.11 version. "
+            "It is recommended to upgrade to Python 3.11 or higher for the best experience."
+        )
+
+    return None
+
+
+check_environments()
 
 
 def get_abs_err(x, y):

@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use_cuda_graph
@@ -212,24 +210,23 @@ def fused_recurrent_dplr_delta_rule(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
-    head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
 
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         a (torch.Tensor):
-            a of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            a of shape `[B, T, H, K]`.
         b (torch.Tensor):
-            b of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            b of shape `[B, T, H, K]`.
         gk (torch.Tensor):
-            gk of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`. decay term in log space!
+            gk of shape `[B, T, H, K]`. decay term in log space!
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: 1.
@@ -244,23 +241,7 @@ def fused_recurrent_dplr_delta_rule(
         cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `False`.
     """
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-        q, k, v, a, b, gk = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, a, b, gk))
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -289,6 +270,4 @@ def fused_recurrent_dplr_delta_rule(
         reverse,
         cu_seqlens,
     )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

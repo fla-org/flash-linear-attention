@@ -2,49 +2,82 @@
 
 Zhiyuan Li
 
+>Special thanks to [Sonta](https://github.com/sustcsonglin) and [Beortust](https://github.com/Beortext), Sonta pointed out the correct notation for the outer product in the formulas, and Beortust corrected a considerable number of typos and also helped to improve the formatting.
+
 ## Introduction to RWKV-7 Architecture
 
 RWKV-7 employs **Dynamic State Evolution** that transcends the fundamental TC0 expressivity limitations of attention/linear attention paradigms. RWKV-7 possesses NC1 expressivity, allowing it to solve many problems that attention mechanisms cannot.
 
-In simple terms, traditional attention mechanisms (like Transformer's QKV-softmax-attention) store multiple {k,v} (key and value vector pairs), matching queries (q alias named r in RWKV) against keys to retrieve corresponding values.
+In simple terms, traditional attention mechanisms (like Transformer's QKV-softmax-attention) store multiple $\{k,v\}$ (key and value vector pairs), matching queries ($q$ alias named $r$ in RWKV) against keys to retrieve corresponding values.
 
-RWKV-7 takes a different approach - rather than directly storing {k,v} pairs, it dynamically updates a state by learning relationships between keys and values from context. This updated state then processes new input queries (q, or r in RWKV terminology) to produce outputs[^1].
+RWKV-7 takes a different approach - rather than directly storing $\{k,v\}$ pairs, it dynamically updates a state by learning relationships between keys and values from context. This updated state then processes new input queries ($q$, or $r$ in RWKV terminology) to produce outputs[^1].
 
 [^1]: For a more detailed explanation of this approach, see the original article by the RWKV author: https://mp.weixin.qq.com/s/kC_Z3vuQ5B4PiRwZVeIvHQ
 
-Specifically, RWKV-7 maintains an internal model $v≈kS^⊤$. It aims to fit a simple objective: for given vector sequences {kt} and {vt}, use state S to transform ki into vi, making the output v as close as possible to the target v.
+Specifically, RWKV-7 maintains an internal model $v \approx k^{\top} S$. It aims to fit a simple objective: for given vector sequences $\{k\}$ and $\{v\}$, use state $S$ to transform $k_i$ into $v_i$, making the output $v$ as close as possible to the target $v$.
 
-To achieve this, during inference with an L2 loss function $L=½‖v−kS^⊤‖²$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v≈kS^⊤$.
+For clarity on dimensions:
 
-The gradient is: **$∂L/∂S = S_k^T k - v^T k$**
+$S_t \in \mathbb{R}^{d_v \times d_k}$ is the state matrix
 
-Therefore, the gradient descent update (with weight decay factors $d_t = \exp(-\exp(w_t))$ and learning rate parameters) is: $$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot (k_t^T k_t S_{t-1} - k_t^T v_t)$$ This simplifies to:
+$k_t \in \mathbb{R}^{d_k}$ is the key vector
 
-$$S_t = S_{t-1} \cdot \text{Diag}(d_t) - \eta_t \cdot k_t^T k_t \cdot S_{t-1} + \eta_t \cdot k_t^T v_t$$
+$v_t \in \mathbb{R}^{d_v}$ is the value vector
 
-$$S_t = S_{t-1} \cdot (\text{Diag}(d_t) - \eta_t \cdot k_t^T k_t) + \eta_t \cdot k_t^T v_t$$
+$q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology)
 
-In the full RWKV-7 implementation, this gradient descent update is generalized by replacing the terms as follows:
+To achieve this, during inference with an L2 loss function $L=\frac{1}{2} \left\Vert v − k^{\top} S \right\Vert^2$, RWKV-7 automatically simulates dynamic gradient descent to continuously train its internal model $v \approx k^{\top} S$.
 
-- $\text{Diag}(d_t)$ becomes $D_t$ (the diagonal decay matrix)
-- The term $-\eta_t \cdot k_t^T k_t$ is generalized to $\alpha_t \beta_t^T$, where:
-  - $\alpha_t$ can be initialized as $-\eta_t \cdot k_t$
-  - $\beta_t$ can be initialized as $k_t$
-- The term $\eta_t \cdot k_t^T v_t$ becomes $v_t k_t^T$ with appropriate scaling of $k_t$
+The gradient of the L2 loss function with respect to the state matrix $S$ is: $\frac{\partial L}{\partial S} = S k k^{\top} - v k^{\top}$
+
+Applying stochastic gradient descent (SGD) with this gradient yields a recurrent update formula that forms the foundation of RWKV-7's mechanism. In standard SGD, we would update the parameters by subtracting the gradient scaled by a learning rate:
+
+$$
+S_t = S_{t-1} - \eta_t \cdot \frac{\partial L}{\partial S} , \text{ where } L=L_t \quad S=S_{t-1}
+$$
+
+Incorporating weight decay factors $d_t = \exp(-\exp(w_t))$ as a form of time-dependent regularization and learning rate $\eta_t$, the gradient descent update becomes:
+
+$$S_t = S_{t-1} \text{Diag}(d_t) - \eta_t \cdot (S_{t-1} k_t k_t^{\top} - v_t k_t^{\top})$$
+
+This can be expanded and rearranged as follows:
+
+$$S_t = S_{t-1} \text{Diag}(d_t) - \eta_t \cdot S_{t-1} k_t k_t^{\top} + \eta_t \cdot v_t k_t^{\top}$$
+
+For notational simplicity, we denote $\text{Diag}(d_t)$ as $D_t$ (the diagonal decay matrix):
+
+$$S_t = S_{t-1} D_t - \eta_t \cdot S_{t-1} k_t k_t^{\top} + \eta_t \cdot v_t k_t^{\top}$$
+
+In the full RWKV-7 implementation, this update rule is generalized through several key transformations:
+
+1. The diagonal decay term $D_t$ remains as a component-wise multiplication with $S_{t-1}$
+
+2. The term $-\eta_t \cdot k_t k_t^{\top}$ is generalized to $\alpha_t \beta_t^{\top}$, where:
+
+   - $\alpha_t$ can be initialized as $-k_t$
+   - $\beta_t$ can be initialized as $\eta_t \cdot k_t$
+
+3. The term $-\eta_t \cdot S_{t-1} k_t k_t^{\top}$ can be factorized and computed efficiently:
+
+   - First compute $u_t = S_{t-1} k_t$ (matrix-vector product)
+   - Then compute $-\eta_t \cdot u_t k_t^{\top}$ (scaled outer product)
+
+4. The term $\eta_t \cdot v_t k_t^{\top}$ is directly implemented as the outer product between the value vector $v_t$ and key vector $k_t$, resulting in a rank-1 update matrix
 
 This leads to the final recurrence equation[^2]:
 
-[^2]: For a more detailed explanation, see the triton codes. Note: In the optimized Triton implementation, `w` is already the log of the decay factor, so there's only one exponential operation needed.  https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/rwkv7/fused_recurrent.py#L94
-
-$$S_t = S_{t-1} \cdot D_t + S_{t-1} \cdot \alpha_t \beta_t^T + v_t k_t^T \in \mathbb{R}^{d_v \times d_k}$$
-
-This formulation allows more flexibility in how the state evolves while maintaining the core gradient descent learning dynamics.
+$$
+S_t = S_{t-1} D_t + S_{t-1} \alpha_t \beta_t^{\top} + v_t k_t^{\top} \in \mathbb{R}^{d_v \times d_k}
+$$
 
 The output at each timestep is computed as:
+$o_t = S_t r_t$
 
-$o_t = S_t \cdot q_t$
+Where $r_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology), typically scaled by a factor of $\frac{1}{\sqrt{d_k}}$. This formulation allows RWKV-7 to continuously adapt its internal representation based on context, transcending the limitations of traditional attention mechanisms.
 
-Where $q_t \in \mathbb{R}^{d_k}$ is the query vector (named $r$ in RWKV terminology), typically scaled by a factor of $\frac{1}{\sqrt{d_k}}$. This formulation allows RWKV-7 to continuously adapt its internal representation based on context, transcending the limitations of traditional attention mechanisms.
+[^2]: For a more detailed explanation, see the triton codes. Note: In the optimized Triton implementation, `w` is already the log of the decay factor, so there's only one exponential operation needed. https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/rwkv7/fused_recurrent.py#L94
+
+This formulation allows more flexibility in how the state evolves while maintaining the core gradient descent learning dynamics.
 
 ## 1. Forward Pass Recurrence Equation
 
@@ -85,6 +118,7 @@ For the gradient of w_t, we need to consider how it affects the state update:
 1. For the `w_t[None, :] * state[bi, hi]` component of the state update:
 
 First, compute the derivative of L with respect to w_t:
+
 ```
 ∂L/∂w_t[k] = ∑_v (dstate_curr[v,k] * prev_state[v,k])
 ```
@@ -92,22 +126,26 @@ First, compute the derivative of L with respect to w_t:
 This equation sums over the v dimension for each position k, resulting in a vector of shape [K].
 
 Then, compute the derivative of w_t with respect to w:
+
 ```
 ∂w_t[k]/∂w[k] = -exp(w[k]) * exp(-exp(w[k])) = -exp(w[k]) * w_t[k]
 ```
 
 Finally, apply the chain rule:
+
 ```
 ∂L/∂w[k] = ∂L/∂w_t[k] * ∂w_t[k]/∂w[k]
          = (∑_v dstate_curr[v,k] * prev_state[v,k]) * (-exp(w[k]) * w_t[k])
 ```
 
 In code, this is expressed as:
+
 ```python
 dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=0) * torch.exp(w[bi, hi, t]) * w_t
 ```
 
 Or equivalently:
+
 ```python
 dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=0) * torch.exp(w[bi, hi, t]) * torch.exp(-torch.exp(w[bi, hi, t]))
 ```
@@ -131,7 +169,7 @@ dsa = torch.sum(dstate_curr * b_t[None, :], dim=1)
 da[bi, hi, t] += torch.sum(prev_state * dsa[:, None], dim=0)
 ```
 
-### 2.6 Gradient w.r.t. Previous State S_{t-1}
+### 2.6 Gradient w.r.t. Previous State S\_{t-1}
 
 Finally, we compute the gradient of the previous state for backpropagation:
 
@@ -143,7 +181,6 @@ dstate[bi, hi] = dstate_from_sa + dstate_from_decay
 
 ```python
 # -*- coding: utf-8 -*-
-
 from typing import Optional, Tuple
 
 import torch
@@ -314,12 +351,12 @@ def naive_recurrent_rwkv7_2_bwd(
     B, H, L, N, V = q.shape[0], q.shape[1], q.shape[2], q.shape[3], v.shape[-1]
 
     # Initialize gradients
-    dq = torch.zeros_like(q)
-    dk = torch.zeros_like(k)
-    dv = torch.zeros_like(v)
-    dw = torch.zeros_like(w)
-    da = torch.zeros_like(a)
-    db = torch.zeros_like(b)
+    dq = torch.empty_like(q)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    dw = torch.empty_like(w)
+    da = torch.empty_like(a)
+    db = torch.empty_like(b)
 
     # Initialize state gradients
     dstate = torch.zeros(B, H, V, N, dtype=torch_dtype, device=q.device)
@@ -377,7 +414,7 @@ def naive_recurrent_rwkv7_2_bwd(
                 curr_state = states[t+1][bi, hi]  # State after update [V, K]
                 prev_state = states[t][bi, hi]    # State before update [V, K]
 
-                dq[bi, hi, t] += torch.matmul(doutput[bi, hi, t], curr_state) * scale
+                dq[bi, hi, t] = (doutput[bi, hi, t][:, None] * curr_state).sum(dim=0) * scale
 
                 dstate_from_out = q_t[None, :] * doutput[bi, hi, t][:, None]  # [V, K]
 
@@ -386,19 +423,19 @@ def naive_recurrent_rwkv7_2_bwd(
                 sa = (prev_state * a_t[None, :]).sum(dim=1)  # [V]
 
                 # state[bi, hi] = w_t[None, :] * prev_state + ...
-                dw[bi, hi, t] += -torch.sum(dstate_curr * prev_state, dim=0) * \
+                dw[bi, hi, t] = -torch.sum(dstate_curr * prev_state, dim=0) * \
                     w_t * w_exp
 
                 # k_t[None, :] * v_t[:, None] -> [V, K]
-                dk[bi, hi, t] += torch.sum(dstate_curr * v_t[:, None], dim=0)
-                dv[bi, hi, t] += torch.sum(dstate_curr * k_t[None, :], dim=1)
+                dk[bi, hi, t] = torch.sum(dstate_curr * v_t[:, None], dim=0)
+                dv[bi, hi, t] = torch.sum(dstate_curr * k_t[None, :], dim=1)
 
                 # sa[:, None] * b_t[None, :] -> [V, K]
-                db[bi, hi, t] += torch.sum(dstate_curr * sa[:, None], dim=0)
+                db[bi, hi, t] = torch.sum(dstate_curr * sa[:, None], dim=0)
                 dsa = torch.sum(dstate_curr * b_t[None, :], dim=1)  # [V]
 
                 # sa = (prev_state * a_t[None, :]).sum(dim=1)
-                da[bi, hi, t] += torch.sum(prev_state * dsa[:, None], dim=0)
+                da[bi, hi, t] = torch.sum(prev_state * dsa[:, None], dim=0)
                 dstate_from_sa = a_t[None, :] * dsa[:, None]  # [V, K]
 
                 # w_t[None, :] * prev_state
@@ -495,18 +532,18 @@ def test_autograd_function():
     torch.manual_seed(42)
 
     # Define test dimensions
-    B, H, T, D = 1, 1, 64, 64
+    B, H, T, D = 1, 1, 128, 64
+    V = N = D
     device = 'cpu'
     dtype = torch.float64
 
     # Create random test inputs
-
-    q = torch.empty(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
-    k = torch.empty(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
-    v = torch.empty(B, H, T, D, device=device).uniform_(-1, 1).to(dtype=dtype).requires_grad_(True)
+    q = torch.empty(B, H, T, D, device=device).uniform_(-8, 8).to(dtype=dtype).requires_grad_(True)
+    k = torch.empty(B, H, T, D, device=device).uniform_(-8, 8).to(dtype=dtype).requires_grad_(True)
+    v = torch.empty(B, H, T, D, device=device).uniform_(-8, 8).to(dtype=dtype).requires_grad_(True)
     w = torch.empty(B, H, T, D, device=device).uniform_(-8, -6).to(dtype=dtype).requires_grad_(True)
 
-    kk = torch.empty(B, H, T, D, device=device).uniform_(-1, 1)
+    kk = torch.empty(B, H, T, D, device=device).uniform_(-8, 8)
     kk = torch.nn.functional.normalize(kk, dim=-1).to(dtype=dtype)
 
     a = -kk.clone().requires_grad_(True)  # -kk
@@ -540,14 +577,14 @@ def test_autograd_function():
     def compute_loss(output, state):
         return output.sum()  # + state.sum()
 
-    # # # Compute loss and gradients for both paths
+    # Compute loss and gradients for both paths
     loss1 = compute_loss(output1, state1)
     loss1.backward()
 
     loss2 = compute_loss(output2, state2)
     loss2.backward()
 
-    # # Compare gradients
+    # Compare gradients
     grad_diffs = {
         'q': torch.max(torch.abs(q1.grad - q2.grad)).item(),
         'k': torch.max(torch.abs(k1.grad - k2.grad)).item(),
@@ -563,5 +600,4 @@ def test_autograd_function():
 
 
 test_autograd_function()
-
 ```

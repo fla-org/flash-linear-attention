@@ -125,7 +125,6 @@ def parallel_path_fwd_kernel(
     b_l = tl.math.log2(b_l) + b_m
     p_L_new = tl.make_block_ptr(L_new + (bos * HQ + i_hq), (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0,))
     tl.store(p_L_new, b_l.to(p_L_new.dtype.element_ty), boundary_check=(0,))
-    tl.store(p_L_new, b_l.to(p_L_new.dtype.element_ty), boundary_check=(0,))
 
 
 def parallel_path_fwd_fn(
