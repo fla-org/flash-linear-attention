@@ -115,12 +115,11 @@ class HGRNAttention(nn.Module):
             i = self.i_proj(hidden_states)
             f = self.f_proj(hidden_states)
 
+        f = F.logsigmoid(f)
         # the lower bound for the first layer is zero
-        if lower_bound is None or self.layer_idx == 0:
-            i, f = swiglu(i, 1 - f.sigmoid()), F.logsigmoid(f)
-        else:
-            g = lower_bound + (1 - lower_bound) * f.sigmoid()
-            i, f = swiglu(i, 1 - g), g.log()
+        if lower_bound is not None and self.layer_idx > 0:
+            f = torch.logaddexp(lower_bound.log(), torch.log1p(-lower_bound) + f)
+        i = swiglu(i, 1 - f.exp())
 
         # dealing with left-padding
         if attention_mask is not None:
