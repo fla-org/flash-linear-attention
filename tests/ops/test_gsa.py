@@ -8,8 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.gsa import chunk_gsa, fused_recurrent_gsa
 from fla.ops.gsa.naive import naive_recurrent_gsa
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
-from fla.utils import check_shared_mem, device, device_platform
+from fla.utils import COMPILER_MODE, assert_close, check_shared_mem, device, device_platform
 
 if COMPILER_MODE:
     test_b_list = [1]

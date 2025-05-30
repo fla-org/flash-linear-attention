@@ -8,8 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
-from fla.utils import device, is_intel_alchemist
+from fla.utils import COMPILER_MODE, assert_close, device, is_intel_alchemist
 
 if COMPILER_MODE:
     test_b_list = [1]
@@ -223,7 +222,7 @@ def test_chunk(
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn(B, T, H, D, dtype=dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
+    beta = torch.rand(B, T, H, dtype=dtype).sigmoid().fill_(1)
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     g = g / gate_logit_normalizer

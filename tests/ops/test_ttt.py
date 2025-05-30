@@ -8,8 +8,7 @@ import torch.nn.functional as F
 
 from fla.ops.ttt import chunk_ttt_linear, fused_chunk_ttt_linear
 from fla.ops.ttt.naive import chunk_ttt_linear_ref
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
-from fla.utils import check_shared_mem, device
+from fla.utils import COMPILER_MODE, assert_close, check_shared_mem, device
 
 if COMPILER_MODE:
     test_b_list = [1]

@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.ops.utils.op import exp
 from fla.utils import input_guard
@@ -218,20 +216,19 @@ def fused_recurrent_gated_delta_rule(
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
-    head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         g (torch.Tensor):
-             g (decays) of shape `[B, T, H]` if `head_first=False` else `(B, H, T)`.
+            g (decays) of shape `[B, T, H]`.
         beta (torch.Tensor):
-             betas of shape `[B, T, H]` if `head_first=False` else `(B, H, T)`.
+            betas of shape `[B, T, H]`.
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -247,7 +244,7 @@ def fused_recurrent_gated_delta_rule(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
 
@@ -282,19 +279,6 @@ def fused_recurrent_gated_delta_rule(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-        q, k, v, beta, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, beta, g))
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -324,6 +308,4 @@ def fused_recurrent_gated_delta_rule(
         cu_seqlens,
         use_qk_l2norm_in_kernel
     )
-    if head_first:
-        o = rearrange(o, 'b t h v -> b h t v')
     return o, final_state

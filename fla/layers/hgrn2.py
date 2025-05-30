@@ -139,15 +139,11 @@ class HGRN2Attention(nn.Module):
 
         q = swish(q)
 
-        # improve precision
-        f = f.float()
-
+        g = F.logsigmoid(f)
         # the lower bound for the first layer is zero
-        if lower_bound is None or self.layer_idx == 0:
-            k, g = 1 - f.sigmoid(), F.logsigmoid(f)
-        else:
-            g = lower_bound + (1 - lower_bound) * f.sigmoid()
-            k, g = 1 - g, g.log()
+        if lower_bound is not None and self.layer_idx > 0:
+            g = torch.logaddexp(lower_bound.log(), torch.log1p(-lower_bound) + g)
+        k = 1 - g.exp()
 
         q, k, g = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_f_dim), (q, k.to(i), g))
         i = rearrange(i, '... (h d) -> ... h d', d=self.head_i_dim)

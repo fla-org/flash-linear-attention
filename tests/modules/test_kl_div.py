@@ -5,8 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.modules import FusedKLDivLoss
-from fla.ops.utils.testing import assert_close
-from fla.utils import device, device_platform
+from fla.utils import assert_close, device, device_platform
 
 
 @pytest.mark.parametrize("B", [2])

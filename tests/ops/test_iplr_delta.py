@@ -10,8 +10,7 @@ from einops import rearrange
 
 from fla.ops.generalized_delta_rule.iplr.chunk import chunk_iplr_delta_rule
 from fla.ops.generalized_delta_rule.iplr.fused_recurrent import fused_recurrent_iplr_delta_rule
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
-from fla.utils import device
+from fla.utils import COMPILER_MODE, assert_close, device
 
 if COMPILER_MODE:
     test_b_list = [1]

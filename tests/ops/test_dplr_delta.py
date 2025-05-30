@@ -8,8 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
-from fla.utils import device, device_platform
+from fla.utils import COMPILER_MODE, assert_close, device, device_platform
 
 if COMPILER_MODE:
     test_b_list = [1]

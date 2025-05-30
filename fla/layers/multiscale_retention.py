@@ -14,6 +14,7 @@ from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.rotary import RotaryEmbedding
 from fla.ops.retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
+from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -214,7 +215,7 @@ class MultiScaleRetention(nn.Module):
 
             if attention_mask is not None and seqlen_offset > 0:
                 # to deliminate the offsets of padding tokens
-                seqlen_offset = attention_mask.sum(-1) - q_len
+                seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
                 max_seqlen = q_len + seqlen_offset.max().item()
 
         q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)

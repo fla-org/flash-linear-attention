@@ -7,8 +7,7 @@ import torch
 
 from fla.modules.convolution import ShortConvolution
 from fla.ops.utils.index import prepare_lens
-from fla.ops.utils.testing import assert_close
-from fla.utils import device
+from fla.utils import assert_close, device
 
 try:
     from causal_conv1d import causal_conv1d_fn

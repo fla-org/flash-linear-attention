@@ -39,7 +39,7 @@ class MambaConfig(PretrainedConfig):
             Shape of the state space latents. Default: 16.
         num_hidden_layers (`int`, *optional*):
             Number of hidden layers in the model. Default: 48.
-        layer_norm_epsilon (`float`, *optional*):
+        norm_eps (`float`, *optional*):
             The epsilon to use in the layer normalization layers. Default: 1e-5.
         pad_token_id (`int`, *optional*):
             Padding token id. Default: 0.
@@ -58,7 +58,7 @@ class MambaConfig(PretrainedConfig):
         hidden_act (`str`, *optional*):
             The non-linear activation function (function or string) in the decoder. Default: `"silu"`.
         initializer_range (`float`, *optional*):
-            The standard deviation of the truncated_normal_initializer for initializing all weight matrices. Default: 0.1.
+            The standard deviation of the truncated_normal_initializer for initializing all weight matrices. Default: 0.02.
         residual_in_fp32 (`bool`, *optional*):
             Whether or not residuals should be in `float32`.
             If set to `False` residuals will keep the same `dtype` as the rest of the model. Default: `True`.
@@ -106,7 +106,7 @@ class MambaConfig(PretrainedConfig):
         hidden_size: int = 2048,
         state_size: int = 16,
         num_hidden_layers: int = 48,
-        layer_norm_epsilon=1e-5,
+        norm_eps=1e-5,
         pad_token_id: int = 0,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
@@ -115,7 +115,7 @@ class MambaConfig(PretrainedConfig):
         use_bias: bool = False,
         use_conv_bias: bool = True,
         hidden_act: str = "silu",
-        initializer_range: str = 0.1,
+        initializer_range: str = 0.02,
         residual_in_fp32: bool = False,
         time_step_rank: str = "auto",
         time_step_scale: float = 1.0,
@@ -134,7 +134,7 @@ class MambaConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.state_size = state_size
         self.num_hidden_layers = num_hidden_layers
-        self.layer_norm_epsilon = layer_norm_epsilon
+        self.norm_eps = norm_eps
         self.conv_kernel = conv_kernel
         self.expand = expand
         self.intermediate_size = int(expand * self.hidden_size)

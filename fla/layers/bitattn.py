@@ -15,6 +15,7 @@ from transformers.utils import logging
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RotaryEmbedding
 from fla.modules.fused_bitlinear import FusedBitLinear
+from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -100,7 +101,7 @@ class BitAttention(nn.Module):
 
             if attention_mask is not None:
                 # to deliminate the offsets of padding tokens
-                seqlen_offset = seqlen_offset + attention_mask.sum(-1) - attention_mask.shape[-1]
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
                 max_seqlen = q.shape[1] + max(seqlen_offset)
 
         if self.max_position_embeddings is not None:

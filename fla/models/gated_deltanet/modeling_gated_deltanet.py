@@ -121,7 +121,40 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: Optional[str] = 'rescale',
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
+        if isinstance(module, GatedDeltaNet):
+
+            # --- A_log ---
+            A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(0, 16)
+            with torch.no_grad():
+                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                    module.A_log.copy_(torch.log(A))
+                else:
+                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
+            module.A_log._no_weight_decay = True
+
+            # --- dt_bias ---
+            # hard coded for now
+            dt_min = 0.001
+            dt_max = 0.1
+            dt_init_floor = 1e-4
+            dt = torch.exp(
+                torch.rand(module.num_heads) * (math.log(dt_max) - math.log(dt_min))
+                + math.log(dt_min)
+            )
+            dt = torch.clamp(dt, min=dt_init_floor)
+            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+            inv_dt = dt + torch.log(-torch.expm1(-dt))
+            with torch.no_grad():
+                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                    module.dt_bias.copy_(inv_dt)
+                else:
+                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
+            # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
+            # name.endswith("bias") in param_grouping.py
+            module.dt_bias._no_weight_decay = True
+            module.dt_bias._no_reinit = True
+
+        elif isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
@@ -377,7 +410,7 @@ class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:
