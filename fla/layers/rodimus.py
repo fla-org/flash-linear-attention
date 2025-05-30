@@ -95,7 +95,6 @@ class RodimusAttention(nn.Module):
 
         self.residual_weight = nn.Parameter(torch.ones(
             (self.d_inner, ), dtype=torch.float32 if self.residual_in_fp32 else None), requires_grad=True)
-        self.residual_weight._no_weight_decay = True
 
         self.k_proj = nn.Linear(self.d_inner, self.mem_size, bias=False)
         self.q_proj = nn.Linear(self.d_inner, self.mem_size, bias=False)
@@ -127,7 +126,6 @@ class RodimusAttention(nn.Module):
         batch_size, q_len, _ = hidden_states.shape
         # mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
         mode = 'fused_recurrent' if hidden_states.shape[1] == 1 else self.mode
-        # FIXME: When using the setting of `if hidden_states.shape[1] <= 64`, it will output different answers from the official version.
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
@@ -184,7 +182,6 @@ class RodimusAttention(nn.Module):
                 head_first=False,
             )
         elif mode == 'fused_chunk':
-            # FIXME
             o, recurrent_state = fused_chunk_gla(
                 q=q,
                 k=k,
