@@ -15,7 +15,7 @@ class RodimusConfig(PretrainedConfig):
         block_type: str = 'rodimus_plus',
         hidden_size: int = 2048,
         num_hidden_layers: int = 24,
-        attn_mode: str = "fused_chunk",
+        attn_mode: str = "chunk",
         residual_in_fp32: bool = True,
         block_residual_in_fp32: bool = False,
         expand_ratio: Optional[int] = 64,
@@ -87,7 +87,7 @@ class RodimusConfig(PretrainedConfig):
             if not isinstance(ska_attn, Dict):
                 raise ValueError("attn must be a dictionary")
             if 'num_heads' not in ska_attn:
-                raise ValueError("Number of heads must be provided to initialize hybrid attention layers")
+                raise ValueError("Number of heads must be provided to initialize shared-key attention layers")
             ska_attn['qkv_bias'] = ska_attn.get('qkv_bias', False)
             ska_attn['qk_norm'] = ska_attn.get('qk_norm', False)
             ska_attn['window_size'] = ska_attn.get('window_size', 1024)
