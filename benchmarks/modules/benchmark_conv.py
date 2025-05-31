@@ -4,7 +4,7 @@ import torch
 import triton
 from einops import rearrange
 
-from fla.modules.canon import canon
+from fla.modules.canon import causal_conv1d
 from fla.ops.utils.index import prepare_sequence_ids
 
 try:
@@ -22,9 +22,9 @@ except ImportError:
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``
-        line_vals=['canon', 'causal_conv1d'],
+        line_vals=['causal_conv1d_fwd', 'causal_conv1d_cuda_fwd', 'causal_conv1d_fwdbwd', 'causal_conv1d_cuda_fwdbwd'],
         # label name for the lines
-        line_names=['canon', 'causal_conv1d'],
+        line_names=['causal_conv1d_fwd', 'causal_conv1d_cuda_fwd', 'causal_conv1d_fwdbwd', 'causal_conv1d_cuda_fwdbwd'],
         # line styles
         styles=[('green', '-'), ('blue', '--'), ('red', '-.'),
                 ('cyan', ':'), ('yellow', 'dotted'), ('cyan', '--'), ('cyan', '-'), ('black', ':')],
@@ -54,12 +54,12 @@ def benchmark(T, D, provider):
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
-    if provider.startswith('canon'):
+    if provider.startswith('causal_conv1d_fwd'):
         results = triton.testing.do_bench(
-            lambda: canon(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens),
+            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens),
             quantiles=quantiles
         )
-    if provider.startswith('causal_conv1d'):
+    elif provider.startswith('causal_conv1d_cuda_fwd'):
         results = triton.testing.do_bench(
             lambda: rearrange(
                 causal_conv1d_fn(
@@ -71,6 +71,25 @@ def benchmark(T, D, provider):
                 ),
                 'b d t -> b t d'
             ),
+            quantiles=quantiles
+        )
+    elif provider.startswith('causal_conv1d_fwdbwd'):
+        results = triton.testing.do_bench(
+            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens, residual=True).backward(x),
+            quantiles=quantiles
+        )
+    elif provider.startswith('causal_conv1d_cuda_fwdbwd'):
+        results = triton.testing.do_bench(
+            lambda: rearrange(
+                causal_conv1d_fn(
+                    x=rearrange(x, 'b t d -> b d t'),
+                    weight=weight,
+                    bias=bias,
+                    activation='swish',
+                    seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
+                ),
+                'b d t -> b t d'
+            ).backward(x),
             quantiles=quantiles
         )
     return results
