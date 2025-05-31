@@ -130,13 +130,14 @@ def causal_conv1d_bwd_kernel(
 ):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     if IS_VARLEN:
+        i_bt = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n), tl.load(cu_seqlens + i_n + 1)
         T = eos - bos
     else:
+        i_bt = i_b * tl.num_programs(1) + i_t
         i_n = i_b
         bos, eos = i_b * T, i_b * T + T
-    i_bt = i_b * tl.num_programs(1) + i_t
 
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
