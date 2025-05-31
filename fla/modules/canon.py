@@ -105,6 +105,7 @@ def causal_conv1d_fwd_kernel(
 @triton.jit
 def causal_conv1d_bwd_kernel(
     x,
+    y,
     weight,
     bias,
     residual,
@@ -153,6 +154,13 @@ def causal_conv1d_bwd_kernel(
         # [BT, BD]
         b_dy = tl.load(p_dy, boundary_check=(0, 1))
 
+        if ACTIVATION == 'swish' or ACTIVATION == 'silu':
+            p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+
+            b_y = tl.load(p_y, boundary_check=(0, 1))
+            b_ys = tl.sigmoid(b_y)
+            b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
+
         if HAS_WEIGHT:
             o_w = W - i_w - 1
             # [BT, BD]
@@ -167,9 +175,6 @@ def causal_conv1d_bwd_kernel(
     if HAS_BIAS:
         b_db = tl.cast(b_db, dtype=db.dtype.element_ty, fp_downcast_rounding='rtne')
         tl.store(db + i_bt * D + o_d, b_db, mask=m_d)
-
-    if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-        b_dx = b_dx * tl.sigmoid(b_dx)
 
     p_dx = tl.make_block_ptr(dx + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
     tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
@@ -231,6 +236,16 @@ def causal_conv1d_bwd(
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(T, 1024)
 
+    y = None
+    if activation is not None:
+        y = causal_conv1d_fwd(
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=None,
+            activation=None,
+            cu_seqlens=cu_seqlens
+        )
     dx = torch.empty_like(x)
     dw = weight.new_empty(B*NT, *weight.shape) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape) if bias is not None else None
@@ -238,6 +253,7 @@ def causal_conv1d_bwd(
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
         x=x,
+        y=y,
         weight=weight,
         bias=bias,
         residual=residual,
@@ -425,4 +441,3 @@ class CausalConv1d(nn.Conv1d):
     @property
     def state_size(self) -> int:
         return self.hidden_size * self.kernel_size
-
