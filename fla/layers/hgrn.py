@@ -118,7 +118,7 @@ class HGRNAttention(nn.Module):
         f = F.logsigmoid(f)
         # the lower bound for the first layer is zero
         if lower_bound is not None and self.layer_idx > 0:
-            f = torch.logaddexp(lower_bound.log(), torch.log1p(-lower_bound) + f)
+            f = torch.logaddexp(lower_bound.log(), torch.log1p(-lower_bound) + f).to(f)
         i = swiglu(i, 1 - f.exp())
 
         # dealing with left-padding

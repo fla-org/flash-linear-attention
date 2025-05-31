@@ -24,6 +24,7 @@ from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
 from fla.models.rwkv6 import RWKV6Config, RWKV6ForCausalLM, RWKV6Model
 from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM, RWKV7Model
 from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
+from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel, RodimusTokenizer
 from fla.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
 
 __all__ = [
@@ -47,5 +48,6 @@ __all__ = [
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
     'GatedDeltaProductConfig', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
+    'RodimusConfig', 'RodimusForCausalLM', 'RodimusModel', 'RodimusTokenizer',
     'PaTHAttentionConfig', 'PaTHAttentionForCausalLM', 'PaTHAttentionModel',
 ]

@@ -50,6 +50,8 @@ from fla.models import (
     PaTHAttentionModel,
     RetNetForCausalLM,
     RetNetModel,
+    RodimusForCausalLM,
+    RodimusModel,
     RWKV6ForCausalLM,
     RWKV6Model,
     RWKV7ForCausalLM,
@@ -110,6 +112,8 @@ __all__ = [
     'RWKV6Model',
     'RWKV7ForCausalLM',
     'RWKV7Model',
+    'RodimusForCausalLM',
+    'RodimusModel',
     'TransformerForCausalLM',
     'TransformerModel',
 ]

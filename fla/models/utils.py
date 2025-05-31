@@ -80,7 +80,7 @@ class Cache(transformers.cache_utils.Cache):
         if attn_state is not None:
             input_size = attn_state[0].shape[1]
             window_size = cache_kwargs.get('window_size', None)
-            if not isinstance(attn_state, Tuple):
+            if not (isinstance(attn_state, Tuple) or isinstance(attn_state, List)):
                 raise ValueError("`attn_state` must be a tuple of tensors for key/value states")
         if len(self.states) <= layer_idx:
             if attn_state is not None:
@@ -111,7 +111,7 @@ class Cache(transformers.cache_utils.Cache):
                         torch.cat([old_state, new_state], 1)
                         for old_state, new_state in zip(state['attn_state'], attn_state)
                     ]
-                state['attn_state'] = attn_state
+                    state['attn_state'] = attn_state
             if conv_state is not None:
                 state['conv_state'] = conv_state
             if ffn_state is not None:

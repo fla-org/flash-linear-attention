@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import warnings
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -16,11 +17,11 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
-from fla.layers.hgrn2 import HGRN2Attention
-from fla.models.hgrn2.configuration_hgrn2 import HGRN2Config
+from fla.models.rodimus.configuration_rodimus import RodimusConfig
+from fla.layers.rodimus import RodimusAttention, SlidingWindowSharedKeyAttention, align_multiple
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules import GatedMLP as HGRN2MLP
+from fla.modules import GatedMLP as RodimusMLP
 from fla.modules import RMSNorm
 
 if TYPE_CHECKING:
@@ -29,15 +30,41 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-class HGRN2Block(nn.Module):
-    def __init__(self, config: HGRN2Config, layer_idx: int):
+class RodimusBlock(nn.Module):
+    def __init__(self, config: RodimusConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
         self.layer_idx = layer_idx
+        self.block_type = config.block_type
+        self.block_residual_in_fp32 = config.residual_in_fp32
+        self.residual_in_fp32 = config.residual_in_fp32
+        self.fuse_norm = config.fuse_norm
 
-        self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self._is_ori_attn = False
+
+        if config.intermediate_size is None:
+            intermediate_size = align_multiple(int(config.hidden_ratio * config.hidden_size), 8)
+        else:
+            intermediate_size = config.intermediate_size
+
+        mlp_cls = partial(
+            RodimusMLP,
+            hidden_size=config.hidden_size,
+            hidden_ratio=None,
+            intermediate_size=intermediate_size,
+            hidden_act=config.hidden_act,
+            fuse_swiglu=config.fuse_swiglu
+        )
+        norm_cls = partial(
+            RMSNorm if self.fuse_norm else nn.RMSNorm,
+            config.hidden_size,
+            eps=config.norm_eps,
+        )
+
         if config.attn is not None and layer_idx in config.attn['layers']:
+            self._is_ori_attn = True
+            self.attn_norm = norm_cls()
             self.attn = Attention(
                 hidden_size=config.hidden_size,
                 num_heads=config.attn['num_heads'],
@@ -48,26 +75,40 @@ class HGRN2Block(nn.Module):
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx
             )
+
+            self.mlp_norm = norm_cls()
+            self.mlp = mlp_cls()
         else:
-            self.attn = HGRN2Attention(
+            self.mixer_norm = norm_cls()
+            self.mixer = RodimusAttention(
+                block_type=config.block_type,
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
-                num_heads=config.num_heads,
+                input_gate_low_rank=config.input_gate_low_rank,
                 expand_ratio=config.expand_ratio,
                 use_short_conv=config.use_short_conv,
                 conv_size=config.conv_size,
-                elementwise_affine=config.elementwise_affine,
                 norm_eps=config.norm_eps,
+                k_norm_eps=config.k_norm_eps,
+                residual_in_fp32=config.residual_in_fp32,
                 layer_idx=layer_idx
             )
-        self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.mlp = HGRN2MLP(
-            hidden_size=config.hidden_size,
-            hidden_ratio=config.hidden_ratio,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-            fuse_swiglu=config.fuse_swiglu
-        )
+
+            if self.block_type == "rodimus_plus":
+                self.ska_attn_norm = norm_cls()
+                self.ska_attn = SlidingWindowSharedKeyAttention(
+                    hidden_size=config.hidden_size,
+                    num_heads=config.ska_attn['num_heads'],
+                    qkv_bias=config.ska_attn['qkv_bias'],
+                    qk_norm=config.ska_attn['qk_norm'],
+                    window_size=config.ska_attn['window_size'],
+                    rope_theta=config.ska_attn['rope_theta'],
+                    max_position_embeddings=config.max_position_embeddings,
+                    layer_idx=layer_idx
+                )
+
+                self.mlp_norm = norm_cls()
+                self.mlp = mlp_cls()
 
     def forward(
         self,
@@ -76,51 +117,138 @@ class HGRN2Block(nn.Module):
         past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
-        lower_bound: Optional[torch.Tensor] = False,
+        residual: Optional[torch.Tensor] = None,
         **kwargs: Unpack[Dict]
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        residual = hidden_states
-        hidden_states = self.attn_norm(hidden_states)
-        hidden_states, attentions, past_key_values = self.attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            lower_bound=lower_bound,
-            **kwargs
-        )
-        if self.config.fuse_norm:
-            hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
+
+        if self.block_residual_in_fp32 and self.layer_idx > 0:
+            assert residual is not None, 'Residual must be passed in when setting `block_residual_in_fp32=True`'
+
+        if self._is_ori_attn:
+            if self.block_residual_in_fp32:
+                hidden_states, residual = self.attn_norm(
+                    hidden_states,
+                    residual=residual,
+                    prenorm=True,
+                    residual_in_fp32=self.residual_in_fp32
+                )
+            else:
+                residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
+                hidden_states = self.attn_norm(hidden_states)
+
+            hidden_states, attentions, past_key_values = self.attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                **kwargs
+            )
+            if self.fuse_norm:
+                hidden_states, residual = self.mlp_norm(
+                    hidden_states,
+                    residual,
+                    prenorm=True,
+                    residual_in_fp32=self.residual_in_fp32
+                )
+            else:
+                hidden_states = residual + hidden_states
+                residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
+                hidden_states = self.mlp_norm(hidden_states.to(self.mlp_norm.weight.dtype))
+
+            hidden_states = self.mlp(hidden_states, **kwargs)
         else:
-            hidden_states = residual + hidden_states
-            residual = hidden_states
-            hidden_states = self.mlp_norm(hidden_states)
-        hidden_states = self.mlp(hidden_states, **kwargs)
-        hidden_states = residual + hidden_states
+            if self.block_residual_in_fp32:
+                hidden_states, residual = self.mixer_norm(
+                    hidden_states,
+                    residual=residual,
+                    prenorm=True,
+                    residual_in_fp32=self.residual_in_fp32
+                )
+            else:
+                residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
+                hidden_states = self.mixer_norm(hidden_states)
+
+            hidden_states, attentions, past_key_values = self.mixer(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                **kwargs
+            )
+
+            if self.block_type == "rodimus_plus":
+                past_key_values, rodimus_caches = past_key_values
+
+                if self.fuse_norm:
+                    hidden_states, residual = self.ska_attn_norm(
+                        hidden_states,
+                        residual,
+                        prenorm=True,
+                        residual_in_fp32=self.residual_in_fp32
+                    )
+                else:
+                    hidden_states = residual + hidden_states
+                    residual = hidden_states.float() if self.residual_in_fp32 else hidden_states
+                    hidden_states = self.ska_attn_norm(hidden_states.to(dtype=self.ska_attn_norm.weight.dtype))
+
+                hidden_states, attentions, past_key_values = self.ska_attn(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    rodimus_caches=rodimus_caches,
+                    **kwargs
+                )
+
+                if self.fuse_norm:
+                    hidden_states = self.mlp_norm(
+                        hidden_states,
+                        residual=residual,
+                        prenorm=False,
+                        residual_in_fp32=self.residual_in_fp32
+                    )
+                else:
+                    hidden_states = residual + hidden_states
+                    hidden_states = self.mlp_norm(hidden_states.to(dtype=self.mlp_norm.weight.dtype))
+
+                hidden_states = self.mlp(hidden_states, **kwargs)
+
+        if self.block_residual_in_fp32:
+            hidden_states = (hidden_states, residual)
+        else:
+            hidden_states = (residual + hidden_states).to(dtype=hidden_states.dtype)
 
         outputs = (hidden_states, attentions, past_key_values)
-
         return outputs
 
 
-class HGRN2PreTrainedModel(PreTrainedModel):
+class RodimusPreTrainedModel(PreTrainedModel):
 
-    config_class = HGRN2Config
+    config_class = RodimusConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
-    _no_split_modules = ['HGRN2Block']
+    _no_split_modules = ['RodimusBlock']
     _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
+        if self.config.block_type == "rodimus":
+            self.num_residuals_per_layer = 1
+        elif self.config.block_type == "rodimus_plus":
+            self.num_residuals_per_layer = 3
+        else:
+            raise NotImplementedError()
 
     def _init_weights(
         self,
         module: nn.Module,
         prenorm_residual_strategy: Optional[str] = 'rescale',
-        num_residuals_per_layer: int = 2,
     ):
+        num_residuals_per_layer = self.num_residuals_per_layer
+
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
@@ -131,6 +259,37 @@ class HGRN2PreTrainedModel(PreTrainedModel):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
         elif hasattr(module, 'reset_parameters'):
             module.reset_parameters()
+
+        sigmoid_bias_max = 0.999
+        sigmoid_bias_min = 0.9
+        max_ = 1 - sigmoid_bias_min
+        min_ = 1 - sigmoid_bias_max
+        g_gate_bias = torch.exp(
+            torch.rand(self.config.expand_ratio) * (math.log(max_) - math.log(min_))
+            + math.log(min_)
+        ).clamp(min=1e-4)
+        g_gate_bias = g_gate_bias + torch.log(-torch.expm1(-g_gate_bias))
+        tau_gate_bias = torch.logit(torch.empty((self.config.expand_ratio, )).uniform_(1/16, 0.9))
+
+        if hasattr(module, 'i_gate_proj'):
+            nn.init.xavier_uniform_(module.i_gate_proj[0].weight, gain=2 ** -2.5)
+            nn.init.xavier_uniform_(module.i_gate_proj[1].weight, gain=2 ** -2.5)
+            nn.init.zeros_(module.i_gate_proj[1].bias)
+        if hasattr(module, 'g_gate_proj'):
+            nn.init.xavier_uniform_(module.g_gate_proj.weight, gain=2 ** -2.5)
+            with torch.no_grad():
+                if not isinstance(module.g_gate_proj.bias, torch.distributed.tensor.DTensor):
+                    module.g_gate_proj.bias.copy_(g_gate_bias)
+                else:
+                    logger.warning_once("`g_gate_proj.bias` is a DTensor, skipping initialization")
+
+        if hasattr(module, 'tau_gate_proj'):
+            nn.init.xavier_uniform_(module.tau_gate_proj.weight, gain=2 ** -2.5)
+            with torch.no_grad():
+                if not isinstance(module.tau_gate_proj.bias, torch.distributed.tensor.DTensor):
+                    module.tau_gate_proj.bias.copy_(tau_gate_bias)
+                else:
+                    logger.warning_once("`tau_gate_proj.bias` is a DTensor, skipping initialization")
 
         if prenorm_residual_strategy is not None:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
@@ -159,17 +318,24 @@ class HGRN2PreTrainedModel(PreTrainedModel):
                     raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
-class HGRN2Model(HGRN2PreTrainedModel):
+class RodimusModel(RodimusPreTrainedModel):
 
-    def __init__(self, config: HGRN2Config):
+    def __init__(self, config: RodimusConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self.block_residual_in_fp32 = config.block_residual_in_fp32
+        
+        if config.block_residual_in_fp32:
+            if not config.residual_in_fp32:
+                logger.warning_once('`residual_in_fp32=False` is incompatible with `block_residual_in_fp32=True` Setting `residual_in_fp32=True`...')
+                config.residual_in_fp32 = True
+            if not config.fuse_norm:
+                logger.warning_once('`fuse_norm=False` is incompatible with `block_residual_in_fp32=True` Setting `fuse_norm=True`...')
+                config.fuse_norm = True
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        if config.use_lower_bound:
-            self.lower_bounds = nn.Parameter(torch.zeros(config.num_hidden_layers, config.hidden_size))
-        self.layers = nn.ModuleList([HGRN2Block(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([RodimusBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -194,8 +360,9 @@ class HGRN2Model(HGRN2PreTrainedModel):
         return_dict: Optional[bool] = None,
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
+
         if output_attentions:
-            warnings.warn("`HGRN2Model` does not `output_attentions` now, setting it to `False`.")
+            warnings.warn("`RodimusModel` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -221,15 +388,11 @@ class HGRN2Model(HGRN2PreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
-
-        if self.config.use_lower_bound:
-            lower_bounds = self.lower_bounds.softmax(0, dtype=torch.float)
-            lower_bounds = lower_bounds.cumsum(0) - lower_bounds[0]
-        for i, layer in enumerate(self.layers):
+        residual = None
+        for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            lower_bound = lower_bounds[i] if self.config.use_lower_bound else None
             if self.gradient_checkpointing and self.training:
                 hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
                     layer.__call__,
@@ -238,7 +401,7 @@ class HGRN2Model(HGRN2PreTrainedModel):
                     past_key_values,
                     use_cache,
                     output_attentions,
-                    lower_bound,
+                    residual,
                     **kwargs
                 )
             else:
@@ -248,14 +411,27 @@ class HGRN2Model(HGRN2PreTrainedModel):
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    lower_bound=lower_bound,
+                    residual=residual,
                     **kwargs
                 )
+                
+            if self.block_residual_in_fp32:
+                hidden_states, residual = hidden_states
+            else:
+                residual = None
 
             if output_attentions:
                 all_attns += (attentions,)
 
-        hidden_states = self.norm(hidden_states)
+        if self.block_residual_in_fp32:
+            hidden_states = self.norm(
+                hidden_states,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=True,
+            )
+        else:
+            hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -271,13 +447,13 @@ class HGRN2Model(HGRN2PreTrainedModel):
         )
 
 
-class HGRN2ForCausalLM(HGRN2PreTrainedModel, GenerationMixin):
+class RodimusForCausalLM(RodimusPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = HGRN2Model(config)
+        self.model = RodimusModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None
@@ -327,7 +503,7 @@ class HGRN2ForCausalLM(HGRN2PreTrainedModel, GenerationMixin):
         inputs_embeds: Optional[torch.Tensor] = None,
         use_cache: bool = True,
         logits_to_keep: Optional[int] = None,
-        **kwargs: Unpack[Dict]
+        **kwargs
     ):
         # only last token for `inputs_ids` if the `past_key_values` is not empty.
         if past_key_values is not None and len(past_key_values) > 0:
@@ -386,7 +562,7 @@ class HGRN2ForCausalLM(HGRN2PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:
