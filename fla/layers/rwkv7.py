@@ -30,10 +30,10 @@ class RWKV7Attention(nn.Module):
         hidden_size: int = 1024,
         head_dim: Optional[int] = 64,
         num_heads: Optional[int] = None,
-        decay_low_rank_dim: int = 64,
-        gate_low_rank_dim: int = 128,
-        a_low_rank_dim: int = 64,
-        v_low_rank_dim: int = 16,
+        decay_low_rank_dim: Optional[int] = None,
+        gate_low_rank_dim: Optional[int] = None,
+        a_low_rank_dim: Optional[int] = None,
+        v_low_rank_dim: Optional[int] = None,
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
@@ -47,6 +47,7 @@ class RWKV7Attention(nn.Module):
         self.mode = mode
         assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
         self.hidden_size = hidden_size
+        C = self.hidden_size
 
         self.key_dim = hidden_size
         self.value_dim = value_dim if value_dim is not None else hidden_size
@@ -60,10 +61,30 @@ class RWKV7Attention(nn.Module):
             self.num_heads = num_heads
         self.head_v_dim = int(self.value_dim // self.num_heads)
 
-        self.decay_low_rank_dim = decay_low_rank_dim
-        self.gate_low_rank_dim = gate_low_rank_dim
-        self.a_low_rank_dim = a_low_rank_dim
-        self.v_low_rank_dim = v_low_rank_dim
+        if decay_low_rank_dim is None:
+            decay_low_rank_dim = max(32, int(round((1.8 * (C**0.5)) / 32) * 32))
+            self.decay_low_rank_dim = decay_low_rank_dim
+        else:
+            self.decay_low_rank_dim = decay_low_rank_dim
+
+        if gate_low_rank_dim is None:
+            gate_low_rank_dim = max(32, int(round((0.6 * (C**0.8)) / 32) * 32))
+            self.gate_low_rank_dim = gate_low_rank_dim
+        else:
+            self.gate_low_rank_dim = gate_low_rank_dim
+
+        if a_low_rank_dim is None:
+            a_low_rank_dim = max(32, int(round((1.8 * (C**0.5)) / 32) * 32))
+            self.a_low_rank_dim = a_low_rank_dim
+        else:
+            self.a_low_rank_dim = a_low_rank_dim
+            
+        if v_low_rank_dim is None:
+            v_low_rank_dim = max(32, int(round((1.3 * (C**0.5)) / 32) * 32))
+            self.v_low_rank_dim = v_low_rank_dim
+        else:
+            self.v_low_rank_dim = v_low_rank_dim
+
         self.layer_idx = layer_idx
         self.num_hidden_layers = num_hidden_layers
         self.fuse_norm = fuse_norm
