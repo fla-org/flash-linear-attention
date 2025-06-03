@@ -75,7 +75,7 @@ def benchmark(T, D, provider):
         )
     elif provider.startswith('causal_conv1d_fwdbwd'):
         results = triton.testing.do_bench(
-            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens, residual=True).backward(x),
+            lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens).backward(x),
             quantiles=quantiles
         )
     elif provider.startswith('causal_conv1d_cuda_fwdbwd'):

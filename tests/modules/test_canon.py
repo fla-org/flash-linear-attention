@@ -6,7 +6,7 @@ import pytest
 import torch
 from einops import rearrange
 
-from fla.modules.canon import canon
+from fla.modules.convolution import causal_conv1d
 from fla.utils import assert_close, device
 
 try:
@@ -20,7 +20,9 @@ except ImportError:
 @pytest.mark.parametrize('D', [128, 1024])
 @pytest.mark.parametrize('W', [4])
 @pytest.mark.parametrize('activation', ['swish', None])
-@pytest.mark.parametrize('residual', [True, False])
+@pytest.mark.parametrize('has_bias', [True, False])
+@pytest.mark.parametrize('has_residual', [True, False])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
 @pytest.mark.skipif(
     causal_conv1d_fn is None,
     reason="causal_conv1d is not installed"
@@ -29,12 +31,23 @@ except ImportError:
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
 )
-def test_canon(B: int, T: int, D: int, W: int, activation: str, residual: bool):
+def test_canon(
+    B: int,
+    T: int,
+    D: int,
+    W: int,
+    activation: str,
+    has_bias: bool,
+    has_residual: bool,
+    dtype: torch.dtype
+):
     torch.manual_seed(42)
 
-    x = torch.randn(B, T, D).to(device)
-    weight = torch.randn(D, W).to(device)
-    bias = torch.randn(D).to(device)
+    x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
+    weight = torch.randn(D, W).to(device, dtype).requires_grad_(True)
+    bias = torch.randn(D).to(device, dtype).requires_grad_(True) if has_bias else None
+    residual = x.detach().clone().requires_grad_(True) if has_residual else None
+    dy = torch.randn(B, T, D).to(device, dtype)
 
     ref = causal_conv1d_fn(
         x=rearrange(x, "b t d -> b d t"),
@@ -43,11 +56,32 @@ def test_canon(B: int, T: int, D: int, W: int, activation: str, residual: bool):
         activation=activation,
     )
     ref = rearrange(ref, "b d t -> b t d")
-    if residual:
-        ref += x
+    if residual is not None:
+        ref += residual
+    ref.backward(dy)
+    ref_dx, x.grad = x.grad, None
+    ref_dw, weight.grad = weight.grad, None
+    if has_bias:
+        ref_db, bias.grad = bias.grad, None
+    if has_residual:
+        ref_dr, residual.grad = residual.grad, None
 
-    tri = canon(x, weight, bias, residual=x if residual else None, activation=activation)
+    tri = causal_conv1d(x, weight, bias, residual=residual, activation=activation)
+    tri.backward(dy)
+    tri_dx, x.grad = x.grad, None
+    tri_dw, weight.grad = weight.grad, None
+    if has_bias:
+        tri_db, bias.grad = bias.grad, None
+    if has_residual:
+        tri_dr, residual.grad = residual.grad, None
+
     assert_close(" y", ref, tri, 1e-3)
+    assert_close("dx", ref_dx, tri_dx, 1e-3)
+    assert_close("dw", ref_dw, tri_dw, 1e-3)
+    if has_bias:
+        assert_close("db", ref_db, tri_db, 1e-3)
+    if has_residual:
+        assert_close("dr", ref_dr, tri_dr, 1e-3)
 
 
 @pytest.mark.parametrize("N", [4])
@@ -55,12 +89,23 @@ def test_canon(B: int, T: int, D: int, W: int, activation: str, residual: bool):
 @pytest.mark.parametrize('D', [128, 1024])
 @pytest.mark.parametrize("W", [4])
 @pytest.mark.parametrize("activation", ['swish', None])
-@pytest.mark.parametrize("residual", [True, False])
+@pytest.mark.parametrize("has_bias", [True, False])
+@pytest.mark.parametrize("has_residual", [True, False])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.skipif(
     causal_conv1d_fn is None,
     reason="causal_conv1d is not installed"
 )
-def test_canon_varlen(N: int, T: int, D: int, W: int, activation: str, residual: bool):
+def test_canon_varlen(
+    N: int,
+    T: int,
+    D: int,
+    W: int,
+    activation: str,
+    has_bias: bool,
+    has_residual: bool,
+    dtype: torch.dtype
+):
     torch.manual_seed(42)
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
@@ -68,9 +113,11 @@ def test_canon_varlen(N: int, T: int, D: int, W: int, activation: str, residual:
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
 
-    x = torch.randn(1, T, D).to(device)
-    weight = torch.randn(D, W).to(device)
-    bias = torch.randn(D).to(device)
+    x = torch.randn(1, T, D).to(device, dtype).requires_grad_(True)
+    weight = torch.randn(D, W).to(device, dtype).requires_grad_(True)
+    bias = torch.randn(D).to(device, dtype).requires_grad_(True) if has_bias else None
+    residual = x.detach().clone().requires_grad_(True) if has_residual else None
+    dy = torch.randn(1, T, D).to(device, dtype)
 
     ref = torch.cat([
         rearrange(
@@ -81,9 +128,30 @@ def test_canon_varlen(N: int, T: int, D: int, W: int, activation: str, residual:
                 activation=activation,
             ),
             "b t d -> b d t"
-        ) + (torch.zeros_like(x[:, bos:eos]) if not residual else x[:, bos:eos])
+        ) + (residual[:, bos:eos] if has_residual else torch.zeros_like(x[:, bos:eos]))
         for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:])
     ], 1)
+    ref.backward(dy)
+    ref_dx, x.grad = x.grad, None
+    ref_dw, weight.grad = weight.grad, None
+    if has_bias:
+        ref_db, bias.grad = bias.grad, None
+    if has_residual:
+        ref_dr, residual.grad = residual.grad, None
 
-    tri = canon(x, weight, bias, residual=x if residual else None, activation=activation, cu_seqlens=cu_seqlens)
-    assert_close("y", ref, tri, 1e-5)
+    tri = causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
+    tri.backward(dy)
+    tri_dx, x.grad = x.grad, None
+    tri_dw, weight.grad = weight.grad, None
+    if has_bias:
+        tri_db, bias.grad = bias.grad, None
+    if has_residual:
+        tri_dr, residual.grad = residual.grad, None
+
+    assert_close(" y", ref, tri, 1e-3)
+    assert_close("dx", ref_dx, tri_dx, 1e-3)
+    assert_close("dw", ref_dw, tri_dw, 1e-3)
+    if has_bias:
+        assert_close("db", ref_db, tri_db, 1e-3)
+    if has_residual:
+        assert_close("dr", ref_dr, tri_dr, 1e-3)
