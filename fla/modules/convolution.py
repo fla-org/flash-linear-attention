@@ -340,8 +340,8 @@ def causal_conv1d(
     """
     Implementation of Causal Conv1d layer used by Mamba/Mamba2 and DeltaNet.
 
-    If residual is provided, it functions as the Canon operation
-    mentioned in https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5240330.
+    If `residual` is provided, it functions as the Canon operation
+    as mentioned in https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5240330.
 
     Args:
         x:
