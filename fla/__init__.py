@@ -14,6 +14,7 @@ from fla.layers import (
     HGRNAttention,
     LightNetAttention,
     LinearAttention,
+    MesaNet,
     MultiScaleRetention,
     NativeSparseAttention,
     PaTHAttention,
@@ -44,6 +45,9 @@ from fla.models import (
     LightNetModel,
     LinearAttentionForCausalLM,
     LinearAttentionModel,
+    MesaNetConfig,
+    MesaNetForCausalLM,
+    MesaNetModel,
     NSAForCausalLM,
     NSAModel,
     PaTHAttentionForCausalLM,
@@ -116,6 +120,10 @@ __all__ = [
     'RodimusModel',
     'TransformerForCausalLM',
     'TransformerModel',
+    'MesaNetConfig',
+    'MesaNetForCausalLM',
+    'MesaNetModel',
+    'MesaNet'
 ]
 
 __version__ = '0.2.2'
