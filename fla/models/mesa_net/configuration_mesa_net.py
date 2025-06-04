@@ -17,8 +17,9 @@ class MesaNetConfig(PretrainedConfig):
         use_gate: bool = False,
         use_short_conv: bool = True,
         conv_size: int = 4,
-        head_dim: int = 64,
-        num_heads: int = 32,
+        head_dim: int = 128,
+        num_heads: int = 16,
+        lambda_lower_bound: float = 0.25,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
@@ -56,6 +57,7 @@ class MesaNetConfig(PretrainedConfig):
         self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
+        self.lambda_lower_bound = lambda_lower_bound
 
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu

@@ -78,6 +78,7 @@ class MesaNet(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        lambda_lower_bound: float = 0.25,
         **kwargs
     ) -> MesaNet:
         super().__init__()
@@ -100,6 +101,7 @@ class MesaNet(nn.Module):
         self.head_k_dim = head_dim
         self.head_v_dim = int(head_dim * self.expand_v)
         self.layer_idx = layer_idx
+        self.lambda_lower_bound = lambda_lower_bound
 
         # Consistency check: Ensure expand_v produces integer values
         if not math.isclose(self.key_dim * expand_v, self.value_dim, rel_tol=1e-5):
@@ -231,7 +233,7 @@ class MesaNet(nn.Module):
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
-        lamb = self.lamb_proj(hidden_states).sigmoid() * 0.75 + 0.25
+        lamb = F.softplus(self.lamb_proj(hidden_states)) + 0.25
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
