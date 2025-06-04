@@ -180,7 +180,7 @@ def test_chunk_varlen(
             v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
             beta=beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
             g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            lamb=lamb[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            lamb=lamb,
             h_kk_init=h_kk_init[i],
             h_kv_init=h_kv_init[i]
         )
