@@ -81,8 +81,7 @@ def rotary_embedding_kernel(
         o_cs = o_t + seq_offsets
     else:
         o_cs = o_t + tl.load(seq_offsets + i_n)
-    m_t = (o_t >= 0) & (o_t < T)
-    m_t = m_t & (o_cs >= 0) & (o_cs < TR)
+    m_t = (o_t >= 0) & (o_t < T) & (o_cs >= 0) & (o_cs < TR)
 
     if not INTERLEAVED:
         # Load the 1st and 2nd halves of x, do calculation, then store to 1st and 2nd halves of out
