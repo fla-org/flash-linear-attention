@@ -18,7 +18,7 @@ def convert(
     output: str,
     precision: str = 'float32'
 ):
-    weights = torch.load(rwkv7, weights_only=True)
+    weights = torch.load(rwkv7, weights_only=True, map_location='cpu')
     config = RWKV7Config()
     config.vocab_size = weights['emb.weight'].shape[0]  # 50304
     config.hidden_size = weights['blocks.0.ffn.key.weight'].shape[1]  # 768
@@ -36,17 +36,20 @@ def convert(
         config.v_low_rank_dim = weights['blocks.1.att.v1'].shape[1]  # 32
     except KeyError:
         config.v_low_rank_dim = 32
-    config.torch_dtype = precision
-
-    print(f"Creating model with config:\n{config}")
-    model = AutoModelForCausalLM.from_config(config)
-
+    
     if precision in ['bf16', 'bfloat16']:
-        model = model.to(torch.bfloat16)
+        precision = 'bfloat16'
+        dtype = torch.bfloat16
     if precision in ['fp16', 'float16']:
-        model = model.to(torch.float16)
+        precision = 'float16'
+        dtype = torch.float16
     if precision in ['fp64', 'double', 'float64']:
-        model = model.to(torch.double)
+        precision = 'float64'
+        dtype = torch.float64
+
+    config.torch_dtype = precision
+    print(f"Creating model with config:\n{config}")
+    model = AutoModelForCausalLM.from_config(config).to(dtype=dtype)
 
     print(model)
     model_dict = model.state_dict()
