@@ -133,10 +133,10 @@ class GatedDeltaNet(nn.Module):
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.v_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-        self.a_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
-        self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
+        self.a_proj = nn.Linear(hidden_size, self.num_heads_v, bias=False)
+        self.b_proj = nn.Linear(hidden_size, self.num_heads_v, bias=False)
 
-        A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
+        A = torch.empty(self.num_heads_v, dtype=torch.float32).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
         self.A_log._no_weight_decay = True
         # hard coded for now
@@ -144,7 +144,7 @@ class GatedDeltaNet(nn.Module):
         dt_max = 0.1
         dt_init_floor = 1e-4
         dt = torch.exp(
-            torch.rand(self.num_heads) * (math.log(dt_max) - math.log(dt_min))
+            torch.rand(self.num_heads_v) * (math.log(dt_max) - math.log(dt_min))
             + math.log(dt_min)
         )
         dt = torch.clamp(dt, min=dt_init_floor)
