@@ -112,16 +112,16 @@ class GatedDeltaNet(nn.Module):
         self.num_heads_v = num_heads_v if num_heads_v is not None else num_heads
 
         self.key_dim = int(self.num_heads * self.head_dim)
-        self.value_dim = int(self.key_dim * self.expand_v)
+        self.value_dim = int(self.num_heads_v * self.head_dim * self.expand_v)
         self.head_k_dim = head_dim
         self.head_v_dim = int(head_dim * self.expand_v)
         self.layer_idx = layer_idx
 
         # Consistency check: Ensure expand_v produces integer values
-        if not math.isclose(self.key_dim * expand_v, self.value_dim, rel_tol=1e-5):
+        if not math.isclose(self.num_heads_v * self.head_dim * expand_v, self.value_dim, rel_tol=1e-5):
             raise ValueError(
                 f"expand_v={expand_v} does not produce an integer value when multiplied by key_dim={self.key_dim}. "
-                f"Resulting value_dim would be {self.key_dim * expand_v}, which is invalid for nn.Linear."
+                f"Resulting value_dim would be {self.num_heads_v * self.head_dim * expand_v}, which is invalid for nn.Linear."
             )
         if not math.isclose(head_dim * expand_v, self.head_v_dim, rel_tol=1e-5):
             raise ValueError(
