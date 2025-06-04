@@ -20,7 +20,7 @@ if not check_pytorch_version('2.4'):
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16, 32]
     ],
-    key=['D', 'T'],
+    key=['D'],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit
@@ -40,11 +40,12 @@ def fused_addcmul_fwd_kernel(
     oxa,
     oxg,
     use_xg: tl.constexpr,
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,
     BD: tl.constexpr,
 ):
-    xoffset = tl.program_id(0) * D
+    i_b, i_t = tl.program_id(0), tl.program_id(1)
+    xoffset = i_b * T * D + i_t * D
     indices = tl.arange(0, BD)
     xindex = xoffset + indices
     xmask = indices < D
@@ -78,7 +79,7 @@ def fused_addcmul_fwd_kernel(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16, 32]
     ],
-    key=['D', 'T'],
+    key=['D'],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit
@@ -98,12 +99,13 @@ def addcmul_bwd_kernel1(
     ghidden,
     gx,
     use_xg: tl.constexpr,
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,
     BD: tl.constexpr,
     DTYPE: tl.constexpr
 ):
-    xoffset = tl.program_id(0) * BD
+    i_b, i_t = tl.program_id(0), tl.program_id(1)
+    xoffset = i_b * T * D + i_t * D
     indices = tl.arange(0, BD)
     xindex = xoffset + indices
     xmask = indices < D
@@ -136,7 +138,7 @@ def addcmul_bwd1(d_xr, d_xw, d_xk, d_xv, d_xa, d_xg,
     B, T, D = hidden_states.size()
     g_hiddn = hidden_states if inplace else torch.empty_like(hidden_states)
     g_delta = torch.empty_like(delta)
-    addcmul_bwd_kernel1[(B*T,)](
+    addcmul_bwd_kernel1[(B, T)](
         ixr=x_r,
         ixw=x_w,
         ixk=x_k,
@@ -152,7 +154,7 @@ def addcmul_bwd1(d_xr, d_xw, d_xk, d_xv, d_xa, d_xg,
         ghidden=g_hiddn,
         gx=g_delta,
         use_xg=use_xg,
-        T=T // 32,
+        T=T,
         D=D,
         BD=triton.next_power_of_2(D),
         DTYPE=tl.float16 if hidden_states.dtype == torch.float16 else tl.float32,
@@ -191,7 +193,7 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
             use_xg = False
             oxg = None
 
-        fused_addcmul_fwd_kernel[(B*T,)](
+        fused_addcmul_fwd_kernel[(B, T)](
             hidden_states,
             delta,
             x_r,
@@ -207,8 +209,8 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
             oxa,
             oxg,
             use_xg,
-            T // 32,
-            D,
+            T=T,
+            D=D,
             BD=triton.next_power_of_2(D),
         )
         ctx.save_for_backward(hidden_states, delta,
