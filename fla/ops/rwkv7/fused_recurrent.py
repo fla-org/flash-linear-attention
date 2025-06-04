@@ -6,7 +6,6 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.ops.generalized_delta_rule import fused_recurrent_dplr_delta_rule
 from fla.ops.utils.op import exp
@@ -313,6 +312,4 @@ def fused_mul_recurrent_rwkv7(
         reverse,
         cu_seqlens,
     )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state
