@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from einops import rearrange
+from einops import rearrange, repeat
 from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
@@ -250,7 +250,7 @@ class GatedDeltaNet(nn.Module):
                 f"num_heads_v={self.num_heads_v} must be divisible by num_heads={self.num_heads}."
             )
             q, k = map(
-                lambda x: rearrange(x, '... h d -> ... (h g) d', g=self.num_heads_v // self.num_heads),
+                lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_heads_v // self.num_heads),
                 (q, k)
             )
 
