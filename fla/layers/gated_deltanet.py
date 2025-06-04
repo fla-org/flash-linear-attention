@@ -85,6 +85,7 @@ class GatedDeltaNet(nn.Module):
         expand_v: float = 2,
         head_dim: int = 256,
         num_heads: int = 6,
+        num_heads_v: int = None,
         mode: str = 'chunk',
         use_gate: bool = True,
         use_short_conv: bool = True,
@@ -108,6 +109,7 @@ class GatedDeltaNet(nn.Module):
 
         self.head_dim = head_dim
         self.num_heads = num_heads
+        self.num_heads_v = num_heads_v if num_heads_v is not None else num_heads
 
         self.key_dim = int(self.num_heads * self.head_dim)
         self.value_dim = int(self.key_dim * self.expand_v)
@@ -242,6 +244,16 @@ class GatedDeltaNet(nn.Module):
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
+
+        if self.num_heads_v > self.num_heads:
+            assert self.num_heads_v % self.num_heads == 0, (
+                f"num_heads_v={self.num_heads_v} must be divisible by num_heads={self.num_heads}."
+            )
+            q, k = map(
+                lambda x: rearrange(x, '... h d -> ... (h g) d', g=self.num_heads_v // self.num_heads),
+                (q, k)
+            )
+
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
 
