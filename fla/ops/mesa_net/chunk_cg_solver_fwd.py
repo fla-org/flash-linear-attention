@@ -25,7 +25,7 @@ def chunk_update_once(
     b_o = tl.dot((tl.dot(b_p.to(b_k.dtype), tl.trans(b_k)) * b_m).to(b_v.dtype), b_v)
     b_o += tl.dot((b_p * b_g_exp_q).to(b_h.dtype), b_h)
     if b_lamb is not None:
-        b_o += b_lamb[:, None] * b_p
+        b_o += b_lamb[None, :] * b_p
     return b_o
 
 
@@ -77,7 +77,7 @@ def chunk_fwd_mesa_cg_dim64_kernel(
 
     g += bos * H + i_h
     beta += bos * H + i_h
-    lamb += bos * H + i_h
+    lamb += i_h * K
 
     if CALCULATE_OUTPUT:
         o += (bos * H + i_h) * K
@@ -96,7 +96,7 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     b_g = tl.load(p_g, boundary_check=(0,))
     p_beta = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_beta = tl.load(p_beta, boundary_check=(0,))
-    p_lamb = tl.make_block_ptr(lamb, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_lamb = tl.make_block_ptr(lamb, (K,), (1,), (0,), (BK,), (0,))
     b_lamb = tl.load(p_lamb, boundary_check=(0,))
 
     b_m = safe_exp(b_g[:, None] - b_g[None, :]) * b_beta[None, :]
@@ -108,7 +108,7 @@ def chunk_fwd_mesa_cg_dim64_kernel(
 
     b_h_diagonal = tl.load(h + (tl.arange(0, BK) * (K+1)))
     b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_x += (b_q / (b_h_diagonal[None, :] + b_lamb[:, None]))
+    b_x += (b_q / (b_h_diagonal[None, :] + b_lamb[None, :]))
     b_r += b_q - chunk_update_once(b_x, b_k, b_k, b_m, b_g_exp_q, b_h, b_lamb)
     b_p += b_r
     b_delta_old = tl.sum(b_r*b_r, axis=1)

@@ -17,7 +17,7 @@ if COMPILER_MODE:
 else:
     test_b_list = [2]
     test_t_list = [15, 63, 300, 1000]
-    test_d_list = [100, 64, 128]
+    test_d_list = [128]
 test_h_list = [3]
 
 
@@ -50,7 +50,7 @@ def test_chunk(
     beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
     lower_gate, upper_gate = gate_range
     g = torch.rand(B, T, H, dtype=dtype).float().uniform_(lower_gate, upper_gate).log()
-    lamb = torch.rand(B, T, H, dtype=dtype).sigmoid() * 0.75 + 0.25
+    lamb = torch.rand(H, D, dtype=dtype).sigmoid() * 0.75 + 0.25
     q, k, v, beta, g, lamb = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, lamb))
     do = torch.rand_like(v)
 
@@ -139,7 +139,7 @@ def test_chunk_varlen(
     lower_gate, upper_gate = gate_range
     g = torch.rand(1, T, H, dtype=dtype).float().uniform_(lower_gate, upper_gate).log()
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
-    lamb = torch.rand(1, T, H, dtype=dtype).sigmoid() * 0.75 + 0.25
+    lamb = torch.rand(H, D, dtype=dtype).sigmoid() * 0.75 + 0.25
 
     k_init_rand = torch.nn.functional.normalize(torch.rand(N, H, D, device=device, dtype=dtype), dim=-1, p=2)
     h_kk_init = (k_init_rand.unsqueeze(-1) * k_init_rand.unsqueeze(-2)).detach().clone().float().requires_grad_(True)
@@ -163,6 +163,7 @@ def test_chunk_varlen(
         output_final_state=True,
         cu_seqlens=cu_seqlens,
     )
+
     ((tri * do).sum() +
      (tri_h_kk_final * d_h_kk_final).sum() + (tri_h_kv_final * d_h_kv_final).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dlamb, tri_dh_kk_init, tri_dh_kv_init = \

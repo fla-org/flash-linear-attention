@@ -74,7 +74,7 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     k += (bos * H + i_h) * K
     dk += (bos * H + i_h) * K
     dk_beta += (bos * H + i_h) * K
-    dlamb += (bos * H + i_h)
+    dlamb += (i_tg * H + i_h).to(tl.int64) * K
     beta += (bos * H + i_h)
     dbeta += (bos * H + i_h)
     g += bos * H + i_h
@@ -95,8 +95,8 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     b_q_star = tl.load(p_q_star, boundary_check=(0, 1))
     p_dq = tl.make_block_ptr(dq, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     b_dq = tl.load(p_dq, boundary_check=(0, 1))
-    b_dlamb = -tl.sum(b_q_star * b_dq, axis=1)
-    p_dlamb = tl.make_block_ptr(dlamb, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    b_dlamb = -tl.sum(b_q_star * b_dq, axis=0)
+    p_dlamb = tl.make_block_ptr(dlamb, (K,), (1,), (0,), (BK,), (0,))
     tl.store(p_dlamb, b_dlamb.to(p_dlamb.dtype.element_ty), boundary_check=(0,))
 
     p_h = tl.make_block_ptr(h, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
@@ -109,6 +109,7 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     b_v = tl.load(p_k, boundary_check=(0, 1))
     b_k = b_v * b_beta[:, None]
     # calculation
+
     b_dg_last = tl.sum(b_h * b_dh)
     b_dg_last *= exp(b_g_last)
     o_t = tl.arange(0, BT)
@@ -167,9 +168,8 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
     BV = triton.next_power_of_2(V)
     dk = torch.empty_like(k)
     dg = torch.empty_like(g)
-    dlamb = torch.empty_like(g)
     dbeta = torch.empty_like(beta)
-
+    dlamb = torch.empty(B, NT, H, K, dtype=torch.float32, device=k.device)
     grid = (NT, B * H)
 
     chunk_mesa_net_h_kk_bwd_intra_kernel[grid](
@@ -196,4 +196,5 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
         BK=BK,
         BV=BV,
     )
+    dlamb = dlamb.sum([0, 1])
     return dk, dg, dlamb, dbeta

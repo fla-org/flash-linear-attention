@@ -250,14 +250,14 @@ def chunk_mesa_net(
         >>> from einops import rearrange
         >>> from fla.ops.mesa_net import chunk_mesa_net
         # inputs with equal lengths
-        >>> B, T, H, K, V = 4, 2048, 4, 512, 512
+        >>> B, T, H, K, V = 4, 2048, 16, 128, 128
         >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> k = F.normalize(torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda'), p=2, dim=-1)
         >>> v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device='cuda')
         >>> g = F.logsigmoid(torch.randn(B, T, H, dtype=torch.bfloat16, device='cuda'))
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         # lower bound is 0.25 for numerical stability
-        >>> lamb = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid() * 0.75 + 0.25
+        >>> lamb = F.softplus(torch.rand(H, K, dtype=torch.bfloat16, device='cuda')) + 0.25
         >>> init_state_kk = torch.randn(B, H, K, V, dtype=torch.float32, device='cuda')
         >>> init_state_kv = torch.randn(B, H, K, V, dtype=torch.float32, device='cuda')
         >>> o, (final_state_kk, final_state_kv) = chunk_mesa_net(
