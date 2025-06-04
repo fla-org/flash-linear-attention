@@ -36,7 +36,7 @@ def convert(
         config.v_low_rank_dim = weights['blocks.1.att.v1'].shape[1]  # 32
     except KeyError:
         config.v_low_rank_dim = 32
-    
+
     if precision in ['bf16', 'bfloat16']:
         precision = 'bfloat16'
         dtype = torch.bfloat16
