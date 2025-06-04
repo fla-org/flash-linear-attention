@@ -81,6 +81,8 @@ def rotary_embedding_kernel(
         o_cs = o_t + seq_offsets
     else:
         o_cs = o_t + tl.load(seq_offsets + i_n)
+    m_t = (o_t >= 0) & (o_t < T)
+    m_t = m_t & (o_cs >= 0) & (o_cs < TR)
 
     if not INTERLEAVED:
         # Load the 1st and 2nd halves of x, do calculation, then store to 1st and 2nd halves of out
@@ -88,7 +90,7 @@ def rotary_embedding_kernel(
         p_x = x + o_t[:, None] * H*D + o_r[None, :]
         p_cos = cos + (o_cs[:, None] * R + o_r[None, :])
         p_sin = sin + (o_cs[:, None] * R + o_r[None, :])
-        mask = (o_t[:, None] >= 0) & (o_t[:, None] < T) & (o_r[None, :] < R)
+        mask = m_t[:, None] & (o_r < R)[None, :]
 
         b_cos = tl.load(p_cos, mask=mask, other=1.0).to(tl.float32)
         b_sin = tl.load(p_sin, mask=mask, other=0.0).to(tl.float32)
@@ -116,7 +118,7 @@ def rotary_embedding_kernel(
         p_x1 = x + o_t[:, None] * H*D + o_d_swap[None, :]
         p_cos = cos + (o_cs[:, None] * R + o_d_repeat[None, :])
         p_sin = sin + (o_cs[:, None] * R + o_d_repeat[None, :])
-        mask = (o_cs[:, None] >= 0) & (o_cs[:, None] < TR) & (o_d_repeat[None, :] < R)
+        mask = m_t[:, None] & (o_d_repeat < R)[None, :]
 
         b_cos = tl.load(p_cos, mask=mask, other=1.0).to(tl.float32)
         b_sin = tl.load(p_sin, mask=mask, other=0.0).to(tl.float32)
