@@ -200,6 +200,7 @@ class RWKV7Attention(nn.Module):
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
         v_first: torch.Tensor = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
         if attention_mask is not None:
@@ -217,7 +218,7 @@ class RWKV7Attention(nn.Module):
 
         if attention_mask is not None:
             hidden_states = hidden_states.mul(attention_mask[:, -seq_len:, None])
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+
         # delta [batch_size, seq_len, hidden_size]
         if last_state is None:
             delta = token_shift(hidden_states, cu_seqlens)

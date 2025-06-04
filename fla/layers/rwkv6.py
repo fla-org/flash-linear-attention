@@ -105,6 +105,7 @@ class RWKV6Attention(nn.Module):
         past_key_values: Optional[Cache] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        cu_seqlens: Optional[torch.LongTensor] = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
         if attention_mask is not None:
@@ -124,7 +125,7 @@ class RWKV6Attention(nn.Module):
 
         if attention_mask is not None:
             hidden_states = hidden_states.mul_(attention_mask[:, -hidden_states.shape[-2]:, None])
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+
         if hidden_states.shape[1] == 1 and last_state is not None:
             shifted = last_state['conv_state'].unsqueeze(1)
             delta = shifted - hidden_states
@@ -312,7 +313,7 @@ class LerpLinear(nn.Module):
         return s
 
     def forward(self, x: torch.Tensor, delta: Optional[torch.Tensor] = None,
-                cu_seqlens: Optional[torch.Tensor] = None) -> torch.Tensor:
+                cu_seqlens: Optional[torch.LongTensor] = None) -> torch.Tensor:
         if delta is None:
             delta = token_shift(x, cu_seqlens)
         return self.linear(x + delta * self.mu)
@@ -347,7 +348,7 @@ class DDLerpLinear(nn.Module):
 
     def forward(self, x: torch.Tensor, mu: torch.Tensor,
                 delta: Optional[torch.Tensor] = None,
-                cu_seqlens: Optional[torch.Tensor] = None) -> torch.Tensor:
+                cu_seqlens: Optional[torch.LongTensor] = None) -> torch.Tensor:
         if delta is None:
             delta = token_shift(x, cu_seqlens)
         return self.linear(x + delta * mu)
