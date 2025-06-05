@@ -144,7 +144,11 @@ class MesaNet(nn.Module):
         # name.endswith("bias") in param_grouping.py
         self.dt_bias._no_weight_decay = True
 
-        self.lambda_params = nn.Parameter(torch.randn(hidden_size))
+        lambda_initial_value = 1.0
+        init_lamb_value = torch.log(torch.exp(lambda_initial_value - lambda_lower_bound) - 1.0)
+        init_lamb_params = torch.empty(hidden_size, dtype=torch.float32).fill_(init_lamb_value)
+
+        self.lambda_params = nn.Parameter(init_lamb_params)
         self.lambda_params._no_weight_decay = True
 
         self.conv_size = conv_size
