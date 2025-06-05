@@ -79,6 +79,7 @@ class MesaNet(nn.Module):
         layer_idx: int = None,
         norm_eps: float = 1e-5,
         lambda_lower_bound: float = 0.25,
+        max_train_cg_step: int = 30,
         **kwargs
     ) -> MesaNet:
         super().__init__()
@@ -102,6 +103,7 @@ class MesaNet(nn.Module):
         self.head_v_dim = int(head_dim * self.expand_v)
         self.layer_idx = layer_idx
         self.lambda_lower_bound = lambda_lower_bound
+        self.max_train_cg_step = max_train_cg_step
 
         # Consistency check: Ensure expand_v produces integer values
         if not math.isclose(self.key_dim * expand_v, self.value_dim, rel_tol=1e-5):
@@ -121,7 +123,6 @@ class MesaNet(nn.Module):
         self.v_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
         self.a_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
         self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=True)
-        self.lamb_proj = nn.Linear(hidden_size, self.num_heads, bias=True)
 
         A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
@@ -137,33 +138,26 @@ class MesaNet(nn.Module):
         dt = torch.clamp(dt, min=dt_init_floor)
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
+
         self.dt_bias = nn.Parameter(inv_dt)
         # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
         # name.endswith("bias") in param_grouping.py
         self.dt_bias._no_weight_decay = True
 
-        if use_short_conv:
-            self.conv_size = conv_size
-            self.q_conv1d = ShortConvolution(
-                hidden_size=self.key_dim,
-                kernel_size=conv_size,
-                activation='silu'
-            )
-            self.k_conv1d = ShortConvolution(
-                hidden_size=self.key_dim,
-                kernel_size=conv_size,
-                activation='silu'
-            )
-            self.v_conv1d = ShortConvolution(
-                hidden_size=self.value_dim,
-                kernel_size=conv_size,
-                activation='silu'
-            )
-        else:
-            raise UserWarning(
-                "ShortConvolution is crucial to the performance. "
-                "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing."
-            )
+        self.lambda_params = nn.Parameter(torch.randn(hidden_size))
+        self.lambda_params._no_weight_decay = True
+
+        self.conv_size = conv_size
+        self.q_conv1d = ShortConvolution(
+            hidden_size=self.key_dim,
+            kernel_size=conv_size,
+            activation='silu'
+        )
+        self.k_conv1d = ShortConvolution(
+            hidden_size=self.key_dim,
+            kernel_size=conv_size,
+            activation='silu'
+        )
         if use_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
@@ -188,11 +182,6 @@ class MesaNet(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        # change to inference mode.
-        mode = 'fused_recurrent' if q_len <= 64 else self.mode
-        if self.training:
-            assert mode == 'chunk', "Only chunk mode is supported in training."
-
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
@@ -202,42 +191,36 @@ class MesaNet(nn.Module):
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
-        if self.use_short_conv:
-            conv_state_q, conv_state_k, conv_state_v = None, None, None
-            if last_state is not None:
-                conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            q, conv_state_q = self.q_conv1d(
-                x=self.q_proj(hidden_states),
-                cache=conv_state_q,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
-            )
-            k, conv_state_k = self.k_conv1d(
-                x=self.k_proj(hidden_states),
-                cache=conv_state_k,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
-            )
-            v, conv_state_v = self.v_conv1d(
-                x=self.v_proj(hidden_states),
-                cache=conv_state_v,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
-            )
-        else:
-            q = F.silu(self.q_proj(hidden_states))
-            k = F.silu(self.k_proj(hidden_states))
-            v = F.silu(self.v_proj(hidden_states))
+        conv_state_q, conv_state_k = None, None
+        if last_state is not None:
+            conv_state_q, conv_state_k = last_state['conv_state']
+        q, conv_state_q = self.q_conv1d(
+            x=self.q_proj(hidden_states),
+            cache=conv_state_q,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens
+        )
+        k, conv_state_k = self.k_conv1d(
+            x=self.k_proj(hidden_states),
+            cache=conv_state_k,
+            output_final_state=use_cache,
+            cu_seqlens=cu_seqlens
+        )
+        v = self.v_proj(hidden_states)
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
-        lamb = F.softplus(self.lamb_proj(hidden_states)) + 0.25
+        lamb = F.softplus(self.lambda_params) + 0.25
+        lamb = lamb.reshape(self.num_heads, -1)
 
-        recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        if mode == 'chunk':
-            o, h_kk, h_kv = chunk_mesa_net(
+        # last_h_kk = last_state['h_kk'] if last_state is not None else None
+        # last_h_hv = last_state['h_hv'] if last_state is not None else None
+
+        # prefilling or training
+        if last_state is None:
+            o, h_kk, h_hv = chunk_mesa_net(
                 q=l2_norm(q),
                 k=l2_norm(k),
                 v=v,
@@ -245,15 +228,18 @@ class MesaNet(nn.Module):
                 beta=beta,
                 lamb=lamb,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
+                max_CG_iteration=self.max_train_cg_step
             )
+        # decoding
         else:
-            raise NotImplementedError(f"Not supported mode `{mode}`.")
+            raise NotImplementedError("Decoding is not supported yet.")
 
         if past_key_values is not None:
             past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+                h_kv=h_hv,
+                h_kk=h_kk,
+                conv_state=(conv_state_q, conv_state_k),
                 layer_idx=self.layer_idx,
                 offset=q_len
             )
@@ -263,6 +249,7 @@ class MesaNet(nn.Module):
             o = self.o_norm(o, g)
         else:
             o = self.o_norm(o)
+
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
         if attention_mask is not None:

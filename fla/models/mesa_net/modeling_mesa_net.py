@@ -60,7 +60,8 @@ class MesaNetBlock(nn.Module):
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,
                 lambda_lower_bound=config.lambda_lower_bound,
-                layer_idx=layer_idx
+                layer_idx=layer_idx,
+                max_train_cg_step=config.max_train_cg_step
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = MesaNetMLP(

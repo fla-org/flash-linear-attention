@@ -37,6 +37,7 @@ class MesaNetConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
+        max_train_cg_step: int = 30,
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -63,6 +64,7 @@ class MesaNetConfig(PretrainedConfig):
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
+        self.max_train_cg_step = max_train_cg_step
 
         if attn is not None:
             if not isinstance(attn, Dict):
