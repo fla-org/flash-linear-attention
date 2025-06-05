@@ -145,7 +145,7 @@ class MesaNet(nn.Module):
         self.dt_bias._no_weight_decay = True
 
         lambda_initial_value = 1.0
-        init_lamb_value = torch.log(torch.exp(lambda_initial_value - lambda_lower_bound) - 1.0)
+        init_lamb_value = torch.log(torch.exp(torch.tensor(lambda_initial_value - lambda_lower_bound)) - 1.0)
         init_lamb_params = torch.empty(hidden_size, dtype=torch.float32).fill_(init_lamb_value)
 
         self.lambda_params = nn.Parameter(init_lamb_params)
