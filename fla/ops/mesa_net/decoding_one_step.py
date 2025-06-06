@@ -70,10 +70,10 @@ def mesa_net_decoding_one_step_kernel(
     tl.store(p_hkv_curr, b_h_kv.to(p_hkv_curr.dtype.element_ty), mask=mask_kv)
 
     diag_mask = tl.arange(0, BK)[:, None] == tl.arange(0, BK)[None, :]
-    diag_mask = diag_mask
+    diag_mask = diag_mask & mask_kk
     b_h_kk_diag = tl.sum(tl.where(diag_mask, b_h_kk, 0.0), axis=1)
 
-    b_x = b_q / (b_h_kk_diag + b_lamb)
+    b_x = b_q / (b_h_kk_diag + b_lamb + 1e-5)
     b_Hx = tl.sum(b_h_kk * b_x[:, None], axis=0)
     b_r = b_q - b_Hx - b_lamb * b_x
     b_p = tl.zeros([BK,], dtype=tl.float32)

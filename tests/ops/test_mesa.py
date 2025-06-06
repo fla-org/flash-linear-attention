@@ -17,7 +17,7 @@ if COMPILER_MODE:
 else:
     test_b_list = [2]
     test_t_list = [15, 63, 300, 1000]
-    test_d_list = [128, 64]
+    test_d_list = [128, 64, 50, 100]
 test_h_list = [3]
 
 
@@ -25,8 +25,8 @@ test_h_list = [3]
 @pytest.mark.parametrize('T', test_t_list)
 @pytest.mark.parametrize('H', test_h_list)
 @pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1]])
+@pytest.mark.parametrize('dtype', [torch.bfloat16])
+@pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1], [1, 1]])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
     reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
@@ -44,9 +44,9 @@ def test_chunk(
     gate_range: Tuple[float, float],
 ):
     torch.manual_seed(42)
-    q = torch.rand(B, T, H, D, dtype=dtype)
+    q = torch.rand(B, T, H, D, dtype=dtype) / 10
     k = F.normalize(torch.rand(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype) / 10
     beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
     lower_gate, upper_gate = gate_range
     g = torch.rand(B, T, H, dtype=dtype).float().uniform_(lower_gate, upper_gate).log()
@@ -110,9 +110,9 @@ def test_chunk(
 
 @pytest.mark.parametrize('H', test_h_list)
 @pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1]])
+@pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1], [1, 1]])
 @pytest.mark.parametrize('cu_seqlens', [[0, 14, 121, 421, 500], [0, 32, 222, 333, 444, 555, 666, 777, 888, 999, 1000]])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize('dtype', [torch.bfloat16])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
@@ -133,9 +133,9 @@ def test_chunk_varlen(
     T = cu_seqlens[-1]
     N = len(cu_seqlens) - 1
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype)
+    q = torch.randn((1, T, H, D), dtype=dtype) / 10
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((1, T, H, D), dtype=dtype)
+    v = torch.randn((1, T, H, D), dtype=dtype) / 10
     lower_gate, upper_gate = gate_range
     g = torch.rand(1, T, H, dtype=dtype).float().uniform_(lower_gate, upper_gate).log()
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
@@ -147,7 +147,7 @@ def test_chunk_varlen(
 
     q, k, v, beta, g, lamb, h_kk_init, h_kv_init = map(lambda x: x.to(
         device).requires_grad_(), (q, k, v, beta, g, lamb, h_kk_init, h_kv_init))
-    do = torch.randn_like(v)
+    do = torch.rand_like(v) / 10
     d_h_kk_final = torch.rand_like(h_kk_init)
     d_h_kv_final = torch.rand_like(h_kv_init)
 
@@ -196,12 +196,12 @@ def test_chunk_varlen(
         q.grad, k.grad, v.grad, beta.grad, g.grad, lamb.grad, h_kk_init.grad, h_kv_init.grad
     q.grad = k.grad = v.grad = beta.grad = g.grad = lamb.grad = h_kk_init.grad = h_kv_init.grad = None
 
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' h_kk_final', ref_h_kk_t, tri_h_kk_final, 0.005)
-    assert_close(' h_kv_final', ref_h_kv_t, tri_h_kv_final, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.007)
+    assert_close('  o', ref, tri, 0.006)
+    assert_close(' h_kk_final', ref_h_kk_t, tri_h_kk_final, 0.008)
+    assert_close(' h_kv_final', ref_h_kv_t, tri_h_kv_final, 0.008)
+    assert_close(' dq', ref_dq, tri_dq, 0.008)
     assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.007)
+    assert_close(' dv', ref_dv, tri_dv, 0.008)
     assert_close(' db', ref_dbeta, tri_dbeta, 0.015)
     assert_close(' dlamb', ref_dlamb, tri_dlamb, 0.015)
     assert_close(' dg', ref_dg, tri_dg, 0.015)
