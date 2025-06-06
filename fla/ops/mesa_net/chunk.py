@@ -280,14 +280,21 @@ def chunk_mesa_net(
             cu_seqlens=cu_seqlens
         )
     """
-    assert q.dtype == k.dtype == v.dtype
     assert q.dtype != torch.float32, "Chunk MesaNet does not support float32. Please use bfloat16."
-    assert len(beta.shape) == 3, "beta must be of shape (batch size, num of head, seq len)."
+
+    B, T, H, K = q.shape
+    assert k.shape == (B, T, H, K), "k must be of shape (batch size, seq len, num head, head dim)."
+    assert v.shape == (B, T, H, K), "v must be of shape (batch size, seq len, num head, head dim)."
+    assert g.shape == (B, T, H), "g must be of shape (batch size, seq len, num head)."
+    assert beta.shape == (B, T, H), "beta must be of shape (batch size, seq len, num head)."
+    assert lamb.shape == (H, K), "lamb must be of shape (num head, key dim)."
 
     if h_kv_init is not None:
         assert h_kv_init.dtype == torch.float32, "h_kv_init must be in float32."
+        assert h_kv_init.shape == (B, H, K, K), "h_kv_init must be of shape (batch size, num head, head dim, head dim)."
     if h_kk_init is not None:
         assert h_kk_init.dtype == torch.float32, "h_kk_init must be in float32."
+        assert h_kk_init.shape == (B, H, K, K), "h_kk_init must be of shape (batch size, num head, head dim, head dim)."
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:
