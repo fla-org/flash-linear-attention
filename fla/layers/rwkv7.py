@@ -47,7 +47,6 @@ class RWKV7Attention(nn.Module):
         self.mode = mode
         assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
         self.hidden_size = hidden_size
-        C = self.hidden_size
 
         self.key_dim = hidden_size
         self.value_dim = value_dim if value_dim is not None else hidden_size
@@ -62,25 +61,25 @@ class RWKV7Attention(nn.Module):
         self.head_v_dim = int(self.value_dim // self.num_heads)
 
         if decay_low_rank_dim is None:
-            decay_low_rank_dim = max(32, int(round((1.8 * (C**0.5)) / 32) * 32))
+            decay_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
             self.decay_low_rank_dim = decay_low_rank_dim
         else:
             self.decay_low_rank_dim = decay_low_rank_dim
 
         if gate_low_rank_dim is None:
-            gate_low_rank_dim = max(32, int(round((0.6 * (C**0.8)) / 32) * 32))
+            gate_low_rank_dim = max(32, int(round((0.6 * (hidden_size**0.8)) / 32) * 32))
             self.gate_low_rank_dim = gate_low_rank_dim
         else:
             self.gate_low_rank_dim = gate_low_rank_dim
 
         if a_low_rank_dim is None:
-            a_low_rank_dim = max(32, int(round((1.8 * (C**0.5)) / 32) * 32))
+            a_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
             self.a_low_rank_dim = a_low_rank_dim
         else:
             self.a_low_rank_dim = a_low_rank_dim
-            
+
         if v_low_rank_dim is None:
-            v_low_rank_dim = max(32, int(round((1.3 * (C**0.5)) / 32) * 32))
+            v_low_rank_dim = max(32, int(round((1.3 * (hidden_size**0.5)) / 32) * 32))
             self.v_low_rank_dim = v_low_rank_dim
         else:
             self.v_low_rank_dim = v_low_rank_dim
@@ -201,6 +200,7 @@ class RWKV7Attention(nn.Module):
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
         v_first: torch.Tensor = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
         if attention_mask is not None:
@@ -218,7 +218,7 @@ class RWKV7Attention(nn.Module):
 
         if attention_mask is not None:
             hidden_states = hidden_states.mul(attention_mask[:, -seq_len:, None])
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+
         # delta [batch_size, seq_len, hidden_size]
         if last_state is None:
             delta = token_shift(hidden_states, cu_seqlens)

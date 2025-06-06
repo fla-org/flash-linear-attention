@@ -19,6 +19,7 @@ class GatedDeltaNetConfig(PretrainedConfig):
         conv_size: int = 4,
         head_dim: int = 256,
         num_heads: int = 6,
+        num_v_heads: Optional[int] = None,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
@@ -46,6 +47,7 @@ class GatedDeltaNetConfig(PretrainedConfig):
         self.conv_size = conv_size
         self.head_dim = head_dim
         self.num_heads = num_heads
+        self.num_v_heads = num_v_heads
         self.max_position_embeddings = max_position_embeddings
 
         self.hidden_ratio = hidden_ratio

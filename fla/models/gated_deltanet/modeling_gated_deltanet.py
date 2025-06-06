@@ -56,6 +56,7 @@ class GatedDeltaNetBlock(nn.Module):
                 expand_v=config.expand_v,
                 head_dim=config.head_dim,
                 num_heads=config.num_heads,
+                num_v_heads=config.num_v_heads,
                 use_gate=config.use_gate,
                 use_short_conv=config.use_short_conv,
                 conv_size=config.conv_size,
@@ -124,7 +125,7 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
         if isinstance(module, GatedDeltaNet):
 
             # --- A_log ---
-            A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(0, 16)
+            A = torch.empty(module.num_v_heads, dtype=torch.float32).uniform_(0, 16)
             with torch.no_grad():
                 if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
                     module.A_log.copy_(torch.log(A))
@@ -138,7 +139,7 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
             dt_max = 0.1
             dt_init_floor = 1e-4
             dt = torch.exp(
-                torch.rand(module.num_heads) * (math.log(dt_max) - math.log(dt_min))
+                torch.rand(module.num_v_heads) * (math.log(dt_max) - math.log(dt_min))
                 + math.log(dt_min)
             )
             dt = torch.clamp(dt, min=dt_init_floor)

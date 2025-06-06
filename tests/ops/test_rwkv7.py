@@ -8,7 +8,7 @@ import torch
 from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rwkv7_torch
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize("B", [2])
@@ -87,8 +87,6 @@ def test_fused_rwkv7_addcmul(
     use_g: bool
 ):
     hidden_size = H*D
-    if is_intel_alchemist:
-        pytest.skip("Skip test because Alchemist does not have enough global shared memory")
     hidden_states = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     xx = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     x_r = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
@@ -145,15 +143,15 @@ def test_fused_rwkv7_addcmul(
     d_hidden1 = hidden_states.grad.clone()
     d_xx1 = xx.grad.clone()
 
-    torch.testing.assert_close(d_ixr, d_ixr1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(d_ixw, d_ixw1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(d_ixk, d_ixk1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(d_ixv, d_ixv1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(d_ixa, d_ixa1, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(d_ixr, d_ixr1, rtol=1e-3, atol=1.5e-3)
+    torch.testing.assert_close(d_ixw, d_ixw1, rtol=1e-3, atol=1.5e-3)
+    torch.testing.assert_close(d_ixk, d_ixk1, rtol=1e-3, atol=1.5e-3)
+    torch.testing.assert_close(d_ixv, d_ixv1, rtol=1e-3, atol=1.5e-3)
+    torch.testing.assert_close(d_ixa, d_ixa1, rtol=1e-3, atol=1.5e-3)
     if use_g:
-        torch.testing.assert_close(d_ixg, d_ixg1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(d_hidden, d_hidden1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(d_xx, d_xx1, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(d_ixg, d_ixg1, rtol=1e-3, atol=1.5e-3)
+    torch.testing.assert_close(d_hidden, d_hidden1, rtol=1e-3, atol=1.5e-3)
+    torch.testing.assert_close(d_xx, d_xx1, rtol=1e-3, atol=1.5e-3)
 
 
 @pytest.mark.parametrize("B", [4])

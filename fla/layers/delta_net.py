@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
@@ -147,7 +148,7 @@ class DeltaNet(nn.Module):
                 activation='silu'
             )
         else:
-            raise UserWarning(
+            warnings.warn(
                 "ShortConvolution is crucial to the performance. "
                 "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing."
             )
