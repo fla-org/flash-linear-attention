@@ -53,7 +53,6 @@ class MesaNetBlock(nn.Module):
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
                 expand_v=config.expand_v,
-                head_dim=config.head_dim,
                 num_heads=config.num_heads,
                 use_gate=config.use_gate,
                 use_short_conv=config.use_short_conv,
@@ -61,7 +60,8 @@ class MesaNetBlock(nn.Module):
                 norm_eps=config.norm_eps,
                 lambda_lower_bound=config.lambda_lower_bound,
                 layer_idx=layer_idx,
-                max_train_cg_step=config.max_train_cg_step
+                max_cg_step_training=config.max_cg_step_training,
+                max_cg_step_decoding=config.max_cg_step_decoding
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = MesaNetMLP(

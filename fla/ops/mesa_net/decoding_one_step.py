@@ -78,16 +78,16 @@ def mesa_net_decoding_one_step_kernel(
     b_r = b_q - b_Hx - b_lamb * b_x
     b_p = tl.zeros([BK,], dtype=tl.float32)
     b_p += b_r
-    delta_old = tl.sum(b_r * b_r) + 1e-5
+    delta_old = tl.sum(b_r * b_r)
 
     for i_iter in range(MAX_CG_STEP):
         b_Ap = tl.sum(b_h_kk * b_p[:, None], axis=0) + b_lamb * b_p
-        pAp = tl.sum(b_p * b_Ap) + 1e-5
-        alpha = delta_old / pAp
+        pAp = tl.sum(b_p * b_Ap)
+        alpha = delta_old / (pAp + 1e-5)
         b_x = b_x + alpha * b_p
         b_r = b_r - alpha * b_Ap
-        delta_new = tl.sum(b_r * b_r) + 1e-5
-        beta_cg = delta_new / delta_old
+        delta_new = tl.sum(b_r * b_r)
+        beta_cg = delta_new / (delta_old + 1e-5)
         b_p = b_r + beta_cg * b_p
         delta_old = delta_new
     b_o = tl.sum(b_h_kv * b_x[:, None], axis=0)

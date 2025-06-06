@@ -14,22 +14,12 @@ from torch.nn import functional as F
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.l2norm import l2_norm
-from fla.ops.mesa_net import chunk_mesa_net
+from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
     from fla.models.utils import Cache
-
-
-@torch.compile
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
-@torch.compile
-def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
 
 
 class MesaNet(nn.Module):
@@ -40,36 +30,33 @@ class MesaNet(nn.Module):
         hidden_size (int, Optional):
             The hidden size of the input. Default: 2048.
         expand_v (float, Optional):
-            The expansion ratio for the value dim. Default: 2.0.
-        head_dim (int, Optional):
-            The dimension of each head. Default: 256.
+            The expansion ratio for the value dim. Default: 1.
         num_heads (int, Optional):
-            The number of heads. Default: 4.
+            The number of heads. Default: 16.
         mode (str, Optional):
             Which MesaNet kernel to use.
             Currently available: `chunk`.
             Default: `chunk`.
-        use_beta (bool, Optional):
-            Whether to use beta. Default: `True`.
         use_gate (bool, Optional):
-            Whether to use output gate. Default: `True`.
-        use_short_conv (bool, Optional):
-            Whether to use short convolutions. Default: `True`.
-        conv_size (int, Optional):
-            The kernel size of the short convolution, only used when `use_short_conv` is `True`. Default: 4.
-        conv_bias (bool, Optional):
-            Whether to use bias in the short convolution, only used when `use_short_conv` is `True`. Default: `False`.
+            Whether to use output gate. Default: `False`.
+        conv_size (int):
+            The kernel size of the short convolution. Default: 4.
         layer_idx (int, Optional):
             The index of the layer. Default: None.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
+        lambda_lower_bound (float):
+            The lower bound for the lambda parameter. Default: 0.25.
+        max_cg_step_training (int):
+            The maximum number of CG steps for training. Default: 30.
+        max_cg_step_decoding (int):
+            The maximum number of CG steps for decoding. Default: 30.
     """
 
     def __init__(
         self,
         hidden_size: int = 2048,
         expand_v: float = 1,
-        head_dim: int = 128,
         num_heads: int = 16,
         mode: str = 'chunk',
         use_gate: bool = False,
@@ -79,31 +66,31 @@ class MesaNet(nn.Module):
         layer_idx: int = None,
         norm_eps: float = 1e-5,
         lambda_lower_bound: float = 0.25,
-        max_train_cg_step: int = 30,
+        max_cg_step_training: int = 30,
+        max_cg_step_decoding: int = 30,
         **kwargs
     ) -> MesaNet:
         super().__init__()
 
         self.mode = mode
-
         self.hidden_size = hidden_size
         self.expand_v = expand_v
-
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
-
-        self.head_dim = head_dim
         self.num_heads = num_heads
 
+        head_dim = self.hidden_size // self.num_heads
+        self.head_dim = head_dim
         self.key_dim = int(self.num_heads * self.head_dim)
         self.value_dim = int(self.key_dim * self.expand_v)
-        self.head_k_dim = head_dim
-        self.head_v_dim = int(head_dim * self.expand_v)
+        self.head_k_dim = self.head_dim
+        self.head_v_dim = int(self.head_dim * self.expand_v)
         self.layer_idx = layer_idx
         self.lambda_lower_bound = lambda_lower_bound
-        self.max_train_cg_step = max_train_cg_step
+        self.max_cg_step_training = max_cg_step_training
+        self.max_cg_step_decoding = max_cg_step_decoding
 
         # Consistency check: Ensure expand_v produces integer values
         if not math.isclose(self.key_dim * expand_v, self.value_dim, rel_tol=1e-5):
@@ -155,12 +142,14 @@ class MesaNet(nn.Module):
         self.q_conv1d = ShortConvolution(
             hidden_size=self.key_dim,
             kernel_size=conv_size,
-            activation='silu'
+            activation='silu',
+            bias=self.conv_bias
         )
         self.k_conv1d = ShortConvolution(
             hidden_size=self.key_dim,
             kernel_size=conv_size,
-            activation='silu'
+            activation='silu',
+            bias=self.conv_bias
         )
         if use_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
@@ -216,44 +205,53 @@ class MesaNet(nn.Module):
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
-        lamb = F.softplus(self.lambda_params) + 0.25
+        lamb = F.softplus(self.lambda_params.float()) + 0.25
         lamb = lamb.reshape(self.num_heads, -1)
 
-        # last_h_kk = last_state['h_kk'] if last_state is not None else None
-        # last_h_hv = last_state['h_hv'] if last_state is not None else None
+        last_h_kk, last_h_kv = last_state['recurrent_state'] if last_state is not None else (None, None)
+
+        q = l2_norm(q)
+        k = l2_norm(k)
 
         # prefilling or training
         if last_state is None:
-            o, h_kk, h_hv = chunk_mesa_net(
-                q=l2_norm(q),
-                k=l2_norm(k),
+            o, h_kk, h_kv = chunk_mesa_net(
+                q=q,
+                k=k,
                 v=v,
                 g=g,
                 beta=beta,
                 lamb=lamb,
-                output_final_state=use_cache,
+                output_final_state=True,
                 cu_seqlens=cu_seqlens,
-                max_CG_iteration=self.max_train_cg_step
+                max_CG_iteration=self.max_cg_step_training
             )
         # decoding
         else:
-            raise NotImplementedError("Decoding is not supported yet.")
+            o, h_kk, h_kv = mesa_net_decoding_one_step(
+                q=q.squeeze(0),
+                k=k.squeeze(0),
+                v=v.squeeze(0),
+                g=g.squeeze(0),
+                beta=beta.squeeze(0),
+                lamb=lamb,
+                prev_h_kk=last_h_kk,
+                prev_h_kv=last_h_kv,
+                max_CG_iteration=self.max_cg_step_decoding)
+            o = o.unsqueeze(0).to(q)
 
         if past_key_values is not None:
             past_key_values.update(
-                h_kv=h_hv,
-                h_kk=h_kk,
+                recurrent_state=(h_kk, h_kv),
                 conv_state=(conv_state_q, conv_state_k),
                 layer_idx=self.layer_idx,
                 offset=q_len
             )
-
         if self.use_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
         else:
             o = self.o_norm(o)
-
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
         if attention_mask is not None:

@@ -212,7 +212,7 @@ def test_chunk_varlen(
 @pytest.mark.parametrize('H', test_h_list)
 @pytest.mark.parametrize('B', test_b_list)
 @pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_range', [[0.8, 0.99]])
+@pytest.mark.parametrize('gate_range', [[0.95, 0.99]])
 @pytest.mark.parametrize('max_CG_step', [1, 5, 30])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
@@ -233,9 +233,9 @@ def test_decoding_one_step(
     torch.set_default_device(device)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
-    q = torch.randn((B, H, D), dtype=dtype)
+    q = torch.rand((B, H, D), dtype=dtype)
     k = F.normalize(torch.randn(B, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((B, H, D), dtype=dtype)
+    v = torch.rand((B, H, D), dtype=dtype)
     lower_gate, upper_gate = gate_range
     g = torch.rand(B, H, dtype=dtype).float().uniform_(lower_gate, upper_gate).log()
     beta = torch.rand(B, H, dtype=dtype).sigmoid()

@@ -17,7 +17,6 @@ class MesaNetConfig(PretrainedConfig):
         use_gate: bool = False,
         use_short_conv: bool = True,
         conv_size: int = 4,
-        head_dim: int = 128,
         num_heads: int = 16,
         lambda_lower_bound: float = 0.25,
         max_position_embeddings: int = 2048,
@@ -37,7 +36,8 @@ class MesaNetConfig(PretrainedConfig):
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         vocab_size: int = 32000,
-        max_train_cg_step: int = 30,
+        max_cg_step_training: int = 30,
+        max_cg_step_decoding: int = 30,
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -46,7 +46,6 @@ class MesaNetConfig(PretrainedConfig):
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
-        self.head_dim = head_dim
         self.num_heads = num_heads
         self.max_position_embeddings = max_position_embeddings
 
@@ -64,7 +63,8 @@ class MesaNetConfig(PretrainedConfig):
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.vocab_size = vocab_size
-        self.max_train_cg_step = max_train_cg_step
+        self.max_cg_step_training = max_cg_step_training
+        self.max_cg_step_decoding = max_cg_step_decoding
 
         if attn is not None:
             if not isinstance(attn, Dict):
