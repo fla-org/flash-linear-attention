@@ -99,7 +99,8 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     p_lamb = tl.make_block_ptr(lamb, (K,), (1,), (0,), (BK,), (0,))
     b_lamb = tl.load(p_lamb, boundary_check=(0,))
 
-    b_m = safe_exp(b_g[:, None] - b_g[None, :]) * b_beta[None, :]
+    b_m = tl.where(tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :],
+                   safe_exp(b_g[:, None] - b_g[None, :]) * b_beta[None, :], 0)
     b_g_exp_q = tl.exp(b_g)[:, None]
 
     b_x = tl.zeros([BT, BK], dtype=tl.float32)
@@ -108,7 +109,7 @@ def chunk_fwd_mesa_cg_dim64_kernel(
 
     b_h_diagonal = tl.load(h + (tl.arange(0, BK) * (K+1)))
     b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_x += (b_q / (b_h_diagonal[None, :] + b_lamb[None, :]))
+    b_x += (b_q / (b_h_diagonal[None, :] * b_g_exp_q + tl.dot(b_m.to(b_k.dtype), (b_k*b_k).to(b_k.dtype)) + b_lamb[None, :]))
     b_r += b_q - chunk_update_once(b_x, b_k, b_k, b_m, b_g_exp_q, b_h, b_lamb)
     b_p += b_r
     b_delta_old = tl.sum(b_r*b_r, axis=1)
