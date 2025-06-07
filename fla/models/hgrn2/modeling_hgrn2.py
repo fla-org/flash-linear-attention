@@ -223,7 +223,7 @@ class HGRN2Model(HGRN2PreTrainedModel):
         all_attns = () if output_attentions else None
 
         if self.config.use_lower_bound:
-            lower_bounds = self.lower_bounds.softmax(0)
+            lower_bounds = self.lower_bounds.softmax(0, dtype=torch.float)
             lower_bounds = lower_bounds.cumsum(0) - lower_bounds[0]
         for i, layer in enumerate(self.layers):
             if output_hidden_states:
@@ -386,7 +386,7 @@ class HGRN2ForCausalLM(HGRN2PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:

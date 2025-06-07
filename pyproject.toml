@@ -36,3 +36,7 @@ requires = ["setuptools>=45", "wheel", "ninja", "torch"]
 [tool.isort]
 line_length = 127
 multi_line_output = 3
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"

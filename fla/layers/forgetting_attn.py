@@ -14,7 +14,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import GroupNorm
-from fla.ops.forgetting_attn.decoding import attn_decoding_one_step
+from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
 
 if TYPE_CHECKING:

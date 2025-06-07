@@ -5,11 +5,10 @@ import os
 import pytest
 import torch
 import torch.nn.functional as F
-from einops import rearrange
+from einops import rearrange, repeat
 
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.ops.utils.testing import COMPILER_MODE, assert_close
-from fla.utils import device, is_intel_alchemist
+from fla.utils import COMPILER_MODE, assert_close, device, is_intel_alchemist
 
 if COMPILER_MODE:
     test_b_list = [1]
@@ -24,6 +23,7 @@ else:
     test_d_list = [64, 32, 100, 256]
     test_gate_list = [1, 0.1, 10]
 test_h_list = [2]
+test_hv_list = [4]
 
 
 def recurrent_gated_delta_rule_ref(
@@ -144,10 +144,11 @@ def chunk_gated_delta_rule_ref(
 @pytest.mark.parametrize('B', test_b_list)
 @pytest.mark.parametrize('T', test_t_list)
 @pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('HV', test_hv_list)
 @pytest.mark.parametrize('D', test_d_list)
 @pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
 @pytest.mark.parametrize('scale', [1])
-@pytest.mark.parametrize('use_qk_l2norm_in_kernel', [True, False])
+@pytest.mark.parametrize('use_qk_l2norm_in_kernel', [False, True])
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
@@ -157,6 +158,7 @@ def test_recurrent_forward(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     dtype: torch.dtype,
@@ -166,15 +168,15 @@ def test_recurrent_forward(
     torch.manual_seed(42)
     q = torch.randn(B, T, H, D, dtype=torch.float32)
     k = torch.randn(B, T, H, D, dtype=torch.float32)
-    v = torch.randn(B, T, H, D, dtype=dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
-    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    v = torch.randn(B, T, HV, D, dtype=dtype)
+    beta = torch.rand(B, T, HV, dtype=dtype).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32))
     g = g / gate_logit_normalizer
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
     ref, ref_ht = recurrent_gated_delta_rule_ref(
-        q=F.normalize(q.clone(), p=2, dim=-1).to(dtype),
-        k=F.normalize(k.clone(), p=2, dim=-1).to(dtype),
+        q=F.normalize(repeat(q.clone(), 'b t h d -> b t (h g) d', g=HV // H), p=2, dim=-1).to(dtype),
+        k=F.normalize(repeat(k.clone(), 'b t h d -> b t (h g) d', g=HV // H), p=2, dim=-1).to(dtype),
         v=v.clone(),
         beta=beta.clone(),
         g=g.clone(),
@@ -223,7 +225,7 @@ def test_chunk(
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn(B, T, H, D, dtype=dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
+    beta = torch.rand(B, T, H, dtype=dtype).sigmoid().fill_(1)
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     g = g / gate_logit_normalizer

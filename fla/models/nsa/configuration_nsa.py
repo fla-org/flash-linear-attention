@@ -26,7 +26,7 @@ class NSAConfig(PretrainedConfig):
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
         hidden_act: str = "swish",
-        initializer_range: float = 0.006,
+        initializer_range: float = 0.02,
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-6,
         use_cache: bool = True,

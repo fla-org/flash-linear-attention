@@ -31,6 +31,7 @@ def naive_attn_decoding_kernel(
     o,
     g_cumsum,
     scale,
+    gate_scale,
     cu_seqlens,
     T,
     B: tl.constexpr,
@@ -77,15 +78,20 @@ def naive_attn_decoding_kernel(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         # [BT, BS]
         b_s = tl.sum(b_q[None, :] * b_k, 1)
+
+        mask = i_s + tl.arange(0, BS) < T
+        b_s = tl.where(mask, b_s, float('-inf'))
+
         if USE_G:
             p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
             b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
-            b_s += b_gq - b_gk
+            b_s += (b_gq - b_gk) * gate_scale
         # [BT, BS]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s)), b_m
         b_r = exp(b_mp - b_m)
         # [BT, BS]
         b_p = exp(b_s - b_m)
+
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 0)
         # [BT, BV]
@@ -99,11 +105,37 @@ def attn_decoding_one_step(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
+    g: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
     cu_seqlens: torch.LongTensor = None,
+    do_gate_scale: bool = False,
 ):
-    assert cu_seqlens is not None, "The cu_seqlens should be provided"
+    r"""
+    Args:
+        q (torch.Tensor):
+            query of shape `[1, B, HQ, K]`.
+        k (torch.Tensor):
+            keys of shape `[1, T, H, K]`.
+            GQA will be applied if HQ is divisible by H. T is the cumulative length for all batch.
+        v (torch.Tensor):
+            values of shape `[1, T, H, V]`.
+        g (Optional[torch.Tensor]):
+            log decay factors of shape `[1, T, H]`. Default: `None`.
+        scale (Optional[int]):
+            Scale factor for attention scores.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+        do_gate_scale (bool):
+            Whether to apply gate scale. Default: `False`. If `True`, the attention scale will also be applied
+            to the gating bias term in Forgetting Transformer or PaTH-FoX.
+
+    Returns:
+        o (torch.Tensor):
+            Outputs of shape `[B, 1, HQ, V]`.
+    """
+    assert cu_seqlens is not None, "The cu_seqlens must be provided for varlen decoding"
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = len(cu_seqlens) - 1
     HQ = q.shape[2]
@@ -124,6 +156,7 @@ def attn_decoding_one_step(
     g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, output_dtype=torch.float32) if g is not None else None
     NV = triton.cdiv(V, BV)
     o = torch.empty(*q.shape[:-1], V, dtype=v.dtype, device=q.device)
+    gate_scale = 1.0 if not do_gate_scale else scale
 
     grid = (NV, N * HQ)
     naive_attn_decoding_kernel[grid](
@@ -133,6 +166,7 @@ def attn_decoding_one_step(
         o=o,
         g_cumsum=g_cumsum,
         scale=scale,
+        gate_scale=gate_scale,
         cu_seqlens=cu_seqlens,
         B=B,
         T=T,

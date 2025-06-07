@@ -18,8 +18,11 @@ from fla.models.lightnet import LightNetConfig, LightNetForCausalLM, LightNetMod
 from fla.models.linear_attn import LinearAttentionConfig, LinearAttentionForCausalLM, LinearAttentionModel
 from fla.models.mamba import MambaConfig, MambaForCausalLM, MambaModel
 from fla.models.mamba2 import Mamba2Config, Mamba2ForCausalLM, Mamba2Model
+from fla.models.mesa_net import MesaNetConfig, MesaNetForCausalLM, MesaNetModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
+from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
 from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
+from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel, RodimusTokenizer
 from fla.models.rwkv6 import RWKV6Config, RWKV6ForCausalLM, RWKV6Model
 from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM, RWKV7Model
 from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
@@ -46,4 +49,7 @@ __all__ = [
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
     'GatedDeltaProductConfig', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
+    'RodimusConfig', 'RodimusForCausalLM', 'RodimusModel', 'RodimusTokenizer',
+    'PaTHAttentionConfig', 'PaTHAttentionForCausalLM', 'PaTHAttentionModel',
+    'MesaNetConfig', 'MesaNetForCausalLM', 'MesaNetModel',
 ]

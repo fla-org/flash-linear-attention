@@ -2,6 +2,7 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -37,6 +38,16 @@ def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
 
 
 @tensor_cache
+def prepare_lens_from_mask(mask: torch.BoolTensor) -> torch.LongTensor:
+    return mask.sum(dim=-1, dtype=torch.int32)
+
+
+@tensor_cache
+def prepare_cu_seqlens_from_mask(mask: torch.BoolTensor, out_dtype: torch.dtype = torch.int32) -> torch.LongTensor:
+    return F.pad(prepare_lens_from_mask(mask).cumsum(dim=0, dtype=out_dtype), (1, 0))
+
+
+@tensor_cache
 def prepare_position_ids(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return torch.cat([
         torch.arange(n, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
@@ -45,14 +56,14 @@ def prepare_position_ids(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
 
 
 @tensor_cache
-def prepare_sequence_ids(position_ids: torch.LongTensor) -> torch.LongTensor:
-    return position_ids.eq(0).cumsum(0) - 1
+def prepare_sequence_ids(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
+    return prepare_position_ids(cu_seqlens).eq(0).cumsum(0) - 1
 
 
 @tensor_cache
 def prepare_token_indices(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     position_ids = prepare_position_ids(cu_seqlens)
-    return torch.stack([prepare_sequence_ids(position_ids), position_ids], 1).to(cu_seqlens)
+    return torch.stack([prepare_sequence_ids(cu_seqlens), position_ids], 1).to(cu_seqlens)
 
 
 @tensor_cache
@@ -61,7 +72,7 @@ def prepare_chunk_indices(
     chunk_size: int
 ) -> torch.LongTensor:
     indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
-    return torch.stack([prepare_sequence_ids(indices), indices], 1).to(cu_seqlens)
+    return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
 
 
 @tensor_cache

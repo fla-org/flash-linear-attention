@@ -6,7 +6,7 @@ To reduce notational clutter, we focus on the first chunk, denoting $\mathbf{S}^
 ```math
 \begin{equation}
 \begin{aligned}
-\mathbf{S}^r &= \underbrace{\left(\prod_{i=1}^r \mathbf{I} - \beta^i \boldsymbol{k}^i \boldsymbol{k}^{i\top} \right)}_{:= \mathbf{P}^r} \cdot\mathbf{S}^{0} + \overbrace{\sum_{i=1}^{r} \underbrace{\left(\prod_{j=i+1}^r \mathbf{I} - \beta^j \boldsymbol{k}^j \boldsymbol{k}^{j\top} \right)}_{:= \mathbf{P}_{i+1}^r}\beta^i \boldsymbol{k}^i\boldsymbol{v}^{i\top}}^{:=\mathbf{H}^r} \\
+\mathbf{S}^r &= \underbrace{\left(\prod_{i=1}^r \mathbf{I} - \beta^i \bf{k}^i \bf{k}^{i\top} \right)}_{:= \mathbf{P}^r} \cdot\mathbf{S}^{0} + \overbrace{\sum_{i=1}^{r} \underbrace{\left(\prod_{j=i+1}^r \mathbf{I} - \beta^j \bf{k}^j \bf{k}^{j\top} \right)}_{:= \mathbf{P}_{i+1}^r}\beta^i \bf{k}^i\bf{v}^{i\top}}^{:=\mathbf{H}^r} \\
 &=\mathbf{P}^r \cdot \mathbf{S}^{0} + \mathbf{H}^r
 \end{aligned}
 \end{equation}
@@ -17,39 +17,39 @@ We abbreviate $\mathbf{P}_1^r$ as $\mathbf{P}^r$.
 This can be optimized using the classical WY representation:
 ```math
 \begin{equation}
-\mathbf{P}^{r} = \mathbf{I} - \sum_{i=1}^{r}\boldsymbol{k}^i\boldsymbol{w}^{i\top}  \in \mathbb{R}^{d_k \times d_k};\qquad
-\boldsymbol{w}^r = \beta^r \left(\boldsymbol{k}^r -  \sum_{i=1}^{r-1} \left(\boldsymbol{k}^{r\top}\boldsymbol{k}^i \right)\boldsymbol{w}^i  \right) \in \mathbb{R}^{d_k}
+\mathbf{P}^{r} = \mathbf{I} - \sum_{i=1}^{r}\bf{k}^i\bf{w}^{i\top}  \in \mathbb{R}^{d_k \times d_k};\qquad
+\bf{w}^r = \beta^r \left(\bf{k}^r -  \sum_{i=1}^{r-1} \left(\bf{k}^{r\top}\bf{k}^i \right)\bf{w}^i  \right) \in \mathbb{R}^{d_k}
 \end{equation}
 ```
 
 We prove this by induction:
 ```math
 \begin{align*}
-\mathbf{P}^{r} &= \prod_{i=1}^r \mathbf{I} - \beta^i \boldsymbol{k}^i \boldsymbol{k}^{i\top} \\
-&= \left(\mathbf{I} - \beta^r \boldsymbol{k}^r \boldsymbol{k}^{r\top}\right)\mathbf{P}^{r-1} \\
-&= \left(\mathbf{I} - \beta^r \boldsymbol{k}^r \boldsymbol{k}^{r\top}\right)\left(\mathbf{I} - \sum_{i=1}^{r-1}\boldsymbol{k}^i\boldsymbol{w}^{i\top}\right) \\
-&= \mathbf{I} - \sum_{i=1}^{r-1}\boldsymbol{k}^i\boldsymbol{w}^{i\top} - \beta^r \boldsymbol{k}^r \boldsymbol{k}^{r\top} + \beta^r\boldsymbol{k}^r \boldsymbol{k}^{r\top} \left(\sum_{i=1}^{r-1}\boldsymbol{k}^i\boldsymbol{w}^{i\top}\right) \\
-&= \mathbf{I} - \sum_{i=1}^{r-1}\boldsymbol{k}^i\boldsymbol{w}^{i\top} - \beta^r \boldsymbol{k}^r \left(\boldsymbol{k}^{r} - \left(\sum_{i=1}^{r-1}\left(\boldsymbol{k}^{r\top} \boldsymbol{k}^i\right)\boldsymbol{w}^{i}\right) \right)^\top \\
-&= \mathbf{I} - \sum_{i=1}^{r}\boldsymbol{k}^i\boldsymbol{w}^{i\top}
+\mathbf{P}^{r} &= \prod_{i=1}^r \mathbf{I} - \beta^i \bf{k}^i \bf{k}^{i\top} \\
+&= \left(\mathbf{I} - \beta^r \bf{k}^r \bf{k}^{r\top}\right)\mathbf{P}^{r-1} \\
+&= \left(\mathbf{I} - \beta^r \bf{k}^r \bf{k}^{r\top}\right)\left(\mathbf{I} - \sum_{i=1}^{r-1}\bf{k}^i\bf{w}^{i\top}\right) \\
+&= \mathbf{I} - \sum_{i=1}^{r-1}\bf{k}^i\bf{w}^{i\top} - \beta^r \bf{k}^r \bf{k}^{r\top} + \beta^r\bf{k}^r \bf{k}^{r\top} \left(\sum_{i=1}^{r-1}\bf{k}^i\bf{w}^{i\top}\right) \\
+&= \mathbf{I} - \sum_{i=1}^{r-1}\bf{k}^i\bf{w}^{i\top} - \beta^r \bf{k}^r \left(\bf{k}^{r} - \left(\sum_{i=1}^{r-1}\left(\bf{k}^{r\top} \bf{k}^i\right)\bf{w}^{i}\right) \right)^\top \\
+&= \mathbf{I} - \sum_{i=1}^{r}\bf{k}^i\bf{w}^{i\top}
 \end{align*}
 ```
 
 Similarly, $\mathbf{H}^r$ can be represented as:
 ```math
 \begin{equation}
-\mathbf{H}^{r} = \sum_{i=1}^{r} \boldsymbol{k}^i \boldsymbol{u}^{i\top}  \in \mathbb{R}^{d_k \times d_v};\qquad \boldsymbol{u}^r = \beta^r \left(\boldsymbol{v}^r -  \sum_{i=1}^{r-1} \left(\boldsymbol{k}^{r\top}\boldsymbol{k}^i\right) \boldsymbol{u}^i \right)\in \mathbb{R}^{d_v}
+\mathbf{H}^{r} = \sum_{i=1}^{r} \bf{k}^i \bf{u}^{i\top}  \in \mathbb{R}^{d_k \times d_v};\qquad \bf{u}^r = \beta^r \left(\bf{v}^r -  \sum_{i=1}^{r-1} \left(\bf{k}^{r\top}\bf{k}^i\right) \bf{u}^i \right)\in \mathbb{R}^{d_v}
 \end{equation}
 ```
 
 This can also be proven by induction:
 ```math
 \begin{align*}
-\mathbf{H}^{r} &= \sum_{i=1}^{r} \mathbf{P}_{i+1}^r \beta^i \boldsymbol{k}^i \boldsymbol{v}^{i\top}\\
-&= \left(\mathbf{I} - \beta^r \boldsymbol{k}^r \boldsymbol{k}^{r\top}\right) \mathbf{H}^{r-1} +  \beta^r \boldsymbol{k}^r \boldsymbol{v}^{r\top}\\
-&= \sum_{i=1}^{r-1}\boldsymbol{k}^i \boldsymbol{u}^{i\top} - \beta^r \boldsymbol{k}^r \boldsymbol{k}^{r\top} \sum_{i=1}^{r-1}\boldsymbol{k}^i \boldsymbol{u}^{i\top} +\beta^r \boldsymbol{k}^r \boldsymbol{v}^{r\top}\\
-&= \sum_{i=1}^{r-1}\boldsymbol{k}^i \boldsymbol{u}^{i\top} + \boldsymbol{k}^r \left(\beta^r \boldsymbol{v}^{r\top}-\beta^r \boldsymbol{k}^{r\top} \sum_{i=1}^{r-1}\boldsymbol{k}^i \boldsymbol{u}^{i\top}\right) \\
-&= \sum_{i=1}^{r-1}\boldsymbol{k}^i \boldsymbol{u}^{i\top} + \boldsymbol{k}^r \beta^r\left(\boldsymbol{v}^{r}-\sum_{i=1}^{r-1}\left(\boldsymbol{k}^{r\top}\boldsymbol{k}^{i}\right)\boldsymbol{u}^{i} \right)^\top \\
-&=\sum_{i=1}^{r} \boldsymbol{k}^i \boldsymbol{u}^{i\top}
+\mathbf{H}^{r} &= \sum_{i=1}^{r} \mathbf{P}_{i+1}^r \beta^i \bf{k}^i \bf{v}^{i\top}\\
+&= \left(\mathbf{I} - \beta^r \bf{k}^r \bf{k}^{r\top}\right) \mathbf{H}^{r-1} +  \beta^r \bf{k}^r \bf{v}^{r\top}\\
+&= \sum_{i=1}^{r-1}\bf{k}^i \bf{u}^{i\top} - \beta^r \bf{k}^r \bf{k}^{r\top} \sum_{i=1}^{r-1}\bf{k}^i \bf{u}^{i\top} +\beta^r \bf{k}^r \bf{v}^{r\top}\\
+&= \sum_{i=1}^{r-1}\bf{k}^i \bf{u}^{i\top} + \bf{k}^r \left(\beta^r \bf{v}^{r\top}-\beta^r \bf{k}^{r\top} \sum_{i=1}^{r-1}\bf{k}^i \bf{u}^{i\top}\right) \\
+&= \sum_{i=1}^{r-1}\bf{k}^i \bf{u}^{i\top} + \bf{k}^r \beta^r\left(\bf{v}^{r}-\sum_{i=1}^{r-1}\left(\bf{k}^{r\top}\bf{k}^{i}\right)\bf{u}^{i} \right)^\top \\
+&=\sum_{i=1}^{r} \bf{k}^i \bf{u}^{i\top}
 \end{align*}
 ```
 

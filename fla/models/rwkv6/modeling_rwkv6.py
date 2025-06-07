@@ -21,6 +21,7 @@ from fla.models.rwkv6.configuration_rwkv6 import RWKV6Config
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
 from fla.modules.activations import ACT2FN
+from fla.modules.token_shift import token_shift
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -62,17 +63,22 @@ class RWKV6FeedForward(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        state: Optional[Cache] = None
+        state: Optional[Cache] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+        **kwargs
     ) -> torch.Tensor:
         if attention_mask is not None:
             x = x.mul_(attention_mask[:, -x.shape[-2]:, None])
         if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
-        else:
+            delta = shifted - x
+        elif state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = self.time_shift(x)
             if state is not None and state[self.layer_idx]['ffn_state'] is not None:
                 shifted[:, 0] = state[self.layer_idx]['ffn_state']
-        delta = shifted - x
+            delta = shifted - x
+        else:
+            delta = token_shift(x, cu_seqlens)
         key = self.act_fn(self.key(x, delta))
         value = self.value(key)
         receptance = self.receptance(x, delta)
@@ -145,6 +151,7 @@ class RWKV6Block(nn.Module):
         past_key_values: Optional[Cache] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        cu_seqlens: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = self.pre_norm(hidden_states) if hasattr(self, 'pre_norm') else hidden_states
@@ -155,6 +162,7 @@ class RWKV6Block(nn.Module):
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            cu_seqlens=cu_seqlens,
             **kwargs
         )
         if self.config.fuse_norm:
@@ -163,7 +171,9 @@ class RWKV6Block(nn.Module):
             hidden_states = residual + hidden_states
             residual = hidden_states
             hidden_states = self.ffn_norm(hidden_states)
-        hidden_states, past_key_values = self.ffn(hidden_states, attention_mask, past_key_values)
+        hidden_states, past_key_values = self.ffn(
+            hidden_states, attention_mask, past_key_values, cu_seqlens, **kwargs
+        )
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states, attentions, past_key_values)
@@ -258,6 +268,7 @@ class RWKV6Model(RWKV6PreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        cu_seqlens: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
@@ -299,6 +310,7 @@ class RWKV6Model(RWKV6PreTrainedModel):
                     past_key_values,
                     use_cache,
                     output_attentions,
+                    cu_seqlens,
                     **kwargs
                 )
             else:
@@ -308,6 +320,7 @@ class RWKV6Model(RWKV6PreTrainedModel):
                     past_key_values=past_key_values,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    cu_seqlens=cu_seqlens,
                     **kwargs
                 )
 
@@ -445,7 +458,7 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:

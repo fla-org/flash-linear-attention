@@ -58,7 +58,7 @@ def main():
     trainer = Trainer(
         model=model,
         args=args,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         callbacks=[LogCallback()],
         train_dataset=dataset

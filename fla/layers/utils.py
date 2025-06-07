@@ -6,41 +6,41 @@
 from typing import Tuple
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from fla.ops.utils.index import prepare_cu_seqlens_from_mask, prepare_lens_from_mask
 from fla.utils import tensor_cache
 
 
 class IndexFirstAxis(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input, indices):
+    def forward(ctx, x, indices):
         ctx.save_for_backward(indices)
-        assert input.ndim >= 2
-        ctx.first_axis_dim, other_shape = input.shape[0], input.shape[1:]
+        assert x.ndim >= 2
+        ctx.first_axis_dim, other_shape = x.shape[0], x.shape[1:]
         second_dim = other_shape.numel()
         # TD [2022-03-04] For some reason torch.gather is a bit faster than indexing.
-        # return input[indices]
+        # return x[indices]
         return torch.gather(
-            rearrange(input, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim)
+            rearrange(x, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim)
         ).reshape(-1, *other_shape)
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, do):
         (indices,) = ctx.saved_tensors
-        assert grad_output.ndim >= 2
-        other_shape = grad_output.shape[1:]
-        grad_output = rearrange(grad_output, "b ... -> b (...)")
-        grad_input = torch.zeros(
-            [ctx.first_axis_dim, grad_output.shape[1]],
-            device=grad_output.device,
-            dtype=grad_output.dtype,
+        assert do.ndim >= 2
+        other_shape = do.shape[1:]
+        do = rearrange(do, "b ... -> b (...)")
+        dx = torch.zeros(
+            [ctx.first_axis_dim, do.shape[1]],
+            device=do.device,
+            dtype=do.dtype,
         )
         # TD [2022-03-04] For some reason torch.scatter is a bit faster than indexing.
-        # grad_input[indices] = grad_output
-        grad_input.scatter_(0, repeat(indices, "z -> z d", d=grad_output.shape[1]), grad_output)
-        return grad_input.reshape(ctx.first_axis_dim, *other_shape), None
+        # dx[indices] = do
+        dx.scatter_(0, repeat(indices, "z -> z d", d=do.shape[1]), do)
+        return dx.reshape(ctx.first_axis_dim, *other_shape), None
 
 
 index_first_axis = IndexFirstAxis.apply
@@ -49,25 +49,23 @@ index_first_axis = IndexFirstAxis.apply
 class IndexPutFirstAxis(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, values, indices, first_axis_dim):
+    def forward(ctx, x, indices, first_axis_dim):
         ctx.save_for_backward(indices)
         assert indices.ndim == 1
-        assert values.ndim >= 2
-        output = torch.zeros(
-            first_axis_dim, *values.shape[1:], device=values.device, dtype=values.dtype
-        )
-        # TD [2022-03-04] For some reason torch.scatter is a bit faster than indexing.
-        output[indices] = values
-        # output.scatter_(0, repeat(indices, 'z -> z d', d=values.shape[1]), values)
-        return output
+        assert x.ndim >= 2
+        y = torch.zeros(first_axis_dim, *x.shape[1:], device=x.device, dtype=x.dtype)
+        # TODO [2022-03-04] For some reason torch.scatter is a bit faster than indexing.
+        y[indices] = x
+        # y.scatter_(0, repeat(indices, 'z -> z d', d=x.shape[1]), x)
+        return y
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, do):
         (indices,) = ctx.saved_tensors
-        # TD [2022-03-04] For some reason torch.gather is a bit faster than indexing.
-        grad_values = grad_output[indices]
-        # grad_values = torch.gather(grad_output, 0, repeat(indices, 'z -> z d', d=grad_output.shape[1]))
-        return grad_values, None, None
+        # TODO [2022-03-04] For some reason torch.gather is a bit faster than indexing.
+        dx = do[indices]
+        # dx = torch.gather(do, 0, repeat(indices, 'z -> z d', d=do.shape[1]))
+        return dx, None, None
 
 
 index_put_first_axis = IndexPutFirstAxis.apply
@@ -93,10 +91,10 @@ def get_unpad_data(
         max_seqlen_in_batch (`int`):
             Maximum sequence length in batch.
     """
-    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+    lens = prepare_lens_from_mask(attention_mask)
     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
-    max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    max_seqlen_in_batch = lens.max().item()
+    cu_seqlens = prepare_cu_seqlens_from_mask(attention_mask)
     return indices, cu_seqlens, max_seqlen_in_batch
 
 

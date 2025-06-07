@@ -49,7 +49,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     V: tl.constexpr,
     BT: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
@@ -398,7 +397,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
-def proprocess_qkw(
+def preprocess_qkw(
     q,
     k,
     w,
@@ -493,7 +492,7 @@ def chunk_gated_delta_rule_fwd_h(
         k_new = torch.empty_like(k)
         w_new = torch.empty_like(w)
         def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
-        proprocess_qkw[grid](
+        preprocess_qkw[grid](
             q=None,
             k=k,
             w=w,
@@ -525,8 +524,7 @@ def chunk_gated_delta_rule_fwd_h(
         H=H,
         K=K,
         V=V,
-        BT=BT,
-        NT=NT,
+        BT=BT
     )
     return h, v_new, final_state
 
@@ -564,7 +562,7 @@ def chunk_gated_delta_rule_bwd_dhu(
         k_new = torch.empty_like(k)
         w_new = torch.empty_like(w)
         def grid(meta): return (triton.cdiv(K, meta['BK']), N*H, triton.cdiv(T, BT))
-        proprocess_qkw[grid](
+        preprocess_qkw[grid](
             q=q,
             k=k,
             w=w,

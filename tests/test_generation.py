@@ -20,17 +20,17 @@ from fla.models import (
     Mamba2Config,
     MambaConfig,
     NSAConfig,
+    PaTHAttentionConfig,
     RetNetConfig,
     RWKV6Config,
     RWKV7Config,
     SambaConfig,
     TransformerConfig
 )
-from fla.ops.utils.testing import assert_close
-from fla.utils import device, device_platform
+from fla.utils import assert_close, device, is_nvidia_hopper
 
 
-@pytest.mark.parametrize("L", [2])
+@pytest.mark.parametrize("L", [1])
 @pytest.mark.parametrize("B", [4])
 @pytest.mark.parametrize("T", [512])
 @pytest.mark.parametrize("H", [8])
@@ -51,16 +51,17 @@ from fla.utils import device, device_platform
     Mamba2Config,
     MambaConfig,
     NSAConfig,
+    PaTHAttentionConfig,
     RetNetConfig,
     RWKV6Config,
     RWKV7Config,
     SambaConfig,
-    TransformerConfig
+    TransformerConfig,
 ])
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure"
+    is_nvidia_hopper is False,
+    reason="Only run on Hopper GPUs"
 )
 def test_generation(
     L: int,

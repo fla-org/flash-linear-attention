@@ -28,9 +28,10 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 * [Acknowledgments](#acknowledgments)
 
 ## News
+- **$\texttt{[2025-05]}$:** 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
 - **$\texttt{[2025-04]}$:** 🎉 Add DeltaProduct implementation to `fla` ([paper](https://arxiv.org/abs/2502.10297)).
 - **$\texttt{[2025-04]}$:** 🎉 Add FoX implementation to `fla` ([paper](https://arxiv.org/abs/2503.02130)).
-- **$\texttt{[2025-03]}$:** We have changed the default `initializer_range` to the magic 🐳 0.006, leading to great improvements across all models.
+- **$\texttt{[2025-03]}$:** ~~We have changed the default `initializer_range` to the magic 🐳 0.006~~ The `initializer_range` was rolled back to the default value of 0.02. For actual training, we recommend trying both.
 - **$\texttt{[2025-02]}$:** 🐳 Add NSA implementations to `fla`. See kernels [here](fla/ops/nsa).
 - **$\texttt{[2025-01]}$:** 🔥 We are migrating to `torchtitan`-based training framework. Check out the [flame](https://github.com/fla-org/flame) repo for more details.
 - **$\texttt{[2025-01]}$:** 🎉 Add RWKV7 implementations (both kernels and models) to `fla`.
@@ -51,7 +52,7 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 Roughly sorted according to the timeline supported in `fla`. The recommended training mode is `chunk` when available.
 
 | Year | Venue   | Model          | Paper                                                                                                                                         |                                              Code                                               |                                               `fla` impl                                               |
-|:-----| :------ |:---------------|:----------------------------------------------------------------------------------------------------------------------------------------------| :---------------------------------------------------------------------------------------------: |:------------------------------------------------------------------------------------------------------:|
+| :--- | :------ | :------------- | :-------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------: | :----------------------------------------------------------------------------------------------------: |
 | 2023 |         | RetNet         | [Retentive network: a successor to transformer for large language models](https://arxiv.org/abs/2307.08621)                                   |                  [official](https://github.com/microsoft/torchscale/tree/main)                  | [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/multiscale_retention.py) |
 | 2024 | ICML    | GLA            | [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635)                                      |                  [official](https://github.com/berlino/gated_linear_attention)                  |         [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/gla.py)          |
 | 2024 | ICML    | Based          | [Simple linear attention language models balance the recall-throughput tradeoff](https://arxiv.org/abs/2402.18668)                            |                        [official](https://github.com/HazyResearch/based)                        |        [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/based.py)         |
@@ -70,10 +71,12 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 | 2025 |         | NSA            | [Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention](https://arxiv.org/abs/2502.11089)                         |                                                                                                 |            [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/nsa)             |
 | 2025 |         | FoX            | [Forgetting Transformer: Softmax Attention with a Forget Gate](https://arxiv.org/abs/2503.02130)                                              |                [official](https://github.com/zhixuan-lin/forgetting-transformer)                |      [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/forgetting_attn)       |
 | 2025 |         | DeltaProduct   | [DeltaProduct: Improving State-Tracking in Linear RNNs via Householder Products](https://arxiv.org/abs/2502.10297)   |    |  [code](https://github.com/fla-org/flash-linear-attention/tree/main/fla/layers/gated_deltaproduct.py)  |
+| 2025 | ICLR    | Rodimus&ast;          | [Rodimus*: Breaking the Accuracy-Efficiency Trade-Off with Efficient Attentions](https://arxiv.org/abs/2410.06577)                 |                         [official](https://github.com/codefuse-ai/rodimus)                          |          [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/rodimus.py)          |
+| 2025 |     | MesaNet          | [MesaNet: Sequence Modeling by Locally Optimal Test-Time Training](https://arxiv.org/abs/2506.05233)                 |                                              |          [code](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/mesa_net.py)          |
 
 ## Installation
 
- [![nvidia-4090-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml) [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml) [![intel-a770-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml/badge.svg?event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml)
+[![nvidia-4090-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml) [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml) [![intel-a770-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml/badge.svg?event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml)
 
 The following requirements should be satisfied
 - [PyTorch](https://pytorch.org/) >= 2.5
@@ -335,9 +338,8 @@ SambaForCausalLM(
     (layers): ModuleList(
       (0): SambaBlock(
         (mixer_norm): RMSNorm(2304, eps=1e-05)
-        (mixer): MambaMixer(
+        (mixer): Mamba(
           (conv1d): Conv1d(4608, 4608, kernel_size=(4,), stride=(1,), padding=(3,), groups=4608)
-          (act): SiLU()
           (in_proj): Linear(in_features=2304, out_features=9216, bias=False)
           (x_proj): Linear(in_features=4608, out_features=176, bias=False)
           (dt_proj): Linear(in_features=144, out_features=4608, bias=True)
@@ -393,14 +395,14 @@ Follow the steps below to use this library:
 
 2. Run evaluation with:
 ```sh
-$ PATH='fla-hub/gla-1.3B-100B'
+$ MODEL='fla-hub/gla-1.3B-100B'
 $ python -m evals.harness --model hf \
-    --model_args pretrained=$PATH,dtype=bfloat16 \
+    --model_args pretrained=$MODEL,dtype=bfloat16 \
     --tasks wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge,boolq,sciq,copa,openbookqa \
     --batch_size 64 \
     --num_fewshot 0 \
     --device cuda \
-    --show_config  
+    --show_config
 ```
 
 We've made `fla` compatible with hf-style evaluations, you can call [evals.harness](evals/harness.py) to finish the evaluations.
@@ -410,14 +412,43 @@ Running the command above will provide the task results reported in the GLA pape
 
 To perform data-parallel evaluation (where each GPU loads a separate full copy of the model), we leverage the accelerate launcher as follows:
 ```sh
-$ PATH='fla-hub/gla-1.3B-100B'
-$ accelerate launch -m evals.harness --model hf \
-    --model_args pretrained=$PATH,dtype=bfloat16 \
+$ MODEL='fla-hub/gla-1.3B-100B'
+$ accelerate launch -m evals.harness --model hf  \
+    --model_args pretrained=$MODEL,dtype=bfloat16,trust_remote_code=True  \
     --tasks wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge,boolq,sciq,copa,openbookqa \
-    --batch_size 64 \
-    --num_fewshot 0 \
-    --device cuda \
-    --show_config  
+    --batch_size 64  \
+    --num_fewshot 0  \
+    --device cuda  \
+    --show_config  \
+    --trust_remote_code
+```
+
+4. 📏 RULER Benchmark suite
+
+The RULER benchmarks are commonly used for evaluating model performance on long-context tasks.
+You can evaluate `fla` models on RULER directly using `lm-evaluation-harness`. RULER is only available in a relatively recent version of `lm-evaluation-harness`, so make sure you have the latest version installed.
+
+```
+git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness
+cd lm-evaluation-harness
+pip install -e .
+```
+
+
+Then, install the necessary dependencies for RULER:
+```sh
+pip install lm_eval["ruler"]
+```
+and run evaluation by (e.g., 32k contexts):
+```sh
+$ accelerate launch -m evals.harness \
+    --output_path $OUTPUT \
+    --tasks niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_hotpot,ruler_qa_squad \
+    --model_args pretrained=$MODEL,dtype=bfloat16,max_length=32768,trust_remote_code=True \
+    --metadata='{"max_seq_lengths":[4096,8192,16384,32768]}' \
+    --batch_size 2 \
+    --show_config  \
+    --trust_remote_code
 ```
 
 If a GPU can't load a full copy of the model, please refer to [this link](https://github.com/EleutherAI/lm-evaluation-harness?tab=readme-ov-file#multi-gpu-evaluation-with-hugging-face-accelerate) for FSDP settings.
