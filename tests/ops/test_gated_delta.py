@@ -103,6 +103,7 @@ def chunk_gated_delta_rule_ref(
         [q, k, v, k_beta, decay.unsqueeze(-1)]
     )
     decay = decay.squeeze(-1).cumsum(-1)
+    decay_exp = decay.exp()[..., None]
     L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
     attn = -((k_beta @ k.transpose(-1, -2)) * L_mask).masked_fill(mask, 0)
     for i in range(1, chunk_size):
@@ -110,13 +111,7 @@ def chunk_gated_delta_rule_ref(
     attn = attn + torch.eye(chunk_size, dtype=torch.float, device=q.device)
     attn = attn
     k_cumsum = attn @ v
-
-    attn = -((k_beta @ k.transpose(-1, -2))).masked_fill(mask, 0)
-    for i in range(1, chunk_size):
-        attn[..., i, :i] = attn[..., i, :i].clone() + (attn[..., i, :i, None].clone() * attn[..., :i, :i].clone()).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=torch.float, device=q.device)
-    attn = attn
-    k_cumdecay = attn @ k_beta
+    k_cumdecay = attn @ (k_beta * decay_exp)
     v = k_cumsum
     S = k.new_zeros(b, h, d_k, d_v)
     if initial_state is not None:
@@ -126,7 +121,7 @@ def chunk_gated_delta_rule_ref(
     for i in range(0, l // chunk_size):
         q_i, k_i, v_i = q[:, :, i], k[:, :, i], v[:, :, i]
         attn = (q_i @ k_i.transpose(-1, -2) * L_mask[:, :, i]).masked_fill_(mask, 0)
-        v_prime = (k_cumdecay[:, :, i] * decay[:, :, i, :, None].exp()) @ S
+        v_prime = (k_cumdecay[:, :, i]) @ S
         v_new = v_i - v_prime
         o_inter = (q_i * decay[:, :, i, :, None].exp()) @ S
         o[:, :, i] = o_inter + attn @ v_new
