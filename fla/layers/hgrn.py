@@ -56,7 +56,6 @@ class HGRNAttention(nn.Module):
 
         if use_short_conv:
             self.conv_size = conv_size
-            self.q_conv1d = ShortConvolution(self.input_dim, conv_size, activation=None)
             self.f_conv1d = ShortConvolution(self.input_dim, conv_size, activation=None)
             self.i_conv1d = ShortConvolution(self.input_dim, conv_size, activation=None)
 
