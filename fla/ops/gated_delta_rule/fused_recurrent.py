@@ -31,6 +31,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     T,
     B: tl.constexpr,
     H: tl.constexpr,
+    HV: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BK: tl.constexpr,
@@ -42,7 +43,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_VARLEN: tl.constexpr
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_n, i_h = i_nh // H, i_nh % H
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    i_h = i_hv // (HV // H)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
@@ -55,13 +57,13 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
     p_q = q + (bos * H + i_h) * K + o_k
     p_k = k + (bos * H + i_h) * K + o_k
-    p_v = v + (bos * H + i_h) * V + o_v
+    p_v = v + (bos * HV + i_hv) * V + o_v
     if IS_BETA_HEADWISE:
-        p_beta = beta + (bos * H + i_h) * V + o_v
+        p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:
-        p_beta = beta + bos * H + i_h
-    p_g = g + bos * H + i_h
-    p_o = o + ((i_k * all + bos) * H + i_h) * V + o_v
+        p_beta = beta + bos * HV + i_hv
+    p_g = g + bos * HV + i_hv
+    p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
 
     mask_k = o_k < K
     mask_v = o_v < V
@@ -99,10 +101,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         p_q += H*K
         p_k += H*K
-        p_o += H*V
-        p_v += H*V
-        p_g += H
-        p_beta += H * (V if IS_BETA_HEADWISE else 1)
+        p_o += HV*V
+        p_v += HV*V
+        p_g += HV
+        p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
     if STORE_FINAL_STATE:
         p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -122,6 +124,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
+    HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -131,11 +134,11 @@ def fused_recurrent_gated_delta_rule_fwd(
 
     o = q.new_empty(NK, *v.shape)
     if output_final_state:
-        final_state = q.new_empty(N, H, K, V, dtype=torch.float32)
+        final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
     else:
         final_state = None
 
-    grid = (NK, NV, N * H)
+    grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
@@ -150,6 +153,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         T=T,
         B=B,
         H=H,
+        HV=HV,
         K=K,
         V=V,
         BK=BK,
@@ -224,29 +228,30 @@ def fused_recurrent_gated_delta_rule(
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            values of shape `[B, T, HV, V]`.
+            GVA is applied if `HV > H`.
         g (torch.Tensor):
-            g (decays) of shape `[B, T, H]`.
+            g (decays) of shape `[B, T, HV]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]`.
+            betas of shape `[B, T, HV]`.
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            Initial state of shape `[N, HV, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]`.
+            Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state of shape `[N, HV, K, V]` if `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch
@@ -254,13 +259,13 @@ def fused_recurrent_gated_delta_rule(
         >>> from einops import rearrange
         >>> from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
         # inputs with equal lengths
-        >>> B, T, H, K, V = 4, 2048, 4, 512, 512
+        >>> B, T, H, HV, K, V = 4, 2048, 4, 8, 512, 512
         >>> q = torch.randn(B, T, H, K, device='cuda')
         >>> k = F.normalize(torch.randn(B, T, H, K, device='cuda'), p=2, dim=-1)
-        >>> v = torch.randn(B, T, H, V, device='cuda')
-        >>> g = F.logsigmoid(torch.rand(B, T, H, device='cuda'))
-        >>> beta = torch.rand(B, T, H, device='cuda').sigmoid()
-        >>> h0 = torch.randn(B, H, K, V, device='cuda')
+        >>> v = torch.randn(B, T, HV, V, device='cuda')
+        >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
+        >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
+        >>> h0 = torch.randn(B, HV, K, V, device='cuda')
         >>> o, ht = fused_gated_recurrent_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
@@ -276,8 +281,6 @@ def fused_recurrent_gated_delta_rule(
             output_final_state=True,
             cu_seqlens=cu_seqlens
         )
-        >>> assert o.allclose(o_var.view(o.shape))
-        >>> assert ht.allclose(ht_var)
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
