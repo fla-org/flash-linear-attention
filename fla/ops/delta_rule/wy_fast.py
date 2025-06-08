@@ -183,7 +183,7 @@ def prepare_wy_repr_fwd(
     beta: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    A, _ = chunk_scaled_dot_kkt_fwd(
+    A = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
         g_cumsum=None,

@@ -31,7 +31,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
         g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, output_dtype=torch.float32) if g is not None else None
         BS = 64
         BT = 64
-        A, _ = chunk_scaled_dot_kkt_fwd(
+        A = chunk_scaled_dot_kkt_fwd(
             k=w,
             beta=beta,
             cu_seqlens=cu_seqlens,
