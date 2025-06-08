@@ -205,7 +205,7 @@ class MesaNet(nn.Module):
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
         beta = self.b_proj(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
-        lamb = F.softplus(self.lambda_params.float()) + 0.25
+        lamb = F.softplus(self.lambda_params.float()) + self.lambda_lower_bound
         lamb = lamb.reshape(self.num_heads, -1)
 
         last_h_kk, last_h_kv = last_state['recurrent_state'] if last_state is not None else (None, None)
