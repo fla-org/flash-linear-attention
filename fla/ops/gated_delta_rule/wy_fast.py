@@ -150,8 +150,8 @@ def recompute_w_u_fwd_kernel(
     beta,
     w,
     u,
-    Aw,
-    Au,
+    A,
+    g,
     cu_seqlens,
     chunk_indices,
     T,
@@ -172,29 +172,26 @@ def recompute_w_u_fwd_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
     p_beta = tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_Au = tl.make_block_ptr(Au + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_g = tl.make_block_ptr(g + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_beta = tl.load(p_beta, boundary_check=(0,))
-    b_Au = tl.load(p_Au, boundary_check=(0, 1))
+    b_A = tl.load(p_A, boundary_check=(0, 1))
+    b_g = tl.exp(tl.load(p_g, boundary_check=(0,)))
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
-        b_u = tl.dot(b_Au, b_vb, allow_tf32=False)
+        b_u = tl.dot(b_A, b_vb, allow_tf32=False)
         tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
-
-    tl.debug_barrier()
-    b_Au = None
-    p_Aw = tl.make_block_ptr(Aw + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_Aw = tl.load(p_Aw, boundary_check=(0, 1))
 
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_kb = (b_k * b_beta[:, None]).to(b_k.dtype)
-        b_w = tl.dot(b_Aw, b_kb)
+        b_kb = (b_k * b_beta[:, None] * b_g[:, None]).to(b_k.dtype)
+        b_w = tl.dot(b_A, b_kb)
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -202,12 +199,12 @@ def recompute_w_u_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
-    Aw: torch.Tensor,
-    Au: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    A: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = Aw.shape[-1]
+    BT = A.shape[-1]
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -222,8 +219,8 @@ def recompute_w_u_fwd(
         beta=beta,
         w=w,
         u=u,
-        Aw=Aw,
-        Au=Au,
+        A=A,
+        g=g_cumsum,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,

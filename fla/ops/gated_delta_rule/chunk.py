@@ -29,20 +29,15 @@ def chunk_gated_delta_rule_fwd(
 ):
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
     # obtain WY representation. u is actually the new v.
-    Aw, Au = chunk_scaled_dot_kkt_fwd(
+    A = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
         output_dtype=torch.float32
     )
-    Aw = solve_tril(
-        A=Aw,
-        cu_seqlens=cu_seqlens,
-        output_dtype=k.dtype
-    )
-    Au = solve_tril(
-        A=Au,
+    A = solve_tril(
+        A=A,
         cu_seqlens=cu_seqlens,
         output_dtype=k.dtype
     )
@@ -50,8 +45,8 @@ def chunk_gated_delta_rule_fwd(
         k=k,
         v=v,
         beta=beta,
-        Aw=Aw,
-        Au=Au,
+        A=A,
+        g_cumsum=g,
         cu_seqlens=cu_seqlens,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -72,7 +67,7 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-    return g, o, Aw, Au, final_state
+    return g, o, A, final_state
 
 
 def chunk_gated_delta_rule_bwd(
@@ -126,7 +121,6 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
         k=k,
@@ -183,7 +177,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
 
-        g, o, Aw, Au, final_state = chunk_gated_delta_rule_fwd(
+        g, o, A, final_state = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -194,7 +188,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
-        ctx.save_for_backward(q_orig, k_orig, v, g, beta, Aw, Au, initial_state, cu_seqlens)
+        ctx.save_for_backward(q_orig, k_orig, v, g, beta, A, initial_state, cu_seqlens)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state

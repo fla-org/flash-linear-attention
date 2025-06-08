@@ -22,7 +22,7 @@ from fla.ops.utils.op import safe_exp
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'BT', 'IS_VARLEN'],
+    key=['H', 'K', 'BT', 'IS_VARLEN', 'USE_G'],
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_scaled_dot_kkt_fwd_kernel(
@@ -30,7 +30,6 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     beta,
     g_cumsum,
     A,
-    Ag,
     cu_seqlens,
     chunk_indices,
     T,
@@ -61,17 +60,15 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         b_kb = b_k * b_beta[:, None]
         b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
 
-    b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
-    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
-
     if USE_G:
         p_g = tl.make_block_ptr(g_cumsum + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_diff = b_g[:, None] - b_g[None, :]
-        b_Ag = b_A * safe_exp(b_g_diff)
-        p_Ag = tl.make_block_ptr(Ag + (bos*H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        tl.store(p_Ag, b_Ag.to(p_Ag.dtype.element_ty), boundary_check=(0, 1))
+        b_A = b_A * safe_exp(b_g_diff)
+
+    b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
+    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
 def chunk_scaled_dot_kkt_fwd(
@@ -109,13 +106,11 @@ def chunk_scaled_dot_kkt_fwd(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
-    Ag = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype) if g_cumsum is not None else None
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
         k=k,
         beta=beta,
         g_cumsum=g_cumsum,
         A=A,
-        Ag=Ag,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
@@ -123,4 +118,4 @@ def chunk_scaled_dot_kkt_fwd(
         K=K,
         BT=BT,
     )
-    return A, Ag
+    return A
