@@ -215,7 +215,7 @@ def chunk_bwd_kernel_dqkwg(
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
 
-    if USE_DW and not USE_G:
+    if USE_DW:
         p_dw = tl.make_block_ptr(dw, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
 
@@ -237,14 +237,6 @@ def chunk_bwd_kernel_dqkwg(
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * H)
         b_dg_last *= exp(b_g_last)
-
-        if USE_DW:
-            p_w = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dw = tl.make_block_ptr(dw, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            b_w = tl.load(p_w, boundary_check=(0, 1))
-            b_dw = b_dw * exp(b_g)[:, None]
-            tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
-            b_dg -= tl.sum(b_w * b_dw, axis=1)
 
         b_dq = b_dq * exp(b_g)[:, None] * scale
         b_dg += tl.sum(b_dq * b_q, axis=1)
