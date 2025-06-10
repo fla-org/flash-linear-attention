@@ -237,6 +237,8 @@ class Mamba2Mixer(nn.Module):
         self.time_step_min = config.time_step_min
         self.time_step_max = config.time_step_max
 
+        self.use_segment_input = config.use_segment_input
+
         self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.ssm_state_size
         self.conv1d = nn.Conv1d(
             in_channels=self.conv_dim,
@@ -483,6 +485,34 @@ class Mamba2Mixer(nn.Module):
             if self.use_conv_bias:
                 hidden_states_B_C = hidden_states_B_C + self.conv1d.bias
             hidden_states_B_C = self.act(hidden_states_B_C)
+        elif self.use_segment_input and cache_params is not None:
+            prev_conv_states = cache_params.conv_states[self.layer_idx]
+            current_states = hidden_states_B_C.transpose(1, 2)
+            if prev_conv_states is not None:
+                # Cat history states and current input
+                combined_states = torch.cat([prev_conv_states, current_states], dim=-1)
+                conv_output = self.conv1d(combined_states)
+                start_index = cache_params.conv_kernel_size
+                current_output = conv_output[..., start_index:]
+                new_cache_end = current_states[..., -cache_params.conv_kernel_size:]
+                cache_params.update_conv_state(
+                    layer_idx=self.layer_idx,
+                    new_conv_state=new_cache_end,
+                    cache_init=False 
+                )
+                hidden_states_B_C = self.act(current_output.transpose(1, 2))
+            else:
+                padded_states = nn.functional.pad(
+                    current_states,
+                    (cache_params.conv_kernel_size - current_states.shape[-1], 0)
+                )
+                cache_params.update_conv_state(
+                    layer_idx=self.layer_idx,
+                    new_conv_state=padded_states,
+                    cache_init=True
+                )
+                conv_output = self.conv1d(current_states)[..., :seq_len]
+                hidden_states_B_C = self.act(conv_output.transpose(1, 2))
         else:
             # Init cache
             if cache_params is not None:
@@ -563,6 +593,8 @@ class Mamba2Mixer(nn.Module):
             # [bsz, num_heads, head_dim] -> [bsz, 1, intermediate_size]
             y = y.reshape(batch_size, -1)[:, None, ...]
         else:
+            if self.use_segment_input:
+                self.chunk_size = seq_len
             # begin ssd naive implementation without einsums
             dt = nn.functional.softplus(dt + self.dt_bias)
             dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
@@ -612,6 +644,11 @@ class Mamba2Mixer(nn.Module):
             # (middle term of factorization of off-diag blocks; A terms)
             if cache_params is not None and cache_position is not None and cache_position[0] > 0:
                 previous_states = cache_params.ssm_states[self.layer_idx][:, None, ...].to(device=states.device)
+            elif self.use_segment_input and cache_params is not None:
+                if cache_params.ssm_states[self.layer_idx] is not None:
+                    previous_states = cache_params.ssm_states[self.layer_idx][:, None, ...].to(device=states.device)
+                else:
+                    previous_states = torch.zeros_like(states[:, :1])
             else:
                 previous_states = torch.zeros_like(states[:, :1])
             states = torch.cat([previous_states, states], dim=1)
@@ -640,7 +677,11 @@ class Mamba2Mixer(nn.Module):
 
             # Init cache
             if ssm_state is not None and cache_params is not None:
-                cache_params.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
+                if self.use_segment_input:
+                    final_state = ssm_state[:, -1, :].detach()  # [batch, state_dim]
+                    cache_params.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=final_state)
+                else:
+                    cache_params.update_ssm_state(layer_idx=self.layer_idx, new_ssm_state=ssm_state)
 
         scan_output = self.norm(y, gate)
 
@@ -658,7 +699,7 @@ class Mamba2Mixer(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ):
-        if is_fast_path_available and "cuda" in self.in_proj.weight.device.type:
+        if is_fast_path_available and "cuda" in self.in_proj.weight.device.type and not self.use_segment_input:
             return self.cuda_kernels_forward(hidden_states, cache_params, cache_position, attention_mask)
         dtype = hidden_states.dtype
         if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
