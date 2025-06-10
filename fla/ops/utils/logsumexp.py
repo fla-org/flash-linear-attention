@@ -7,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import exp, log
+
 
 @triton.heuristics({
     'HAS_SCALE': lambda args: args['scale'] is not None
@@ -35,7 +37,7 @@ def logsumexp_fwd_kernel(
     if HAS_SCALE:
         b_x = b_x * scale
     b_m = tl.max(b_x, 0)
-    b_z = tl.log(tl.sum(tl.exp(b_x - b_m), 0)) + b_m
+    b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
     tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
 
 

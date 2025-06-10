@@ -11,7 +11,7 @@ from einops import rearrange
 from packaging import version
 
 from fla.ops.utils import chunk_local_cumsum
-from fla.ops.utils.exp import safe_exp
+from fla.ops.utils.op import exp, safe_exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -43,8 +43,8 @@ def prepare_qg_kg(
         b_q = tl.load(p_q, mask=mask, other=0)
         b_k = tl.load(p_k, mask=mask, other=0)
         b_g = tl.load(p_g, mask=mask, other=0).to(tl.float32)
-        b_q *= tl.exp(b_g) * scale
-        b_k *= tl.exp(last_decay - b_g)
+        b_q *= exp(b_g) * scale
+        b_k *= exp(last_decay - b_g)
         tl.store(p_kg, b_k.to(p_kg.dtype.element_ty), mask=mask)
         tl.store(p_qg, b_q.to(p_qg.dtype.element_ty), mask=mask)
         p_q += K
@@ -87,7 +87,7 @@ def bwd_decay_global_cumsum(
             last_g = b_g
         b_dq1 = tl.load(p_dq_inner, mask=mask, other=0)
         b_dq2 = tl.load(p_dq_inter, mask=mask, other=0)
-        b_dq2 *= tl.exp(b_g)
+        b_dq2 *= exp(b_g)
         b_dq = b_dq1 + b_dq2
         tl.store(p_dq_inter, b_dq, mask=mask)
         b_dk1 = tl.load(p_dk_inner, mask=mask, other=0)
@@ -131,7 +131,6 @@ def fused_chunk_gla_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     CHECK: tl.constexpr
 ):
-    # indices
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -159,10 +158,10 @@ def fused_chunk_gla_fwd_kernel(
         b_gn = tl.load(p_gn, mask=mask, other=0).to(tl.float32)
         if CHECK and i == 0:
             b_o = tl.dot(b_q.to(b_v.dtype), b_h.to(b_v.dtype), allow_tf32=False)
-            b_h = b_h * tl.exp(b_gn)[:, None] + tl.dot(b_k.to(b_v.dtype), b_v, allow_tf32=False)
+            b_h = b_h * exp(b_gn)[:, None] + tl.dot(b_k.to(b_v.dtype), b_v, allow_tf32=False)
         else:
             b_o = tl.dot(b_q.to(b_v.dtype), b_h.to(b_v.dtype), allow_tf32=False)
-            b_h = b_h * tl.exp(b_gn)[:, None] + tl.dot(b_k.to(b_v.dtype), b_v, allow_tf32=False)
+            b_h = b_h * exp(b_gn)[:, None] + tl.dot(b_k.to(b_v.dtype), b_v, allow_tf32=False)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
         p_q = tl.advance(p_q, (BT, 0))
@@ -225,10 +224,10 @@ def fused_chunk_gla_bwd_kernel(
         # [V, K]
         if CHECK and i == 0:
             b_dq += tl.dot(b_do, b_h.to(b_do.dtype), allow_tf32=False)
-            b_h = b_h * tl.exp(b_gn)[None, :] + tl.dot(b_v, b_k.to(b_v.dtype), allow_tf32=False)
+            b_h = b_h * exp(b_gn)[None, :] + tl.dot(b_v, b_k.to(b_v.dtype), allow_tf32=False)
         else:
             b_dq += tl.dot(b_do, b_h.to(b_do.dtype), allow_tf32=False)
-            b_h = b_h * tl.exp(b_gn)[None, :] + tl.dot(b_v, b_k.to(b_v.dtype), allow_tf32=False)
+            b_h = b_h * exp(b_gn)[None, :] + tl.dot(b_v, b_k.to(b_v.dtype), allow_tf32=False)
         b_dq *= scale
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
@@ -263,11 +262,11 @@ def fused_chunk_gla_bwd_kernel(
         if CHECK and i == 1:
             b_dk = tl.trans(tl.dot(b_dh.to(b_v.dtype), tl.trans(b_v), allow_tf32=False))
             b_dv = tl.dot((b_k).to(b_v.dtype), b_dh.to(b_v.dtype), allow_tf32=False)
-            b_dh = b_dh * tl.exp(b_db)[:, None] + tl.dot(b_q.to(b_do.dtype), b_do, allow_tf32=False)
+            b_dh = b_dh * exp(b_db)[:, None] + tl.dot(b_q.to(b_do.dtype), b_do, allow_tf32=False)
         else:
             b_dk = tl.trans(tl.dot(b_dh.to(b_v.dtype), tl.trans(b_v), allow_tf32=False))
             b_dv = tl.dot((b_k).to(b_v.dtype), b_dh.to(b_v.dtype), allow_tf32=False)
-            b_dh = b_dh * tl.exp(b_db)[:, None] + tl.dot(b_q.to(b_do.dtype), b_do, allow_tf32=False)
+            b_dh = b_dh * exp(b_db)[:, None] + tl.dot(b_q.to(b_do.dtype), b_do, allow_tf32=False)
 
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
@@ -616,16 +615,11 @@ def fused_chunk_gla(
     scale: int = -1,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if scale == -1:
         scale = q.shape[-1] ** -0.5
-    if not head_first:
-        q, k, v, g = map(lambda x: x.transpose(1, 2), (q, k, v, g))
     seq_len = q.shape[-2]
     q, k, v, g = map(lambda x: pad(x), [q, k, v, g])
     o, final_state = FusedChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
     o = o[..., :seq_len, :].contiguous()
-    if not head_first:
-        o = o.transpose(1, 2)
     return o, final_state

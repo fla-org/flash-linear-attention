@@ -1,20 +1,21 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional
 
 import torch
 import triton
+from einops import rearrange
 
-from fla.ops.common.utils import prepare_chunk_indices
 from fla.ops.generalized_delta_rule.dplr.chunk_A_bwd import chunk_dplr_bwd_dqk_intra
-from fla.ops.generalized_delta_rule.dplr.chunk_A_fwd import chunk_fwd_intra_dplr_fn
+from fla.ops.generalized_delta_rule.dplr.chunk_A_fwd import chunk_dplr_fwd_intra
 from fla.ops.generalized_delta_rule.dplr.chunk_h_bwd import chunk_dplr_bwd_dhu
 from fla.ops.generalized_delta_rule.dplr.chunk_h_fwd import chunk_dplr_fwd_h
 from fla.ops.generalized_delta_rule.dplr.chunk_o_bwd import chunk_dplr_bwd_dAu, chunk_dplr_bwd_dv, chunk_dplr_bwd_o
 from fla.ops.generalized_delta_rule.dplr.chunk_o_fwd import chunk_dplr_fwd_o
 from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
-from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import fwd_prepare_wy_repr
+from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import prepare_wy_repr_fwd
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -29,16 +30,14 @@ def chunk_dplr_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
-    T = q.shape[2] if head_first else q.shape[1]
+    T = q.shape[1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
-    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, indices=indices, head_first=head_first)
+    gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, cu_seqlens=cu_seqlens)
 
-    A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
+    A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
         q=q,
         k=k,
         a=a,
@@ -46,23 +45,19 @@ def chunk_dplr_fwd(
         gi=gi,
         ge=ge,
         scale=scale,
-        offsets=offsets,
-        indices=indices,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT,
-        head_first=head_first
     )
     del ge
 
     # A_ab, A_ak, gi, ge torch.float32
     # A_qk, A_qb, qg, kg, ag, bg, dtype=q.dtype, eg: bf16
-    w, u, _ = fwd_prepare_wy_repr(
+    w, u, _ = prepare_wy_repr_fwd(
         ag=ag,
         A_ab=A_ab,
         A_ak=A_ak,
         v=v,
-        offsets=offsets,
-        indices=indices,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     del A_ab, A_ak
@@ -75,8 +70,7 @@ def chunk_dplr_fwd(
         gk=gi,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        offsets=offsets,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     del u, kg, bg, gi
@@ -88,9 +82,7 @@ def chunk_dplr_fwd(
         A_qk=A_qk,
         A_qb=A_qb,
         h=h,
-        offsets=offsets,
-        indices=indices,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=BT
     )
     del v_new, h, A_qk, A_qb
@@ -114,17 +106,9 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ):
-        chunk_size = 64
-
-        # 2-d indices denoting the offsets of chunks in each sequence
-        # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
-        # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
-        # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = prepare_chunk_indices(offsets, chunk_size) if offsets is not None else None
-
+        chunk_size = 16
         o, final_state = chunk_dplr_fwd(
             q=q,
             k=k,
@@ -135,15 +119,11 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            offsets=offsets,
-            indices=indices,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
         ctx.save_for_backward(q, k, v, a, b, gk, initial_state)
-        ctx.head_first = head_first
-        ctx.offsets = offsets
-        ctx.indices = indices
+        ctx.cu_seqlens = cu_seqlens
         ctx.scale = scale
         ctx.chunk_size = chunk_size
         return o.to(q.dtype), final_state
@@ -158,15 +138,13 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
     ):
         q, k, v, a, b, gk, initial_state = ctx.saved_tensors
         BT = ctx.chunk_size
-        head_first = ctx.head_first
-        offsets = ctx.offsets
-        indices = ctx.indices
+        cu_seqlens = ctx.cu_seqlens
         scale = ctx.scale
 
         # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
-        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, offsets=offsets, indices=indices, head_first=head_first)
+        gi, ge = chunk_rwkv6_fwd_cumsum(gk, BT, cu_seqlens=cu_seqlens)
 
-        A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_fwd_intra_dplr_fn(
+        A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
             q=q,
             k=k,
             a=a,
@@ -174,19 +152,15 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             gi=gi,
             ge=ge,
             scale=scale,
-            offsets=offsets,
-            indices=indices,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT,
-            head_first=head_first
         )
-        w, u, A_ab_inv = fwd_prepare_wy_repr(
+        w, u, A_ab_inv = prepare_wy_repr_fwd(
             ag=ag,
             A_ab=A_ab,
             A_ak=A_ak,
             v=v,
-            offsets=offsets,
-            indices=indices,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
         del A_ab
@@ -198,8 +172,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             u=u,
             gk=gi,
             initial_state=initial_state,
-            offsets=offsets,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
         del u
@@ -213,9 +186,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             do=do,
             A_qb=A_qb,
             scale=scale,
-            offsets=offsets,
-            indices=indices,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
 
@@ -228,8 +199,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dht=dht,
             do=do,
             dv=dv_new_intra,
-            offsets=offsets,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
 
@@ -238,9 +208,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             kg=kg,
             do=do,
             dh=dh,
-            offsets=offsets,
-            indices=indices,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
         del A_qk
@@ -256,11 +224,9 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dv=dv_new,
             w=w,
             gk=gi,
-            offsets=offsets,
-            indices=indices,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT,
             scale=scale,
-            head_first=head_first,
         )
         del v_new
 
@@ -272,9 +238,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dw=dw,
             du=dv_new,
             dv0=dv,
-            offsets=offsets,
-            indices=indices,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=BT
         )
         del A_ak
@@ -297,12 +261,10 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             dbg=dbg,
             chunk_size=BT,
             scale=scale,
-            head_first=head_first,
-            offsets=offsets,
-            indices=indices
+            cu_seqlens=cu_seqlens,
         )
 
-        return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None
 
 
 @torch.compiler.disable
@@ -317,22 +279,22 @@ def chunk_dplr_delta_rule(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    head_first: bool = False,
 ):
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         a (torch.Tensor):
-            activations of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            activations of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         b (torch.Tensor):
-            betas of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            betas of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         gk (torch.Tensor):
-            gk of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`. decay term in log space!
+            gk of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`. decay term in log space!
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -351,23 +313,41 @@ def chunk_dplr_delta_rule(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """
-    assert q.dtype == k.dtype == v.dtype
-    # assert q.dtype != torch.float32, "ChunkDeltaRuleFunction does not support float32. Please use bfloat16."
-    # gk = gk.float()
-
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v, a, b, gk = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, a, b, gk))
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
+    if q.dtype == torch.float32:
+        warnings.warn(
+            """ChunkDeltaRuleFunction does not support float32 on some platforms. Please use bfloat16/float16.
+            If you want to use float32, please solve the issue by yourself.""",
+            category=RuntimeWarning,
+            stacklevel=2
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
-        if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     scale = k.shape[-1] ** -0.5 if scale is None else scale
     o, final_state = ChunkDPLRDeltaRuleFunction.apply(
         q,
@@ -380,6 +360,7 @@ def chunk_dplr_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
-        head_first
     )
+    if head_first:
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

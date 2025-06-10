@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang, Yuqi Pan
 
+import warnings
 from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
+from einops import rearrange
 
 from fla.modules.layernorm import group_norm
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_nvidia_hopper
+
+NUM_WARPS = [1, 2] if is_nvidia_hopper else [1, 2, 4, 8]
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_INITIAL_STATE_B': lambda args: args['hb0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -40,7 +44,7 @@ def fused_chunk_ttt_linear_fwd_kernel(
     hb0,
     ht,
     hbt,
-    offsets,
+    cu_seqlens,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -51,14 +55,12 @@ def fused_chunk_ttt_linear_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     USE_INITIAL_STATE_B: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
-    # indices
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
@@ -83,20 +85,12 @@ def fused_chunk_ttt_linear_fwd_kernel(
         b_hb = tl.load(p_hb0, boundary_check=(0,), padding_option="zero").to(tl.float32)
 
     for i_t in range(NT):
-        if HEAD_FIRST:
-            p_q = tl.make_block_ptr(q+i_nh*T*K, (T, K), (K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k+i_nh*T*K, (K, T), (1, K), (0, i_t*BT), (BK, BT), (0, 1))
-            p_v = tl.make_block_ptr(v+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_o = tl.make_block_ptr(o+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_e = tl.make_block_ptr(eta+i_nh*T, (T,), (1,), (i_t*BT,), (BT,), (0,))
-            p_e_last = eta+i_nh*T+T-1 if i_t == NT-1 else eta+i_nh*T+i_t*BT+BT-1
-        else:
-            p_q = tl.make_block_ptr(q+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
-            p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_o = tl.make_block_ptr(o+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
-            p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_q = tl.make_block_ptr(q+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
+        p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_o = tl.make_block_ptr(o+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
+        p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
         # [BK, BT]
         b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
         # [BT, BV]
@@ -184,12 +178,10 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
     BV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_INITIAL_STATE_B: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
 ):
-    # indices
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
-    bos, eos = i_n * T, i_n * T + T
+    bos, _ = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)
     boh = i_n * NT
 
@@ -211,30 +203,17 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
         b_hb = tl.load(p_hb0, boundary_check=(0,), padding_option="zero").to(tl.float32)
 
     for i_t in range(NT):
-        if HEAD_FIRST:
-            p_h = tl.make_block_ptr(h+(i_nh*NT+i_t)*K*V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
-            p_k = tl.make_block_ptr(k+i_nh*T*K, (K, T), (1, K), (0, i_t*BT), (BK, BT), (0, 1))
-            p_v = tl.make_block_ptr(v+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_v2 = tl.make_block_ptr(v2+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_x = tl.make_block_ptr(x+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_y = tl.make_block_ptr(y+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_r = tl.make_block_ptr(r+i_nh*T, (T, 1), (1, 1), (i_t*BT, 0), (BT, 1), (1, 0))
-            p_e = tl.make_block_ptr(eta+i_nh*T, (T,), (1,), (i_t*BT,), (BT,), (0,))
-            p_dq = tl.make_block_ptr(dq+i_nh*T*K, (T, K), (K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-            p_do = tl.make_block_ptr(do+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_e_last = eta+i_nh*T+T-1 if i_t == NT-1 else eta+i_nh*T+i_t*BT+BT-1
-        else:
-            p_h = tl.make_block_ptr(h+((boh+i_t)*H+i_h)*K*V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
-            p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
-            p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_v2 = tl.make_block_ptr(v2+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_x = tl.make_block_ptr(x+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_y = tl.make_block_ptr(y+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_r = tl.make_block_ptr(r+bos*H+i_h, (T, 1), (H, 1), (i_t*BT, 0), (BT, 1), (1, 0))
-            p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
-            p_dq = tl.make_block_ptr(dq+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-            p_do = tl.make_block_ptr(do+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_h = tl.make_block_ptr(h+((boh+i_t)*H+i_h)*K*V, (K, V), (V, 1), (0, 0), (BK, BV), (1, 0))
+        p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
+        p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_v2 = tl.make_block_ptr(v2+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_x = tl.make_block_ptr(x+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_y = tl.make_block_ptr(y+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_r = tl.make_block_ptr(r+bos*H+i_h, (T, 1), (H, 1), (i_t*BT, 0), (BT, 1), (1, 0))
+        p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
+        p_dq = tl.make_block_ptr(dq+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
+        p_do = tl.make_block_ptr(do+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
         # [BK, BT]
         b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
@@ -286,9 +265,8 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4)
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in NUM_WARPS
     ],
     key=['BT', 'BK', 'BV'],
 )
@@ -327,12 +305,10 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     USE_INITIAL_STATE_B: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT_B: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
 ):
-    # indices
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
-    bos, eos = i_n * T, i_n * T + T
+    bos, _ = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)
     boh = i_n * NT
 
@@ -360,36 +336,20 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     p_db = tl.make_block_ptr(db + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
 
     for i_t in range(NT - 1, -1, -1):
-        if HEAD_FIRST:
-            p_h = tl.make_block_ptr(h+(i_nh*NT+i_t)*K*V, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
-            p_q = tl.make_block_ptr(q+i_nh*T*K, (K, T), (1, K), (0, i_t*BT), (BK, BT), (0, 1))
-            p_k = tl.make_block_ptr(k+i_nh*T*K, (T, K), (K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-            p_v = tl.make_block_ptr(v+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_v2 = tl.make_block_ptr(v2+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_x = tl.make_block_ptr(x+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_y = tl.make_block_ptr(y+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_r = tl.make_block_ptr(r+i_nh*T, (T, 1), (1, 1), (i_t*BT, 0), (BT, 1), (1, 0))
-            p_e = tl.make_block_ptr(eta+i_nh*T, (T,), (1,), (i_t*BT,), (BT,), (0,))
-            p_dv = tl.make_block_ptr(dv+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_dk = tl.make_block_ptr(dk+i_nh*T*K, (T, K), (K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-            p_do = tl.make_block_ptr(do+i_nh*T*V, (T, V), (V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_de = tl.make_block_ptr(de+i_nh*T, (T,), (1,), (i_t*BT,), (BT,), (0,))
-            p_e_last = eta + i_nh*T + T - 1 if i_t == NT-1 else eta + i_nh*T + i_t*BT + BT - 1
-        else:
-            p_h = tl.make_block_ptr(h+((boh+i_t)*H+i_h)*K*V, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
-            p_q = tl.make_block_ptr(q+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
-            p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-            p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_v2 = tl.make_block_ptr(v2+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_x = tl.make_block_ptr(x+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_y = tl.make_block_ptr(y+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_r = tl.make_block_ptr(r+bos*H+i_h, (T, 1), (H, 1), (i_t*BT, 0), (BT, 1), (1, 0))
-            p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
-            p_dv = tl.make_block_ptr(dv+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_dk = tl.make_block_ptr(dk+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
-            p_do = tl.make_block_ptr(do+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
-            p_de = tl.make_block_ptr(de+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
-            p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
+        p_h = tl.make_block_ptr(h+((boh+i_t)*H+i_h)*K*V, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
+        p_q = tl.make_block_ptr(q+(bos*H+i_h)*K, (K, T), (1, H*K), (0, i_t*BT), (BK, BT), (0, 1))
+        p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
+        p_v = tl.make_block_ptr(v+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_v2 = tl.make_block_ptr(v2+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_x = tl.make_block_ptr(x+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_y = tl.make_block_ptr(y+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_r = tl.make_block_ptr(r+bos*H+i_h, (T, 1), (H, 1), (i_t*BT, 0), (BT, 1), (1, 0))
+        p_e = tl.make_block_ptr(eta+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
+        p_dv = tl.make_block_ptr(dv+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_dk = tl.make_block_ptr(dk+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT, 0), (BT, BK), (1, 0))
+        p_do = tl.make_block_ptr(do+(bos*H+i_h)*V, (T, V), (H*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
+        p_de = tl.make_block_ptr(de+(bos*H+i_h), (T,), (H,), (i_t*BT,), (BT,), (0,))
+        p_e_last = eta+bos*H+i_h + (T-1)*H if i_t == NT-1 else eta+bos*H+i_h + (i_t*BT+BT-1)*H
         b_q = tl.load(p_q, boundary_check=(0, 1), padding_option="zero")
         b_k = tl.load(p_k, boundary_check=(0, 1), padding_option="zero")
         b_e = tl.load(p_e, boundary_check=(0,), padding_option="zero")
@@ -473,25 +433,17 @@ def fused_chunk_ttt_linear_bwd_h(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    assert offsets is None, "bwd of varlen is not implemented yet."
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    assert cu_seqlens is None, "bwd of varlen is not implemented yet."
+    B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     N, NT = B, triton.cdiv(T, BT)
     BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
 
-    if head_first:
-        h = k.new_empty(B, H, NT, K, V)
-        r = v.new_empty(B, H, T, 1, dtype=torch.float32)
-    else:
-        h = k.new_empty(B, NT, H, K, V)
-        r = v.new_empty(B, T, H, 1, dtype=torch.float32)
+    h = k.new_empty(B, NT, H, K, V)
+    r = v.new_empty(B, T, H, 1, dtype=torch.float32)
     v2 = torch.empty_like(v)
     x = torch.empty_like(v)
     y = torch.empty_like(v)
@@ -522,7 +474,6 @@ def fused_chunk_ttt_linear_bwd_h(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
     )
     return dq, h, v2, x, y, r
 
@@ -546,14 +497,10 @@ def fused_chunk_ttt_linear_bwd_dh(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    assert offsets is None, "bwd of varlen is not implemented yet."
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    assert cu_seqlens is None, "bwd of varlen is not implemented yet."
+    B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     N = B
     BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
@@ -598,7 +545,6 @@ def fused_chunk_ttt_linear_bwd_dh(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
     )
     dw = dw.sum(dim=0)
     db = db.sum(dim=0)
@@ -617,16 +563,12 @@ def fused_chunk_ttt_linear_fwd(
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     BT: int = 16
 ):
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    N = B if offsets is None else len(offsets) - 1
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
     o = torch.empty_like(v)
@@ -648,7 +590,7 @@ def fused_chunk_ttt_linear_fwd(
         hb0=initial_state_bias,
         ht=final_state,
         hbt=final_state_bias,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         T=T,
         H=H,
         K=K,
@@ -656,7 +598,6 @@ def fused_chunk_ttt_linear_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
-        HEAD_FIRST=head_first
     )
     return o, final_state, final_state_bias
 
@@ -676,10 +617,9 @@ def fused_chunk_ttt_linear_bwd(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    assert offsets is None, "bwd of varlen is not implemented yet."
+    assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     dq, h, v2, x, y, rstd = fused_chunk_ttt_linear_bwd_h(
         q=q,
         k=k,
@@ -693,8 +633,7 @@ def fused_chunk_ttt_linear_bwd(
         BT=BT,
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
-        offsets=offsets,
-        head_first=head_first
+        cu_seqlens=cu_seqlens,
     )
     dk, dv, de, dw, db, dh0, dhb0 = fused_chunk_ttt_linear_bwd_dh(
         q=q,
@@ -715,8 +654,7 @@ def fused_chunk_ttt_linear_bwd(
         BT=BT,
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
-        offsets=offsets,
-        head_first=head_first
+        cu_seqlens=cu_seqlens,
     )
     return dq, dk, dv, de, dw, db, dh0, dhb0
 
@@ -727,7 +665,7 @@ class FusedChunkTTTLinearFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, w, b, BT, eta, scale, eps, initial_state,
-                initial_state_bias, output_final_state, offsets, head_first):
+                initial_state_bias, output_final_state, cu_seqlens):
         o, final_state, final_state_bias = fused_chunk_ttt_linear_fwd(
             q=q,
             k=k,
@@ -741,15 +679,13 @@ class FusedChunkTTTLinearFunction(torch.autograd.Function):
             initial_state=initial_state,
             initial_state_bias=initial_state_bias,
             output_final_state=output_final_state,
-            offsets=offsets,
-            head_first=head_first
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, eta, w, b, initial_state, initial_state_bias)
         ctx.BT = BT
         ctx.scale = scale
         ctx.eps = eps
-        ctx.offsets = offsets
-        ctx.head_first = head_first
+        ctx.cu_seqlens = cu_seqlens
         return o.to(q.dtype), final_state, final_state_bias
 
     @staticmethod
@@ -772,34 +708,21 @@ class FusedChunkTTTLinearFunction(torch.autograd.Function):
             BT=ctx.BT,
             initial_state=initial_state,
             initial_state_bias=initial_state_bias,
-            offsets=ctx.offsets,
-            head_first=ctx.head_first
+            cu_seqlens=ctx.cu_seqlens,
         )
-        return dq.to(q), dk.to(k), dv.to(v), dw.to(w), db.to(b), None, de.to(eta), None, None, dh0, dhb0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dw.to(w), db.to(b), None, de.to(eta), None, None, dh0, dhb0, None, None
 
 
-def norm_residual(x, weight, bias, eps, head_first):
+def norm_residual(x, weight, bias, eps):
     # GroupNorm and Residual
-    if head_first:
-        B, H, T, D = x.shape
-        x = x.transpose(1, 2)
-        x += group_norm(
-            x.reshape(B, T, -1).clone(),
-            weight=weight.reshape(-1).clone(),
-            bias=bias.reshape(-1).clone(),
-            eps=eps,
-            num_groups=H,
-        ).reshape(x.shape)
-        x = x.transpose(1, 2)
-    else:
-        B, T, H, D = x.shape
-        x += group_norm(
-            x.reshape(B, T, -1).clone(),
-            weight=weight.reshape(-1).clone(),
-            bias=bias.reshape(-1).clone(),
-            eps=eps,
-            num_groups=H,
-        ).reshape(x.shape)
+    B, T, H, D = x.shape
+    x += group_norm(
+        x.reshape(B, T, -1).clone(),
+        weight=weight.reshape(-1).clone(),
+        bias=bias.reshape(-1).clone(),
+        eps=eps,
+        num_groups=H,
+    ).reshape(x.shape)
     return x
 
 
@@ -817,7 +740,7 @@ def fused_chunk_ttt_linear(
     initial_state_bias: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    head_first: bool = False,
 ):
     r"""
     Args:
@@ -849,7 +772,7 @@ def fused_chunk_ttt_linear(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -863,15 +786,30 @@ def fused_chunk_ttt_linear(
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."
     if isinstance(eta, float):
         eta = torch.full_like(q[:, :, :, :1], eta)
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v, eta = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, eta))
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
-        if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     else:
@@ -890,7 +828,8 @@ def fused_chunk_ttt_linear(
         initial_state_bias,
         output_final_state,
         cu_seqlens,
-        head_first
     )
-    o = norm_residual(o, w, b, eps, head_first)
+    o = norm_residual(o, w, b, eps)
+    if head_first:
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state, final_state_bias

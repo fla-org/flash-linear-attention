@@ -10,9 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from fla.modules import FusedRMSNormSwishGate, RMSNorm, ShortConvolution
+from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.activations import ACT2FN
-from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
 from fla.ops.simple_gla import chunk_simple_gla, fused_recurrent_simple_gla
 
 if TYPE_CHECKING:
@@ -115,18 +114,41 @@ class SimpleGatedLinearAttention(nn.Module):
 
         if use_short_conv:
             self.conv_size = conv_size
-            self.q_conv1d = ShortConvolution(self.key_dim, conv_size, activation='silu')
-            self.k_conv1d = ShortConvolution(self.key_dim_per_group, conv_size, activation='silu')
-            self.v_conv1d = ShortConvolution(self.value_dim_per_group, conv_size, activation='silu')
+            self.q_conv1d = ShortConvolution(
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu',
+            )
+            self.k_conv1d = ShortConvolution(
+                hidden_size=self.key_dim_per_group,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu',
+            )
+            self.v_conv1d = ShortConvolution(
+                hidden_size=self.value_dim_per_group,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu',
+            )
 
         self.gk_proj = nn.Linear(hidden_size, self.num_heads)
 
         if gate_fn == 'swish' and fuse_norm:
-            self.g_norm_swish_gate = FusedRMSNormSwishGate(self.head_v_dim, elementwise_affine, norm_eps)
+            self.g_norm_swish_gate = FusedRMSNormGated(
+                hidden_size=self.head_v_dim,
+                elementwise_affine=elementwise_affine,
+                eps=norm_eps
+            )
             self.fuse_norm_and_gate = True
         else:
             self.fuse_norm_and_gate = False
-            self.g_norm = RMSNorm(hidden_size=self.head_v_dim, elementwise_affine=elementwise_affine, eps=norm_eps)
+            self.g_norm = RMSNorm(
+                hidden_size=self.head_v_dim,
+                elementwise_affine=elementwise_affine,
+                eps=norm_eps
+            )
             self.gate_fn = ACT2FN[gate_fn]
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
@@ -155,33 +177,33 @@ class SimpleGatedLinearAttention(nn.Module):
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
-        cu_seqlens, position_ids, seq_idx = kwargs.get('cu_seqlens', None), kwargs.get('position_ids', None), None
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            if cu_seqlens is not None:
-                if position_ids is not None:
-                    seq_idx = prepare_sequence_ids(position_ids)
-                else:
-                    seq_idx = prepare_sequence_ids(prepare_position_ids(cu_seqlens))
-                seq_idx = seq_idx.to(torch.int32).unsqueeze(0)
-            q, conv_state_q = self.q_conv1d(x=self.q_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_q,
-                                            output_final_state=use_cache,
-                                            seq_idx=seq_idx)
-            k, conv_state_k = self.k_conv1d(x=self.k_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_k,
-                                            output_final_state=use_cache,
-                                            seq_idx=seq_idx)
-            v, conv_state_v = self.v_conv1d(x=self.v_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_v,
-                                            output_final_state=use_cache,
-                                            seq_idx=seq_idx)
+            q, conv_state_q = self.q_conv1d(
+                x=self.q_proj(hidden_states),
+                mask=conv_mask,
+                cache=conv_state_q,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens
+            )
+            k, conv_state_k = self.k_conv1d(
+                x=self.k_proj(hidden_states),
+                mask=conv_mask,
+                cache=conv_state_k,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens
+            )
+            v, conv_state_v = self.v_conv1d(
+                x=self.v_proj(hidden_states),
+                mask=conv_mask,
+                cache=conv_state_v,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens
+            )
         else:
             q = self.q_proj(hidden_states)
             k = self.k_proj(hidden_states)
@@ -210,7 +232,6 @@ class SimpleGatedLinearAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_first=False
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_simple_gla(
@@ -221,7 +242,6 @@ class SimpleGatedLinearAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_first=False
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

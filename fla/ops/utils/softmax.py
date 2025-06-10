@@ -7,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.op import exp
+
 
 @triton.autotune(
     configs=[
@@ -32,7 +34,7 @@ def softmax_fwd_kernel(
 
     b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=-float('inf'))
     b_m = tl.max(b_x, 0)
-    b_x = tl.exp(b_x - b_m)
+    b_x = exp(b_x - b_m)
     b_p = b_x / tl.sum(b_x, 0)
 
     tl.store(p + i_n * D + o_d, b_p.to(p.dtype.element_ty), mask=m_d)

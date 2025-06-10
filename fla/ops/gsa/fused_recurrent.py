@@ -9,6 +9,7 @@ import triton.language as tl
 
 from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
 from fla.ops.utils import chunk_global_cumsum
+from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -37,7 +38,7 @@ def fused_recurrent_gsa_inference_kernel(
 
     b_s = tl.load(s + i_bg * M + tl.arange(0, M)).to(tl.float32)
     b_g = tl.load(g + i_bg * M + tl.arange(0, M)).to(tl.float32)
-    b_g = tl.exp(b_g)
+    b_g = exp(b_g)
 
     b_ok = tl.zeros([M], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
@@ -92,13 +93,9 @@ def fused_recurrent_gsa_inference(
     initial_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     output_final_state: bool = False,
     scale: float = 1.,
-    head_first: bool = True
 ) -> torch.Tensor:
-    if head_first:
-        B, H, T, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    else:
-        B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    HQ = q.shape[1] if head_first else q.shape[2]
+    B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
+    HQ = q.shape[2]
     BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NG = HQ // H
 
@@ -114,7 +111,7 @@ def fused_recurrent_gsa_inference(
         else:
             hkt, hvt = q.new_empty(B, H, K, M, dtype=torch.float), q.new_empty(B, H, M, V, dtype=torch.float)
 
-    o = v.new_empty(B, HQ, T, V) if head_first else v.new_empty(B, T, HQ, V)
+    o = v.new_empty(B, T, HQ, V)
     grid = (B * HQ,)
     fused_recurrent_gsa_inference_kernel[grid](
         q,
@@ -148,15 +145,11 @@ def fused_recurrent_gsa_fwd(
     output_final_state: bool = False,
     scale: float = 1.,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
-    if head_first:
-        B, H, T, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    else:
-        B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
-    HQ = q.shape[1] if head_first else q.shape[2]
+    B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    HQ = q.shape[2]
     if HQ != H:
         raise ValueError("GQA not supported yet.")
 
@@ -183,7 +176,7 @@ def fused_recurrent_gsa_fwd(
         o=ok,
         h0=hk0,
         ht=hkt,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=scale,
         B=B,
         T=T,
@@ -195,8 +188,7 @@ def fused_recurrent_gsa_fwd(
         USE_G=False,
         USE_GK=False,
         USE_GV=True,
-        REVERSE=reverse,
-        HEAD_FIRST=head_first
+        REVERSE=reverse
     )
     ok = ok.sum(0)
 
@@ -214,7 +206,7 @@ def fused_recurrent_gsa_fwd(
         o=ov,
         h0=hv0,
         ht=hvt,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=1.,
         B=B,
         T=T,
@@ -227,7 +219,6 @@ def fused_recurrent_gsa_fwd(
         USE_GK=True,
         USE_GV=False,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     ov = ov.sum(0)
     return ok, hkt, qv, ov, hvt
@@ -248,26 +239,17 @@ def fused_recurrent_gsa_bwd(
     dhvt: Optional[torch.Tensor] = None,
     scale: float = 1.,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor]:
-    if head_first:
-        B, H, T, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
-    else:
-        B, T, H, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    B, T, H, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
     BK, BV, BM = min(K, 64), min(V, 64), min(M, 64)
     NK, NV, NM = triton.cdiv(K, BK), triton.cdiv(V, BV), triton.cdiv(M, BM)
 
-    if head_first:
-        dqv = q.new_empty(NV, B, H, T, M, dtype=torch.float)
-        dsv = q.new_empty(NV, B, H, T, M, dtype=torch.float)
-        dv = q.new_empty(NM, B, H, T, V, dtype=torch.float)
-    else:
-        dqv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
-        dsv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
-        dv = q.new_empty(NM, B, T, H, V, dtype=torch.float)
+    dqv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
+    dsv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
+    dv = q.new_empty(NM, B, T, H, V, dtype=torch.float)
     dhk0 = torch.empty_like(hk0)if hk0 is not None else None
     dhv0 = torch.empty_like(hv0)if hv0 is not None else None
 
@@ -287,7 +269,7 @@ def fused_recurrent_gsa_bwd(
         dv=dv,
         dht=dhvt,
         dh0=dhv0,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=1.,
         B=B,
         T=T,
@@ -300,25 +282,16 @@ def fused_recurrent_gsa_bwd(
         USE_GK=True,
         USE_GV=False,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     dqv = dqv.sum(0)
     dsv = dsv.sum(0)
     dv = dv.sum(0)
-    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(),
-                              reverse=not reverse,
-                              offsets=offsets,
-                              head_first=head_first)
+    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
 
     dok = qv * (dqv - (qv * dqv).sum(-1, True))
-    if head_first:
-        dq = q.new_empty(NM, B, H, T, K, dtype=torch.float)
-        dk = q.new_empty(NM, B, H, T, K, dtype=torch.float)
-        dsk = q.new_empty(NK, B, H, T, M, dtype=torch.float)
-    else:
-        dq = q.new_empty(NM, B, T, H, K, dtype=torch.float)
-        dk = q.new_empty(NM, B, T, H, K, dtype=torch.float)
-        dsk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
+    dq = q.new_empty(NM, B, T, H, K, dtype=torch.float)
+    dk = q.new_empty(NM, B, T, H, K, dtype=torch.float)
+    dsk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
     gk, gv = None, g
     grid = (NM, NK, N * H)
     fused_recurrent_bwd_kernel[grid](
@@ -335,7 +308,7 @@ def fused_recurrent_gsa_bwd(
         dv=dsk,
         dht=dhkt,
         dh0=dhk0,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         scale=scale,
         B=B,
         T=T,
@@ -348,16 +321,12 @@ def fused_recurrent_gsa_bwd(
         USE_GK=False,
         USE_GV=True,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     dq = dq.sum(0)
     dk = dk.sum(0)
     dsk = dsk.sum(0)
 
-    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(),
-                              reverse=not reverse,
-                              offsets=offsets,
-                              head_first=head_first)
+    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
 
     ds = dsk.add_(dsv)
     dg = dgk.add_(dgv)
@@ -382,10 +351,9 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         hv0: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
-        T = q.shape[2] if head_first else q.shape[1]
+        T = q.shape[1]
         if T == 1 and not q.requires_grad:
             o, (hkt, hvt) = fused_recurrent_gsa_inference(
                 q=q,
@@ -396,7 +364,6 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
                 initial_state=(hk0, hv0),
                 output_final_state=output_final_state,
                 scale=scale,
-                head_first=head_first
             )
             return o, hkt, hvt
         ok, hkt, qv, ov, hvt = fused_recurrent_gsa_fwd(
@@ -409,14 +376,12 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             scale=scale,
             reverse=reverse,
-            offsets=offsets,
-            head_first=head_first
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, s, g, qv, hk0, hv0, ok)
         ctx.scale = scale
         ctx.reverse = reverse
-        ctx.offsets = offsets
-        ctx.head_first = head_first
+        ctx.cu_seqlens = cu_seqlens
         return ov.to(q.dtype), hkt, hvt
 
     @staticmethod
@@ -426,8 +391,7 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         q, k, v, s, g, qv, hk0, hv0, ok = ctx.saved_tensors
         scale = ctx.scale
         reverse = ctx.reverse
-        offsets = ctx.offsets
-        head_first = ctx.head_first
+        cu_seqlens = ctx.cu_seqlens
 
         # not supported yet.
         if dhkt is not None or dhvt is not None:
@@ -448,10 +412,9 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
             dhvt=dhvt,
             scale=scale,
             reverse=reverse,
-            offsets=offsets,
-            head_first=head_first
+            cu_seqlens=cu_seqlens,
         )
-        return dq.to(q), dk.to(k), dv.to(v), ds.to(s), dg.to(g), None, dhk0, dhv0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), ds.to(s), dg.to(g), None, dhk0, dhv0, None, None, None
 
 
 def fused_recurrent_gsa(
@@ -465,18 +428,17 @@ def fused_recurrent_gsa(
     output_final_state: Optional[bool] = False,
     reverse: Optional[bool] = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]`.
         s (torch.Tensor):
-            slot representations of shape `[B, H, T, M]` if `head_first=True` else `[B, T, H, M]`.
+            slot representations of shape `[B, T, H, M]`.
         g (torch.Tensor):
             Forget gates of shape `[B, H, T, M]` applied to keys.
         scale (Optional[int]):
@@ -494,13 +456,10 @@ def fused_recurrent_gsa(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]`.
         final_state (Tuple[torch.Tensor]):
             Final state tuple having tensors of shape `[N, H, K, M]` and `[N, H, M, V]`.
 
@@ -517,32 +476,36 @@ def fused_recurrent_gsa(
         >>> s = torch.randn(B, T, H, M, device='cuda')
         >>> g = F.logsigmoid(torch.randn(B, T, H, M, device='cuda'))
         >>> h0 = (torch.randn(B, H, K, M, device='cuda'), torch.randn(B, H, M, V, device='cuda'))
-        >>> o, (hk, hv) = fused_recurrent_gsa(q, k, v, s, g,
-                                              initial_state=h0,
-                                              output_final_state=True,
-                                              head_first=False)
+        >>> o, (hk, hv) = fused_recurrent_gsa(
+            q, k, v, s, g,
+            initial_state=h0,
+            output_final_state=True
+        )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, s, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, s, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, (hk_var, hv_var) = fused_recurrent_gsa(q, k, v, s, g,
-                                                          initial_state=h0,
-                                                          output_final_state=True,
-                                                          cu_seqlens=cu_seqlens,
-                                                          head_first=False)
+        >>> o_var, (hk_var, hv_var) = fused_recurrent_gsa(
+            q, k, v, s, g,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert hk.allclose(hk_var)
         >>> assert hv.allclose(hv_var)
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
-        if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if initial_state is not None and initial_state[0].shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state[0].shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if initial_state is None:
@@ -558,6 +521,5 @@ def fused_recurrent_gsa(
         output_final_state,
         reverse,
         cu_seqlens,
-        head_first
     )
     return o, final_state

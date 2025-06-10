@@ -32,7 +32,6 @@ def fused_chunk_retention_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     CHECK: tl.constexpr
 ):
-    # indices
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
 
@@ -326,16 +325,16 @@ def fused_chunk_retention(
     scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
         scale (Optional[int]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -344,12 +343,11 @@ def fused_chunk_retention(
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format.
-            Default: `True`.
+            Whether the inputs are in the head-first format. Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`.
     """

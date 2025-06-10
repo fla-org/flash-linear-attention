@@ -1,2 +1,12 @@
 [flake8]
 max-line-length = 127
+exclude =
+  ./.git,
+  ./docs,
+  ./build,
+  ./scripts,
+  ./venv,
+  .flake8,
+  .pre-commit-config.yaml,
+  *.pyi,
+  *.md,

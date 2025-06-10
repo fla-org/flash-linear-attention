@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
+from einops import rearrange
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv, chunk_fwd_o
@@ -20,12 +22,10 @@ def chunk_simple_gla_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    g = chunk_local_cumsum(g, chunk_size, offsets=offsets, indices=indices, head_first=head_first) if g is not None else None
+    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
     h, ht = chunk_fwd_h(
         k=k,
         v=v,
@@ -35,8 +35,7 @@ def chunk_simple_gla_fwd(
         h0=initial_state,
         output_final_state=output_final_state,
         states_in_fp32=False,
-        offsets=offsets,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     o = chunk_fwd_o(
@@ -46,9 +45,7 @@ def chunk_simple_gla_fwd(
         g=g,
         h=h,
         scale=scale,
-        offsets=offsets,
-        indices=indices,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     return g, o, ht
@@ -63,9 +60,7 @@ def chunk_simple_gla_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     scale: float,
-    offsets: Optional[torch.LongTensor] = None,
-    indices: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # (SY 09/22) states_in_fp32 seems not affecting the error of dg but for safety, set to True
@@ -78,8 +73,7 @@ def chunk_simple_gla_bwd(
         h0=initial_state,
         output_final_state=False,
         states_in_fp32=True,
-        offsets=offsets,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     dh, dh0 = chunk_bwd_dh(
@@ -94,8 +88,7 @@ def chunk_simple_gla_bwd(
         dht=dht,
         scale=scale,
         states_in_fp32=True,
-        offsets=offsets,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     dq, dk, _, dg = chunk_bwd_dqkwg(
@@ -107,9 +100,7 @@ def chunk_simple_gla_bwd(
         do=do,
         dh=dh,
         scale=scale,
-        offsets=offsets,
-        indices=indices,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     dv = chunk_bwd_dv(
@@ -119,9 +110,7 @@ def chunk_simple_gla_bwd(
         do=do,
         dh=dh,
         scale=scale,
-        offsets=offsets,
-        indices=indices,
-        head_first=head_first,
+        cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
     return dq, dk, dv, dg, dh0
@@ -141,20 +130,10 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         scale,
         initial_state,
         output_final_state,
-        offsets,
-        head_first
+        cu_seqlens
     ):
-        T = q.shape[2] if head_first else q.shape[1]
+        T = q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
-
-        # 2-d indices denoting the offsets of chunks in each sequence
-        # for example, if the passed `offsets` is [0, 100, 356] and `chunk_size` is 64,
-        # then there are 2 and 4 chunks in the 1st and 2nd sequences respectively, and `indices` will be
-        # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        indices = None
-        if offsets is not None:
-            indices = torch.cat([torch.arange(n) for n in triton.cdiv(offsets[1:] - offsets[:-1], chunk_size).tolist()])
-            indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(offsets)
 
         g, o, ht = chunk_simple_gla_fwd(
             q=q,
@@ -164,24 +143,20 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            offsets=offsets,
-            indices=indices,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
         ctx.save_for_backward(q, k, v, g, initial_state)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
-        ctx.offsets = offsets
-        ctx.indices = indices
-        ctx.head_first = head_first
+        ctx.cu_seqlens = cu_seqlens
         return o.to(q.dtype), ht
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
-        chunk_size, scale, offsets, indices, head_first = ctx.chunk_size, ctx.scale, ctx.offsets, ctx.indices, ctx.head_first
+        chunk_size, scale, cu_seqlens = ctx.chunk_size, ctx.scale, ctx.cu_seqlens
         q, k, v, g, initial_state = ctx.saved_tensors
         dq, dk, dv, dg, dh0 = chunk_simple_gla_bwd(
             q=q,
@@ -192,16 +167,15 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             scale=scale,
-            offsets=offsets,
-            indices=indices,
-            head_first=head_first,
+            cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
         if g is not None:
-            dg = chunk_local_cumsum(dg, chunk_size, reverse=True, offsets=offsets, indices=indices, head_first=head_first)
+            dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens).to(g)
         else:
             dg = None
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg.to(g.dtype), None, dh0, None, None, None
+
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None
 
 
 @torch.compiler.disable
@@ -214,18 +188,18 @@ def chunk_simple_gla(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         g (torch.Tensor):
-            Forget gates of shape `[B, H, T]` if `head_first=True` else `[B, T, H]`.
+            Forget gates of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
             Compared to GLA, the gating is head-wise instead of elementwise.
         scale (Optional[int]):
             Scale factor for the attention scores.
@@ -241,11 +215,11 @@ def chunk_simple_gla(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
 
@@ -260,31 +234,48 @@ def chunk_simple_gla(
         >>> k = torch.randn(B, T, H, K, device='cuda')
         >>> v = torch.randn(B, T, H, V, device='cuda')
         >>> g = F.logsigmoid(torch.randn(B, T, H, device='cuda'))
-        >>> o, ht = chunk_simple_gla(q, k, v, g,
-                                     initial_state=None,
-                                     output_final_state=True,
-                                     head_first=False)
+        >>> o, ht = chunk_simple_gla(
+            q, k, v, g,
+            initial_state=None,
+            output_final_state=True
+        )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = chunk_simple_gla(q, k, v, g,
-                                             initial_state=None,
-                                             output_final_state=True,
-                                             cu_seqlens=cu_seqlens,
-                                             head_first=False)
+        >>> o_var, ht_var = chunk_simple_gla(
+            q, k, v, g,
+            initial_state=None,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, g))
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
-        if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkSimpleGLAFunction.apply(
@@ -295,7 +286,8 @@ def chunk_simple_gla(
         scale,
         initial_state,
         output_final_state,
-        cu_seqlens,
-        head_first
+        cu_seqlens
     )
+    if head_first:
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

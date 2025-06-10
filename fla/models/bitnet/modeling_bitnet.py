@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
-from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -26,6 +25,7 @@ from fla.modules.fused_bitlinear import FusedBitLinear
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
+
 logger = logging.get_logger(__name__)
 
 
@@ -36,7 +36,8 @@ class BitNetMLP(nn.Module):
         hidden_size: int,
         hidden_ratio: Optional[int] = None,
         intermediate_size: Optional[int] = None,
-        hidden_act: str = 'swish'
+        hidden_act: str = 'swish',
+        fuse_swiglu: bool = True
     ) -> BitNetMLP:
         super().__init__()
 
@@ -50,19 +51,23 @@ class BitNetMLP(nn.Module):
             intermediate_size = 256 * ((intermediate_size + 256 - 1) // 256)
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
+        self.hidden_act = hidden_act
+        self.fuse_swiglu = fuse_swiglu
 
-        self.gate_proj = FusedBitLinear(self.hidden_size, self.intermediate_size * 2, bias=False)
-        self.down_proj = FusedBitLinear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[hidden_act]
+        if hidden_act != 'swish':
+            raise ValueError(f'Unsupported hidden_act: {hidden_act}')
+
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
 
     def forward(
         self,
         x: torch.Tensor,
-        **kwargs: Unpack[Any],
+        **kwargs: Unpack[Any]
     ) -> torch.Tensor:
-        gate, y = self.gate_proj(x).chunk(2, -1)
-        z = self.down_proj(swiglu(gate, y))
-        return z
+        gate, y = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(swiglu(gate, y))
 
 
 class BitNetBlock(nn.Module):
@@ -83,6 +88,7 @@ class BitNetBlock(nn.Module):
             max_position_embeddings=config.max_position_embeddings,
             layer_idx=layer_idx
         )
+
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = BitNetMLP(
             hidden_size=config.hidden_size,
@@ -149,7 +155,7 @@ class BitNetPreTrainedModel(PreTrainedModel):
         rescale_prenorm_residual: bool = False,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, (nn.Linear, nn.Conv1d, FusedBitLinear)):
+        if isinstance(module, (nn.Linear, FusedBitLinear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
@@ -369,6 +375,7 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
         })
         return model_inputs
 
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -402,11 +409,10 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
+        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
-        loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
+        loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
@@ -417,6 +423,7 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
                     criterion = nn.CrossEntropyLoss()
             else:
                 criterion = self.criterion
+
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
             if fuse_linear_and_cross_entropy:

@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
+from einops import rearrange
 
+from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -32,7 +35,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
     o,  # output [NK, B, H, T, V]/[NK, B, T, H, V]
     h0,  # initial hidden state [B, H, K, V]
     ht,  # final hidden state [B, H, K, V]
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -44,13 +47,12 @@ def fused_recurrent_rwkv6_fwd_kernel(
     REVERSE: tl.constexpr,  # whether to reverse the recurrence
     USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
     STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
-    USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -59,18 +61,11 @@ def fused_recurrent_rwkv6_fwd_kernel(
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    if HEAD_FIRST:
-        p_q = q + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_k = k + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_v = v + i_nh * T*V + ((T-1) * V if REVERSE else 0) + o_v
-        p_w = w + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_o = o + (i_k * B*H + i_nh) * T*V + ((T-1) * V if REVERSE else 0) + o_v
-    else:
-        p_q = q + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-        p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_o = o + ((i_k * all + bos) + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_q = q + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_o = o + ((i_k * all + bos) + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
     p_u = u + i_h * K + o_k
 
     mask_k = o_k < K
@@ -91,13 +86,13 @@ def fused_recurrent_rwkv6_fwd_kernel(
         b_w = tl.load(p_w, mask=mask_k, other=0).to(tl.float32)
         b_kv = b_k[:, None] * b_v[None, :]
         b_o = tl.sum((b_h + b_kv * b_u[:, None]) * b_q[:, None], 0)
-        b_h = b_h * tl.exp(b_w)[:, None] + b_kv
+        b_h = b_h * exp(b_w)[:, None] + b_kv
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
-        p_q += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_k += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_v += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_w += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_o += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
+        p_q += (-1 if REVERSE else 1) * H*K
+        p_k += (-1 if REVERSE else 1) * H*K
+        p_v += (-1 if REVERSE else 1) * H*V
+        p_w += (-1 if REVERSE else 1) * H*K
+        p_o += (-1 if REVERSE else 1) * H*V
 
     if STORE_FINAL_STATE:
         p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -106,7 +101,7 @@ def fused_recurrent_rwkv6_fwd_kernel(
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -126,7 +121,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     dq,  # gradient of query [NV, B, H, T, K]/[NV, B, T, H, K]
     dq1,  # gradient of query_aux [NV, B, H, T, K]/[NV, B, T, H, K]
     h0,
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -137,13 +132,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     BV: tl.constexpr,
     REVERSE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -152,20 +146,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    if HEAD_FIRST:
-        p_k = k + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_v = v + i_nh * T*V + ((T-1) * V if REVERSE else 0) + o_v
-        p_w = w + i_nh * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_do = do + i_nh * T*V + ((T-1) * V if REVERSE else 0) + o_v
-        p_dq = dq + (i_v * B*H + i_nh) * T*K + ((T-1) * K if REVERSE else 0) + o_k
-        p_dq1 = dq1 + (i_v * B*H + i_nh) * T*K + ((T-1) * K if REVERSE else 0) + o_k
-    else:
-        p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-        p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_do = do + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-        p_dq = dq + ((i_v * all + bos) + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-        p_dq1 = dq1 + ((i_v * all + bos) + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_do = do + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_dq = dq + ((i_v * all + bos) + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_dq1 = dq1 + ((i_v * all + bos) + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
     p_u = u + i_h * K + o_k
 
     mask_k = o_k < K
@@ -189,22 +175,22 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         b_hq = b_h * b_do[None, :]
         b_dq = tl.sum(b_hq + b_kv * b_u[:, None] * b_do[None, :], 1) * scale
         b_dq1 = tl.sum(b_hq, 1)
-        b_h = b_h * tl.exp(b_w)[:, None]
+        b_h = b_h * exp(b_w)[:, None]
         b_h += b_kv
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), mask=mask_k)
         tl.store(p_dq1, b_dq1.to(p_dq1.dtype.element_ty), mask=mask_k)
 
-        p_k += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_v += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_w += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_do += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_dq += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_dq1 += (-1 if REVERSE else 1) * (1 if HEAD_FIRST else H) * K
+        p_k += (-1 if REVERSE else 1) * H*K
+        p_v += (-1 if REVERSE else 1) * H*V
+        p_w += (-1 if REVERSE else 1) * H*K
+        p_do += (-1 if REVERSE else 1) * H*V
+        p_dq += (-1 if REVERSE else 1) * H*K
+        p_dq1 += (-1 if REVERSE else 1) * H*K
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -226,7 +212,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     dk1,  # gradient of key_aux [NV, B, H, T, K]/[NK, B, T, H, K]
     dv,  # gradient of value [NK, B, H, T, V]/[NV, B, T, H, V]
     dh0,  # gradient of initial hidden state [N, H, K, V]
-    offsets,
+    cu_seqlens,
     scale,
     T,
     B: tl.constexpr,
@@ -237,13 +223,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     BV: tl.constexpr,
     REVERSE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
-        bos, eos = tl.load(offsets + i_n).to(tl.int64), tl.load(offsets + i_n + 1).to(tl.int64)
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
         T = eos - bos
     else:
@@ -252,24 +237,14 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
 
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    if HEAD_FIRST:
-        p_q = q + i_nh * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_k = k + i_nh * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_v = v + i_nh * T*V + ((T-1) * V if not REVERSE else 0) + o_v
-        p_w = w + i_nh * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_do = do + i_nh * T*V + ((T-1) * V if not REVERSE else 0) + o_v
-        p_dk = dk + (i_v * B*H + i_nh) * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_dk1 = dk1 + (i_v * B*H + i_nh) * T*K + ((T-1) * K if not REVERSE else 0) + o_k
-        p_dv = dv + (i_k * B*H + i_nh) * T*V + ((T-1) * V if not REVERSE else 0) + o_v
-    else:
-        p_q = q + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_k = k + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_v = v + (bos + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
-        p_w = w + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_do = do + (bos + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
-        p_dk = dk + ((i_v * all + bos) + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_dk1 = dk1 + ((i_v * all + bos) + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
-        p_dv = dv + ((i_k * all + bos) + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
+    p_q = q + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
+    p_w = w + (bos + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_do = do + (bos + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
+    p_dk = dk + ((i_v * all + bos) + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_dk1 = dk1 + ((i_v * all + bos) + ((T-1) if not REVERSE else 0)) * H*K + i_h * K + o_k
+    p_dv = dv + ((i_k * all + bos) + ((T-1) if not REVERSE else 0)) * H*V + i_h * V + o_v
     p_u = u + i_h * K + o_k
 
     mask_k = o_k < K
@@ -293,17 +268,17 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
 
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=mask_k)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=mask_v)
-        b_dh *= tl.exp(b_w)[:, None]
+        b_dh *= exp(b_w)[:, None]
         b_dh += b_dkv
 
-        p_q += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_k += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_v += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_w += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_do += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * V
-        p_dk += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_dk1 += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * K
-        p_dv += (-1 if not REVERSE else 1) * (1 if HEAD_FIRST else H) * V
+        p_q += (-1 if not REVERSE else 1) * H*K
+        p_k += (-1 if not REVERSE else 1) * H*K
+        p_v += (-1 if not REVERSE else 1) * H*V
+        p_w += (-1 if not REVERSE else 1) * H*K
+        p_do += (-1 if not REVERSE else 1) * H*V
+        p_dk += (-1 if not REVERSE else 1) * H*K
+        p_dk1 += (-1 if not REVERSE else 1) * H*K
+        p_dv += (-1 if not REVERSE else 1) * H*V
 
     if USE_INITIAL_STATE:
         p_dh0 = dh0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -311,7 +286,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
@@ -329,7 +304,7 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     dq,
     dk,
     dw,
-    offsets,
+    cu_seqlens,
     scale,
     T,
     H: tl.constexpr,
@@ -337,13 +312,12 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     BT: tl.constexpr,
     BK: tl.constexpr,
     REVERSE: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
-    USE_OFFSETS: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_k, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     else:
         bos, eos = i_n * T, i_n * T + T
     T = eos - bos
@@ -356,18 +330,11 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
 
     i_t = 0 if not REVERSE else NT - 1
     for _ in range(NT):
-        if HEAD_FIRST:
-            p_q = tl.make_block_ptr(q + i_nh * T*K, (T, K), (K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-            p_dq = tl.make_block_ptr(dq + i_nh * T*K, (T, K), (K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k + i_nh * T*K, (T-1, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dk = tl.make_block_ptr(dk + i_nh * T*K, (T-1, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dw = tl.make_block_ptr(dw + i_nh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        else:
-            p_q = tl.make_block_ptr(q + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-            p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
-            p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_q = tl.make_block_ptr(q + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + 1, i_k * BK), (BT, BK), (1, 0))
+        p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T-1, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         # [BT, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
         b_dq = tl.load(p_dq, boundary_check=(0, 1)).to(tl.float32)
@@ -392,14 +359,10 @@ def fused_recurrent_rwkv6_fwd(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = min(triton.next_power_of_2(K), 32), min(triton.next_power_of_2(V), 32)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
@@ -417,7 +380,7 @@ def fused_recurrent_rwkv6_fwd(
         o,
         h0,
         ht,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         B=B,
@@ -427,7 +390,6 @@ def fused_recurrent_rwkv6_fwd(
         BK=BK,
         BV=BV,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     o = o.sum(0)
     return o, ht
@@ -443,14 +405,10 @@ def fused_recurrent_rwkv6_bwd(
     scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     reverse: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    if head_first:
-        B, H, T, K, V = *k.shape, v.shape[-1]
-    else:
-        B, T, H, K, V = *k.shape, v.shape[-1]
-    N = B if offsets is None else len(offsets) - 1
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
     BK, BV = min(triton.next_power_of_2(K), 16), min(triton.next_power_of_2(V), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
@@ -468,7 +426,7 @@ def fused_recurrent_rwkv6_bwd(
         dq,
         dq1,
         initial_state,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         B=B,
@@ -478,7 +436,6 @@ def fused_recurrent_rwkv6_bwd(
         BK=BK,
         BV=BV,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     dq = dq.sum(0)
     dq1 = dq1.sum(0)
@@ -503,7 +460,7 @@ def fused_recurrent_rwkv6_bwd(
         dk1,
         dv,
         dh0,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         B=B,
@@ -513,7 +470,6 @@ def fused_recurrent_rwkv6_bwd(
         BK=BK,
         BV=BV,
         REVERSE=reverse,
-        HEAD_FIRST=head_first
     )
     dk = dk.sum(0)
     dk1 = dk1.sum(0)
@@ -527,16 +483,15 @@ def fused_recurrent_rwkv6_bwd(
         dq1,
         dk1,
         dw,
-        offsets,
+        cu_seqlens,
         scale,
         T=T,
         H=H,
         K=K,
         REVERSE=not reverse,
-        HEAD_FIRST=head_first
     )
     du = (do.float() * v).sum(-1, True, dtype=torch.float) * q * k * scale
-    du = du.sum((0, 2)) if head_first else du.sum((0, 1))
+    du = du.sum((0, 1))
     return dq, dk, dv, dw, du, dh0
 
 
@@ -556,8 +511,7 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        offsets: Optional[torch.LongTensor] = None,
-        head_first: bool = True
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ):
         o, ht = fused_recurrent_rwkv6_fwd(
             q=q,
@@ -569,14 +523,12 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             reverse=reverse,
-            offsets=offsets,
-            head_first=head_first
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, k, v, w, u, initial_state)
         ctx.scale = scale
         ctx.reverse = reverse
-        ctx.offsets = offsets
-        ctx.head_first = head_first
+        ctx.cu_seqlens = cu_seqlens
         return o.to(v), ht
 
     @staticmethod
@@ -595,11 +547,10 @@ class FusedRecurrentRWKV6Function(torch.autograd.Function):
             scale=ctx.scale,
             initial_state=initial_state,
             reverse=ctx.reverse,
-            offsets=ctx.offsets,
-            head_first=ctx.head_first
+            cu_seqlens=ctx.cu_seqlens,
         )
         dh0 = dh0.to(initial_state) if dh0 is not None else dh0
-        return dq.to(q), dk.to(k), dv.to(v), dw.to(w), du.to(u), None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dw.to(w), du.to(u), None, dh0, None, None, None
 
 
 def fused_recurrent_rwkv6(
@@ -613,19 +564,19 @@ def fused_recurrent_rwkv6(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         r (torch.Tensor):
-            reception of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            reception of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
             Alias: q, query in linear attention.
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`.
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         w (torch.Tensor):
-            data-dependent decays of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]` in log space! Alias: g.
+            data-dependent decays of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]` in log space! Alias: g.
         u (torch.Tensor):
             bonus of shape `[H, K]`
         scale (Optional[int]):
@@ -644,11 +595,11 @@ def fused_recurrent_rwkv6(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `True`.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`.
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (Optional[torch.Tensor]):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
 
@@ -665,31 +616,48 @@ def fused_recurrent_rwkv6(
         >>> g = F.logsigmoid(torch.randn(B, T, H, K, device='cuda'))
         >>> u = torch.randn(H, K, device='cuda')
         >>> h0 = torch.randn(B, H, K, V, device='cuda')
-        >>> o, ht = fused_recurrent_rwkv6(q, k, v, g, u,
-                                          initial_state=h0,
-                                          output_final_state=True,
-                                          head_first=False)
+        >>> o, ht = fused_recurrent_rwkv6(
+            q, k, v, g, u,
+            initial_state=h0,
+            output_final_state=True
+        )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = fused_recurrent_rwkv6(q, k, v, g, u,
-                                                  initial_state=h0,
-                                                  output_final_state=True,
-                                                  cu_seqlens=cu_seqlens,
-                                                  head_first=False)
+        >>> o_var, ht_var = fused_recurrent_rwkv6(
+            q, k, v, g, u,
+            initial_state=h0,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens
+        )
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        r, k, v, w = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (r, k, v, w))
+    if not head_first and r.shape[1] < r.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
-            raise ValueError(f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
-                             f"Please flatten variable-length inputs before processing.")
-        if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
+                f"Please flatten variable-length inputs before processing."
+            )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
-            raise ValueError(f"The number of initial states is expected to be equal to the number of input sequences, "
-                             f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.")
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+            )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = FusedRecurrentRWKV6Function.apply(
@@ -703,6 +671,7 @@ def fused_recurrent_rwkv6(
         output_final_state,
         reverse,
         cu_seqlens,
-        head_first
     )
+    if head_first:
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

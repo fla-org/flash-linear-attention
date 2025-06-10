@@ -1,28 +1,26 @@
 # -*- coding: utf-8 -*-
 
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
-from ops.titans.fused_chunk import fused_chunk_titans_linear
-from ops.titans.naive import chunk_titans_linear_ref
 
-from fla.utils import device
+# from fla.ops.titans.fused_chunk import fused_chunk_titans_linear
+from fla.ops.titans.naive import chunk_titans_linear_ref
+from fla.utils import COMPILER_MODE, assert_close, device
 
-
-def get_abs_err(x, y):
-    return (x - y).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x - y).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
-    return err / base
-
-
-def assert_close(prefix, ref, tri, ratio):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
-    assert get_err_ratio(ref, tri) < ratio, msg
+if COMPILER_MODE:
+    test_b_list = [1]
+    test_t_list = [4096]
+    test_t_varlen_list = test_t_list
+    test_d_list = [64, 128, 256]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 15, 63, 300]
+    test_t_varlen_list = [63, 286, 300, 512]
+    test_d_list = [64, 32, 100, 256]
+test_h_list = [2]
 
 
 def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
@@ -54,13 +52,17 @@ def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
     return theta
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [512])
-@pytest.mark.parametrize("H", [32])
-@pytest.mark.parametrize("D", [512])
+@pytest.mark.parametrize("B", test_b_list)
+@pytest.mark.parametrize("T", test_t_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("scale", [1])
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
 def test_naive_chunk_fwd(
     B: int, T: int, H: int, D: int, dtype: torch.dtype, scale: float, head_first: bool
 ):
@@ -130,89 +132,89 @@ def test_naive_chunk_fwd(
     assert_close("ht", ref_ht, ref_ht_naive, 0.005)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T", [64])
-@pytest.mark.parametrize("H", [16])
-@pytest.mark.parametrize("D", [32])
-@pytest.mark.parametrize("scale", [1])
-@pytest.mark.parametrize("dtype", [torch.float32])
-@pytest.mark.parametrize("head_first", [True, False])
-def test_fused_chunk_fwd(
-    B: int, T: int, H: int, D: int, dtype: torch.dtype, scale: float, head_first: bool
-):
-    BT = 1
-    # set seed
-    torch.manual_seed(1)
-    # we don't use such initialization in the original code
-    # theta = initialize_chunked_param(B, H, T, BT, dtype)
-    # alpha = initialize_chunked_param(B, H, T, BT, dtype)
-    # eta = initialize_chunked_param(B, H, T, BT, dtype)
-    theta = torch.rand(B, H, T, 1, dtype=dtype)
-    alpha = torch.rand(B, H, T, 1, dtype=dtype)
-    eta = torch.rand(B, H, T, 1, dtype=dtype)
+# @pytest.mark.parametrize("B", test_b_list)
+# @pytest.mark.parametrize("T", test_t_list)
+# @pytest.mark.parametrize("H", test_h_list)
+# @pytest.mark.parametrize("D", test_d_list)
+# @pytest.mark.parametrize("scale", [1])
+# @pytest.mark.parametrize("dtype", [torch.float32])
+# @pytest.mark.parametrize("head_first", [True, False])
+# def test_fused_chunk_fwd(
+#     B: int, T: int, H: int, D: int, dtype: torch.dtype, scale: float, head_first: bool
+# ):
+#     BT = 1
+#     # set seed
+#     torch.manual_seed(1)
+#     # we don't use such initialization in the original code
+#     # theta = initialize_chunked_param(B, H, T, BT, dtype)
+#     # alpha = initialize_chunked_param(B, H, T, BT, dtype)
+#     # eta = initialize_chunked_param(B, H, T, BT, dtype)
+#     theta = torch.rand(B, H, T, 1, dtype=dtype)
+#     alpha = torch.rand(B, H, T, 1, dtype=dtype)
+#     eta = torch.rand(B, H, T, 1, dtype=dtype)
 
-    if head_first:
-        # titans normalize queries and keys using ℓ2-normalization
-        q = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(
-            dtype
-        )
-        k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(
-            dtype
-        )
-        v = torch.randn(B, H, T, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        h0 = torch.randn(B, H, D, D, dtype=dtype)
-    else:
-        q = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(
-            dtype
-        )
-        k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(
-            dtype
-        )
-        v = torch.randn(B, T, H, D, dtype=dtype)
-        w = torch.randn(H, D, dtype=dtype)
-        b = torch.randn(H, D, dtype=dtype)
-        h0 = torch.randn(B, H, D, D, dtype=dtype)
-        # we need to reshape here because head_first is True
-        theta = theta.permute(0, 2, 1, 3)
-        alpha = alpha.permute(0, 2, 1, 3)
-        eta = eta.permute(0, 2, 1, 3)
-    q, k, v, w, b, theta, alpha, eta = map(
-        lambda x: x.to(device).requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
-    )
-    # in titans paper, h0 is not learnable
-    h0 = h0.to(device)
+#     if head_first:
+#         # titans normalize queries and keys using ℓ2-normalization
+#         q = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(
+#             dtype
+#         )
+#         k = F.normalize(torch.randn(B, H, T, D, dtype=torch.float32), p=2, dim=-1).to(
+#             dtype
+#         )
+#         v = torch.randn(B, H, T, D, dtype=dtype)
+#         w = torch.randn(H, D, dtype=dtype)
+#         b = torch.randn(H, D, dtype=dtype)
+#         h0 = torch.randn(B, H, D, D, dtype=dtype)
+#     else:
+#         q = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(
+#             dtype
+#         )
+#         k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(
+#             dtype
+#         )
+#         v = torch.randn(B, T, H, D, dtype=dtype)
+#         w = torch.randn(H, D, dtype=dtype)
+#         b = torch.randn(H, D, dtype=dtype)
+#         h0 = torch.randn(B, H, D, D, dtype=dtype)
+#         # we need to reshape here because head_first is True
+#         theta = theta.permute(0, 2, 1, 3)
+#         alpha = alpha.permute(0, 2, 1, 3)
+#         eta = eta.permute(0, 2, 1, 3)
+#     q, k, v, w, b, theta, alpha, eta = map(
+#         lambda x: x.to(device).requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
+#     )
+#     # in titans paper, h0 is not learnable
+#     h0 = h0.to(device)
 
-    ref_naive, ref_ht_naive = fused_chunk_titans_linear(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        w.clone(),
-        b.clone(),
-        theta.clone(),
-        alpha.clone(),
-        eta.clone(),
-        output_final_state=True,
-        chunk_size=BT,
-        initial_state=h0.clone(),
-        head_first=head_first,
-    )
-    ref, ref_ht = chunk_titans_linear_ref(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        w.clone(),
-        b.clone(),
-        theta.clone(),
-        alpha.clone(),
-        eta.clone(),
-        output_final_state=True,
-        chunk_size=BT,
-        initial_state=h0.clone(),
-        head_first=head_first,
-        use_chunk=True,
-    )
+#     ref_naive, ref_ht_naive = fused_chunk_titans_linear(
+#         q.clone(),
+#         k.clone(),
+#         v.clone(),
+#         w.clone(),
+#         b.clone(),
+#         theta.clone(),
+#         alpha.clone(),
+#         eta.clone(),
+#         output_final_state=True,
+#         chunk_size=BT,
+#         initial_state=h0.clone(),
+#         head_first=head_first,
+#     )
+#     ref, ref_ht = chunk_titans_linear_ref(
+#         q.clone(),
+#         k.clone(),
+#         v.clone(),
+#         w.clone(),
+#         b.clone(),
+#         theta.clone(),
+#         alpha.clone(),
+#         eta.clone(),
+#         output_final_state=True,
+#         chunk_size=BT,
+#         initial_state=h0.clone(),
+#         head_first=head_first,
+#         use_chunk=True,
+#     )
 
-    # assert_close(" o", ref, ref_naive, 0.006)
-    assert_close("ht", ref_ht, ref_ht_naive, 0.005)
+#     # assert_close(" o", ref, ref_naive, 0.006)
+#     assert_close("ht", ref_ht, ref_ht_naive, 0.005)

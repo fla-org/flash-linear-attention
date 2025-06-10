@@ -313,7 +313,7 @@ def chunk_titans_linear_ref(
     chunk_size: int = 16,  # chunk size
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = True,
+    head_first: bool = False,
     use_chunk: bool = True,
 ):
     assert q.dtype == k.dtype == v.dtype

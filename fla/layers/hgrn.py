@@ -11,9 +11,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from fla.modules import FusedRMSNormSwishGate, ShortConvolution
+from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.modules.activations import swiglu
-from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
 
 if TYPE_CHECKING:
@@ -57,11 +56,24 @@ class HGRNAttention(nn.Module):
 
         if use_short_conv:
             self.conv_size = conv_size
-            self.q_conv1d = ShortConvolution(self.input_dim, conv_size, activation=None)
-            self.f_conv1d = ShortConvolution(self.input_dim, conv_size, activation=None)
-            self.i_conv1d = ShortConvolution(self.input_dim, conv_size, activation=None)
+            self.f_conv1d = ShortConvolution(
+                hidden_size=self.input_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation=None,
+            )
+            self.i_conv1d = ShortConvolution(
+                hidden_size=self.input_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation=None,
+            )
 
-        self.g_norm = FusedRMSNormSwishGate(self.input_dim, elementwise_affine, norm_eps)
+        self.g_norm = FusedRMSNormGated(
+            hidden_size=self.input_dim,
+            elementwise_affine=elementwise_affine,
+            eps=norm_eps
+        )
         self.o_proj = nn.Linear(self.input_dim, hidden_size, bias=False)
 
     def forward(
@@ -88,36 +100,35 @@ class HGRNAttention(nn.Module):
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
-        cu_seqlens, position_ids, seq_idx = kwargs.get('cu_seqlens', None), kwargs.get('position_ids', None), None
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if self.use_short_conv:
             conv_state_i, conv_state_f = None, None
             if last_state is not None:
                 conv_state_i, conv_state_f = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            if cu_seqlens is not None:
-                if position_ids is None:
-                    position_ids = prepare_position_ids(cu_seqlens)
-                seq_idx = prepare_sequence_ids(position_ids).to(torch.int32).unsqueeze(0)
-            i, conv_state_i = self.i_conv1d(x=self.i_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_i,
-                                            output_final_state=use_cache,
-                                            seq_idx=seq_idx)
-            f, conv_state_f = self.f_conv1d(x=self.f_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_f,
-                                            output_final_state=use_cache,
-                                            seq_idx=seq_idx)
+            i, conv_state_i = self.i_conv1d(
+                x=self.i_proj(hidden_states),
+                mask=conv_mask,
+                cache=conv_state_i,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens
+            )
+            f, conv_state_f = self.f_conv1d(
+                x=self.f_proj(hidden_states),
+                mask=conv_mask,
+                cache=conv_state_f,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens
+            )
         else:
             i = self.i_proj(hidden_states)
             f = self.f_proj(hidden_states)
 
+        f = F.logsigmoid(f)
         # the lower bound for the first layer is zero
-        if lower_bound is None or self.layer_idx == 0:
-            i, f = swiglu(i, 1 - f.sigmoid()), F.logsigmoid(f)
-        else:
-            g = lower_bound + (1 - lower_bound) * f.sigmoid()
-            i, f = swiglu(i, 1 - g), g.log()
+        if lower_bound is not None and self.layer_idx > 0:
+            f = torch.logaddexp(lower_bound.log(), torch.log1p(-lower_bound) + f).to(f)
+        i = swiglu(i, 1 - f.exp())
 
         # dealing with left-padding
         if attention_mask is not None:
@@ -125,10 +136,22 @@ class HGRNAttention(nn.Module):
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
-            o, recurrent_state = chunk_hgrn(i, f, recurrent_state, use_cache)
+            if cu_seqlens is not None:
+                raise NotImplementedError("Chunk mode does not support variable-length sequences.")
+            o, recurrent_state = chunk_hgrn(
+                x=i,
+                g=f,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+            )
         elif mode == 'fused_recurrent':
-            o, recurrent_state = fused_recurrent_hgrn(i, f, recurrent_state, use_cache,
-                                                      cu_seqlens=cu_seqlens)
+            o, recurrent_state = fused_recurrent_hgrn(
+                x=i,
+                g=f,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens
+            )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 

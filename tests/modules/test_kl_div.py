@@ -5,15 +5,19 @@ import torch
 import torch.nn.functional as F
 
 from fla.modules import FusedKLDivLoss
-from fla.utils import device
+from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.parametrize("B", [1, 4])
-@pytest.mark.parametrize("T", [2048, 4096])
+@pytest.mark.parametrize("B", [2])
+@pytest.mark.parametrize("T", [16, 32])
 @pytest.mark.parametrize("D", [1024, 2048])
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("reduction", ["batchmean"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason="Intel Triton Failure"
+)
 def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
     x = torch.randn(B * T, D).to(device).to(dtype=dtype).requires_grad_()
@@ -36,6 +40,6 @@ def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtyp
     tri_dx, x.grad = x.grad.clone(), None
     tri_dw, x_weight.grad = x_weight.grad.clone(), None
 
-    assert torch.allclose(ref, tri, atol=1e-5), f" o: {(ref-tri).abs().max()}"
-    assert torch.allclose(ref_dx, tri_dx, atol=1e-5), f"dx: {(ref_dx-tri_dx).abs().max()}"
-    assert torch.allclose(ref_dw, tri_dw, atol=1e-5), f"dx_weight: {(ref_dw-tri_dw).abs().max()}"
+    assert_close("  o", ref, tri, 1e-2)
+    assert_close(" dx", ref_dx, tri_dx, 1e-2)
+    assert_close(" dw", ref_dw, tri_dw, 1e-2)

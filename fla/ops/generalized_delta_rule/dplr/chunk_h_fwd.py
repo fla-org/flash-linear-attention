@@ -7,15 +7,15 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_chunk_offsets
-from fla.ops.utils.exp import exp
-from fla.utils import is_triton_shared_mem_enough, use_cuda_graph
+from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils.op import exp
+from fla.utils import check_shared_mem, use_cuda_graph
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -38,7 +38,7 @@ def chunk_dplr_fwd_kernel_h(
     h,
     h0,
     ht,
-    offsets,
+    cu_seqlens,
     chunk_offsets,
     T,
     H: tl.constexpr,
@@ -48,16 +48,14 @@ def chunk_dplr_fwd_kernel_h(
     BC: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_OFFSETS: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
-    if USE_OFFSETS:
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
@@ -65,6 +63,7 @@ def chunk_dplr_fwd_kernel_h(
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
+    o_k = i_k * BK + tl.arange(0, BK)
 
     # [BK, BV]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -73,10 +72,7 @@ def chunk_dplr_fwd_kernel_h(
         b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
 
     for i_t in range(NT):
-        if HEAD_FIRST:
-            p_h = tl.make_block_ptr(h + (i_nh * NT + i_t) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        else:
-            p_h = tl.make_block_ptr(h + ((boh + i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+        p_h = tl.make_block_ptr(h + ((boh + i_t) * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
 
         b_hc = tl.zeros([BK, BV], dtype=tl.float32)
@@ -118,11 +114,7 @@ def chunk_dplr_fwd_kernel_h(
             tl.store(p_v_new, b_v2.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
 
         last_idx = min((i_t + 1) * BT, T) - 1
-        if HEAD_FIRST:
-            b_g_last = tl.load(gk + i_nh * T * K + last_idx * K + tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
-        else:
-            b_g_last = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
-                               tl.arange(0, BK), mask=tl.arange(0, BK) < K).to(tl.float32)
+        b_g_last = tl.load(gk + (bos + last_idx) * H*K + i_h * K + o_k, mask=o_k < K).to(tl.float32)
         b_h *= exp(b_g_last[:, None])
         b_h += b_hc
 
@@ -140,30 +132,26 @@ def chunk_dplr_fwd_h(
     gk: torch.Tensor,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
-    offsets: Optional[torch.LongTensor] = None,
-    head_first: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if head_first:
-        B, H, T, K, V = *kg.shape, u.shape[-1]
-    else:
-        B, T, H, K, V = *kg.shape, u.shape[-1]
+    B, T, H, K, V = *kg.shape, u.shape[-1]
     BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
-    if offsets is None:
+    if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
-        N = len(offsets) - 1
-        chunk_offsets = prepare_chunk_offsets(offsets, BT)
-        NT = chunk_offsets[-1]
+        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     BK = triton.next_power_of_2(K)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
 
-    if is_triton_shared_mem_enough(233472, kg.device.index):
+    if check_shared_mem('hopper', kg.device.index):
         BV = 64
         BC = 64 if K <= 128 else 32
-    elif is_triton_shared_mem_enough(131072, kg.device.index):  # A100
+    elif check_shared_mem('ampere', kg.device.index):  # A100
         BV = 32
         BC = 32
     else:
@@ -175,10 +163,7 @@ def chunk_dplr_fwd_h(
     NV = triton.cdiv(V, BV)
     assert NK == 1, 'NK > 1 is not supported because it involves time-consuming synchronization'
 
-    if head_first:
-        h = kg.new_empty(B, H, NT, K, V)
-    else:
-        h = kg.new_empty(B, NT, H, K, V)
+    h = kg.new_empty(B, NT, H, K, V)
     final_state = kg.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u)
     grid = (NK, NV, N * H)
@@ -193,7 +178,7 @@ def chunk_dplr_fwd_h(
         gk=gk,
         h0=initial_state,
         ht=final_state,
-        offsets=offsets,
+        cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
         H=H,
@@ -203,7 +188,5 @@ def chunk_dplr_fwd_h(
         BC=BC,
         BK=BK,
         BV=BV,
-        NT=NT,
-        HEAD_FIRST=head_first
     )
     return h, v_new, final_state

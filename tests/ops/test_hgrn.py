@@ -8,29 +8,31 @@ import torch.nn.functional as F
 
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
 from fla.ops.hgrn.naive import naive_recurrent_hgrn
-from fla.utils import device
+from fla.utils import COMPILER_MODE, assert_close, device
+
+if COMPILER_MODE:
+    test_b_list = [1]
+    test_t_list = [4096]
+    test_t_varlen_list = test_t_list
+    test_d_list = [500, 1024]
+    test_gate_list = [1.0]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 15, 63, 300]
+    test_t_varlen_list = [63, 286, 300, 512]
+    test_d_list = [500, 1024]
+    test_gate_list = [1, 0.1, 10]
+test_h_list = [2]
 
 
-def get_abs_err(x, y):
-    return (x-y).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x-y).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
-    return err / base
-
-
-def assert_close(prefix, ref, tri, ratio):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
-    assert get_err_ratio(ref, tri) < ratio, msg
-
-
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("D", [500, 1024])
-@pytest.mark.parametrize("dtype", [torch.float])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('dtype', [torch.float])
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+)
 def test_fused_recurrent(
     B: int,
     T: int,
@@ -60,17 +62,21 @@ def test_fused_recurrent(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close("o", ref, tri, 0.005)
-    assert_close("ht", ref_ht, tri_ht, 0.005)
-    assert_close("dx", ref_dx, tri_dx, 0.005)
-    assert_close("dg", ref_dg, tri_dg, 0.005)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.005)
+    assert_close('  o', ref, tri, 0.005)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dx', ref_dx, tri_dx, 0.005)
+    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("D", [500, 1024])
-@pytest.mark.parametrize("dtype", [torch.float])
+@pytest.mark.parametrize('N', test_b_list)
+@pytest.mark.parametrize('T', test_t_varlen_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('dtype', [torch.float])
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+)
 def test_fused_recurrent_varlen(
     N: int,
     T: int,
@@ -80,9 +86,9 @@ def test_fused_recurrent_varlen(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
 
@@ -97,8 +103,8 @@ def test_fused_recurrent_varlen(
     refs, ref_hts = [], []
     for i in range(N):
         ref, ref_ht = naive_recurrent_hgrn(
-            x[:, offsets[i]:offsets[i+1]],
-            g[:, offsets[i]:offsets[i+1]],
+            x[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            g[:, cu_seqlens[i]:cu_seqlens[i+1]],
             h0[i:i+1],
             output_final_state=True
         )
@@ -111,23 +117,27 @@ def test_fused_recurrent_varlen(
     ref_dg, g.grad = g.grad.clone(), None
     ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, tri_ht = fused_recurrent_hgrn(x, g, h0, output_final_state=True, cu_seqlens=offsets)
+    tri, tri_ht = fused_recurrent_hgrn(x, g, h0, output_final_state=True, cu_seqlens=cu_seqlens)
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dx, x.grad = x.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close(" o", ref, tri, 0.005)
-    assert_close("ht", ref_ht, tri_ht, 0.005)
-    assert_close("dx", ref_dx, tri_dx, 0.005)
-    assert_close("dg", ref_dg, tri_dg, 0.005)
-    assert_close("dh0", ref_dh0, tri_dh0, 0.005)
+    assert_close('  o', ref, tri, 0.005)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dx', ref_dx, tri_dx, 0.005)
+    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [300, 512])
-@pytest.mark.parametrize("D", [500, 1024])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float])
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+)
 def test_chunk(
     B: int,
     T: int,
@@ -154,6 +164,6 @@ def test_chunk(
     tri_dx, x.grad = x.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None
 
-    assert_close(" o", ref, tri, 0.005)
-    assert_close("dx", ref_dx, tri_dx, 0.005)
-    assert_close("dg", ref_dg, tri_dg, 0.005)
+    assert_close(' o', ref, tri, 0.005)
+    assert_close('dx', ref_dx, tri_dx, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)

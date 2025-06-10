@@ -82,26 +82,19 @@ class LinearAttentionBlock(nn.Module):
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
         # currently not supported
-        attn_weights, present_key_value = None, None
-
+        attentions, past_key_values = None, None
         hidden_states = self.attn_norm(hidden_states)
-        hidden_states = self.attn(hidden_states)
+        hidden_states = self.attn(hidden_states=hidden_states, **kwargs)
         if self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
             hidden_states = residual + hidden_states
             residual = hidden_states
             hidden_states = self.mlp_norm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, **kwargs)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (attn_weights,)
-
-        if use_cache:
-            outputs += (present_key_value,)
+        outputs = (hidden_states, attentions, past_key_values)
 
         return outputs
 
@@ -224,9 +217,6 @@ class LinearAttentionModel(LinearAttentionPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
 
-        if self.config.use_lower_bound:
-            lower_bounds = self.lower_bounds.softmax(0)
-            lower_bounds = lower_bounds.cumsum(0) - lower_bounds[0]
         for i, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -381,7 +371,7 @@ class LinearAttentionForCausalLM(LinearAttentionPreTrainedModel, GenerationMixin
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:

@@ -10,10 +10,9 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from fla.modules import FusedRMSNormSwishGate, RMSNorm, RotaryEmbedding, ShortConvolution
+from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding, ShortConvolution
 from fla.modules.activations import swiglu, swish
 from fla.ops.abc.chunk import chunk_abc
-from fla.ops.common.utils import prepare_position_ids, prepare_sequence_ids
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -35,6 +34,7 @@ class ABCAttention(nn.Module):
         norm_eps: float = 1e-5,
         gate_low_rank_dim: int = 16,
         gate_logit_normalizer: int = 16,
+        use_rope: bool = True,
         use_input_gate: bool = False,
         use_output_gate: bool = True,
         use_norm: bool = True,
@@ -61,6 +61,7 @@ class ABCAttention(nn.Module):
         self.gate_low_rank_dim = gate_low_rank_dim
         self.gate_logit_normalizer = gate_logit_normalizer
 
+        self.use_rope = use_rope
         self.use_input_gate = use_input_gate
         self.use_output_gate = use_output_gate
         self.use_norm = use_norm
@@ -93,15 +94,38 @@ class ABCAttention(nn.Module):
 
         if use_short_conv:
             self.conv_size = conv_size
-            self.q_conv1d = ShortConvolution(self.key_dim, conv_size, activation='silu')
-            self.k_conv1d = ShortConvolution(self.key_dim, conv_size, activation='silu')
-            self.v_conv1d = ShortConvolution(self.value_dim, conv_size, activation='silu')
+            self.q_conv1d = ShortConvolution(
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
+            self.k_conv1d = ShortConvolution(
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
+            self.v_conv1d = ShortConvolution(
+                hidden_size=self.value_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
 
         if self.use_norm:
             if self.use_output_gate:
-                self.g_norm = FusedRMSNormSwishGate(self.head_v_dim, elementwise_affine, norm_eps)
+                self.g_norm = FusedRMSNormGated(
+                    hidden_size=self.head_v_dim,
+                    elementwise_affine=elementwise_affine,
+                    eps=norm_eps
+                )
             else:
-                self.g_norm = RMSNorm(hidden_size=self.head_v_dim, elementwise_affine=elementwise_affine, eps=norm_eps)
+                self.g_norm = RMSNorm(
+                    hidden_size=self.head_v_dim,
+                    elementwise_affine=elementwise_affine,
+                    eps=norm_eps
+                )
 
         if self.use_rope:
             self.rotary = RotaryEmbedding(self.head_k_dim)
@@ -126,36 +150,34 @@ class ABCAttention(nn.Module):
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
-        cu_seqlens, position_ids, seq_idx = kwargs.get('cu_seqlens', None), kwargs.get('position_ids', None), None
+        cu_seqlens = kwargs.get('cu_seqlens', None)
+        if cu_seqlens is not None:
+            raise NotImplementedError("Training with cu_seqlens is not supported yet for ABCAttention")
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            if cu_seqlens is not None:
-                if position_ids is None:
-                    position_ids = prepare_position_ids(cu_seqlens)
-                seq_idx = prepare_sequence_ids(position_ids).to(torch.int32).unsqueeze(0)
             q, conv_state_q = self.q_conv1d(
                 x=self.q_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_q,
                 output_final_state=use_cache,
-                seq_idx=seq_idx
+                cu_seqlens=cu_seqlens
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_k,
                 output_final_state=use_cache,
-                seq_idx=seq_idx
+                cu_seqlens=cu_seqlens
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_v,
                 output_final_state=use_cache,
-                seq_idx=seq_idx
+                cu_seqlens=cu_seqlens
             )
         else:
             q = self.q_proj(hidden_states)
@@ -187,7 +209,6 @@ class ABCAttention(nn.Module):
             s=s,
             initial_state=recurrent_state,
             output_final_state=use_cache,
-            head_first=False
         )
         if past_key_values is not None:
             past_key_values.update(

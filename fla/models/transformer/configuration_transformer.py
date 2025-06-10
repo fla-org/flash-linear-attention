@@ -17,13 +17,14 @@ class TransformerConfig(PretrainedConfig):
         num_heads: int = 32,
         num_kv_heads: int = None,
         qkv_bias: bool = False,
+        qk_norm: bool = False,
         window_size: Optional[int] = None,
         rope_theta: Optional[float] = 10000.,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
         hidden_act: str = "swish",
-        initializer_range: float = 0.006,
+        initializer_range: float = 0.02,
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-6,
         use_cache: bool = True,
@@ -42,6 +43,7 @@ class TransformerConfig(PretrainedConfig):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.qkv_bias = qkv_bias
+        self.qk_norm = qk_norm
         self.window_size = window_size
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings

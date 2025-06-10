@@ -18,7 +18,7 @@ def convert(
     output: str,
     precision: str = 'float32'
 ):
-    weights = torch.load(rwkv7, weights_only=True)
+    weights = torch.load(rwkv7, weights_only=True, map_location='cpu')
     config = RWKV7Config()
     config.vocab_size = weights['emb.weight'].shape[0]  # 50304
     config.hidden_size = weights['blocks.0.ffn.key.weight'].shape[1]  # 768
@@ -36,17 +36,20 @@ def convert(
         config.v_low_rank_dim = weights['blocks.1.att.v1'].shape[1]  # 32
     except KeyError:
         config.v_low_rank_dim = 32
-    config.torch_dtype = precision
-
-    print(f"Creating model with config:\n{config}")
-    model = AutoModelForCausalLM.from_config(config)
 
     if precision in ['bf16', 'bfloat16']:
-        model = model.to(torch.bfloat16)
+        precision = 'bfloat16'
+        dtype = torch.bfloat16
     if precision in ['fp16', 'float16']:
-        model = model.to(torch.float16)
+        precision = 'float16'
+        dtype = torch.float16
     if precision in ['fp64', 'double', 'float64']:
-        model = model.to(torch.double)
+        precision = 'float64'
+        dtype = torch.float64
+
+    config.torch_dtype = precision
+    print(f"Creating model with config:\n{config}")
+    model = AutoModelForCausalLM.from_config(config).to(dtype=dtype)
 
     print(model)
     model_dict = model.state_dict()
@@ -90,9 +93,7 @@ def convert(
             'ln1': 'attn_norm',
             'ln2': 'ffn_norm'
         }[name_compo[2]]
-        if name_compo[2] == 'attn' and re.match("x_[rwkvag]", name_compo[3]):
-            name_compo[3] = 'x_x'
-        elif re.match("[wvag][012]", name_compo[3]):
+        if re.match("[wvag][012]", name_compo[3]):
             typ, num = name_compo[3]
             name_compo[3] = f'{typ}_lora.lora.' + {
                 '0': '2.bias',
@@ -121,15 +122,15 @@ def convert(
         if shape1 == [1, 1, config.hidden_size]:
             weight.squeeze_()
 
-        # fix: fusing x_[rwkvag] to x_x
-        if fla_name.endswith('attn.x_x'):
-            model_dict[fla_name].data['rwkvag'.find(name[-1])].copy_(weight)
-            if fla_name in model_names:
-                model_names.remove(fla_name)
+        if "attn.x_" in fla_name:
+            assert model_dict[fla_name].shape[2:] == weight.shape, \
+                f"Shape mismatch for {fla_name}: model_dict={model_dict[fla_name].shape}, weight={weight.shape}"
         else:
-            assert model_dict[fla_name].shape == weight.shape
-            model_dict[fla_name].data.copy_(weight)
-            model_names.remove(fla_name)
+            assert model_dict[fla_name].shape == weight.shape, \
+                f"Shape mismatch for {fla_name}: model_dict={model_dict[fla_name].shape}, weight={weight.shape}"
+
+        model_dict[fla_name].data.copy_(weight)
+        model_names.remove(fla_name)
 
     print("uninitialized parameters: ", model_names)
     for n in model_names:

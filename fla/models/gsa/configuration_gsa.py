@@ -38,7 +38,7 @@ class GSAConfig(PretrainedConfig):
         pad_token_id: int = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
-        initializer_range: float = 0.006,
+        initializer_range: float = 0.02,
         tie_word_embeddings: bool = False,
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,

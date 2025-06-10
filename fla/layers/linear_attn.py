@@ -3,6 +3,7 @@
 
 from typing import Optional
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
@@ -13,6 +14,7 @@ from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fuse
 
 
 class LinearAttention(nn.Module):
+
     def __init__(
         self,
         mode: str = 'chunk',
@@ -108,11 +110,15 @@ class LinearAttention(nn.Module):
         self.norm_q = norm_q
         self.norm_k = norm_k
 
-    def forward(self, x):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        **kwargs
+    ) -> torch.Tensor:
         mode = self.mode
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_k_dim)
         if self.num_kv_groups > 1:
@@ -136,7 +142,6 @@ class LinearAttention(nn.Module):
                 k=k,
                 v=v,
                 normalize=self.do_feature_map_norm,
-                head_first=False
             )
         elif mode == 'fused_chunk':
             o, final_state = fused_chunk_linear_attn(
@@ -155,5 +160,6 @@ class LinearAttention(nn.Module):
         else:
             raise NotImplementedError
         o = self.norm(o)
+        o = rearrange(o, '... h d -> ... (h d)')
         o = self.o_proj(o)
         return o

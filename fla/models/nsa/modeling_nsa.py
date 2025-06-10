@@ -17,14 +17,13 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.nsa import NativeSparseAttention
 from fla.models.nsa.configuration_nsa import NSAConfig
+from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as NSAMLP
 from fla.modules import RMSNorm
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
-
-    from fla.models.utils import Cache
 
 logger = logging.get_logger(__name__)
 
@@ -364,7 +363,7 @@ class NSAForCausalLM(NSAPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:

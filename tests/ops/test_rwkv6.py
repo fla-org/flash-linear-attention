@@ -8,32 +8,37 @@ import torch.nn.functional as F
 
 from fla.ops.rwkv6 import chunk_rwkv6
 from fla.ops.rwkv6.fused_recurrent import fused_recurrent_rwkv6
-from fla.utils import device
+from fla.utils import COMPILER_MODE, assert_close, device, device_platform
+
+if COMPILER_MODE:
+    test_b_list = [1]
+    test_t_list = [4096]
+    test_t_varlen_list = test_t_list
+    test_d_list = [64, 128, 256]
+    test_gate_list = [1.0]
+else:
+    test_b_list = [2]
+    test_t_list = [1, 15, 63, 300]
+    test_t_varlen_list = [63, 286, 300, 512]
+    test_d_list = [64, 32, 100, 256]
+    test_gate_list = [1, 0.1, 10]
+test_h_list = [2]
 
 
-def get_abs_err(x, y):
-    return (x-y).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x-y).flatten().square().mean().sqrt().item()
-    base = (x).flatten().square().mean().sqrt().item()
-    return err / base
-
-
-def assert_close(prefix, ref, tri, ratio):
-    msg = f"{prefix} diff: {get_abs_err(ref, tri):.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    print(msg)
-    assert get_err_ratio(ref, tri) < ratio, msg
-
-
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("gate_logit_normalizer", [0.05, 1, 20])
-@pytest.mark.parametrize("T", [130, 146, 162, 178, 300, 2048])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [300, 100])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("head_first", [True, False])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
+@pytest.mark.parametrize('dtype', [torch.bfloat16])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason="Intel Triton Failure"
+)
 def test_chunk(
     B: int,
     T: int,
@@ -41,43 +46,38 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     gate_logit_normalizer: float,
-    head_first: bool
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    if head_first:
-        q = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        k = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        v = torch.randn((B, H, T, D), dtype=dtype, device=device).requires_grad_()
-        w = F.logsigmoid(torch.randn((B, H, T, D), dtype=dtype, device=device)) / gate_logit_normalizer
-    else:
-        q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-        w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device=device)) / gate_logit_normalizer
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    w = F.logsigmoid(torch.randn((B, T, H, D), dtype=dtype, device=device)) / gate_logit_normalizer
 
     u = torch.randn(H, D, dtype=dtype, device=device).requires_grad_(True)
     h0 = torch.randn(B, H, D, D, dtype=dtype, device=device).requires_grad_()
     w = w.requires_grad_()
     do = torch.randn_like(v)
 
-    ref, ref_ht = fused_recurrent_rwkv6(q.clone(),
-                                        k.clone(),
-                                        v.clone(),
-                                        w.clone(),
-                                        u.clone(),
-                                        initial_state=h0.clone(),
-                                        output_final_state=True,
-                                        head_first=head_first)
-    ref, _ = fused_recurrent_rwkv6(q.clone(),
-                                   k.clone(),
-                                   v.clone(),
-                                   w.clone(),
-                                   u.clone(),
-                                   initial_state=h0.clone(),
-                                   output_final_state=False,
-                                   head_first=head_first)
+    ref, ref_ht = fused_recurrent_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    ref, _ = fused_recurrent_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=False,
+    )
 
     ((ref * do).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
@@ -88,14 +88,15 @@ def test_chunk(
     ref_dh0, h0.grad = h0.grad.clone(), None
 
     # triton implementation
-    tri, tri_ht = chunk_rwkv6(q.clone(),
-                              k.clone(),
-                              v.clone(),
-                              w.clone(),
-                              u.clone(),
-                              initial_state=h0.clone(),
-                              output_final_state=True,
-                              head_first=head_first)
+    tri, tri_ht = chunk_rwkv6(
+        q.clone(),
+        k.clone(),
+        v.clone(),
+        w.clone(),
+        u.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
     ((tri * do).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -114,11 +115,15 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", [64, 128, 200, 250, 256, 300, 400, 512, 1000, 2048])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [300, 100])
+@pytest.mark.parametrize("N", test_b_list)
+@pytest.mark.parametrize("T", test_t_varlen_list)
+@pytest.mark.parametrize("H", test_h_list)
+@pytest.mark.parametrize("D", test_d_list)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+)
 def test_chunk_varlen(
     N: int,
     T: int,
@@ -129,9 +134,9 @@ def test_chunk_varlen(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
-    offsets = torch.cat([
+    cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 1)[:N-1]],
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
     # seq-first required for inputs with variable lengths
@@ -151,8 +156,7 @@ def test_chunk_varlen(
         u.clone(),
         initial_state=h0.clone(),
         output_final_state=True,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ref, _ = fused_recurrent_rwkv6(
         q.clone(),
@@ -162,8 +166,7 @@ def test_chunk_varlen(
         u.clone(),
         initial_state=h0.clone(),
         output_final_state=False,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -181,8 +184,7 @@ def test_chunk_varlen(
         u.clone(),
         initial_state=h0.clone(),
         output_final_state=True,
-        cu_seqlens=offsets,
-        head_first=False
+        cu_seqlens=cu_seqlens,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None

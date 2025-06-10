@@ -12,7 +12,7 @@ class HGRNConfig(PretrainedConfig):
 
     def __init__(
         self,
-        attn_mode: str = "chunk",
+        attn_mode: str = "fused_recurrent",
         hidden_size: int = 2048,
         num_hidden_layers: int = 24,
         expand_ratio: Optional[int] = 1,
@@ -31,7 +31,7 @@ class HGRNConfig(PretrainedConfig):
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
-        initializer_range: float = 0.006,
+        initializer_range: float = 0.02,
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,

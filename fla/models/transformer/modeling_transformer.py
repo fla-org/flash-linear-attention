@@ -43,6 +43,7 @@ class TransformerBlock(nn.Module):
             num_heads=config.num_heads,
             num_kv_heads=config.num_kv_heads,
             qkv_bias=config.qkv_bias,
+            qk_norm=config.qk_norm,
             window_size=config.window_size,
             rope_theta=config.rope_theta,
             max_position_embeddings=config.max_position_embeddings,
@@ -369,7 +370,7 @@ class TransformerForCausalLM(TransformerPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
         logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None

@@ -18,16 +18,16 @@ def chunk_linear_attn(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     normalize: bool = True,
-    head_first: bool = True
+    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`
+            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
         k (torch.Tensor):
-            keys of shape `[B, H, T, K]` if `head_first=True` else `[B, T, H, K]`
+            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
         v (torch.Tensor):
-            values of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`
+            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
         scale (Optional[int]):
             Scale factor for the linear attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -38,18 +38,31 @@ def chunk_linear_attn(
         normalize (bool):
             Whether to normalize the output. Default: `True`.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `True`.
+            Whether the inputs are in the head-first format. Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]` if `head_first=True` else `[B, T, H, V]`
+            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`
     """
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
-
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
+    if not head_first:
+        if q.shape[1] < q.shape[2]:
+            raise DeprecationWarning(
+                f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+                "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+                "when head_first=False was specified. "
+                "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            )
     o, final_state = chunk_simple_gla(
         q=q,
         k=k,
@@ -57,9 +70,10 @@ def chunk_linear_attn(
         scale=scale,
         g=None,
         initial_state=initial_state,
-        output_final_state=output_final_state,
-        head_first=head_first
+        output_final_state=output_final_state
     )
     if normalize:
         o = normalize_output(q * scale, k, o)
+    if head_first:
+        o = o.transpose(1, 2)
     return o, final_state
