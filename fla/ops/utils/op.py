@@ -37,3 +37,8 @@ if not is_gather_supported:
         return src
 else:
     gather = tl.gather
+
+
+@triton.jit
+def nothing(x):
+    return x

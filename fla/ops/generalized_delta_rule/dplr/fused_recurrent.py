@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, nothing
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use_cuda_graph
 
 
@@ -50,6 +50,7 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    LOG_DECAY: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -59,6 +60,8 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
+
+    exp_or_not = exp if LOG_DECAY else nothing
 
     o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -88,7 +91,7 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
 
         tmp = tl.sum(b_h * b_a[None, :], axis=1)
-        b_h = exp(b_gk)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
+        b_h = exp_or_not(b_gk)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
         b_o = tl.sum(b_h * b_q[None, :], axis=1)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
@@ -116,6 +119,7 @@ def fused_recurrent_dplr_delta_rule_fwd(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
+    log_decay: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -149,6 +153,7 @@ def fused_recurrent_dplr_delta_rule_fwd(
         V=V,
         BK=BK,
         REVERSE=reverse,
+        LOG_DECAY=log_decay,
     )
     return o, ht
 
@@ -170,6 +175,7 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         reverse: bool = False,
+        log_decay: bool = True,
         cu_seqlens: Optional[torch.LongTensor] = None,
     ):
         o, ht = fused_recurrent_dplr_delta_rule_fwd(
@@ -209,6 +215,7 @@ def fused_recurrent_dplr_delta_rule(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
+    log_decay: bool = True,
     cu_seqlens: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -238,6 +245,9 @@ def fused_recurrent_dplr_delta_rule(
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
+        log_decay (Optional[bool]):
+            If `True`, the decay term `gk` is interpreted as a logarithm of the decay factor.
+            If `False`, it is interpreted as the decay factor itself. Default: `True`.
         cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -268,6 +278,7 @@ def fused_recurrent_dplr_delta_rule(
         initial_state,
         output_final_state,
         reverse,
+        log_decay,
         cu_seqlens,
     )
     return o, final_state

@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.generalized_delta_rule import fused_recurrent_dplr_delta_rule
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, nothing
 from fla.utils import input_guard, use_cuda_graph
 
 
@@ -52,6 +52,7 @@ def fused_recurrent_rwkv7_fwd_kernel(
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_DECODE: tl.constexpr,
+    LOG_DECAY: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -61,6 +62,8 @@ def fused_recurrent_rwkv7_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
+
+    exp_or_not = exp if LOG_DECAY else nothing
 
     o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -93,7 +96,7 @@ def fused_recurrent_rwkv7_fwd_kernel(
         b_b = b_kk * b_a
 
         tmp = tl.sum(b_h * b_act_a[None, :], axis=1)
-        b_h = exp(b_w)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
+        b_h = exp_or_not(b_w)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
         b_o = tl.sum(b_h * b_r[None, :], axis=1)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
@@ -109,7 +112,7 @@ def fused_recurrent_rwkv7_fwd_kernel(
             b_b = b_kk * b_a
 
             tmp = tl.sum(b_h * b_act_a[None, :], axis=1)
-            b_h = exp(b_w)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
+            b_h = exp_or_not(b_w)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
             b_o = tl.sum(b_h * b_r[None, :], axis=1)
 
             tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
@@ -138,6 +141,7 @@ def fused_recurrent_rwkv7_fwd(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
+    log_decay: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -172,7 +176,8 @@ def fused_recurrent_rwkv7_fwd(
         V=V,
         BK=BK,
         REVERSE=reverse,
-        IS_DECODE=IS_DECODE
+        IS_DECODE=IS_DECODE,
+        LOG_DECAY=log_decay,
     )
     return o, ht
 
@@ -187,6 +192,8 @@ def fused_recurrent_rwkv7(
     scale: float = 1.0,
     initial_state: torch.Tensor = None,
     output_final_state: bool = True,
+    reverse: bool = False,
+    log_decay: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
 ):
@@ -210,6 +217,11 @@ def fused_recurrent_rwkv7(
             initial state of shape `[B, H, K, V]` if cu_seqlens is None else `[N, H, K, V]` where N = len(cu_seqlens) - 1.
         output_final_state (bool):
             whether to output the final state.
+        reverse (Optional[bool]):
+            If `True`, process the state passing in reverse order. Default: `False`.
+        log_decay (Optional[bool]):
+            If `True`, the decay term `gk` is interpreted as a logarithm of the decay factor.
+            If `False`, it is interpreted as the decay factor itself. Default: `True`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -218,9 +230,9 @@ def fused_recurrent_rwkv7(
             Default: `False`.
     """
     assert head_first is False, DeprecationWarning(
-            "head_first is deprecated. "
-            "Please use head_first=False for now instead."
-        )
+        "head_first is deprecated. "
+        "Please use head_first=False for now instead."
+    )
     return fused_recurrent_dplr_delta_rule(
         q=r,
         k=k,
@@ -231,6 +243,8 @@ def fused_recurrent_rwkv7(
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,
+        reverse=reverse,
+        log_decay=log_decay,
         cu_seqlens=cu_seqlens,
     )
 
@@ -246,6 +260,7 @@ def fused_mul_recurrent_rwkv7(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
+    log_decay: bool = True,
     cu_seqlens: Optional[torch.Tensor] = None,
     head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -276,6 +291,9 @@ def fused_mul_recurrent_rwkv7(
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
+        log_decay (Optional[bool]):
+            If `True`, the decay term `gk` is interpreted as a logarithm of the decay factor.
+            If `False`, it is interpreted as the decay factor itself. Default: `True`.
         cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -284,9 +302,9 @@ def fused_mul_recurrent_rwkv7(
             Default: `False`.
     """
     assert head_first is False, DeprecationWarning(
-            "head_first is deprecated. "
-            "Please use head_first=False for now instead."
-        )
+        "head_first is deprecated. "
+        "Please use head_first=False for now instead."
+    )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(
@@ -313,6 +331,7 @@ def fused_mul_recurrent_rwkv7(
         initial_state,
         output_final_state,
         reverse,
+        log_decay,
         cu_seqlens,
     )
     return o, final_state
