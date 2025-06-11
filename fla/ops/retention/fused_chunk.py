@@ -538,5 +538,3 @@ def fused_chunk_retention(
         cu_seqlens
     )
     return o, final_state
-    return o, final_state
-    return o, final_state
