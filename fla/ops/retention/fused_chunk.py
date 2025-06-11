@@ -254,8 +254,6 @@ def fused_chunk_bwd_kernel(
     b_h = None
     tl.debug_barrier()
 
-    m_s = o_i[:, None] <= o_i[None, :]
-
     # [BK, BV]
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_FINAL_STATE:
@@ -291,7 +289,7 @@ def fused_chunk_bwd_kernel(
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
-            b_gs = tl.where(m_s, exp(b_g[:, None] - b_g[None, :]), 0)
+            b_gs = tl.trans(tl.where(m_s, exp(b_g[:, None] - b_g[None, :]), 0))
 
             b_s = (b_s * b_gs).to(b_q.dtype)
             b_ds = (b_ds * b_gs).to(b_k.dtype)
