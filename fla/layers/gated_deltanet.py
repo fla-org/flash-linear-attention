@@ -265,6 +265,16 @@ class GatedDeltaNet(nn.Module):
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
+            original_dtype = q.dtype
+
+            q = q.to(torch.bfloat16)
+            k = k.to(torch.bfloat16)
+            v = v.to(torch.bfloat16)
+            g = g.to(torch.bfloat16)
+            beta = beta.to(torch.bfloat16)
+            if recurrent_state is not None:
+                recurrent_state = recurrent_state.to(torch.bfloat16)
+
             o, recurrent_state = chunk_gated_delta_rule(
                 q=q,
                 k=k,
@@ -276,6 +286,10 @@ class GatedDeltaNet(nn.Module):
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True
             )
+
+            o = o.to(original_dtype)
+            if recurrent_state is not None:
+                recurrent_state = recurrent_state.to(original_dtype)
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gated_delta_rule(
                 q=q,
