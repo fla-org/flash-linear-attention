@@ -29,7 +29,7 @@ from fla.models import (
     SambaConfig,
     TransformerConfig
 )
-from fla.utils import assert_close, device, is_nvidia_hopper
+from fla.utils import assert_close, device, is_intel_alchemist
 
 
 @pytest.mark.parametrize("L", [4])
@@ -65,8 +65,8 @@ from fla.utils import assert_close, device, is_nvidia_hopper
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("use_l2warp", [True, False])
 @pytest.mark.skipif(
-    is_nvidia_hopper is False,
-    reason="Only run on Hopper GPUs"
+    is_intel_alchemist is True,
+    reason="Skipping test on Intel Alchemist due to known issues with SRAM."
 )
 def test_model(
     L: int,
