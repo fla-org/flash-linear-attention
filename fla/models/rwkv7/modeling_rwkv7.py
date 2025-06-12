@@ -574,7 +574,7 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
             shift_labels = shift_labels.to(hidden_states.device)
 
             if fuse_linear_and_cross_entropy:
-                loss = criterion(hidden_states, shift_labels, self.lm_head.weight, self.lm_head.bias, self.config.use_l2warp)
+                loss = criterion(hidden_states, shift_labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(shift_labels.numel(), -1), shift_labels.view(-1))
                 loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
