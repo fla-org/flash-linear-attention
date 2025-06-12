@@ -29,14 +29,14 @@ from fla.models import (
     SambaConfig,
     TransformerConfig
 )
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import assert_close, device, is_intel_alchemist, is_nvidia_hopper
 
 
 @pytest.mark.parametrize("L", [4])
-@pytest.mark.parametrize("B", [8])
+@pytest.mark.parametrize("B", [4])
 @pytest.mark.parametrize("T", [2048])
 @pytest.mark.parametrize("H", [16])
-@pytest.mark.parametrize("D", [128])
+@pytest.mark.parametrize("D", [64, 128])
 @pytest.mark.parametrize("config_class", [
     ABCConfig,
     BitNetConfig,
@@ -78,11 +78,16 @@ def test_model(
     dtype: torch.dtype,
     use_l2warp: bool
 ):
+    if not is_nvidia_hopper and D == 128 or config_class in [GatedDeltaNetConfig]:
+        pytest.skip("D=128 is only Tested on Hopper GPUs")
     if config_class in [
-        ABCConfig, LinearAttentionConfig, LightNetConfig,
-        Mamba2Config, MambaConfig, SambaConfig, GatedDeltaProductConfig
+        ABCConfig, ForgettingTransformerConfig, LinearAttentionConfig, LightNetConfig,
+        Mamba2Config, MambaConfig, MesaNetConfig, SambaConfig, GatedDeltaProductConfig,
+        RodimusConfig,
     ]:
         pytest.skip("Variable length not supported yet")
+    if config_class in [PaTHAttentionConfig]:
+        pytest.skip("PaTHAttentionConfig does not adopted for testing yet")
     config = config_class(**{
         'hidden_size': int(H * D),
         'num_hidden_layers': L,
