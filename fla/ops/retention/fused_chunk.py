@@ -8,7 +8,6 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.op import exp
 from fla.utils import (
     autocast_custom_bwd,
@@ -25,6 +24,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
+    'USE_G_GAMMA': lambda args: args['g_gamma'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
@@ -44,6 +44,7 @@ def fused_chunk_fwd_kernel(
     k,
     v,
     g,
+    g_gamma,
     o,
     h0,
     ht,
@@ -58,6 +59,7 @@ def fused_chunk_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
@@ -73,6 +75,15 @@ def fused_chunk_fwd_kernel(
     NT = tl.cdiv(T, BT)
 
     o_i = tl.arange(0, BT)
+
+    if USE_G_GAMMA:
+        # decay rate given the head index
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (o_i + 1)
+        b_g_last = b_gamma * BT
+        b_gq = exp(b_g)
+        b_gk = exp(b_g_last - b_g)
+        b_gn = exp(b_g_last)
 
     # [BT, BT]
     m_s = o_i[:, None] >= o_i[None, :]
@@ -114,8 +125,12 @@ def fused_chunk_fwd_kernel(
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
+        if USE_G_GAMMA and (i_t == NT - 1 and (T % BT) != 0):
+            b_g_last = b_gamma * (T % BT)
+            b_gk = exp(b_g_last - b_g)
+            b_gn = exp(b_g_last)
+        if USE_G or USE_G_GAMMA:
             b_gs = tl.where(m_s, exp(b_g[:, None] - b_g[None, :]), 0)
-
             # [BT, BT]
             b_s *= b_gs
             # [BT, BV]
@@ -139,6 +154,7 @@ def fused_chunk_fwd_kernel(
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
+    'USE_G_GAMMA': lambda args: args['g_gamma'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE': lambda args: args['dht'] is not None,
@@ -157,6 +173,7 @@ def fused_chunk_bwd_kernel(
     k,
     v,
     g,
+    g_gamma,
     do,
     dq,
     dk,
@@ -175,6 +192,7 @@ def fused_chunk_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
@@ -189,6 +207,14 @@ def fused_chunk_bwd_kernel(
     NT = tl.cdiv(T, BT)
 
     o_i = tl.arange(0, BT)
+    if USE_G_GAMMA:
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (o_i + 1)
+        b_g_last = b_gamma * BT
+        b_gq = exp(b_g)
+        b_gk = exp(b_g_last - b_g)
+        b_gn = exp(b_g_last)
+
     m_s = o_i[:, None] >= o_i[None, :]
 
     q = q + (bos*H + i_h) * K
@@ -232,6 +258,11 @@ def fused_chunk_bwd_kernel(
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
+        if USE_G_GAMMA and (i_t == NT - 1 and (T % BT) != 0):
+            b_g_last = b_gamma * (T % BT)
+            b_gk = exp(b_g_last - b_g)
+            b_gn = exp(b_g_last)
+        if USE_G or USE_G_GAMMA:
             b_gs = tl.where(m_s, exp(b_g[:, None] - b_g[None, :]), 0)
 
             # [BT, BT]
@@ -289,6 +320,15 @@ def fused_chunk_bwd_kernel(
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
+        if USE_G_GAMMA:
+            if i_t == NT - 1 and (T % BT) != 0:
+                b_g_last = b_gamma * (T % BT)
+            else:
+                b_g_last = b_gamma * BT
+            b_gk = exp(b_g_last - b_g)
+            b_gn = exp(b_g_last)
+
+        if USE_G or USE_G_GAMMA:
             b_gs = tl.trans(tl.where(m_s, exp(b_g[:, None] - b_g[None, :]), 0))
 
             b_s = (b_s * b_gs).to(b_q.dtype)
@@ -316,14 +356,13 @@ def fused_chunk_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
+    g_gamma: torch.Tensor,
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
-    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
     BK = min(triton.next_power_of_2(K), 64)
@@ -337,7 +376,8 @@ def fused_chunk_fwd(
         q=q,
         k=k,
         v=v,
-        g=g,
+        g=None,
+        g_gamma=g_gamma,
         o=o,
         h0=initial_state,
         ht=ht,
@@ -353,14 +393,14 @@ def fused_chunk_fwd(
     )
     if NK > 1:
         o = o.sum(0).to(v)
-    return g, o, ht
+    return o, ht
 
 
 def fused_chunk_bwd(
     q,
     k,
     v,
-    g,
+    g_gamma,
     do,
     scale,
     initial_state: torch.Tensor,
@@ -385,7 +425,8 @@ def fused_chunk_bwd(
         q=q,
         k=k,
         v=v,
-        g=g,
+        g=None,
+        g_gamma=g_gamma,
         do=do,
         dq=dq,
         dk=dk,
@@ -424,18 +465,18 @@ class FusedChunkRetentionFunction(torch.autograd.Function):
         q,
         k,
         v,
-        g,
+        g_gamma,
         scale,
         initial_state,
         output_final_state,
         cu_seqlens
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
-        g, o, ht = fused_chunk_fwd(
+        o, ht = fused_chunk_fwd(
             q=q,
             k=k,
             v=v,
-            g=g,
+            g_gamma=g_gamma,
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
@@ -443,7 +484,7 @@ class FusedChunkRetentionFunction(torch.autograd.Function):
             chunk_size=chunk_size
         )
 
-        ctx.save_for_backward(q, k, v, g, initial_state)
+        ctx.save_for_backward(q, k, v, g_gamma, initial_state)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
@@ -453,13 +494,13 @@ class FusedChunkRetentionFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht=None):
-        q, k, v, g, initial_state = ctx.saved_tensors
+        q, k, v, g_gamma, initial_state = ctx.saved_tensors
 
         dq, dk, dv, dh0 = fused_chunk_bwd(
             q=q,
             k=k,
             v=v,
-            g=g,
+            g_gamma=g_gamma,
             do=do,
             scale=ctx.scale,
             initial_state=initial_state,
@@ -525,13 +566,12 @@ def fused_chunk_retention(
         )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    s = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
-    g = s[None, None, :].expand(q.shape[0], q.shape[1], q.shape[2]).contiguous()
+    g_gamma = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
     o, final_state = FusedChunkRetentionFunction.apply(
         q,
         k,
         v,
-        g,
+        g_gamma,
         scale,
         initial_state,
         output_final_state,
