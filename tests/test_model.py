@@ -19,8 +19,11 @@ from fla.models import (
     LinearAttentionConfig,
     Mamba2Config,
     MambaConfig,
+    MesaNetConfig,
     NSAConfig,
+    PaTHAttentionConfig,
     RetNetConfig,
+    RodimusConfig,
     RWKV6Config,
     RWKV7Config,
     SambaConfig,
@@ -49,14 +52,18 @@ from fla.utils import assert_close, device, is_nvidia_hopper
     LinearAttentionConfig,
     Mamba2Config,
     MambaConfig,
+    MesaNetConfig,
     NSAConfig,
+    PaTHAttentionConfig,
     RetNetConfig,
+    RodimusConfig,
     RWKV6Config,
     RWKV7Config,
     SambaConfig,
     TransformerConfig
 ])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("use_l2warp", [True, False])
 @pytest.mark.skipif(
     is_nvidia_hopper is False,
     reason="Only run on Hopper GPUs"
@@ -68,7 +75,8 @@ def test_model(
     H: int,
     D: int,
     config_class: AutoConfig,
-    dtype: torch.dtype
+    dtype: torch.dtype,
+    use_l2warp: bool
 ):
     if config_class in [
         ABCConfig, LinearAttentionConfig, LightNetConfig,
@@ -80,6 +88,7 @@ def test_model(
         'num_hidden_layers': L,
         **({'num_heads': H} if config_class != NSAConfig else {})
     })
+    config.use_l2warp = use_l2warp
     model = AutoModelForCausalLM.from_config(config)
     model.to(dtype).to(device)
 
@@ -95,3 +104,6 @@ def test_model(
     output_var = model(input_ids, output_hidden_states=True, cu_seqlens=cu_seqlens).hidden_states[-1]
     assert output_var.shape == (1, B * T, config.hidden_size)
     assert_close('output', output.view(1, B * T, -1), output_var, ratio=1e-3)
+    # Test backward pass
+    # Do nothing, just to ensure no errors occur during backward pass
+    output_var.sum().backward()
