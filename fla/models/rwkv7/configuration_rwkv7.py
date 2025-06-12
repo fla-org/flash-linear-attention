@@ -37,6 +37,7 @@ class RWKV7Config(PretrainedConfig):
         initializer_range: float = 0.02,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        use_l2warp: bool = True,
         vocab_size: int = 32000,
         value_dim: Optional[Union[int, List[int]]] = None,
         **kwargs
@@ -82,6 +83,7 @@ class RWKV7Config(PretrainedConfig):
         self.initializer_range = initializer_range
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
         if attn is not None:

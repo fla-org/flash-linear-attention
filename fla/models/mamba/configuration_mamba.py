@@ -127,6 +127,7 @@ class MambaConfig(PretrainedConfig):
         use_cache: bool = True,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        use_l2warp: bool = False,
         tie_word_embeddings: bool = False,
         **kwargs,
     ):
@@ -156,6 +157,7 @@ class MambaConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.use_l2warp = use_l2warp
 
         super().__init__(
             bos_token_id=bos_token_id,

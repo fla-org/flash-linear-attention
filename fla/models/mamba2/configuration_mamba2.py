@@ -118,6 +118,7 @@ class Mamba2Config(PretrainedConfig):
         chunk_size: int = 256,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        use_l2warp: bool = False,
         tie_word_embeddings: bool = False,
         **kwargs,
     ):
@@ -156,6 +157,7 @@ class Mamba2Config(PretrainedConfig):
         self.time_step_limit = time_step_limit
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.use_l2warp = use_l2warp
         self.tie_word_embeddings = tie_word_embeddings
 
         super().__init__(
