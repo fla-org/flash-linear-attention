@@ -329,8 +329,11 @@ class RodimusModel(RodimusPreTrainedModel):
 
         if config.block_residual_in_fp32:
             if not config.residual_in_fp32:
-                logger.warning_once(
-                    '`residual_in_fp32=False` is incompatible with `block_residual_in_fp32=True` Setting `residual_in_fp32=True`...')
+                warning_message = (
+                    "`residual_in_fp32=False` is incompatible with `block_residual_in_fp32=True`. "
+                    "Setting `residual_in_fp32=True`..."
+                )
+                logger.warning_once(warning_message)
                 config.residual_in_fp32 = True
             if not config.fuse_norm:
                 logger.warning_once(
