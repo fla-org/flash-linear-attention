@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Yu Zhang, Songlin Yang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -23,11 +23,11 @@ def chunk_linear_attn(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
+            values of shape `[B, T, H, V]`.
         scale (Optional[int]):
             Scale factor for the linear attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -38,13 +38,15 @@ def chunk_linear_attn(
         normalize (bool):
             Whether to normalize the output. Default: `True`.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
+            Whether the inputs are in the head-first format.
+            Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
+            Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`
+            Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`.
     """
 
     if scale is None:
@@ -54,7 +56,6 @@ def chunk_linear_attn(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
     if not head_first:
         if q.shape[1] < q.shape[2]:
             raise DeprecationWarning(
@@ -68,12 +69,9 @@ def chunk_linear_attn(
         k=k,
         v=v,
         scale=scale,
-        g=None,
         initial_state=initial_state,
         output_final_state=output_final_state
     )
     if normalize:
         o = normalize_output(q * scale, k, o)
-    if head_first:
-        o = o.transpose(1, 2)
     return o, final_state
