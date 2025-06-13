@@ -20,7 +20,9 @@ from fla.layers import (
     PaTHAttention,
     ReBasedLinearAttention,
     RWKV6Attention,
-    RWKV7Attention
+    RWKV7Attention,
+    MomGatedDeltaNet,
+    
 )
 from fla.models import (
     ABCForCausalLM,
@@ -61,7 +63,9 @@ from fla.models import (
     RWKV7ForCausalLM,
     RWKV7Model,
     TransformerForCausalLM,
-    TransformerModel
+    TransformerModel,
+    MomGatedDeltaNetForCausalLM, 
+    MomGatedDeltaNetModel
 )
 
 __all__ = [
@@ -123,7 +127,10 @@ __all__ = [
     'MesaNetConfig',
     'MesaNetForCausalLM',
     'MesaNetModel',
-    'MesaNet'
+    'MesaNet',
+    'MomGatedDeltaNetForCausalLM', 
+    'MomGatedDeltaNetModel',
+    'MomGatedDeltaNet'
 ]
 
 __version__ = '0.2.2'
