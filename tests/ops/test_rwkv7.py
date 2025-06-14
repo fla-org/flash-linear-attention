@@ -159,16 +159,21 @@ def test_fused_rwkv7_addcmul(
 @pytest.mark.parametrize("H", [64])
 @pytest.mark.parametrize("D", [64])
 @pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("ka_shape", [1, 3])
 def test_fused_k_update(
     B: int,
     T: int,
     H: int,
     D: int,
     dtype: torch.dtype,
+    ka_shape: int,
 ):
     k = torch.randn(B, T, H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     a = torch.randn(B, T, H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    ka = torch.randn(H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    if ka_shape == 1:
+        ka = torch.randn(H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    else:
+        ka = torch.randn(1, 1, H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
 
     ref = k_update_ref(k, a, ka)
     ref.sum().backward()
