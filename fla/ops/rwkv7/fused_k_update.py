@@ -98,7 +98,6 @@ def k_update_bwd_kernel(
     tl.store(dka + xindex, b_dka.to(dka.dtype.element_ty), xmask)
 
 
-
 class KUpdateFunction(torch.autograd.Function):
     @staticmethod
     @autocast_custom_fwd
@@ -140,7 +139,7 @@ class KUpdateFunction(torch.autograd.Function):
         )
 
         dka = dka = dka.sum(dim=(0, 1), keepdim=ctx.keep_dim)
-        
+
         return dk, da, dka
 
 
