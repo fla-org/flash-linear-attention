@@ -20,7 +20,8 @@ from fla.layers import (
     PaTHAttention,
     ReBasedLinearAttention,
     RWKV6Attention,
-    RWKV7Attention
+    RWKV7Attention,
+    Comba
 )
 from fla.models import (
     ABCForCausalLM,
@@ -61,7 +62,9 @@ from fla.models import (
     RWKV7ForCausalLM,
     RWKV7Model,
     TransformerForCausalLM,
-    TransformerModel
+    TransformerModel,
+    CombaForCausalLM,
+    CombaModel,
 )
 
 __all__ = [
@@ -123,7 +126,10 @@ __all__ = [
     'MesaNetConfig',
     'MesaNetForCausalLM',
     'MesaNetModel',
-    'MesaNet'
+    'MesaNet',
+    'CombaForCausalLM',
+    'CombaModel',
+    'Comba'
 ]
 
 __version__ = '0.2.2'
