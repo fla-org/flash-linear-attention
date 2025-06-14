@@ -699,7 +699,7 @@ def parallel_attn(
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         g (Optional[torch.Tensor]):
             log decay factors of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         cu_seqlens (torch.LongTensor):

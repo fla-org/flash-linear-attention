@@ -1209,7 +1209,7 @@ def chunk_rwkv6(
             Forget gates of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]` applied to keys.
         u (torch.Tensor):
             bonus representations of shape `[H]`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

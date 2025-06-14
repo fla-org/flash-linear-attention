@@ -201,7 +201,7 @@ def chunk_simple_gla(
         g (torch.Tensor):
             Forget gates of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
             Compared to GLA, the gating is head-wise instead of elementwise.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

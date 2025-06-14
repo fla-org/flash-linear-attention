@@ -33,7 +33,7 @@ def fused_recurrent_lightning_attn(
             The index of the current layer.
         num_layers (int):
             The total number of layers. Both `layer_idx` and `num_layers` are used to compute the decay factor.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

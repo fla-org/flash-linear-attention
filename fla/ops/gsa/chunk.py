@@ -1020,7 +1020,7 @@ def chunk_gsa(
         g (torch.Tensor):
             Forget gates of shape `[B, H, T, M]` applied to keys.
             If not provided, this function is equivalent to vanilla ABC.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[Tuple[torch.Tensor]]):

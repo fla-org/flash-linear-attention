@@ -295,7 +295,7 @@ def chunk_dplr_delta_rule(
             betas of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         gk (torch.Tensor):
             gk of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`. decay term in log space!
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

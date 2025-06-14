@@ -30,7 +30,7 @@ def parallel_forgetting_attn(
             values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         g (torch.Tensor):
             Log decay at rach time step (in **log space**) of shape `[B, T, HQ]` if `head_first=False` else `[B, HQ, T]`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         cu_seqlens (torch.LongTensor):

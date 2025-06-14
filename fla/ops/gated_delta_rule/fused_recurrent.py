@@ -234,7 +234,7 @@ def fused_recurrent_gated_delta_rule(
             g (decays) of shape `[B, T, HV]`.
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
