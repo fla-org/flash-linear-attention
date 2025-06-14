@@ -4,10 +4,13 @@ import os
 
 import pytest
 import torch
+import torch.nn.functional as F
 
+from fla.ops.generalized_delta_rule.dplr.fused_recurrent import fused_recurrent_dplr_delta_rule
 from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rwkv7_torch
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
+from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
 from fla.utils import assert_close, device
 
 
@@ -66,6 +69,66 @@ def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdi
     assert_close(" dx_k", x_k.grad, x_k2.grad, ratio=5e-3)
     assert_close(" dK_", K_.grad, K_2.grad, ratio=5e-3)
     assert_close(" dV_", V_.grad, V_2.grad, ratio=5e-3)
+
+
+@pytest.mark.parametrize('B', [2])
+@pytest.mark.parametrize('T', [1, 1024])
+@pytest.mark.parametrize('H', [1])
+@pytest.mark.parametrize('D', [64])
+@pytest.mark.parametrize('scale', [None, 1])
+@pytest.mark.parametrize('dtype', [torch.float32])
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+)
+def test_fused_mul_recurrent_fwd(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    r = torch.empty(B, T, H, D, device=device).uniform_(-8, -6).to(dtype=dtype)
+    k = torch.empty(B, T, H, D, device=device).uniform_(-8, -6).to(dtype=dtype)
+    v = torch.empty(B, T, H, D, device=device).uniform_(-8, -6).to(dtype=dtype)
+    w = torch.empty(B, T, H, D, device=device).uniform_(-8, -6).to(dtype=dtype)
+
+    kk = torch.empty(B, T, H, D, device=device).uniform_(-1, 1)
+    kk = F.normalize(kk, dim=-1).to(dtype=dtype)
+
+    a = -kk.clone()
+    a_scale = torch.empty(B, T, H, D, device=device).uniform_(0, 0.1).to(dtype=dtype)
+    b = (kk * a_scale).requires_grad_(False)  # kk*a
+    h0 = torch.randn(B, H, D, D, dtype=torch.float)
+    r, k, v, a, a_scale, b, w, h0 = map(lambda x: x.to(device).requires_grad_(False),
+                                        (r, k, v, a, a_scale, b, w, h0))
+    ref, ref_ht = fused_recurrent_dplr_delta_rule(
+        q=r.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        gk=w.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+
+    tri, tri_ht = fused_mul_recurrent_rwkv7(
+        r=r.clone(),
+        w=w.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        kk=kk.clone(),
+        a=a_scale.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    assert_close(' o', ref, tri, 0.002)
+    assert_close('ht', ref_ht, tri_ht, 0.002)
 
 
 @pytest.mark.parametrize("B", [4])
