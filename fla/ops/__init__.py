@@ -23,6 +23,7 @@ from .path_attn import parallel_path_attention
 from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
+from .comba import chunk_comba, fused_recurrent_comba
 from .simple_gla import chunk_simple_gla, fused_recurrent_simple_gla, parallel_simple_gla
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     'chunk_delta_rule', 'fused_chunk_delta_rule', 'fused_recurrent_delta_rule',
     'parallel_forgetting_attn',
     'chunk_gated_delta_rule', 'fused_recurrent_gated_delta_rule',
+    'chunk_comba', 'fused_recurrent_comba',
     'chunk_dplr_delta_rule', 'chunk_iplr_delta_rule',
     'fused_recurrent_dplr_delta_rule', 'fused_recurrent_iplr_delta_rule',
     'chunk_gla', 'fused_chunk_gla', 'fused_recurrent_gla',
