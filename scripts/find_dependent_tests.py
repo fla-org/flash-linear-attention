@@ -1,7 +1,9 @@
 import ast
+import re
 import sys
-from functools import lru_cache
+from collections import deque, defaultdict
 from pathlib import Path
+from functools import lru_cache
 
 
 @lru_cache(maxsize=None)
@@ -52,7 +54,8 @@ class DependencyFinder:
 
         self.file_to_definitions = {}
         self.file_to_imports = {}
-        self.symbol_to_file_map = {}
+        # Changed to handle multiple files defining the same symbol
+        self.symbol_to_file_map = defaultdict(set)
         for file_path in self.all_project_files:
             tree = parse_file(file_path)
             definitions = get_definitions_from_tree(tree)
@@ -60,7 +63,8 @@ class DependencyFinder:
             self.file_to_definitions[file_path] = definitions
             self.file_to_imports[file_path] = imports
             for defn in definitions:
-                self.symbol_to_file_map[defn] = file_path
+                # Changed to add file path to a set
+                self.symbol_to_file_map[defn].add(file_path)
 
     def find_dependent_tests(self, changed_files_str: list, max_depth=4) -> set:
         changed_files = {Path(f).resolve() for f in changed_files_str}
@@ -102,9 +106,12 @@ class DependencyFinder:
 
         dependent_tests = set()
 
-        # Get the filenames of the source files containing the affected symbols
-        affected_source_file_stems = {
-            self.symbol_to_file_map[s].stem for s in all_affected_symbols if s in self.symbol_to_file_map}
+        # Changed to handle multiple files per symbol
+        affected_source_file_stems = set()
+        for s in all_affected_symbols:
+            if s in self.symbol_to_file_map:
+                for file_path in self.symbol_to_file_map[s]:
+                    affected_source_file_stems.add(file_path.stem)
 
         for test_file in self.all_test_files:
             imported_in_test = self.file_to_imports.get(test_file, set())
