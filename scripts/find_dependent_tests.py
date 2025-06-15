@@ -52,10 +52,15 @@ class DependencyFinder:
 
         self.file_to_definitions = {}
         self.file_to_imports = {}
+        self.symbol_to_file_map = {}
         for file_path in self.all_project_files:
             tree = parse_file(file_path)
-            self.file_to_definitions[file_path] = get_definitions_from_tree(tree)
-            self.file_to_imports[file_path] = get_imports_from_tree(tree)
+            definitions = get_definitions_from_tree(tree)
+            imports = get_imports_from_tree(tree)
+            self.file_to_definitions[file_path] = definitions
+            self.file_to_imports[file_path] = imports
+            for defn in definitions:
+                self.symbol_to_file_map[defn] = file_path
 
     def find_dependent_tests(self, changed_files_str: list, max_depth=4) -> set:
         changed_files = {Path(f).resolve() for f in changed_files_str}
@@ -79,7 +84,6 @@ class DependencyFinder:
                 if not symbols_to_trace.isdisjoint(imported_symbols):
                     next_layer_files.add(file_path)
 
-            # Heuristic rule: if a modeling file is found, also include its configuration file
             config_files_to_add = set()
             for file in next_layer_files:
                 if 'modeling_' in file.stem and 'models' in str(file):
@@ -97,9 +101,21 @@ class DependencyFinder:
             all_affected_symbols.update(symbols_to_trace)
 
         dependent_tests = set()
+
+        # Get the filenames of the source files containing the affected symbols
+        affected_source_file_stems = {
+            self.symbol_to_file_map[s].stem for s in all_affected_symbols if s in self.symbol_to_file_map}
+
         for test_file in self.all_test_files:
             imported_in_test = self.file_to_imports.get(test_file, set())
+
+            # Case 1: Direct import of a symbol (e.g., `from ... import RWKV7Model`)
             if not all_affected_symbols.isdisjoint(imported_in_test):
+                dependent_tests.add(str(test_file))
+                continue
+
+            # Case 2: Import of a module (e.g., `import modeling_rwkv7`)
+            if not affected_source_file_stems.isdisjoint(imported_in_test):
                 dependent_tests.add(str(test_file))
 
         return dependent_tests
