@@ -29,11 +29,15 @@ def get_imports_from_tree(tree) -> set:
     imports = set()
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
+            # Handles `from package import sub` and `from package import sub as ps`
+            # We add the name that is actually used in the code (`ps` or `sub`)
             for alias in node.names:
-                imports.add(alias.name)
+                imports.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
+            # Handles `import package.sub` and `import package.sub as ps`
+            # We add the name that is actually bound in the code (`ps` or `package`)
             for alias in node.names:
-                imports.add(alias.name.split('.')[-1])
+                imports.add(alias.asname or alias.name.split('.')[0])
     return imports
 
 
