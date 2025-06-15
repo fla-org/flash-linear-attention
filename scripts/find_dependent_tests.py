@@ -1,9 +1,8 @@
 import ast
-import re
 import sys
-from collections import deque, defaultdict
-from pathlib import Path
+from collections import defaultdict
 from functools import lru_cache
+from pathlib import Path
 
 
 @lru_cache(maxsize=None)
@@ -31,13 +30,9 @@ def get_imports_from_tree(tree) -> set:
     imports = set()
     for node in tree.body:
         if isinstance(node, ast.ImportFrom):
-            # Handles `from package import sub` and `from package import sub as ps`
-            # We add the name that is actually used in the code (`ps` or `sub`)
             for alias in node.names:
                 imports.add(alias.asname or alias.name)
         elif isinstance(node, ast.Import):
-            # Handles `import package.sub` and `import package.sub as ps`
-            # We add the name that is actually bound in the code (`ps` or `package`)
             for alias in node.names:
                 imports.add(alias.asname or alias.name.split('.')[0])
     return imports
@@ -54,7 +49,6 @@ class DependencyFinder:
 
         self.file_to_definitions = {}
         self.file_to_imports = {}
-        # Changed to handle multiple files defining the same symbol
         self.symbol_to_file_map = defaultdict(set)
         for file_path in self.all_project_files:
             tree = parse_file(file_path)
@@ -63,11 +57,20 @@ class DependencyFinder:
             self.file_to_definitions[file_path] = definitions
             self.file_to_imports[file_path] = imports
             for defn in definitions:
-                # Changed to add file path to a set
                 self.symbol_to_file_map[defn].add(file_path)
 
     def find_dependent_tests(self, changed_files_str: list, max_depth=4) -> set:
         changed_files = {Path(f).resolve() for f in changed_files_str}
+
+        # Heuristic: If a changed file is a modeling file, automatically include its config file at the start.
+        initial_configs_to_add = set()
+        for file in changed_files:
+            if 'modeling_' in file.stem and 'models' in str(file):
+                model_name = file.stem.replace('modeling_', '')
+                config_file = file.parent / f"configuration_{model_name}.py"
+                if config_file.is_file():
+                    initial_configs_to_add.add(config_file)
+        changed_files.update(initial_configs_to_add)
 
         all_affected_symbols = set()
 
@@ -88,6 +91,7 @@ class DependencyFinder:
                 if not symbols_to_trace.isdisjoint(imported_symbols):
                     next_layer_files.add(file_path)
 
+            # This heuristic is now also applied at each dependency level
             config_files_to_add = set()
             for file in next_layer_files:
                 if 'modeling_' in file.stem and 'models' in str(file):
@@ -106,7 +110,6 @@ class DependencyFinder:
 
         dependent_tests = set()
 
-        # Changed to handle multiple files per symbol
         affected_source_file_stems = set()
         for s in all_affected_symbols:
             if s in self.symbol_to_file_map:
@@ -116,12 +119,10 @@ class DependencyFinder:
         for test_file in self.all_test_files:
             imported_in_test = self.file_to_imports.get(test_file, set())
 
-            # Case 1: Direct import of a symbol (e.g., `from ... import RWKV7Model`)
             if not all_affected_symbols.isdisjoint(imported_in_test):
                 dependent_tests.add(str(test_file))
                 continue
 
-            # Case 2: Import of a module (e.g., `import modeling_rwkv7`)
             if not affected_source_file_stems.isdisjoint(imported_in_test):
                 dependent_tests.add(str(test_file))
 
@@ -139,6 +140,7 @@ if __name__ == "__main__":
     changed_files = [file for file in changed_files if not any(file.endswith(b) for b in BLACKLIST)]
 
     changed_files = [file for file in changed_files if file.endswith('.py')]
+
     current_dir = Path(__file__).parent.resolve()
     test_dir = current_dir.parent / "tests"
     search_dir = current_dir.parent / "fla"
