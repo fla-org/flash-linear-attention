@@ -1,4 +1,4 @@
-name: nvidia-h100-ci
+name: nvidia-a100-ci
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -17,7 +17,7 @@ on:
 jobs:
   test:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
-    runs-on: 'nvidia-h100'
+    runs-on: 'nvidia-a100'
     env:
       FLA_CI_ENV: 1
     steps:
