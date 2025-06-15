@@ -68,7 +68,7 @@ jobs:
           # MAX_JOBS=4 pip install -U flash-attn --no-build-isolation
           # pip install git+https://github.com/Dao-AILab/causal-conv1d.git --no-build-isolation
           pip install -U uv
-          uv pip uninstall -y flash-linear-attention
+          pip uninstall -y flash-linear-attention
           uv pip install git+https://github.com/Dao-AILab/causal-conv1d.git -U --no-cache-dir --no-build-isolation
           uv pip install flash-attn -U --no-cache-dir --no-build-isolation
           uv pip install torch~=2.7.0 triton pytest setuptools wheel ninja -U --index-url https://download.pytorch.org/whl/cu128

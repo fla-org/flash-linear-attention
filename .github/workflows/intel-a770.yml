@@ -63,7 +63,7 @@ jobs:
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           pip install -U uv
-          uv pip uninstall -y flash-linear-attention
+          pip uninstall -y flash-linear-attention
           uv pip install -U pytest setuptools wheel ninja
           uv pip install -U torch~=2.7.0 pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
           uv pip install .
