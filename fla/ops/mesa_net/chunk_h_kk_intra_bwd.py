@@ -96,7 +96,7 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     b_k = (b_v * b_beta[:, None]).to(b_v.dtype)
 
     o_t = tl.arange(0, BT)
-    b_m = exp(tl.where(o_t[:, None] >= o_t[None, :], b_g[:, None] - b_g[None, :], float("-inf")))
+    b_m = tl.where(o_t[:, None] >= o_t[None, :], safe_exp(b_g[:, None] - b_g[None, :]), 0.)
     b_s = tl.dot(b_q_star, tl.trans(b_k)) * b_m
     b_ds = tl.dot(b_dq, tl.trans(b_v))
     b_dv += tl.dot(tl.trans(b_s.to(b_dq.dtype)), b_dq)
