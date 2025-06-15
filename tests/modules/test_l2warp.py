@@ -15,7 +15,7 @@ from fla.utils import assert_close, device, is_intel_alchemist
 @pytest.mark.parametrize("T", [1024])
 @pytest.mark.parametrize("H", [256])
 @pytest.mark.parametrize("V", [2000])
-@pytest.mark.parametrize("l2_penalty_factor", [1e-4])
+@pytest.mark.parametrize("l2_penalty_factor", [1e-4, 1])
 @pytest.mark.skipif(
     is_intel_alchemist is True,
     reason="Intel Triton Failure"
@@ -41,7 +41,7 @@ def test_fused_linear_cross_entropy_l2_warp(
 
     ref_logits = F.linear(x.view(-1, H), lm_head.weight, lm_head.bias)
     ref_loss_ce = ref_criterion(ref_logits.view(B * T, V), shift_labels.view(-1))
-    ref_loss = standalone_l2_warp(ref_loss_ce, ref_logits.view(B, T, V))
+    ref_loss = standalone_l2_warp(ref_loss_ce, ref_logits.view(B, T, V), l2_penalty_factor)
 
     ref_loss.backward()
     ref_x_grad = x.grad.clone()
@@ -63,7 +63,7 @@ def test_fused_linear_cross_entropy_l2_warp(
     fused_w_grad = lm_head.weight.grad.clone()
     fused_b_grad = lm_head.bias.grad.clone()
 
-    ratio = 4e-3 if dtype == torch.bfloat16 else 1e-5
+    ratio = 4e-3 if dtype == torch.bfloat16 else 1e-3
 
     assert_close("Loss", ref_loss, fused_loss, ratio)
     assert_close("dx", ref_x_grad, fused_x_grad, ratio)

@@ -11,22 +11,28 @@ class L2Wrap(torch.autograd.Function):
     This version is memory-optimized by not storing the full logits tensor.
     """
     @staticmethod
-    def forward(ctx, loss, logits):
-        ctx.save_for_backward(logits)
+    def forward(ctx, loss, logits, l2_penalty_factor=1e-4):
+        """
+        Forward pass for L2 penalty.
+        Args:
+            loss (torch.Tensor): The loss tensor.
+            logits (torch.Tensor): Shape[B, T, V] The logits tensor.
+            l2_penalty_factor (float): The factor for L2 penalty.
+        """
+        maxx, ids = torch.max(logits, dim=-1, keepdim=True)
+        ctx.logits_shape = logits.shape
+        factor = l2_penalty_factor / (logits.shape[0] * logits.shape[1])
+        maxx = maxx * factor
+        ctx.save_for_backward(maxx, ids)
         return loss
 
     @staticmethod
     def backward(ctx, grad_output):
-        logits = ctx.saved_tensors[0]
-
-        factor = 1e-4 / (logits.shape[0] * logits.shape[1])
-        maxx, ids = torch.max(logits, -1, keepdim=True)
-
-        glogits = torch.zeros_like(logits)
-        penalty_grad = maxx * factor
-        glogits.scatter_(-1, ids, penalty_grad)
-
-        return grad_output, glogits
+        maxx, ids = ctx.saved_tensors
+        glogits = torch.zeros(ctx.logits_shape, device=grad_output.device,
+                              dtype=grad_output.dtype)
+        glogits.scatter_(-1, ids, maxx)
+        return grad_output, glogits, None
 
 
 l2_warp = L2Wrap.apply
