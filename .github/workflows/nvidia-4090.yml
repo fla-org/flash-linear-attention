@@ -67,7 +67,10 @@ jobs:
           # pip install -U pytest setuptools wheel ninja torch triton
           # MAX_JOBS=4 pip install -U flash-attn --no-build-isolation
           # pip install git+https://github.com/Dao-AILab/causal-conv1d.git --no-build-isolation
-          pip install --no-use-pep517 .
+          pip install -U uv
+          uv pip uninstall -y flash-linear-attention
+          uv pip install torch~=2.7.0 triton pytest setuptools wheel ninja -U --index-url https://download.pytorch.org/whl/cu128
+          uv pip install .
 
       - name: Check GPU status
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
