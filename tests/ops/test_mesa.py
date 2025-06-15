@@ -28,10 +28,6 @@ test_h_list = [3]
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1], [1, 1]])
 @pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
-)
-@pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure'
 )
