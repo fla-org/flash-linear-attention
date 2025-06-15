@@ -90,7 +90,6 @@ jobs:
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run pytest on test files
-        continue-on-error: true
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
@@ -98,7 +97,6 @@ jobs:
 
       - name: Run pytest on varlen test files
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
-        continue-on-error: true
         run: |
           FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} || \
@@ -111,14 +109,12 @@ jobs:
             pytest tests/
 
       - name: Run full pytest on test files
-        continue-on-error: true
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run full pytest on varlen test files
-        continue-on-error: true
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
         run: |
           FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
