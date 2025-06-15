@@ -72,7 +72,7 @@ jobs:
           uv pip install git+https://github.com/Dao-AILab/causal-conv1d.git -U --no-cache-dir --no-build-isolation
           uv pip install flash-attn -U --no-cache-dir --no-build-isolation
           uv pip install torch~=2.7.0 triton pytest setuptools wheel ninja -U --index-url https://download.pytorch.org/whl/cu128
-          uv pip install .
+          pip install .
 
       - name: Check GPU status
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
