@@ -332,7 +332,6 @@ def chunk_comba(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-        q, k, v, beta, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, beta, g))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
@@ -366,6 +365,4 @@ def chunk_comba(
         cu_seqlens,
         use_qk_l2norm_in_kernel
     )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state
