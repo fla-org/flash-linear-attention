@@ -22,16 +22,6 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-@torch.compile
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
-@torch.compile
-def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
-
-
 class Comba(nn.Module):
     """
     The layer implementaion for [Comba: Improving Bilinear RNNs with Closed-loop Control](https://arxiv.org/abs/2506.02475).
