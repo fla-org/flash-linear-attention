@@ -126,6 +126,10 @@ class DependencyFinder:
             if not affected_source_file_stems.isdisjoint(imported_in_test):
                 dependent_tests.add(str(test_file))
 
+        for changed_file in changed_files:
+            if changed_file in self.all_test_files:
+                dependent_tests.add(str(changed_file))
+
         return dependent_tests
 
 
@@ -134,7 +138,8 @@ if __name__ == "__main__":
         print("Usage: python find_dependent_tests.py <file1> <file2> ...")
         sys.exit(1)
 
-    changed_files = sys.argv[1:]
+    all_args_string = " ".join(sys.argv[1:])
+    changed_files = all_args_string.split()
 
     BLACKLIST = ['fla/utils.py', 'utils/convert_from_llama.py', 'utils/convert_from_rwkv6.py', 'utils/convert_from_rwkv7.py']
     changed_files = [file for file in changed_files if not any(file.endswith(b) for b in BLACKLIST)]
