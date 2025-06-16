@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.comba import chunk_comba, fused_recurrent_comba
+from fla.ops.comba.utils import chunk_comba_cumsum_scalar_fwd
 from fla.utils import COMPILER_MODE, assert_close, device, is_intel_alchemist
 
 if COMPILER_MODE:
@@ -24,6 +25,36 @@ else:
     test_gate_list = [1, 0.1, 10]
 test_h_list = [2]
 test_hv_list = [4]
+
+
+def cumsum_comba_local_fwd_reference(s, reverse=False, chunk_size=128):
+    o_0 = torch.zeros_like(s)
+    o_1 = torch.zeros_like(s)
+    T = s.size(1)
+    fn = torch.cumsum
+    for i in range(0, T, chunk_size):
+        s_chunk = s[:, i:i+chunk_size]
+        o_1[:, i:i+chunk_size] = fn(s_chunk.float(), dim=1).to(o_1)
+        o_0[:, i:i+chunk_size] = o_1[:, i:i+chunk_size] - s_chunk
+
+    return o_0, o_1
+
+
+@pytest.mark.parametrize("B", [32])
+@pytest.mark.parametrize("T", [256, 1024, 2048])
+@pytest.mark.parametrize("H", [4])
+@pytest.mark.parametrize("dtype", [torch.float, torch.float16])
+@pytest.mark.parametrize("chunk_size", [32, 64])
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+)
+def test_cumsum_local_scalar_fwd(B, T, H, dtype, chunk_size):
+    s = torch.randn((B, T, H), dtype=dtype, device=device).requires_grad_()
+    ref_0, ref_1 = cumsum_comba_local_fwd_reference(s, chunk_size=chunk_size)
+    tri_0, tri_1 = chunk_comba_cumsum_scalar_fwd(s, chunk_size=chunk_size)
+    assert_close("local cumsum scalar", ref_0, tri_0, 0.001 if dtype == torch.float else 0.003)
+    assert_close("local cumsum scalar", ref_1, tri_1, 0.001 if dtype == torch.float else 0.003)
 
 
 def chunk_comba_ref(
@@ -69,8 +100,8 @@ def chunk_comba_ref(
         lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size),
         [q, k, v, p_beta, decay.unsqueeze(-1), g.unsqueeze(-1)]
     )
-    decay = decay.squeeze(-1).cumsum(-1) # [B, H, n, c]
-    decay_0 = decay - g.squeeze(-1) # [B, H, n, c]
+    decay = decay.squeeze(-1).cumsum(-1)  # [B, H, n, c]
+    decay_0 = decay - g.squeeze(-1)  # [B, H, n, c]
     L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
     L_mask_0 = ((decay_0.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
     # [B, H, n, c, d] @ [B, H, n, d, c] -> [B, H, n, c, c]
@@ -104,7 +135,6 @@ def chunk_comba_ref(
     o = o[:, :, :T]
     o = o.transpose(1, 2)
     return o, S
-
 
 
 @pytest.mark.parametrize('B', [4, 8, 16])
@@ -184,7 +214,6 @@ def test_chunk_dplr(
         assert_close("dg", ref_dg, tri_dg, 0.02)
 
 
-
 @pytest.mark.parametrize('B', [4, 8, 16])
 @pytest.mark.parametrize('T', [1024, 1314, 2048])
 @pytest.mark.parametrize('H', [2, 4])
@@ -204,7 +233,7 @@ def test_forward(
     dtype: torch.dtype,
     scale: float,
     gate_logit_normalizer: float
-):  
+):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
