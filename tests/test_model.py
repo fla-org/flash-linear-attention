@@ -80,8 +80,10 @@ def test_model(
     dtype: torch.dtype,
     use_l2warp: bool
 ):
-    if not is_nvidia_hopper and D == 128 or config_class in [CombaConfig, GatedDeltaNetConfig]:
-        # Due to lack of shared memory
+    if not is_nvidia_hopper and (D == 128 or config_class in [CombaConfig, GatedDeltaNetConfig]):
+        # Skip D=128 for non-Hopper GPUs
+        # CombaConfig and GatedDeltaNetConfig are not supported on non-Hopper GPUs
+        # as they require specific shared memory
         pytest.skip("D=128 is only Tested on Hopper GPUs")
     if config_class in [
         ABCConfig, ForgettingTransformerConfig, LinearAttentionConfig, LightNetConfig,

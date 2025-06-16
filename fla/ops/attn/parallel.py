@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange, reduce
+from einops import reduce
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cumsum import chunk_global_cumsum
@@ -691,14 +691,14 @@ def parallel_attn(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, HQ, T, K]`.
+            queries of shape `[B, T, HQ, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
             GQA will be applied if HQ is divisible by H.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         g (Optional[torch.Tensor]):
-            log decay factors of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
+            log decay factors of shape `[B, T, H]`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -707,19 +707,17 @@ def parallel_attn(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
+            Outputs of shape `[B, T, HQ, V]`.
     """
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-        q, k, v = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v))
-        if g is not None:
-            g = rearrange(g, 'b h t ... -> b t h ...')
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
@@ -733,6 +731,4 @@ def parallel_attn(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
 
     o = ParallelAttentionFunction.apply(q, k, v, g, scale, cu_seqlens)
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o

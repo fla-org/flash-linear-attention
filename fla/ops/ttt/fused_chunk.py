@@ -7,7 +7,6 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.modules.layernorm import group_norm
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_nvidia_hopper
@@ -771,8 +770,8 @@ def fused_chunk_ttt_linear(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
@@ -791,7 +790,6 @@ def fused_chunk_ttt_linear(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-        q, k, v, eta = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, eta))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
@@ -830,6 +828,4 @@ def fused_chunk_ttt_linear(
         cu_seqlens,
     )
     o = norm_residual(o, w, b, eps)
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state, final_state_bias

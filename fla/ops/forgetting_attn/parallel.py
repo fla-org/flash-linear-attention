@@ -5,7 +5,6 @@ import warnings
 from typing import Optional
 
 import torch
-from einops import rearrange
 
 from fla.ops.attn.parallel import parallel_attn
 
@@ -22,12 +21,12 @@ def parallel_forgetting_attn(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, HQ, T, K]`.
+            queries of shape `[B, T, HQ, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
             GQA will be applied if HQ is divisible by H.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         g (torch.Tensor):
             Log decay at rach time step (in **log space**) of shape `[B, T, HQ]` if `head_first=False` else `[B, HQ, T]`.
         scale (Optional[float]):
@@ -38,10 +37,11 @@ def parallel_forgetting_attn(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
+            Outputs of shape `[B, T, HQ, V]`.
     """
     assert (g <= 0).all(), "g_cumsum must be in log space"
     if scale is None:
@@ -53,7 +53,6 @@ def parallel_forgetting_attn(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-        q, k, v, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, g))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
@@ -62,6 +61,4 @@ def parallel_forgetting_attn(
             "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
         )
     o = parallel_attn(q, k, v, g, scale, cu_seqlens)
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o
