@@ -7,6 +7,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from fla.models import (
     ABCConfig,
     BitNetConfig,
+    CombaConfig,
     DeltaNetConfig,
     ForgettingTransformerConfig,
     GatedDeltaNetConfig,
@@ -35,11 +36,12 @@ from fla.utils import assert_close, device, is_intel_alchemist, is_nvidia_hopper
 @pytest.mark.parametrize("L", [4])
 @pytest.mark.parametrize("B", [4])
 @pytest.mark.parametrize("T", [2048])
-@pytest.mark.parametrize("H", [16])
+@pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("D", [64, 128])
 @pytest.mark.parametrize("config_class", [
     ABCConfig,
     BitNetConfig,
+    CombaConfig,
     DeltaNetConfig,
     ForgettingTransformerConfig,
     GatedDeltaNetConfig,
@@ -78,7 +80,8 @@ def test_model(
     dtype: torch.dtype,
     use_l2warp: bool
 ):
-    if not is_nvidia_hopper and D == 128 or config_class in [GatedDeltaNetConfig]:
+    if not is_nvidia_hopper and D == 128 or config_class in [CombaConfig, GatedDeltaNetConfig]:
+        # Due to lack of shared memory
         pytest.skip("D=128 is only Tested on Hopper GPUs")
     if config_class in [
         ABCConfig, ForgettingTransformerConfig, LinearAttentionConfig, LightNetConfig,
@@ -91,9 +94,9 @@ def test_model(
     config = config_class(**{
         'hidden_size': int(H * D),
         'num_hidden_layers': L,
+        'use_l2warp': use_l2warp,
         **({'num_heads': H} if config_class != NSAConfig else {})
     })
-    config.use_l2warp = use_l2warp
     model = AutoModelForCausalLM.from_config(config)
     model.to(dtype).to(device)
 

@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.ops.comba.cumsum import chunk_comba_cumsum_scalar_bwd, chunk_comba_cumsum_scalar_fwd
+from fla.ops.comba.utils import chunk_comba_cumsum_scalar_bwd, chunk_comba_cumsum_scalar_fwd
 from fla.ops.comba.wy_fast import chunk_scaled_dot_comba_pkt_fwd, prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
@@ -242,30 +242,29 @@ def chunk_comba(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    p: torch.Tensor,
     g: torch.Tensor,
-    beta: torch.Tensor,
-    p: torch.Tensor = None,
+    beta: torch.Tensor = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False
 ):
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         p (torch.Tensor):
-            values of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            values of shape `[B, T, H, K]`.
         g (torch.Tensor):
-            (forget) gating tensor (in log space!) of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
+            (forget) gating tensor (in log space!) of shape `[B, T, H]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
+            betas of shape `[B, T, H]`.
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -281,7 +280,7 @@ def chunk_comba(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
 
@@ -316,10 +315,6 @@ def chunk_comba(
             cu_seqlens=cu_seqlens
         )
     """
-    assert q.dtype == k.dtype == v.dtype
-    assert q.dtype != torch.float32, "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
-    assert len(beta.shape) == 3, "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
-
     if p is None:
         p = k
     if cu_seqlens is not None:
