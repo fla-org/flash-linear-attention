@@ -1368,7 +1368,7 @@ def chunk_ttt_linear(
             layer norm bias of shape `(H, V)`
         eta (torch.Tensor):
             Learning rate for hidden state, of shape `(B, H, T, 1)`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         chunk_size (int):

@@ -110,6 +110,7 @@ class KUpdateFunction(torch.autograd.Function):
         ka: [key_dim]
         """
         ctx.save_for_backward(k, a, ka)
+        ctx.keep_dim = True if ka.dim() == 3 else False
 
         def grid(meta): return (triton.cdiv(meta['xnumel'], meta['BLOCK_SIZE']),)
 
@@ -137,7 +138,7 @@ class KUpdateFunction(torch.autograd.Function):
             k.numel(), k.shape[2]
         )
 
-        dka = dka.sum(dim=(0, 1))
+        dka = dka.sum(dim=(0, 1), keepdim=ctx.keep_dim)
 
         return dk, da, dka
 

@@ -110,7 +110,8 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     b_r = tl.zeros([BT, BK], dtype=tl.float32)
 
     b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_x += b_q * 0.  # workaround for a compiler bug
+    # zero initial guess looks good enough
+    b_x += b_q * 0.  # workaround for a compiler bug.
     b_r += b_q
     b_p += b_q
     b_delta_old = tl.sum(b_r*b_r, axis=1)

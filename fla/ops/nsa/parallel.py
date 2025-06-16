@@ -805,7 +805,7 @@ def parallel_nsa(
             Selected block size. Default: 64.
         window_size (int):
             Sliding window size. Default: 0.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         head_first (Optional[bool]):

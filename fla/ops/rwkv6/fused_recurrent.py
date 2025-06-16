@@ -579,7 +579,7 @@ def fused_recurrent_rwkv6(
             data-dependent decays of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]` in log space! Alias: g.
         u (torch.Tensor):
             bonus of shape `[H, K]`
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

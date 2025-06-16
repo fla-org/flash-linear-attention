@@ -1234,7 +1234,7 @@ def chunk_gla(
             values of shape `[B, T, H, V]`.
         g (torch.Tensor):
             Forget gates of shape `[B, T, H, K]`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

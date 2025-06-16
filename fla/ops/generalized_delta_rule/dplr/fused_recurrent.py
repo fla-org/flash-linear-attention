@@ -62,21 +62,21 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
 
     o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    p_q = q + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_a = a + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_b = b + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_gk = gk + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-    p_o = o + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_q = q + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_a = a + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_b = b + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_gk = gk + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T - 1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_o = o + (bos + ((T - 1) if REVERSE else 0)) * H*V + i_h * V + o_v
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[None, :] & mask_v[:, None]
-    b_h = tl.zeros([BV, BK], dtype=tl.float32)
+    mask_h = mask_k[:, None] & mask_v[None, :]
+    b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
-        p_h0 = h0 + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
+        p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for _ in range(0, T):
@@ -87,9 +87,9 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
         b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
 
-        tmp = tl.sum(b_h * b_a[None, :], axis=1)
-        b_h = exp(b_gk)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
-        b_o = tl.sum(b_h * b_q[None, :], axis=1)
+        b_h = exp(b_gk)[:, None] * b_h + b_b[:, None] * tl.sum(b_a[:, None] * b_h, 0)[None, :]
+        b_h += b_k[:, None] * b_v[None, :]
+        b_o = tl.sum(b_h * b_q[:, None], 0)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
         p_q += (-1 if REVERSE else 1) * H*K
@@ -101,7 +101,7 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
         p_o += (-1 if REVERSE else 1) * H*V
 
     if STORE_FINAL_STATE:
-        p_ht = ht + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
+        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
@@ -205,7 +205,7 @@ def fused_recurrent_dplr_delta_rule(
     a: torch.Tensor,
     b: torch.Tensor,
     gk: torch.Tensor,
-    scale: Optional[float] = 1.0,
+    scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
@@ -227,9 +227,9 @@ def fused_recurrent_dplr_delta_rule(
             b of shape `[B, T, H, K]`.
         gk (torch.Tensor):
             gk of shape `[B, T, H, K]`. decay term in log space!
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the RetNet attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: 1.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
@@ -255,8 +255,6 @@ def fused_recurrent_dplr_delta_rule(
             )
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
     o, final_state = FusedRecurrentDPLRDeltaRuleFunction.apply(
         q,
         k,

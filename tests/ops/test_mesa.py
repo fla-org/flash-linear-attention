@@ -25,12 +25,8 @@ test_h_list = [3]
 @pytest.mark.parametrize('T', test_t_list)
 @pytest.mark.parametrize('H', test_h_list)
 @pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.bfloat16])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1], [1, 1]])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
-)
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure'
@@ -112,7 +108,7 @@ def test_chunk(
 @pytest.mark.parametrize('D', test_d_list)
 @pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1], [1, 1]])
 @pytest.mark.parametrize('cu_seqlens', [[0, 14, 121, 421, 500], [0, 32, 222, 333, 444, 555, 666, 777, 888, 999, 1000]])
-@pytest.mark.parametrize('dtype', [torch.bfloat16])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'

@@ -78,7 +78,7 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 
 ## Installation
 
-[![nvidia-4090-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml) [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml) [![intel-a770-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml/badge.svg?event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml)
+[![nvidia-4090-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml) [![nvidia-a100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-a100.yml/badge.svg?branch=main)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-a100.yml) [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml) [![intel-a770-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml/badge.svg?event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml)
 
 The following requirements should be satisfied
 - [PyTorch](https://pytorch.org/) >= 2.5
@@ -90,12 +90,12 @@ The following requirements should be satisfied
 
 You can install `fla` with pip:
 ```sh
-pip install --no-use-pep517 flash-linear-attention
+pip install flash-linear-attention
 ```
 As `fla` is actively developed now, for the latest features and updates, an alternative way is to install the package from source
 ```sh
 # uninstall `fla` first to ensure a successful upgrade
-pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention
+pip uninstall flash-linear-attention && pip install -U git+https://github.com/fla-org/flash-linear-attention
 ```
 or manage `fla` with submodules
 ```sh
