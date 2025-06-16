@@ -3,6 +3,7 @@
 from .abc import chunk_abc
 from .attn import parallel_attn
 from .based import fused_chunk_based, parallel_based
+from .comba import chunk_comba, fused_recurrent_comba
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from .forgetting_attn import parallel_forgetting_attn
 from .gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
@@ -32,6 +33,7 @@ __all__ = [
     'chunk_delta_rule', 'fused_chunk_delta_rule', 'fused_recurrent_delta_rule',
     'parallel_forgetting_attn',
     'chunk_gated_delta_rule', 'fused_recurrent_gated_delta_rule',
+    'chunk_comba', 'fused_recurrent_comba',
     'chunk_dplr_delta_rule', 'chunk_iplr_delta_rule',
     'fused_recurrent_dplr_delta_rule', 'fused_recurrent_iplr_delta_rule',
     'chunk_gla', 'fused_chunk_gla', 'fused_recurrent_gla',
@@ -39,11 +41,11 @@ __all__ = [
     'fused_recurrent_hgrn',
     'chunk_lightning_attn', 'fused_recurrent_lightning_attn',
     'chunk_linear_attn', 'fused_chunk_linear_attn', 'fused_recurrent_linear_attn',
+    'chunk_mesa_net',
     'parallel_nsa',
+    'parallel_path_attention',
     'chunk_retention', 'fused_chunk_retention', 'fused_recurrent_retention', 'parallel_retention',
     'chunk_rwkv6', 'fused_recurrent_rwkv6',
     'chunk_rwkv7', 'fused_recurrent_rwkv7',
     'chunk_simple_gla', 'fused_recurrent_simple_gla', 'parallel_simple_gla',
-    'parallel_path_attention',
-    'chunk_mesa_net',
 ]
