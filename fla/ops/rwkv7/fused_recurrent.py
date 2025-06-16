@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -193,17 +194,17 @@ def fused_recurrent_rwkv7(
     """
     Args:
         r (torch.Tensor):
-            r of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            r of shape `[B, T, H, K]`.
         w (torch.Tensor):
-            log decay of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            log decay of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            k of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            k of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            v of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            v of shape `[B, T, H, V]`.
         a (torch.Tensor):
-            a of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            a of shape `[B, T, H, K]`.
         b (torch.Tensor):
-            b of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            b of shape `[B, T, H, K]`.
         scale (float):
             scale of the attention.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -214,14 +215,22 @@ def fused_recurrent_rwkv7(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (bool):
-            deprecated. Must be False.
-            Default: `False`.
+        head_first (Optional[bool]):
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
     """
-    assert head_first is False, DeprecationWarning(
-        "head_first is deprecated. "
-        "Please use head_first=False for now instead."
-    )
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+    if not head_first and r.shape[1] < r.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     return fused_recurrent_dplr_delta_rule(
         q=r,
         k=k,
@@ -255,17 +264,17 @@ def fused_mul_recurrent_rwkv7(
 
     Args:
         r (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, H, K]`.
         w (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         v (torch.Tensor):
-            a of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            a of shape `[B, T, H, K]`.
         kk (torch.Tensor):
-            b of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            b of shape `[B, T, H, K]`.
         a (torch.Tensor):
-            gk of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`. decay term in log space!
+            gk of shape `[B, T, H, K]`. decay term in log space!
         scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: 1.
@@ -281,13 +290,21 @@ def fused_mul_recurrent_rwkv7(
             Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
-            deprecated. Must be False.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
     """
-    assert head_first is False, DeprecationWarning(
-        "head_first is deprecated. "
-        "Please use head_first=False for now instead."
-    )
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+    if not head_first and r.shape[1] < r.shape[2]:
+        raise ValueError(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(
