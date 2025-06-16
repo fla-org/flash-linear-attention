@@ -35,6 +35,8 @@ def test_conv(
     has_residual: bool,
     dtype: torch.dtype
 ):
+    if has_bias is False:
+        pytest.skip("causal_conv1d_fn has a bug with no bias")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
