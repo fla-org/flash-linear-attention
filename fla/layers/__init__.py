@@ -5,6 +5,7 @@ from .abc import ABCAttention
 from .attn import Attention
 from .based import BasedLinearAttention
 from .bitattn import BitAttention
+from .comba import Comba
 from .delta_net import DeltaNet
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
@@ -25,13 +26,13 @@ from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
-from .comba import Comba
 
 __all__ = [
     'ABCAttention',
     'Attention',
     'BasedLinearAttention',
     'BitAttention',
+    'Comba',
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
@@ -53,5 +54,4 @@ __all__ = [
     'SlidingWindowSharedKeyAttention',
     'PaTHAttention',
     'MesaNet',
-    'Comba'
 ]

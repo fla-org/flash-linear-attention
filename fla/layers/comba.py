@@ -16,7 +16,6 @@ from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.comba import chunk_comba, fused_recurrent_comba
 
-
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
@@ -158,9 +157,9 @@ class Comba(nn.Module):
 
         if use_output_correction:
             warnings.warn(
-            "The correction_factor is set to 1 by default similar to Mamba2. "
-            "However, we find that sometimes correction_factor = 0.02 works better for small-scale models. "
-            "In practice, we recommend trying both settings. "
+                "The correction_factor is set to 1 by default similar to Mamba2. "
+                "However, we find that sometimes correction_factor = 0.02 works better for small-scale models. "
+                "In practice, we recommend trying both settings. "
             )
             self.D = nn.Parameter(torch.ones(self.num_heads) * correction_factor)
             self.D._no_weight_decay = True

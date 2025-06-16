@@ -5,6 +5,7 @@ from fla.layers import (
     Attention,
     BasedLinearAttention,
     BitAttention,
+    Comba,
     DeltaNet,
     GatedDeltaNet,
     GatedDeltaProduct,
@@ -20,14 +21,15 @@ from fla.layers import (
     PaTHAttention,
     ReBasedLinearAttention,
     RWKV6Attention,
-    RWKV7Attention,
-    Comba
+    RWKV7Attention
 )
 from fla.models import (
     ABCForCausalLM,
     ABCModel,
     BitNetForCausalLM,
     BitNetModel,
+    CombaForCausalLM,
+    CombaModel,
     DeltaNetForCausalLM,
     DeltaNetModel,
     GatedDeltaNetForCausalLM,
@@ -62,9 +64,7 @@ from fla.models import (
     RWKV7ForCausalLM,
     RWKV7Model,
     TransformerForCausalLM,
-    TransformerModel,
-    CombaForCausalLM,
-    CombaModel,
+    TransformerModel
 )
 
 __all__ = [
