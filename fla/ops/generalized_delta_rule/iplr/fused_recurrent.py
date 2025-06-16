@@ -411,7 +411,7 @@ def fused_recurrent_iplr_delta_rule(
             as of shape `[B, T, H, K]`
         b (torch.Tensor):
             bs of shape `[B, T, H, K]`
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

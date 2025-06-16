@@ -2,6 +2,7 @@
 
 from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
+from fla.models.comba import CombaConfig, CombaForCausalLM, CombaModel
 from fla.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
 from fla.models.forgetting_transformer import (
     ForgettingTransformerConfig,
@@ -22,7 +23,7 @@ from fla.models.mesa_net import MesaNetConfig, MesaNetForCausalLM, MesaNetModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
 from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
 from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
-from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel, RodimusTokenizer
+from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel
 from fla.models.rwkv6 import RWKV6Config, RWKV6ForCausalLM, RWKV6Model
 from fla.models.rwkv7 import RWKV7Config, RWKV7ForCausalLM, RWKV7Model
 from fla.models.samba import SambaConfig, SambaForCausalLM, SambaModel
@@ -32,9 +33,11 @@ from fla.models.mom_gated_deltanet import MomGatedDeltaNetConfig,MomGatedDeltaNe
 __all__ = [
     'ABCConfig', 'ABCForCausalLM', 'ABCModel',
     'BitNetConfig', 'BitNetForCausalLM', 'BitNetModel',
+    'CombaConfig', 'CombaForCausalLM', 'CombaModel',
     'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
     'ForgettingTransformerConfig', 'ForgettingTransformerForCausalLM', 'ForgettingTransformerModel',
     'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
+    'GatedDeltaProductConfig', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
     'GLAConfig', 'GLAForCausalLM', 'GLAModel',
     'GSAConfig', 'GSAForCausalLM', 'GSAModel',
     'HGRNConfig', 'HGRNForCausalLM', 'HGRNModel',
@@ -49,9 +52,8 @@ __all__ = [
     'RWKV7Config', 'RWKV7ForCausalLM', 'RWKV7Model',
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
-    'GatedDeltaProductConfig', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
-    'RodimusConfig', 'RodimusForCausalLM', 'RodimusModel', 'RodimusTokenizer',
     'PaTHAttentionConfig', 'PaTHAttentionForCausalLM', 'PaTHAttentionModel',
+    'RodimusConfig', 'RodimusForCausalLM', 'RodimusModel',
     'MesaNetConfig', 'MesaNetForCausalLM', 'MesaNetModel',
     'MomGatedDeltaNetConfig','MomGatedDeltaNetForCausalLM','MomGatedDeltaNetModel'
 ]

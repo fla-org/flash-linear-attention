@@ -297,10 +297,12 @@ def chunk_mesa_net(
 
     if h_kv_init is not None:
         assert h_kv_init.dtype == torch.float32, "h_kv_init must be in float32."
-        assert h_kv_init.shape == (B, H, K, K), "h_kv_init must be of shape (batch size, num head, head dim, head dim)."
+        if cu_seqlens is None:
+            assert h_kv_init.shape == (B, H, K, K), "h_kv_init must be of shape (batch size, num head, head dim, head dim)."
     if h_kk_init is not None:
         assert h_kk_init.dtype == torch.float32, "h_kk_init must be in float32."
-        assert h_kk_init.shape == (B, H, K, K), "h_kk_init must be of shape (batch size, num head, head dim, head dim)."
+        if cu_seqlens is None:
+            assert h_kk_init.shape == (B, H, K, K), "h_kk_init must be of shape (batch size, num head, head dim, head dim)."
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:

@@ -434,7 +434,7 @@ def chunk_iplr_delta_rule(
             activations of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
         b (torch.Tensor):
             betas of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

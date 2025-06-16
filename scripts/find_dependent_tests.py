@@ -1,123 +1,152 @@
 import ast
 import sys
-from collections import deque
+from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
 
-@lru_cache(maxsize=200)
-def extract_definitions(file_path, include_vars=False):
-    """Extract function and class definitions from a Python file."""
-    if file_path.suffix != ".py":
-        return set()
+@lru_cache(maxsize=None)
+def parse_file(file_path):
     try:
-        with open(file_path, "r") as f:
-            try:
-                tree = ast.parse(f.read())
-            except SyntaxError:
-                return set()
-        definitions = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-                definitions.add(node.name)
-            elif include_vars and isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        definitions.add(target.id)
-                    elif isinstance(target, ast.Tuple):
-                        for elt in target.elts:
-                            if isinstance(elt, ast.Name):
-                                definitions.add(elt.id)
-        return definitions
-    except BaseException:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return ast.parse(f.read(), filename=file_path)
+    except (SyntaxError, FileNotFoundError, UnicodeDecodeError):
+        return None
+
+
+def get_definitions_from_tree(tree) -> set:
+    if not tree:
         return set()
+    definitions = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            definitions.add(node.name)
+    return definitions
 
 
-def find_calls_in_file(file_path, definitions):
-    """Check if a file calls any of the given definitions."""
-    if file_path.suffix != ".py":
-        return False
-    with open(file_path, "r") as f:
-        try:
-            tree = ast.parse(f.read())
-        except SyntaxError:
-            return False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in definitions:
-                return True
-    return False
+def get_imports_from_tree(tree) -> set:
+    if not tree:
+        return set()
+    imports = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imports.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.add(alias.asname or alias.name.split('.')[0])
+    return imports
 
 
-def find_files_using_definitions(definitions, directory):
-    """Find files in the directory that use any of the given definitions."""
-    files = []
-    for file_path in Path(directory).rglob("*.py"):
-        if find_calls_in_file(file_path, definitions):
-            files.append(file_path)
-    return files
+class DependencyFinder:
+    def __init__(self, search_dirs, test_dir):
+        self.test_dir = Path(test_dir).resolve()
 
+        source_files = [p for s_dir in search_dirs for p in Path(s_dir).resolve().rglob("*.py") if p.name != '__init__.py']
+        test_files = [p for p in self.test_dir.rglob("*.py") if p.name != '__init__.py']
+        self.all_project_files = source_files + test_files
+        self.all_test_files = set(test_files)
 
-def find_dependent_tests(changed_file, test_dir, search_dir, max_depth=3):
-    abs_test_dir = Path(test_dir).resolve()
-    abs_search_dir = Path(search_dir).resolve()
-    abs_changed_file = Path(changed_file).resolve()
+        self.file_to_definitions = {}
+        self.file_to_imports = {}
+        self.symbol_to_file_map = defaultdict(set)
+        for file_path in self.all_project_files:
+            tree = parse_file(file_path)
+            definitions = get_definitions_from_tree(tree)
+            imports = get_imports_from_tree(tree)
+            self.file_to_definitions[file_path] = definitions
+            self.file_to_imports[file_path] = imports
+            for defn in definitions:
+                self.symbol_to_file_map[defn].add(file_path)
 
-    if abs_test_dir in abs_changed_file.parents:
-        return {str(abs_changed_file)}
+    def find_dependent_tests(self, changed_files_str: list, max_depth=4) -> set:
+        changed_files = {Path(f).resolve() for f in changed_files_str}
 
-    queue = deque([(abs_changed_file, 0, True)])  # (file, depth, include_vars)
-    processed = set()
-    all_definitions = set()
+        # Heuristic: If a changed file is a modeling file, automatically include its config file at the start.
+        initial_configs_to_add = set()
+        for file in changed_files:
+            if 'modeling_' in file.stem and 'models' in str(file):
+                model_name = file.stem.replace('modeling_', '')
+                config_file = file.parent / f"configuration_{model_name}.py"
+                if config_file.is_file():
+                    initial_configs_to_add.add(config_file)
+        changed_files.update(initial_configs_to_add)
 
-    while queue:
-        current_file, depth, include_vars = queue.popleft()
-        if current_file in processed or depth > max_depth:
-            continue
+        all_affected_symbols = set()
 
-        processed.add(current_file)
-        current_defs = extract_definitions(current_file, include_vars)
-        all_definitions.update(current_defs)
+        symbols_to_trace = set()
+        for file_path in changed_files:
+            if file_path.name == '__init__.py':
+                continue
+            new_defs = self.file_to_definitions.get(file_path, set())
+            symbols_to_trace.update(new_defs)
+            all_affected_symbols.update(new_defs)
 
-        for f in Path(abs_search_dir).rglob("*.py"):
-            if f not in processed and find_calls_in_file(f, current_defs):
-                queue.append((f, depth + 1, False))
+        for i in range(max_depth):
+            if not symbols_to_trace:
+                break
 
-    return {
-        str(test_file) for test_file in abs_test_dir.rglob("test_*.py")
-        if find_calls_in_file(test_file, all_definitions)
-    }
+            next_layer_files = set()
+            for file_path, imported_symbols in self.file_to_imports.items():
+                if not symbols_to_trace.isdisjoint(imported_symbols):
+                    next_layer_files.add(file_path)
+
+            # This heuristic is now also applied at each dependency level
+            config_files_to_add = set()
+            for file in next_layer_files:
+                if 'modeling_' in file.stem and 'models' in str(file):
+                    model_name = file.stem.replace('modeling_', '')
+                    config_file = file.parent / f"configuration_{model_name}.py"
+                    if config_file.is_file():
+                        config_files_to_add.add(config_file)
+            next_layer_files.update(config_files_to_add)
+
+            new_definitions = set()
+            for file_path in next_layer_files:
+                new_definitions.update(self.file_to_definitions.get(file_path, set()))
+
+            symbols_to_trace = new_definitions - all_affected_symbols
+            all_affected_symbols.update(symbols_to_trace)
+
+        dependent_tests = set()
+
+        affected_source_file_stems = set()
+        for s in all_affected_symbols:
+            if s in self.symbol_to_file_map:
+                for file_path in self.symbol_to_file_map[s]:
+                    affected_source_file_stems.add(file_path.stem)
+
+        for test_file in self.all_test_files:
+            imported_in_test = self.file_to_imports.get(test_file, set())
+
+            if not all_affected_symbols.isdisjoint(imported_in_test):
+                dependent_tests.add(str(test_file))
+                continue
+
+            if not affected_source_file_stems.isdisjoint(imported_in_test):
+                dependent_tests.add(str(test_file))
+
+        return dependent_tests
 
 
 if __name__ == "__main__":
-    # Get the changed files from the command line arguments
     if len(sys.argv) < 2:
-        print("Usage: python scripts/find_dependent_tests.py <file_paths>")
+        print("Usage: python find_dependent_tests.py <file1> <file2> ...")
         sys.exit(1)
 
-    # Split the input argument into individual file paths
-    changed_files = [Path(file) for file in sys.argv[1].split()]
-    # Skip fla/utils.py
-    BLACKLIST = [
-        'fla/utils.py',
-        'utils/convert_from_llama.py',
-        'utils/convert_from_rwkv6.py',
-        'utils/convert_from_rwkv7.py',
-    ]
-    changed_files = [
-        file for file in changed_files
-        if not any(str(file).endswith(blacklisted) for blacklisted in BLACKLIST)
-    ]
+    changed_files = sys.argv[1:]
 
-    # Define the test directory and the directory to search for dependent files
+    BLACKLIST = ['fla/utils.py', 'utils/convert_from_llama.py', 'utils/convert_from_rwkv6.py', 'utils/convert_from_rwkv7.py']
+    changed_files = [file for file in changed_files if not any(file.endswith(b) for b in BLACKLIST)]
+
+    changed_files = [file for file in changed_files if file.endswith('.py')]
+
     current_dir = Path(__file__).parent.resolve()
     test_dir = current_dir.parent / "tests"
     search_dir = current_dir.parent / "fla"
 
-    # Find dependent test files for each changed file
-    dependent_tests = set()
-    for changed_file in changed_files:
-        dependent_tests.update(find_dependent_tests(changed_file, test_dir, search_dir))
+    finder = DependencyFinder(search_dirs=[search_dir], test_dir=test_dir)
+    dependent_tests = finder.find_dependent_tests(changed_files)
 
-    # Output the test files as a space-separated string
-    print(" ".join(dependent_tests))
+    if dependent_tests:
+        print(" ".join(sorted(list(dependent_tests))))

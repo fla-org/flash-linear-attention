@@ -9,23 +9,11 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, safe_exp
-from fla.utils import check_shared_mem, is_nvidia_hopper
-
-BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
-NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
-    ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
-)
 @triton.jit(do_not_specialize=['T'])
 def chunk_mesa_net_h_kk_bwd_intra_kernel(
     k,
@@ -101,33 +89,34 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
 
     p_h = tl.make_block_ptr(h, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
     p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (0, 0), (BV, BK), (0, 1))
-    b_h = tl.load(p_h, boundary_check=(0, 1))
-    b_dh = tl.load(p_dh, boundary_check=(0, 1))
     p_beta = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_beta = tl.load(p_beta, boundary_check=(0,))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     b_v = tl.load(p_k, boundary_check=(0, 1))
     b_k = (b_v * b_beta[:, None]).to(b_v.dtype)
-    # calculation
 
-    b_dg_last = tl.sum(b_h * b_dh)
-    b_dg_last *= exp(b_g_last)
     o_t = tl.arange(0, BT)
-    b_m = tl.where(o_t[:, None] >= o_t[None, :], safe_exp(b_g[:, None] - b_g[None, :]), 0)
+    b_m = tl.where(o_t[:, None] >= o_t[None, :], safe_exp(b_g[:, None] - b_g[None, :]), 0.)
     b_s = tl.dot(b_q_star, tl.trans(b_k)) * b_m
     b_ds = tl.dot(b_dq, tl.trans(b_v))
+    b_dv += tl.dot(tl.trans(b_s.to(b_dq.dtype)), b_dq)
     b_dm = b_s * b_ds
     b_dm = tl.where(tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :], b_dm, 0)
     b_dg += tl.sum(b_dm, axis=1)
     b_dg -= tl.sum(b_dm, axis=0)
     b_ds = b_ds * b_m
-    b_dk += tl.dot(b_v, b_dh.to(b_v.dtype)) * b_gk[:, None]
-
-    b_dg_last += tl.sum(b_dk * b_k)
-    b_dg -= tl.sum(b_dk * b_k, axis=1)
-    b_dg += tl.sum(tl.dot(b_dq, tl.trans(b_h)) * tl.exp(b_g)[:, None] * b_q_star, axis=1)
-    b_dv += tl.dot(b_k, tl.trans(b_dh).to(b_k.dtype)) * b_gk[:, None] + tl.dot(tl.trans(b_s.to(b_dq.dtype)), b_dq)
     b_dk += tl.dot(tl.trans(b_ds.to(b_q_star.dtype)), b_q_star)
+
+    b_h = tl.load(p_h, boundary_check=(0, 1))
+    b_dg += tl.sum(tl.dot(b_dq, tl.trans(b_h)) * tl.exp(b_g)[:, None] * b_q_star, axis=1)
+    b_dh = tl.load(p_dh, boundary_check=(0, 1))
+    b_dk2 = tl.dot(b_v, b_dh.to(b_v.dtype)) * b_gk[:, None]
+    b_dg -= tl.sum(b_dk2 * b_k, axis=1)
+    b_dg_last += tl.sum(b_dk2 * b_k)
+    b_dk += b_dk2
+    b_dv += tl.dot(b_k, tl.trans(b_dh).to(b_k.dtype)) * b_gk[:, None]
+    b_dh = b_dh * b_h
+    b_dg_last += tl.sum(b_dh) * exp(b_g_last)
 
     p_dk_beta = tl.make_block_ptr(dk_beta, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     b_dk -= tl.load(p_dk_beta, boundary_check=(0, 1))
@@ -194,7 +183,7 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
         V=V,
         BT=BT,
         BK=BK,
-        BV=BV,
+        BV=BV
     )
     dlamb = dlamb.sum([0, 1])
     return dk, dg, dlamb, dbeta

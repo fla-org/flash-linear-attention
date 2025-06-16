@@ -17,10 +17,11 @@ from fla.utils import input_guard
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.jit(do_not_specialize=['T'])
-def fused_recurrent_gated_delta_rule_fwd_kernel(
+def fused_recurrent_comba_fwd_kernel(
     q,
     k,
     v,
+    p,
     g,
     beta,
     o,
@@ -58,6 +59,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     p_q = q + (bos * H + i_h) * K + o_k
     p_k = k + (bos * H + i_h) * K + o_k
     p_v = v + (bos * HV + i_hv) * V + o_v
+    p_p = p + (bos * H + i_h) * K + o_k
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:
@@ -78,16 +80,17 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+        b_p = tl.load(p_p, mask=mask_k, other=0).to(tl.float32)
         b_g = tl.load(p_g).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
             b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
         b_q = b_q * scale
+        # [BV]
+        b_v -= tl.sum(b_h * b_p[:, None], 0)
         # [BK, BV]
         b_h *= exp(b_g)
-        # [BV]
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
@@ -103,6 +106,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_k += H*K
         p_o += HV*V
         p_v += HV*V
+        p_p += H*K
         p_g += HV
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
@@ -111,10 +115,11 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
-def fused_recurrent_gated_delta_rule_fwd(
+def fused_recurrent_comba_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    p: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
     scale: float,
@@ -139,10 +144,11 @@ def fused_recurrent_gated_delta_rule_fwd(
         final_state = None
 
     grid = (NK, NV, N * HV)
-    fused_recurrent_gated_delta_rule_fwd_kernel[grid](
+    fused_recurrent_comba_fwd_kernel[grid](
         q=q,
         k=k,
         v=v,
+        p=p,
         g=g,
         beta=beta,
         o=o,
@@ -176,6 +182,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        p: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
         scale: float,
@@ -184,10 +191,11 @@ class FusedRecurrentFunction(torch.autograd.Function):
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False
     ):
-        o, final_state = fused_recurrent_gated_delta_rule_fwd(
+        o, final_state = fused_recurrent_comba_fwd(
             q=q,
             k=k,
             v=v,
+            p=p,
             g=g,
             beta=beta,
             scale=scale,
@@ -209,12 +217,13 @@ class FusedRecurrentFunction(torch.autograd.Function):
         )
 
 
-def fused_recurrent_gated_delta_rule(
+def fused_recurrent_comba(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor = None,
+    p: torch.Tensor = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
@@ -230,11 +239,13 @@ def fused_recurrent_gated_delta_rule(
         v (torch.Tensor):
             values of shape `[B, T, HV, V]`.
             GVA is applied if `HV > H`.
+        p (torch.Tensor):
+            keys of shape `[B, T, H, K]`.
         g (torch.Tensor):
             g (decays) of shape `[B, T, HV]`.
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
-        scale (Optional[float]):
+        scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
@@ -263,11 +274,13 @@ def fused_recurrent_gated_delta_rule(
         >>> q = torch.randn(B, T, H, K, device='cuda')
         >>> k = F.normalize(torch.randn(B, T, H, K, device='cuda'), p=2, dim=-1)
         >>> v = torch.randn(B, T, HV, V, device='cuda')
+        >>> b = torch.rand(H, dtype=torch.bfloat16, device='cuda').sigmoid()
+        >>> p = k * b[:, None]
         >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
         >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
         >>> h0 = torch.randn(B, HV, K, V, device='cuda')
         >>> o, ht = fused_gated_recurrent_delta_rule(
-            q, k, v, g, beta,
+            q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True
         )
@@ -299,10 +312,13 @@ def fused_recurrent_gated_delta_rule(
         assert scale > 0, "scale must be positive"
     if beta is None:
         beta = torch.ones_like(q[..., 0])
+    if p is None:
+        p = k
     o, final_state = FusedRecurrentFunction.apply(
         q,
         k,
         v,
+        p,
         g,
         beta,
         scale,

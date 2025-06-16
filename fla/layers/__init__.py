@@ -5,6 +5,7 @@ from .abc import ABCAttention
 from .attn import Attention
 from .based import BasedLinearAttention
 from .bitattn import BitAttention
+from .comba import Comba
 from .delta_net import DeltaNet
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
@@ -32,6 +33,7 @@ __all__ = [
     'Attention',
     'BasedLinearAttention',
     'BitAttention',
+    'Comba',
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
@@ -44,6 +46,7 @@ __all__ = [
     'LinearAttention',
     'Mamba',
     'Mamba2',
+    'MomGatedDeltaNet'
     'MultiScaleRetention',
     'NativeSparseAttention',
     'ReBasedLinearAttention',
@@ -53,5 +56,4 @@ __all__ = [
     'SlidingWindowSharedKeyAttention',
     'PaTHAttention',
     'MesaNet',
-    'MomGatedDeltaNet'
 ]

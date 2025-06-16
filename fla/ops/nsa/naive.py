@@ -31,7 +31,7 @@ def naive_nsa(
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
         block_size (int):
             Selected block size. Default: 64.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         cu_seqlens (torch.LongTensor):
