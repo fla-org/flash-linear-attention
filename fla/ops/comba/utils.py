@@ -138,7 +138,6 @@ def chunk_comba_cumsum_scalar_bwd_kernel(
     tl.store(p_dgr, b_dgr.to(p_dgr.dtype.element_ty), boundary_check=(0,))
 
 
-
 def chunk_comba_cumsum_scalar_bwd(
     dg0: torch.Tensor,
     chunk_size: int,
