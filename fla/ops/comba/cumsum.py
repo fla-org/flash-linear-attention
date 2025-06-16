@@ -53,7 +53,7 @@ def chunk_comba_cumsum_scalar_fwd_kernel(
     b_g0 = b_g1 - b_g
     tl.store(p_g0, b_g0.to(p_g0.dtype.element_ty), boundary_check=(0,))
     tl.store(p_g1, b_g1.to(p_g1.dtype.element_ty), boundary_check=(0,))
-    
+
 
 def chunk_comba_cumsum_scalar_fwd(
     g: torch.Tensor,

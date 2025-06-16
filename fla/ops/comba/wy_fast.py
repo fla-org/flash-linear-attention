@@ -8,8 +8,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import safe_exp, safe_exp_comba
+from fla.ops.utils.op import safe_exp_comba
 from fla.utils import check_shared_mem
+
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,

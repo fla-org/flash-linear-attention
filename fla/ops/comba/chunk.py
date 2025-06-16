@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional
 
 import torch
-from einops import rearrange
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.comba.cumsum import chunk_comba_cumsum_scalar_bwd, chunk_comba_cumsum_scalar_fwd
+from fla.ops.comba.wy_fast import chunk_scaled_dot_comba_pkt_fwd, prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
-from fla.ops.comba.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd, chunk_scaled_dot_comba_pkt_fwd
-from fla.ops.comba.cumsum import chunk_comba_cumsum_scalar_fwd, chunk_comba_cumsum_scalar_bwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
