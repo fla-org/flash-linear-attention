@@ -552,7 +552,7 @@ class ShortConvolution(nn.Conv1d):
         kernel_size: int,
         bias: bool = False,
         activation: Optional[str] = 'silu',
-        use_fast_conv1d: Optional[bool] = True,
+        backend: Optional[str] = 'cuda',
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         **kwargs,
@@ -575,23 +575,23 @@ class ShortConvolution(nn.Conv1d):
             assert activation in ['silu', 'swish'], f"Activation `{activation}` not supported yet."
             self.activation = activation
 
-        self.use_fast_conv1d = use_fast_conv1d
-        if use_fast_conv1d:
+        if 'use_fast_conv1d' in kwargs:
+            warnings.warn(
+                "The `use_fast_conv1d` parameter is deprecated and will be ignored. "
+                "Please use the `backend` parameter instead."
+            )
+
+        self.backend = backend
+        if backend not in ['cuda', 'triton']:
+            raise ValueError(f"Invalid backend: {backend}, must be one of ['cuda', 'triton']")
+        if backend == 'cuda':
             if causal_conv1d_fn is None:
                 warnings.warn(
-                    "The `use_fast_conv1d` parameter is set to `True`, but `causal_conv1d_fn` is not available. "
+                    "The `backend` parameter is set to `cuda`, but `causal_conv1d_fn` is not available. "
                     "Switching to the Triton implementation instead. "
-                    "Consider installing `causal_conv1d` to enable the CUDA implementation."
+                    "Consider installing `causal_conv1d` to enable the CUDA backend."
                 )
-                self.use_fast_conv1d = False
-        if bias is False:
-            # There is a bug in https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/cpp_functions.py#L135
-            self.use_fast_conv1d = False
-            warnings.warn(
-                "The `use_fast_conv1d` parameter is set to `True`, but bias is set to `False`. "
-                "Switching to the Triton implementation instead. "
-                "Since there is a bug in causal_conv1d that does not support bias during backward pass."
-            )
+                self.backend = 'triton'
 
     def extra_repr(self):
         s = ('{in_channels}, {out_channels}, kernel_size={kernel_size}'
@@ -610,8 +610,7 @@ class ShortConvolution(nn.Conv1d):
             s += ', padding_mode={padding_mode}'
         if self.activation is not None:
             s += ', activation={activation}'
-        if not self.use_fast_conv1d:
-            s += ', use_fast_conv1d={use_fast_conv1d}'
+        s += f', backend={self.backend}'
         return s.format(**self.__dict__)
 
     def forward(
@@ -663,7 +662,7 @@ class ShortConvolution(nn.Conv1d):
             else:
                 cache[:, :, -min(W, T):].copy_(rearrange(x[..., -min(W, T):, :], 'n w d -> n d w'))
 
-        if not self.use_fast_conv1d:
+        if self.backend == 'triton':
             y = causal_conv1d(
                 x=x,
                 weight=rearrange(self.weight, "d 1 w -> d w"),
@@ -709,7 +708,7 @@ class ShortConvolution(nn.Conv1d):
         cu_seqlens: Optional[torch.LongTensor] = None
     ):
         # NOTE: we follow the fast mode that updates the cache in-place
-        if not self.use_fast_conv1d:
+        if self.backend == 'triton':
             return causal_conv1d_update(
                 x=x,
                 cache=cache,
