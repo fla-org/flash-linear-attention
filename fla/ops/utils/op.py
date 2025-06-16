@@ -28,10 +28,7 @@ else:
 def safe_exp(x):
     return exp(tl.where(x <= 0, x, float('-inf')))
 
-@triton.jit
-def safe_exp_comba(x):
-    return exp(tl.where(x <= 1e-5, x, float('-inf')))
-    
+
 if not is_gather_supported:
     @triton.jit
     def gather(src, index, axis, _builder=None):

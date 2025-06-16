@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.op import exp
 
 
 @triton.heuristics({
@@ -166,3 +167,8 @@ def chunk_comba_cumsum_scalar_bwd(
         HEAD_FIRST=head_first,
     )
     return dg
+
+
+@triton.jit
+def safe_exp_comba(x):
+    return exp(tl.where(x <= 1e-5, x, float('-inf')))

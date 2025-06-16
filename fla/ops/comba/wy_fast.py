@@ -7,8 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.comba.utils import safe_exp_comba
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import safe_exp_comba
 from fla.utils import check_shared_mem
 
 
