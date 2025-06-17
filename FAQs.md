@@ -23,7 +23,7 @@ conda create -n triton-nightly python=3.12
 conda activate triton-nightly
 
 # Install PyTorch nightly (required for Triton nightly compatibility)
-pip install -U --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+pip install -U --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
 
 # Install Triton nightly
 pip uninstall triton pytorch-triton -y
@@ -34,8 +34,9 @@ pip install einops ninja datasets transformers numpy
 pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 
 # Optional: Install flash-attention
-conda install nvidia/label/cuda-12.6.3::cuda-nvcc
+conda install nvidia/label/cuda-12.8.1::cuda-nvcc
 pip install packaging psutil ninja
+pip install git+https://github.com/Dao-AILab/causal-conv1d.git --no-build-isolation
 pip install flash-attn --no-deps --no-cache-dir --no-build-isolation
 
 # Optional: Verify flash-attention installation

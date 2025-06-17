@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional
 
 import torch
@@ -28,6 +29,7 @@ def chunk_fwd_mesa_net_fwd(
     h_kv_init: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
 ) -> torch.Tensor:
+
     g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
     h_kk, h_kv, h_kk_final, h_kv_final = chunk_mesa_fwd_h(
         k=k,
@@ -170,6 +172,7 @@ class ChunkMesaNetFunction(torch.autograd.Function):
         chunk_size = 64
         g_cumsum, q_star, o, (h_kk_final, h_kv_final) = chunk_fwd_mesa_net_fwd(q, k, v, g, beta, lamb,
                                                                                cu_seqlens, max_CG_iteration, chunk_size,
+
                                                                                h_kk_init, h_kv_init, output_final_state)
         ctx.max_CG_iteration = max_CG_iteration
         ctx.chunk_size = chunk_size
@@ -280,8 +283,11 @@ def chunk_mesa_net(
             cu_seqlens=cu_seqlens
         )
     """
-    assert q.dtype != torch.float32, "Chunk MesaNet does not support float32. Please use bfloat16."
-
+    if q.dtype == torch.bfloat16:
+        warnings.warn(
+            "We empirically found that conjugate gradient solver performs poorly with bfloat16, "
+            "please consider using float16 instead."
+        )
     B, T, H, K = q.shape
     assert k.shape == (B, T, H, K), "k must be of shape (batch size, seq len, num head, head dim)."
     assert v.shape == (B, T, H, K), "v must be of shape (batch size, seq len, num head, head dim)."
@@ -291,10 +297,12 @@ def chunk_mesa_net(
 
     if h_kv_init is not None:
         assert h_kv_init.dtype == torch.float32, "h_kv_init must be in float32."
-        assert h_kv_init.shape == (B, H, K, K), "h_kv_init must be of shape (batch size, num head, head dim, head dim)."
+        if cu_seqlens is None:
+            assert h_kv_init.shape == (B, H, K, K), "h_kv_init must be of shape (batch size, num head, head dim, head dim)."
     if h_kk_init is not None:
         assert h_kk_init.dtype == torch.float32, "h_kk_init must be in float32."
-        assert h_kk_init.shape == (B, H, K, K), "h_kk_init must be of shape (batch size, num head, head dim, head dim)."
+        if cu_seqlens is None:
+            assert h_kk_init.shape == (B, H, K, K), "h_kk_init must be of shape (batch size, num head, head dim, head dim)."
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -312,7 +320,6 @@ def chunk_mesa_net(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {h_kv_init.shape[0]}."
             )
-
     o, final_state_kk, final_state_kv = ChunkMesaNetFunction.apply(
         q,
         k,

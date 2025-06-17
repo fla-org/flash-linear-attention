@@ -32,7 +32,7 @@ def fused_recurrent_gla(
             Forget gates of shape `[B, T, H, K]`.
         gv (torch.Tensor):
             Forget gates of shape `[B, T, H, V]` applied to values.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):

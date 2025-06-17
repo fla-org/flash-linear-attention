@@ -28,7 +28,7 @@ def chunk_linear_attn(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the linear attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
@@ -38,8 +38,7 @@ def chunk_linear_attn(
         normalize (bool):
             Whether to normalize the output. Default: `True`.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
             This argument has been deprecated.
 
     Returns:
@@ -49,8 +48,6 @@ def chunk_linear_attn(
             Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`.
     """
 
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
@@ -64,6 +61,8 @@ def chunk_linear_attn(
                 "when head_first=False was specified. "
                 "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
             )
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
     o, final_state = chunk_simple_gla(
         q=q,
         k=k,

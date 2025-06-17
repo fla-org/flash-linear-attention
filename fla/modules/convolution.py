@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-# from https://github.com/HazyResearch/zoology/blob/main/zoology/mixers/convolution.py
+# code adapted from https://github.com/HazyResearch/zoology/blob/main/zoology/mixers/convolution.py
 
 import math
 import warnings
@@ -52,6 +53,7 @@ def causal_conv1d_fwd_kernel(
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
+    BW: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -71,12 +73,13 @@ def causal_conv1d_fwd_kernel(
         bos, eos = i_b * T, i_b * T + T
 
     o_d = i_d * BD + tl.arange(0, BD)
-    o_w = tl.arange(0, W)
+    o_w = tl.arange(0, BW) + W - BW
     m_d = o_d < D
+    m_w = o_w >= 0
 
     if HAS_WEIGHT:
         # [BD, W]
-        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None], other=0).to(tl.float32)
+        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0).to(tl.float32)
 
     b_y = tl.zeros((BT, BD), dtype=tl.float32)
     for i_w in tl.static_range(-W + 1, 1):
@@ -134,6 +137,7 @@ def causal_conv1d_bwd_kernel(
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
+    BW: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -154,14 +158,15 @@ def causal_conv1d_bwd_kernel(
         bos, eos = i_b * T, i_b * T + T
 
     o_d = i_d * BD + tl.arange(0, BD)
-    o_w = tl.arange(0, W)
+    o_w = tl.arange(0, BW) + W - BW
     m_d = o_d < D
+    m_w = o_w >= 0
 
     if HAS_WEIGHT:
         p_x = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
         b_x = tl.load(p_x, boundary_check=(0, 1))
         # [BD, W]
-        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None], other=0)
+        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
 
     b_dx = tl.zeros((BT, BD), dtype=tl.float32)
     if HAS_BIAS:
@@ -213,6 +218,7 @@ def causal_conv1d_update_kernel(
     D: tl.constexpr,
     W: tl.constexpr,
     BD: tl.constexpr,
+    BW: tl.constexpr,
     ACTIVATION: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
@@ -221,21 +227,22 @@ def causal_conv1d_update_kernel(
     i_d, i_n = tl.program_id(0), tl.program_id(1)
 
     o_d = i_d * BD + tl.arange(0, BD)
-    o_w = tl.arange(0, W)
+    o_w = tl.arange(0, BW) + W - BW
     m_d = o_d < D
+    m_w = o_w >= 0
     m_c = o_w < W - 1
 
     # [BD]
     b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=0).to(tl.float32)
 
     # shift the cache by 1 with the last one being discarded
-    p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, 1), (BD, W), (1, 0))
+    p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW + 1), (BD, BW), (1, 0))
     # [BD, W]
     b_cache = tl.load(p_cache, boundary_check=(0, 1)).to(tl.float32)
     b_cache = tl.where(m_c[None, :], b_cache, b_x[:, None])
 
     if HAS_WEIGHT:
-        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None], other=0)
+        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
         b_y = tl.sum(b_cache * b_w, 1)
     else:
         b_y = tl.sum(b_cache, 1)
@@ -252,7 +259,7 @@ def causal_conv1d_update_kernel(
 
     b_cache = tl.cast(b_cache, dtype=cache.dtype.element_ty, fp_downcast_rounding='rtne')
     # update the cache in-place
-    p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, 0), (BD, W), (1, 0))
+    p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW), (BD, BW), (1, 0))
     tl.store(p_cache, b_cache, boundary_check=(0, 1))
 
 
@@ -269,6 +276,7 @@ def causal_conv1d_fwd(
         x = rearrange(x, 'b t ... -> b t (...)')
     B, T, D, W = *x.shape, weight.shape[1]
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
+    BW = triton.next_power_of_2(W)
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
@@ -288,6 +296,7 @@ def causal_conv1d_fwd(
         D=D,
         W=W,
         BT=BT,
+        BW=BW,
         NB=NB,
         ACTIVATION=activation,
     )
@@ -309,6 +318,7 @@ def causal_conv1d_bwd(
     B, T, D = x.shape
     W = weight.shape[1] if weight is not None else None
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
+    BW = triton.next_power_of_2(W)
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
@@ -345,6 +355,7 @@ def causal_conv1d_bwd(
         D=D,
         W=W,
         BT=BT,
+        BW=BW,
         NB=NB,
         ACTIVATION=activation,
     )
@@ -372,6 +383,7 @@ def causal_conv1d_update(
     N = x.numel() // D
     W = weight.shape[1] if weight is not None else None
     BD = 8
+    BW = triton.next_power_of_2(W)
 
     y = torch.empty_like(x)
     # NOTE: autotuning is disabled as cache is updated in-place
@@ -386,6 +398,7 @@ def causal_conv1d_update(
         D=D,
         W=W,
         BD=BD,
+        BW=BW,
         ACTIVATION=activation,
         num_warps=32,
     )
@@ -539,7 +552,7 @@ class ShortConvolution(nn.Conv1d):
         kernel_size: int,
         bias: bool = False,
         activation: Optional[str] = 'silu',
-        use_fast_conv1d: Optional[bool] = True,
+        backend: Optional[str] = 'cuda',
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         **kwargs,
@@ -558,21 +571,27 @@ class ShortConvolution(nn.Conv1d):
         self.hidden_size = hidden_size
         self.activation = None
 
-        if kernel_size % 2 != 0:
-            raise ValueError("Kernel size must be the power of 2")
         if activation is not None:
             assert activation in ['silu', 'swish'], f"Activation `{activation}` not supported yet."
             self.activation = activation
 
-        self.use_fast_conv1d = use_fast_conv1d
-        if use_fast_conv1d:
+        if 'use_fast_conv1d' in kwargs:
+            warnings.warn(
+                "The `use_fast_conv1d` parameter is deprecated and will be ignored. "
+                "Please use the `backend` parameter instead."
+            )
+
+        self.backend = backend
+        if backend not in ['cuda', 'triton']:
+            raise ValueError(f"Invalid backend: {backend}, must be one of ['cuda', 'triton']")
+        if backend == 'cuda':
             if causal_conv1d_fn is None:
                 warnings.warn(
-                    "The `use_fast_conv1d` parameter is set to `True`, but `causal_conv1d_fn` is not available. "
+                    "The `backend` parameter is set to `cuda`, but `causal_conv1d_fn` is not available. "
                     "Switching to the Triton implementation instead. "
-                    "Consider installing `causal_conv1d` to enable the CUDA implementation."
+                    "Consider installing `causal_conv1d` to enable the CUDA backend."
                 )
-                self.use_fast_conv1d = False
+                self.backend = 'triton'
 
     def extra_repr(self):
         s = ('{in_channels}, {out_channels}, kernel_size={kernel_size}'
@@ -591,8 +610,7 @@ class ShortConvolution(nn.Conv1d):
             s += ', padding_mode={padding_mode}'
         if self.activation is not None:
             s += ', activation={activation}'
-        if not self.use_fast_conv1d:
-            s += ', use_fast_conv1d={use_fast_conv1d}'
+        s += f', backend={self.backend}'
         return s.format(**self.__dict__)
 
     def forward(
@@ -644,7 +662,7 @@ class ShortConvolution(nn.Conv1d):
             else:
                 cache[:, :, -min(W, T):].copy_(rearrange(x[..., -min(W, T):, :], 'n w d -> n d w'))
 
-        if not self.use_fast_conv1d:
+        if self.backend == 'triton':
             y = causal_conv1d(
                 x=x,
                 weight=rearrange(self.weight, "d 1 w -> d w"),
@@ -690,7 +708,7 @@ class ShortConvolution(nn.Conv1d):
         cu_seqlens: Optional[torch.LongTensor] = None
     ):
         # NOTE: we follow the fast mode that updates the cache in-place
-        if not self.use_fast_conv1d:
+        if self.backend == 'triton':
             return causal_conv1d_update(
                 x=x,
                 cache=cache,
@@ -728,9 +746,11 @@ class LongConvolution(nn.Module):
     LongConvolution applies a convolution operation on the input tensor using a fixed
     filter of length max_len.
     The filter is learned during training and is applied using FFT convolution.
+
     Args:
         hidden_size (int): The number of expected features in the input and output.
         max_len (int): The maximum sequence length.
+
     Returns:
         y: [batch_size, seq_len, hidden_size] tensor
     """
@@ -840,14 +860,13 @@ class ImplicitLongConvolution(nn.Module):
         )
 
     def filter(self, seq_len: int, *args, **kwargs):
-        k = self.mlp(self.pos_emb(seq_len))
-
-        return k.transpose(1, 2)
+        return self.mlp(self.pos_emb(seq_len)).transpose(1, 2)
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         """
         Args:
             x: [batch_size, seq_len, hidden_size] tensor
+
         Returns:
             y: [batch_size, seq_len, hidden_size] tensor
         """

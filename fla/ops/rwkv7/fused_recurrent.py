@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional, Tuple
 
 import torch
@@ -64,22 +65,22 @@ def fused_recurrent_rwkv7_fwd_kernel(
 
     o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    p_r = r + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_w = w + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-    p_a = a + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_kk = kk + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_r = r + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_w = w + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T - 1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_a = a + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_kk = kk + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
 
-    p_o = o + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_o = o + (bos + ((T - 1) if REVERSE else 0)) * H*V + i_h * V + o_v
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[None, :] & mask_v[:, None]
-    b_h = tl.zeros([BV, BK], dtype=tl.float32)
+    mask_h = mask_k[:, None] & mask_v[None, :]
+    b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
-        p_h0 = h0 + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
+        p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     if IS_DECODE:
@@ -92,9 +93,9 @@ def fused_recurrent_rwkv7_fwd_kernel(
         b_act_a = -b_kk
         b_b = b_kk * b_a
 
-        tmp = tl.sum(b_h * b_act_a[None, :], axis=1)
-        b_h = exp(b_w)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
-        b_o = tl.sum(b_h * b_r[None, :], axis=1)
+        b_h = exp(b_w)[:, None] * b_h + b_b[:, None] * tl.sum(b_act_a[:, None] * b_h, 0)[None, :]
+        b_h += b_k[:, None] * b_v[None, :]
+        b_o = tl.sum(b_h * b_r[:, None], 0)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
     else:
@@ -108,9 +109,9 @@ def fused_recurrent_rwkv7_fwd_kernel(
             b_act_a = -b_kk
             b_b = b_kk * b_a
 
-            tmp = tl.sum(b_h * b_act_a[None, :], axis=1)
-            b_h = exp(b_w)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
-            b_o = tl.sum(b_h * b_r[None, :], axis=1)
+            b_h = exp(b_w)[:, None] * b_h + b_b[:, None] * tl.sum(b_act_a[:, None] * b_h, 0)[None, :]
+            b_h += b_k[:, None] * b_v[None, :]
+            b_o = tl.sum(b_h * b_r[:, None], 0)
 
             tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
             p_r += (-1 if REVERSE else 1) * H*K
@@ -122,7 +123,7 @@ def fused_recurrent_rwkv7_fwd_kernel(
             p_o += (-1 if REVERSE else 1) * H*V
 
     if STORE_FINAL_STATE:
-        p_ht = ht + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
+        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
@@ -184,7 +185,7 @@ def fused_recurrent_rwkv7(
     v: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
-    scale: float = 1.0,
+    scale: Optional[float] = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
@@ -193,19 +194,20 @@ def fused_recurrent_rwkv7(
     """
     Args:
         r (torch.Tensor):
-            r of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            r of shape `[B, T, H, K]`.
         w (torch.Tensor):
-            log decay of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            log decay of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            k of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            k of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            v of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            v of shape `[B, T, H, V]`.
         a (torch.Tensor):
-            a of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            a of shape `[B, T, H, K]`.
         b (torch.Tensor):
-            b of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            b of shape `[B, T, H, K]`.
         scale (float):
             scale of the attention.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (torch.Tensor):
             initial state of shape `[B, H, K, V]` if cu_seqlens is None else `[N, H, K, V]` where N = len(cu_seqlens) - 1.
         output_final_state (bool):
@@ -213,13 +215,21 @@ def fused_recurrent_rwkv7(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (bool):
-            deprecated. Must be False.
-            Default: `False`.
+        head_first (Optional[bool]):
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
     """
-    assert head_first is False, DeprecationWarning(
-            "head_first is deprecated. "
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
+        )
+    if not head_first and r.shape[1] < r.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
         )
     return fused_recurrent_dplr_delta_rule(
         q=r,
@@ -254,18 +264,18 @@ def fused_mul_recurrent_rwkv7(
 
     Args:
         r (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, H, K]`.
         w (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         v (torch.Tensor):
-            a of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            a of shape `[B, T, H, K]`.
         kk (torch.Tensor):
-            b of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            b of shape `[B, T, H, K]`.
         a (torch.Tensor):
-            gk of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`. decay term in log space!
-        scale (Optional[int]):
+            gk of shape `[B, T, H, K]`. decay term in log space!
+        scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: 1.
         initial_state (Optional[torch.Tensor]):
@@ -280,12 +290,20 @@ def fused_mul_recurrent_rwkv7(
             Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
-            deprecated. Must be False.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
     """
-    assert head_first is False, DeprecationWarning(
-            "head_first is deprecated. "
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
+        )
+    if not head_first and r.shape[1] < r.shape[2]:
+        raise ValueError(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
         )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
@@ -300,8 +318,6 @@ def fused_mul_recurrent_rwkv7(
             )
     if scale is None:
         scale = r.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
     o, final_state = fused_recurrent_rwkv7_fwd(
         r,
         w,

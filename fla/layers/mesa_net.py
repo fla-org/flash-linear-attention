@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
@@ -56,8 +55,8 @@ class MesaNet(nn.Module):
     def __init__(
         self,
         hidden_size: int = 2048,
-        expand_v: float = 1,
         num_heads: int = 16,
+        head_dim: int = 128,
         mode: str = 'chunk',
         use_gate: bool = False,
         use_short_conv: bool = True,
@@ -74,66 +73,30 @@ class MesaNet(nn.Module):
 
         self.mode = mode
         self.hidden_size = hidden_size
-        self.expand_v = expand_v
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
         self.num_heads = num_heads
-
-        head_dim = self.hidden_size // self.num_heads
         self.head_dim = head_dim
-        self.key_dim = int(self.num_heads * self.head_dim)
-        self.value_dim = int(self.key_dim * self.expand_v)
+        self.key_dim = self.num_heads * self.head_dim
+        self.value_dim = self.key_dim
         self.head_k_dim = self.head_dim
-        self.head_v_dim = int(self.head_dim * self.expand_v)
+        self.head_v_dim = self.head_dim
         self.layer_idx = layer_idx
         self.lambda_lower_bound = lambda_lower_bound
         self.max_cg_step_training = max_cg_step_training
         self.max_cg_step_decoding = max_cg_step_decoding
 
-        # Consistency check: Ensure expand_v produces integer values
-        if not math.isclose(self.key_dim * expand_v, self.value_dim, rel_tol=1e-5):
-            raise ValueError(
-                f"expand_v={expand_v} does not produce an integer value when multiplied by key_dim={self.key_dim}. "
-                f"Resulting value_dim would be {self.key_dim * expand_v}, which is invalid for nn.Linear."
-            )
-        if not math.isclose(head_dim * expand_v, self.head_v_dim, rel_tol=1e-5):
-            raise ValueError(
-                f"expand_v={expand_v} does not produce an integer value when multiplied by head_dim={head_dim}. "
-                f"Resulting head_v_dim would be {head_dim * expand_v}, which is invalid for FusedRMSNormGated."
-            )
-        assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
-
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.v_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-        self.a_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
+        self.a_proj = nn.Linear(hidden_size, self.num_heads, bias=True)
         self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=True)
-
-        A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
-        self.A_log = nn.Parameter(torch.log(A))
-        self.A_log._no_weight_decay = True
-        # hard coded for now
-        dt_min = 0.001
-        dt_max = 0.1
-        dt_init_floor = 1e-4
-        dt = torch.exp(
-            torch.rand(self.num_heads) * (math.log(dt_max) - math.log(dt_min))
-            + math.log(dt_min)
-        )
-        dt = torch.clamp(dt, min=dt_init_floor)
-        # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-        inv_dt = dt + torch.log(-torch.expm1(-dt))
-
-        self.dt_bias = nn.Parameter(inv_dt)
-        # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
-        # name.endswith("bias") in param_grouping.py
-        self.dt_bias._no_weight_decay = True
 
         lambda_initial_value = 1.0
         init_lamb_value = torch.log(torch.exp(torch.tensor(lambda_initial_value - lambda_lower_bound)) - 1.0)
-        init_lamb_params = torch.empty(hidden_size, dtype=torch.float32).fill_(init_lamb_value)
+        init_lamb_params = torch.empty(self.key_dim, dtype=torch.float32).fill_(init_lamb_value)
 
         self.lambda_params = nn.Parameter(init_lamb_params)
         self.lambda_params._no_weight_decay = True
@@ -203,29 +166,27 @@ class MesaNet(nn.Module):
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
-        beta = self.b_proj(hidden_states).sigmoid()
-        g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
+        beta = self.b_proj(hidden_states).float().sigmoid()
+        g = F.logsigmoid(self.a_proj(hidden_states).float())
         lamb = F.softplus(self.lambda_params.float()) + self.lambda_lower_bound
         lamb = lamb.reshape(self.num_heads, -1)
 
         last_h_kk, last_h_kv = last_state['recurrent_state'] if last_state is not None else (None, None)
 
-        q = l2_norm(q)
-        k = l2_norm(k)
-
+        q = l2_norm(q, output_dtype=torch.float16)
+        k = l2_norm(k, output_dtype=torch.float16)
         # prefilling or training
         if last_state is None:
             o, h_kk, h_kv = chunk_mesa_net(
                 q=q,
                 k=k,
-                v=v,
+                v=v.to(torch.float16),
                 g=g,
                 beta=beta,
                 lamb=lamb,
-                output_final_state=True,
-                cu_seqlens=cu_seqlens,
-                max_CG_iteration=self.max_cg_step_training
+                max_CG_iteration=self.max_cg_step_training,
             )
+            o = o.to(hidden_states)
         # decoding
         else:
             o, h_kk, h_kv = mesa_net_decoding_one_step(

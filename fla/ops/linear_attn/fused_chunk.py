@@ -28,8 +28,8 @@ def fused_chunk_linear_attn(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
-        scale (Optional[int]):
-            Scale factor for the linear attention scores.
+        scale (Optional[float]):
+            Scale factor for linear attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[B, H, K, V]`. Default: `None`.
@@ -38,8 +38,7 @@ def fused_chunk_linear_attn(
         normalize (bool):
             Whether to normalize the output. Default: `True`.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
             This argument has been deprecated.
 
     Returns:

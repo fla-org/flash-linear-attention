@@ -30,6 +30,7 @@ class PaTHAttentionConfig(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        use_l2warp: bool = False,
         vocab_size: int = 32000,
         use_forget_gate: bool = False,
         use_w_shortconv: bool = True,
@@ -51,6 +52,7 @@ class PaTHAttentionConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
         self.use_forget_gate = use_forget_gate

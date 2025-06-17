@@ -121,7 +121,7 @@ def attn_decoding_one_step(
             values of shape `[1, T, H, V]`.
         g (Optional[torch.Tensor]):
             log decay factors of shape `[1, T, H]`. Default: `None`.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         cu_seqlens (torch.LongTensor):
