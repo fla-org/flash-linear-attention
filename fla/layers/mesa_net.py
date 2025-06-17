@@ -173,22 +173,23 @@ class MesaNet(nn.Module):
 
         last_h_kk, last_h_kv = last_state['recurrent_state'] if last_state is not None else (None, None)
 
-        q = l2_norm(q, output_dtype=torch.float16)
-        k = l2_norm(k, output_dtype=torch.float16)
         # prefilling or training
+        # Note that QK will be normalized inside the kernel to avoid saving the activations, thereby reducing the memory usage.
         if last_state is None:
             o, h_kk, h_kv = chunk_mesa_net(
                 q=q,
                 k=k,
-                v=v.to(torch.float16),
+                v=v,
                 g=g,
                 beta=beta,
                 lamb=lamb,
                 max_CG_iteration=self.max_cg_step_training,
+                use_qk_l2norm_in_kernel=True
             )
-            o = o.to(hidden_states)
         # decoding
         else:
+            q = l2_norm(q)
+            k = l2_norm(k)
             o, h_kk, h_kv = mesa_net_decoding_one_step(
                 q=q.squeeze(0),
                 k=k.squeeze(0),
