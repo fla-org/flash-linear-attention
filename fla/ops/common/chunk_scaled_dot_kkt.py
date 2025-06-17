@@ -22,7 +22,7 @@ from fla.ops.utils.op import safe_exp
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'BT', 'IS_VARLEN', 'USE_G'],
+    key=['H', 'K', 'BT', 'IS_VARLEN'],
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_scaled_dot_kkt_fwd_kernel(

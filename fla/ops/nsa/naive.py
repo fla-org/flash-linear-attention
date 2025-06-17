@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional
 
 import torch
-from einops import rearrange, repeat
+from einops import repeat
 
 
 def naive_nsa(
@@ -20,12 +21,12 @@ def naive_nsa(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, HQ, K]`..
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         block_indices (torch.LongTensor):
             Block indices of shape `[B, T, H, S]` if `head_first=False` else `[B, H, T, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
@@ -39,15 +40,26 @@ def naive_nsa(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
+            Outputs of shape `[B, T, HQ, V]`.
     """
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, block_indices))
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
 
     dtype = q.dtype
     G = q.shape[2] // k.shape[2]
@@ -88,6 +100,4 @@ def naive_nsa(
             else:
                 o[0][cu_seqlens[i]+i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
 
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o.to(dtype)

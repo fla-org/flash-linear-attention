@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional
 
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.comba.utils import chunk_comba_cumsum_scalar_bwd, chunk_comba_cumsum_scalar_fwd
+from fla.ops.comba.wy_fast import chunk_scaled_dot_comba_pkt_fwd, prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
-from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
-def chunk_gated_delta_rule_fwd(
+def chunk_comba_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    p: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
     scale: float,
@@ -26,12 +26,14 @@ def chunk_gated_delta_rule_fwd(
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None
 ):
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+    g0, g = chunk_comba_cumsum_scalar_fwd(g, chunk_size=64, cu_seqlens=cu_seqlens)
     # obtain WY representation. u is actually the new v.
-    A = chunk_scaled_dot_kkt_fwd(
+    A = chunk_scaled_dot_comba_pkt_fwd(
         k=k,
+        p=p,
         beta=beta,
-        g_cumsum=g,
+        g0=g0,
+        g=g,
         cu_seqlens=cu_seqlens,
         output_dtype=torch.float32
     )
@@ -41,11 +43,11 @@ def chunk_gated_delta_rule_fwd(
         output_dtype=k.dtype
     )
     w, u = recompute_w_u_fwd(
-        k=k,
+        k=p,
         v=v,
         beta=beta,
         A=A,
-        g_cumsum=g,
+        g_cumsum=g0,
         cu_seqlens=cu_seqlens,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -66,13 +68,15 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-    return g, o, A, final_state
+    return g0, g, o, A, final_state
 
 
-def chunk_gated_delta_rule_bwd(
+def chunk_comba_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    p: torch.Tensor,
+    g0: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
     A: torch.Tensor,
@@ -83,11 +87,11 @@ def chunk_gated_delta_rule_bwd(
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     w, u = recompute_w_u_fwd(
-        k=k,
+        k=p,
         v=v,
         beta=beta,
         A=A,
-        g_cumsum=g,
+        g_cumsum=g0,
         cu_seqlens=cu_seqlens,
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
@@ -132,10 +136,12 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
+    dk2, dv, dp, db, dg0, dg2 = prepare_wy_repr_bwd(
         k=k,
         v=v,
+        p=p,
         beta=beta,
+        g0=g0,
         g=g,
         A=A,
         dw=dw,
@@ -146,10 +152,12 @@ def chunk_gated_delta_rule_bwd(
     dg.add_(dg2)
     assert dg.dtype == torch.float32, "dg should be fp32"
     dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens)
-    return dq, dk, dv, db, dg, dh0
+    # dg0 = d(g_cumsum - g)
+    dg += chunk_comba_cumsum_scalar_bwd(dg0, chunk_size=64, cu_seqlens=cu_seqlens)
+    return dq, dk, dv, dp, db, dg, dh0
 
 
-class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
+class ChunkCombaFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
@@ -159,6 +167,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        p: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
         scale: float,
@@ -169,15 +178,18 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     ):
         q_orig = q
         k_orig = k
+        p_orig = p
 
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
+            p = l2norm_fwd(p)
 
-        g, o, A, final_state = chunk_gated_delta_rule_fwd(
+        g0, g, o, A, final_state = chunk_comba_fwd(
             q=q,
             k=k,
             v=v,
+            p=p,
             g=g,
             beta=beta,
             scale=scale,
@@ -185,7 +197,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
-        ctx.save_for_backward(q_orig, k_orig, v, g, beta, A, initial_state, cu_seqlens)
+        ctx.save_for_backward(q_orig, k_orig, v, p_orig, g0, g, beta, A, initial_state, cu_seqlens)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
@@ -198,14 +210,17 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, k, v, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
+        q, k, v, p, g0, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
         if ctx.use_qk_l2norm_in_kernel:
             q, q_orig = l2norm_fwd(q), q
             k, k_orig = l2norm_fwd(k), k
-        dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
+            p, p_orig = l2norm_fwd(p), p
+        dq, dk, dv, dp, db, dg, dh0 = chunk_comba_bwd(
             q=q,
             k=k,
             v=v,
+            p=p,
+            g0=g0,
             g=g,
             beta=beta,
             A=A,
@@ -218,21 +233,22 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q_orig, dq)
             dk = l2norm_bwd(k_orig, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None
+            dp = l2norm_bwd(p_orig, dp)
+        return dq.to(q), dk.to(k), dv.to(v), dp.to(p), dg.to(g), db.to(beta), None, dh0, None, None, None
 
 
 @torch.compiler.disable
-def chunk_gated_delta_rule(
+def chunk_comba(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    p: torch.Tensor,
     g: torch.Tensor,
-    beta: torch.Tensor,
+    beta: torch.Tensor = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False
 ):
     r"""
@@ -243,11 +259,13 @@ def chunk_gated_delta_rule(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
+        p (torch.Tensor):
+            values of shape `[B, T, H, K]`.
         g (torch.Tensor):
             (forget) gating tensor (in log space!) of shape `[B, T, H]`.
         beta (torch.Tensor):
             betas of shape `[B, T, H]`.
-        scale (Optional[float]):
+        scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
@@ -259,9 +277,6 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
@@ -273,17 +288,19 @@ def chunk_gated_delta_rule(
         >>> import torch
         >>> import torch.nn.functional as F
         >>> from einops import rearrange
-        >>> from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+        >>> from fla.ops.comba import chunk_comba
         # inputs with equal lengths
         >>> B, T, H, K, V = 4, 2048, 4, 512, 512
         >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> k = F.normalize(torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda'), p=2, dim=-1)
         >>> v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device='cuda')
+        >>> b = torch.rand(H, dtype=torch.bfloat16, device='cuda').sigmoid()
+        >>> p = k * b[:, None]
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
         >>> o, ht = chunk_gated_delta_rule(
-            q, k, v, g, beta,
+            q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True
         )
@@ -298,22 +315,8 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
-    assert q.dtype == k.dtype == v.dtype
-    assert q.dtype != torch.float32, "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
-    assert len(beta.shape) == 3, "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
-
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
+    if p is None:
+        p = k
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -327,10 +330,11 @@ def chunk_gated_delta_rule(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, final_state = ChunkGatedDeltaRuleFunction.apply(
+    o, final_state = ChunkCombaFunction.apply(
         q,
         k,
         v,
+        p,
         g,
         beta,
         scale,
