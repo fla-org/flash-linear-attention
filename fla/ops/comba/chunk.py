@@ -260,7 +260,7 @@ def chunk_comba(
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         p (torch.Tensor):
-            values of shape `[B, T, H, K]`.
+            auxiliary keys of shape `[B, T, H, K]`.
         g (torch.Tensor):
             (forget) gating tensor (in log space!) of shape `[B, T, H]`.
         beta (torch.Tensor):
@@ -299,7 +299,7 @@ def chunk_comba(
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
-        >>> o, ht = chunk_gated_delta_rule(
+        >>> o, ht = chunk_comba(
             q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True
@@ -308,8 +308,8 @@ def chunk_comba(
         >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = chunk_gated_delta_rule(
-            q, k, v, g, beta,
+        >>> o_var, ht_var = chunk_comba(
+            q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens

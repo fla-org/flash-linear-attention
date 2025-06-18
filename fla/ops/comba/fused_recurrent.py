@@ -221,9 +221,9 @@ def fused_recurrent_comba(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    p: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor = None,
-    p: torch.Tensor = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
@@ -240,7 +240,7 @@ def fused_recurrent_comba(
             values of shape `[B, T, HV, V]`.
             GVA is applied if `HV > H`.
         p (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            auxiliary keys of shape `[B, T, H, K]`.
         g (torch.Tensor):
             g (decays) of shape `[B, T, HV]`.
         beta (torch.Tensor):
@@ -268,7 +268,7 @@ def fused_recurrent_comba(
         >>> import torch
         >>> import torch.nn.functional as F
         >>> from einops import rearrange
-        >>> from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
+        >>> from fla.ops.comba import fused_recurrent_comba
         # inputs with equal lengths
         >>> B, T, H, HV, K, V = 4, 2048, 4, 8, 512, 512
         >>> q = torch.randn(B, T, H, K, device='cuda')
@@ -279,17 +279,17 @@ def fused_recurrent_comba(
         >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
         >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
         >>> h0 = torch.randn(B, HV, K, V, device='cuda')
-        >>> o, ht = fused_gated_recurrent_delta_rule(
+        >>> o, ht = fused_recurrent_comba(
             q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True
         )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
-        >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))
+        >>> q, k, v, p, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, p, g, beta))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = fused_gated_recurrent_delta_rule(
-            q, k, v, g, beta,
+        >>> o_var, ht_var = fused_recurrent_comba(
+            q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
@@ -308,8 +308,6 @@ def fused_recurrent_comba(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
     if beta is None:
         beta = torch.ones_like(q[..., 0])
     if p is None:
