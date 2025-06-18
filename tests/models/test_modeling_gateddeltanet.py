@@ -5,7 +5,6 @@ import torch
 
 from fla.models import GatedDeltaNetConfig
 
-# Import both base test functions
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
 
