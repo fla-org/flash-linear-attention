@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 
+from typing import Optional
+
 import pytest
 import torch
+from transformers.configuration_utils import PretrainedConfig
 
 from fla.utils import assert_close, device, is_intel_alchemist, is_nvidia_hopper
 
@@ -57,8 +60,12 @@ def run_test_model_forward_backward(
 # ===================================================================================
 @pytest.mark.skipif(is_nvidia_hopper is False, reason="Only run on Hopper GPUs")
 def run_test_generation(
-    L: int, B: int, T: int, H: int, D: int,
-    config_class: type, dtype: torch.dtype
+    L: int,
+    B: int, T: int, H: int, D: int,
+    config_class: type, dtype: torch.dtype,
+    use_l2warp: bool = False,
+    model: Optional[torch.nn.Module] = None, config: Optional[PretrainedConfig] = None,
+    tol: float = 2e-3,
 ):
     """
     A foundational test for K/V cache-based generation.
@@ -69,8 +76,10 @@ def run_test_generation(
     if config_class.__name__ in NOT_READY_FOR_TESTING:
         pytest.skip(f"{config_class.__name__} is not yet ready for testing.")
 
-    model, config = create_model_and_config(config_class, L, H, D, dtype, use_l2warp=None)
+    if model is None:
+        model, config = create_model_and_config(config_class, L, H, D, dtype, use_l2warp=use_l2warp)
     model.eval()
+    model = model.to(dtype).to(device)
 
     num_chunks = 4
     chunk_size = T // num_chunks
@@ -94,4 +103,4 @@ def run_test_generation(
     gen_logits = torch.cat(gen_logits_list, 1)
 
     # Correctly call assert_close with the positional argument 'ratio'
-    assert_close('logits', ref_logits, gen_logits, 2e-3)
+    assert_close('logits', ref_logits, gen_logits, tol)
