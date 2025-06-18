@@ -85,7 +85,6 @@ def chunk_comba_ref(
         p = F.pad(p, (0, 0, 0, pad_len))
         beta = F.pad(beta, (0, pad_len))
         g = F.pad(g, (0, pad_len))
-    q, k, v, p, beta, g = map(lambda x: x.to(torch.float32), [q, k, v, p, beta, g])
     decay = g
     chunk_size = BT
     b, h, l, d_k = q.shape
@@ -116,7 +115,7 @@ def chunk_comba_ref(
     v = k_cumsum
     S = k.new_zeros(b, h, d_k, d_v)
     if initial_state is not None:
-        S = initial_state
+        S += initial_state
     o = torch.zeros_like(v)
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=1)
     for i in range(0, l // chunk_size):
@@ -303,7 +302,7 @@ def test_chunk_varlen(
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
         torch.tensor([T], dtype=torch.long)
     ], 0).to(device).sort()[0]
-    # seq-first required for inputs with variable lengths
+
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
