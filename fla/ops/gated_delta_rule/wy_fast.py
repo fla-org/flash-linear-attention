@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import safe_exp
+from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem
 
 
@@ -96,12 +96,13 @@ def prepare_wy_repr_bwd_kernel(
         b_dbeta += tl.sum(b_dv_beta * b_v, 1)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
-    b_dA = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_dA, 0)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+    b_dA = tl.where(m_A, b_dA, 0)
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
-    b_dA = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], -b_dA, 0).to(k.dtype.element_ty)
-
-    b_dA *= safe_exp(b_g[:, None] - b_g[None, :])
+    b_dA = tl.where(m_A, -b_dA * exp(b_g[:, None] - b_g[None, :]), 0)
     b_dA = b_dA.to(k.dtype.element_ty)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
