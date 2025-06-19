@@ -16,10 +16,10 @@ MODELING_UNSUPPORTED_VAR_LEN = [
 ]
 
 # Models not yet ready for basic testing
-NOT_READY_FOR_TESTING = ["PaTHAttentionConfig"]
+NOT_READY_FOR_TESTING = ['RodimusConfig']
 
 # Models requiring specific hardware (e.g., NVIDIA Hopper)
-HOPPER_EXCLUSIVE = ["CombaConfig", "GatedDeltaNetConfig"]
+HOPPER_EXCLUSIVE = []
 
 GENERATION_UNSUPPORTED = [
     "ABCConfig", "LinearAttentionConfig", "LightNetConfig",

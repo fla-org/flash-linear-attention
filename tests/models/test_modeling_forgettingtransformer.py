@@ -25,9 +25,9 @@ def test_forgettingtransformer_modeling(L, B, T, H, D, dtype, use_l2warp):
 # ===================================================================================
 # Test for Generation
 # ===================================================================================
-@pytest.mark.parametrize("L", [1])
+@pytest.mark.parametrize("L", [2])
 @pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [512])
+@pytest.mark.parametrize("T", [4000])
 @pytest.mark.parametrize("H", [8])
 @pytest.mark.parametrize("D", [64])
 @pytest.mark.parametrize("dtype", [torch.float16])
