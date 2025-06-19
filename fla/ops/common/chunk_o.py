@@ -190,23 +190,25 @@ def chunk_bwd_kernel_dqkwg(
     dq += (bos * H + i_h) * K
     dk += (bos * H + i_h) * K
 
-    if USE_G:
-        dg += i_k * B * H * T
-    if USE_G_GAMMA:
-        b_gamma = tl.load(g_gamma + i_h)
-        b_g = b_gamma * (tl.arange(0, BT) + 1)
-        b_g_last = b_gamma * (T % BT)
-
     # for delta rule only
     if USE_DW:
         dw += (bos * H + i_h) * K
         dv += (bos * H + i_h) * V
         w += (bos * H + i_h) * K
 
+    if USE_G:
+        dg += i_k * B * H * T
+        b_dg_last = tl.zeros([1,], dtype=tl.float32) if USE_G else None
+    if USE_G_GAMMA:
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (tl.arange(0, BT) + 1)
+        if i_t == NT - 1:
+            b_g_last = b_gamma * (T % BT)
+        else:
+            b_g_last = b_gamma * BT
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_ds = tl.zeros([BT, BT], dtype=tl.float32)
-    b_dg_last = tl.zeros([1,], dtype=tl.float32) if USE_G else None
     b_dw = tl.zeros([BT, BK], dtype=tl.float32) if USE_DW else None
 
     for i_v in range(tl.cdiv(V, BV)):

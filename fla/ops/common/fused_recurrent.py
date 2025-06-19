@@ -333,6 +333,7 @@ def fused_recurrent_fwd(
         k,
         v,
         g,
+        g_gamma,
         gk,
         gv,
         o,
