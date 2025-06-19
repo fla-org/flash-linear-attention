@@ -9,7 +9,9 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, use_cuda_graph
+from fla.utils import check_shared_mem, is_amd, use_cuda_graph
+
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
 BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
 
@@ -20,7 +22,7 @@ BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3, 4]
     ],
     key=['BV', 'BT'],
@@ -92,7 +94,7 @@ def chunk_dplr_bwd_kernel_dAu(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV'],
@@ -219,7 +221,7 @@ def chunk_dplr_bwd_o_kernel(
 @triton.autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3, 4]
         for BK in BK_LIST
         for BV in BK_LIST

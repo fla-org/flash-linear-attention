@@ -22,7 +22,7 @@ def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Te
     configs=[
         triton.Config({'BLOCK_SIZE': block_size}, num_warps=num_warps)
         for block_size in [1024, 2048, 4096, 8192]
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in [2, 4, 8]
     ],
     key=['hidden_dim'],
 )
@@ -58,7 +58,7 @@ def k_update_fwd_kernel(
     configs=[
         triton.Config({'BLOCK_SIZE': block_size}, num_warps=num_warps)
         for block_size in [1024, 2048, 4096, 8192]
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in [2, 4, 8]
     ],
     key=['hidden_dim'],
 )
