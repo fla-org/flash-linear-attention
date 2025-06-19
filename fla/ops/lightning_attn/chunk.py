@@ -70,14 +70,13 @@ def chunk_lightning_attn(
         )
 
     H = q.shape[2]
-    s = -(8 / H * (1 - layer_idx / num_layers)) * q.new_tensor(range(H), dtype=torch.float)
-    g = s[None, None, :].expand(q.shape[0], q.shape[1], q.shape[2]).contiguous()
+    g_gamma = -(8 / H * (1 - layer_idx / num_layers)) * q.new_tensor(range(H), dtype=torch.float)
     return chunk_simple_gla(
         q=q,
         k=k,
         v=v,
         scale=scale,
-        g=g,
+        g_gamma=g_gamma,
         initial_state=initial_state,
         output_final_state=output_final_state,
         head_first=head_first,

@@ -69,13 +69,12 @@ def fused_recurrent_lightning_attn(
             "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
         )
     H = q.shape[2]
-    s = -(8 / H * (1 - layer_idx / num_layers)) * q.new_tensor(range(H), dtype=torch.float)
-    g = s[None, None, :].expand(q.shape[0], q.shape[1], q.shape[2]).contiguous()
+    g_gamma = -(8 / H * (1 - layer_idx / num_layers)) * q.new_tensor(range(H), dtype=torch.float)
     return fused_recurrent_simple_gla(
         q=q,
         k=k,
         v=v,
-        g=g,
+        g_gamma=g_gamma,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,
