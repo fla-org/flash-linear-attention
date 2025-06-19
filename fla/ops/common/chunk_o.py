@@ -197,15 +197,12 @@ def chunk_bwd_kernel_dqkwg(
         w += (bos * H + i_h) * K
 
     if USE_G:
-        dg += i_k * B * H * T
+        dg += i_k * B * T * H
         b_dg_last = tl.zeros([1,], dtype=tl.float32) if USE_G else None
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (tl.arange(0, BT) + 1)
-        if i_t == NT - 1:
-            b_g_last = b_gamma * (T % BT)
-        else:
-            b_g_last = b_gamma * BT
+        b_g_last = b_gamma * min(BT, T - i_t * BT)
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_ds = tl.zeros([BT, BT], dtype=tl.float32)
@@ -240,8 +237,6 @@ def chunk_bwd_kernel_dqkwg(
         tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
 
     tl.debug_barrier()
-    o_t = i_t * BT + tl.arange(0, BT)
-    m_t = o_t < T
     p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -250,6 +245,8 @@ def chunk_bwd_kernel_dqkwg(
     p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
     if USE_G:
         b_dg = tl.zeros([BT,], dtype=tl.float32)
@@ -384,7 +381,7 @@ def chunk_bwd_kernel_dv(
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (tl.arange(0, BT) + 1)
-        b_g_last = b_gamma * (T % BT)
+        b_g_last = b_gamma * min(BT, T - i_t * BT)
 
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
     if USE_G or USE_G_GAMMA:

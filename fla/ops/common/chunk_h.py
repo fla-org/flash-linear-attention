@@ -76,8 +76,6 @@ def chunk_fwd_kernel_h(
         # decay rate given the head index
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (tl.arange(0, BT) + 1)
-        b_g_last = b_gamma * BT
-        b_gk = exp(b_g_last - b_g)
 
     # [BK, BV]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -110,8 +108,7 @@ def chunk_fwd_kernel_h(
             b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         if USE_G_GAMMA:
-            if i_t == NT - 1 and (T % BT) != 0:
-                b_g_last = b_gamma * (T % BT)
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_h *= exp(b_g_last)
             b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
@@ -209,7 +206,6 @@ def chunk_bwd_kernel_dh(
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (tl.arange(0, BT) + 1)
-        b_g_last = b_gamma * BT
 
     # [BK, BV]
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
@@ -241,8 +237,7 @@ def chunk_bwd_kernel_dh(
             b_dh *= exp(b_g_last)
 
         if USE_G_GAMMA:
-            if i_t == NT - 1 and (T % BT) != 0:
-                b_g_last = b_gamma * (T % BT)
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_q = (b_q * exp(b_g)[None, :]).to(b_q.dtype)
             b_dh *= exp(b_g_last)
 
