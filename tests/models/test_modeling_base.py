@@ -58,7 +58,6 @@ def run_test_model_forward_backward(
 # ===================================================================================
 # BASE TEST FOR GENERATION (K/V CACHE)
 # ===================================================================================
-@pytest.mark.skipif(is_nvidia_hopper is False, reason="Only run on Hopper GPUs")
 def run_test_generation(
     L: int,
     B: int, T: int, H: int, D: int,
