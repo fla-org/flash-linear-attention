@@ -35,6 +35,7 @@ def chunk_fwd_kernel_h(
     v,
     h,
     g,
+    g_gamma,
     gk,
     gv,
     h0,
@@ -50,6 +51,7 @@ def chunk_fwd_kernel_h(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
@@ -69,6 +71,13 @@ def chunk_fwd_kernel_h(
         NT = tl.cdiv(T, BT)
         NS = tl.cdiv(T, BS)
         boh = i_n * NS
+
+    if USE_G_GAMMA:
+        # decay rate given the head index
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (tl.arange(0, BT) + 1)
+        b_g_last = b_gamma * BT
+        b_gk = exp(b_g_last - b_g)
 
     # [BK, BV]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -96,8 +105,14 @@ def chunk_fwd_kernel_h(
         if USE_G:
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = g + bos*H + (i_t * BT + tl.arange(0, BT)) * H + i_h
-            b_h *= exp(b_g_last)
             b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
+            b_h *= exp(b_g_last)
+            b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
+
+        if USE_G_GAMMA:
+            if i_t == NT - 1 and (T % BT) != 0:
+                b_g_last = b_gamma * (T % BT)
+            b_h *= exp(b_g_last)
             b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         # vector decay, h = Diag(gk) @ h
@@ -148,6 +163,7 @@ def chunk_fwd_kernel_h(
 def chunk_bwd_kernel_dh(
     q,
     g,
+    g_gamma,
     gk,
     gv,
     do,
@@ -168,6 +184,7 @@ def chunk_bwd_kernel_dh(
     BV: tl.constexpr,
     NG: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
@@ -188,6 +205,11 @@ def chunk_bwd_kernel_dh(
         NT = tl.cdiv(T, BT)
         NS = tl.cdiv(T, BS)
         boh = i_n * NS
+
+    if USE_G_GAMMA:
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (tl.arange(0, BT) + 1)
+        b_g_last = b_gamma * BT
 
     # [BK, BV]
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
@@ -216,7 +238,12 @@ def chunk_bwd_kernel_dh(
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
             b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
             b_q = (b_q * exp(b_g)[None, :]).to(b_q.dtype)
+            b_dh *= exp(b_g_last)
 
+        if USE_G_GAMMA:
+            if i_t == NT - 1 and (T % BT) != 0:
+                b_g_last = b_gamma * (T % BT)
+            b_q = (b_q * exp(b_g)[None, :]).to(b_q.dtype)
             b_dh *= exp(b_g_last)
 
         if USE_GK:
@@ -248,11 +275,12 @@ def chunk_bwd_kernel_dh(
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
-    gk: torch.Tensor,
-    gv: torch.Tensor,
-    h0: torch.Tensor,
-    output_final_state: bool,
+    g: torch.Tensor = None,
+    g_gamma: torch.Tensor = None,
+    gk: torch.Tensor = None,
+    gv: torch.Tensor = None,
+    h0: torch.Tensor = None,
+    output_final_state: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
@@ -277,6 +305,7 @@ def chunk_fwd_h(
         v=v,
         h=h,
         g=g,
+        g_gamma=g_gamma,
         gk=gk,
         gv=gv,
         h0=h0,
@@ -290,6 +319,7 @@ def chunk_fwd_h(
         BT=BT,
         BS=BS,
         USE_G=g is not None,
+        USE_G_GAMMA=g_gamma is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
     )
@@ -301,6 +331,7 @@ def chunk_bwd_dh(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
+    g_gamma: torch.Tensor,
     gk: torch.Tensor,
     gv: torch.Tensor,
     do: torch.Tensor,
@@ -333,6 +364,7 @@ def chunk_bwd_dh(
     chunk_bwd_kernel_dh[grid](
         q=q,
         g=g,
+        g_gamma=g_gamma,
         gk=gk,
         gv=gv,
         do=do,
@@ -351,6 +383,7 @@ def chunk_bwd_dh(
         BS=BS,
         NG=NG,
         USE_G=g is not None,
+        USE_G_GAMMA=g_gamma is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
     )

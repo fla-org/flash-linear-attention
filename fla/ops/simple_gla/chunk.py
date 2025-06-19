@@ -17,18 +17,19 @@ def chunk_simple_gla_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
-    scale: float,
-    initial_state: torch.Tensor,
-    output_final_state: bool,
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
+    scale: Optional[float] = None,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
     h, ht = chunk_fwd_h(
         k=k,
         v=v,
         g=g,
+        g_gamma=g_gamma,
         gk=None,
         gv=None,
         h0=initial_state,
@@ -42,12 +43,13 @@ def chunk_simple_gla_fwd(
         k=k,
         v=v,
         g=g,
+        g_gamma=g_gamma,
         h=h,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
-    return g, o, ht
+    return o, ht
 
 
 def chunk_simple_gla_bwd(
@@ -55,6 +57,7 @@ def chunk_simple_gla_bwd(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
+    g_gamma: torch.Tensor,
     initial_state: torch.Tensor,
     do: torch.Tensor,
     dht: torch.Tensor,
@@ -67,6 +70,7 @@ def chunk_simple_gla_bwd(
         k=k,
         v=v,
         g=g,
+        g_gamma=g_gamma,
         gk=None,
         gv=None,
         h0=initial_state,
@@ -80,6 +84,7 @@ def chunk_simple_gla_bwd(
         k=k,
         v=v,
         g=g,
+        g_gamma=g_gamma,
         gk=None,
         gv=None,
         do=do,
@@ -95,6 +100,7 @@ def chunk_simple_gla_bwd(
         k=k,
         v=v,
         g=g,
+        g_gamma=g_gamma,
         h=h,
         do=do,
         dh=dh,
@@ -106,6 +112,7 @@ def chunk_simple_gla_bwd(
         q=q,
         k=k,
         g=g,
+        g_gamma=g_gamma,
         do=do,
         dh=dh,
         scale=scale,
@@ -126,6 +133,7 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         k,
         v,
         g,
+        g_gamma,
         scale,
         initial_state,
         output_final_state,
@@ -134,18 +142,20 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         T = q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
 
-        g, o, ht = chunk_simple_gla_fwd(
+        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
+        o, ht = chunk_simple_gla_fwd(
             q=q,
             k=k,
             v=v,
             g=g,
+            g_gamma=g_gamma,
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size
         )
-        ctx.save_for_backward(q, k, v, g, initial_state)
+        ctx.save_for_backward(q, k, v, g, g_gamma, initial_state)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
@@ -156,12 +166,13 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
     @autocast_custom_bwd
     def backward(ctx, do, dht):
         chunk_size, scale, cu_seqlens = ctx.chunk_size, ctx.scale, ctx.cu_seqlens
-        q, k, v, g, initial_state = ctx.saved_tensors
+        q, k, v, g, g_gamma, initial_state = ctx.saved_tensors
         dq, dk, dv, dg, dh0 = chunk_simple_gla_bwd(
             q=q,
             k=k,
             v=v,
             g=g,
+            g_gamma=g_gamma,
             initial_state=initial_state,
             do=do,
             dht=dht,
@@ -173,8 +184,7 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens).to(g)
         else:
             dg = None
-
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, dh0, None, None
 
 
 @torch.compiler.disable
@@ -182,7 +192,8 @@ def chunk_simple_gla(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,  # log decay
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
@@ -200,6 +211,10 @@ def chunk_simple_gla(
         g (torch.Tensor):
             Forget gates of shape `[B, T, H]`.
             Compared to GLA, the gating is head-wise instead of elementwise.
+        g_gamma (torch.Tensor):
+            Log decay of shape `[H]`.
+            Head-wise data-independent decay is used if `g_gamma` is provided.
+            Only one of `g` or `g_gamma` should be provided.
         scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -248,8 +263,6 @@ def chunk_simple_gla(
             output_final_state=True,
             cu_seqlens=cu_seqlens
         )
-        >>> assert o.allclose(o_var.view(o.shape))
-        >>> assert ht.allclose(ht_var)
     """
     if head_first:
         raise DeprecationWarning(
@@ -281,6 +294,7 @@ def chunk_simple_gla(
         k,
         v,
         g,
+        g_gamma,
         scale,
         initial_state,
         output_final_state,
