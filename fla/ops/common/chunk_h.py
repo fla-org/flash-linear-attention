@@ -233,12 +233,12 @@ def chunk_bwd_kernel_dh(
             p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
 
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
-            b_do = (b_do * exp(b_gv)).to(b_do.dtype)
+            b_do = (b_do * exp(b_gv))
 
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
             b_dh *= exp(b_gv_last)[None, :]
 
-        b_dh += tl.dot(b_q, b_do)
+        b_dh += tl.dot(b_q, b_do.to(b_q.dtype))
 
     if STORE_INITIAL_STATE_GRADIENT:
         p_dh0 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))

@@ -33,9 +33,10 @@ class RWKV6Config(PretrainedConfig):
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
-        initializer_range: float = 0.006,
+        initializer_range: float = 0.02,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        use_l2warp: bool = False,
         vocab_size: int = 32000,
         **kwargs
     ):
@@ -59,6 +60,7 @@ class RWKV6Config(PretrainedConfig):
         self.initializer_range = initializer_range
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
         if attn is not None:

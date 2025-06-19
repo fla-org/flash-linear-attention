@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import safe_exp
+from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem
 
 
@@ -29,8 +29,7 @@ def prepare_wy_repr_bwd_kernel(
     v,
     beta,
     g,
-    Aw,
-    Au,
+    A,
     dw,
     du,
     dk,
@@ -57,35 +56,32 @@ def prepare_wy_repr_bwd_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    b_dbeta = tl.zeros([BT], dtype=tl.float32)
-    b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     p_beta = tl.make_block_ptr(beta + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_A = tl.make_block_ptr(Aw + (bos*H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
+    p_g = tl.make_block_ptr(g + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
 
     b_A = tl.load(p_A, boundary_check=(0, 1))
     b_beta = tl.load(p_beta, boundary_check=(0,))
+    b_g = tl.load(p_g, boundary_check=(0,))
+    b_g_exp = tl.exp(b_g)
+
+    b_dbeta = tl.zeros([BT], dtype=tl.float32)
+    b_dA = tl.zeros([BT, BT], dtype=tl.float32)
+    b_dg = tl.zeros([BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_k_beta = (b_k * b_beta[:, None]).to(b_k.dtype)
+        b_k_beta_g = (b_k * b_beta[:, None] * b_g_exp[:, None]).to(b_k.dtype)
         b_dw = tl.load(p_dw, boundary_check=(0, 1))
-        b_dA += tl.dot(b_dw, tl.trans(b_k_beta), allow_tf32=False)
-        b_dk_beta = tl.dot(b_A, b_dw, allow_tf32=False)
-        b_dk = b_dk_beta * b_beta[:, None]
-        b_dbeta += tl.sum(b_dk_beta * b_k, 1)
+        b_dA += tl.dot(b_dw, tl.trans(b_k_beta_g))
+        b_dk_beta_g = tl.dot(b_A, b_dw)
+        b_dk = b_dk_beta_g * b_beta[:, None] * b_g_exp[:, None]
+        b_dbeta += tl.sum(b_dk_beta_g * b_k * b_g_exp[:, None], 1)
+        b_dg += tl.sum(b_dk_beta_g * b_k * b_g_exp[:, None] * b_beta[:, None], 1)
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-
-    b_dA = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_dA, 0)
-    b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
-    b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
-    b_dA = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], -b_dA, 0).to(k.dtype.element_ty)
-
-    p_A = tl.make_block_ptr(Au + (bos*H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
-    b_dA2 = tl.zeros([BT, BT], dtype=tl.float32)
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -94,21 +90,19 @@ def prepare_wy_repr_bwd_kernel(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_v_beta = (b_v * b_beta[:, None]).to(b_v.dtype)
         b_du = tl.load(p_du, boundary_check=(0, 1))
-        b_dA2 += tl.dot(b_du, tl.trans(b_v_beta), allow_tf32=False)
-        b_dv_beta = tl.dot(b_A, b_du, allow_tf32=False)
+        b_dA += tl.dot(b_du, tl.trans(b_v_beta))
+        b_dv_beta = tl.dot(b_A, b_du)
         b_dv = b_dv_beta * b_beta[:, None]
         b_dbeta += tl.sum(b_dv_beta * b_v, 1)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
-    b_dA2 = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_dA2, 0)
-    b_dA2 = tl.dot(b_dA2.to(b_A.dtype), b_A)
-    b_dA2 = tl.dot(b_A, b_dA2.to(b_A.dtype))
-    b_dA2 = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], -b_dA2, 0).to(k.dtype.element_ty)
-
-    p_g = tl.make_block_ptr(g + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_g = tl.load(p_g, boundary_check=(0,))
-    b_dA2 *= safe_exp(b_g[:, None] - b_g[None, :])
-    b_dA += b_dA2
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+    b_dA = tl.where(m_A, b_dA, 0)
+    b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
+    b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
+    b_dA = tl.where(m_A, -b_dA * exp(b_g[:, None] - b_g[None, :]), 0)
     b_dA = b_dA.to(k.dtype.element_ty)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
@@ -119,13 +113,14 @@ def prepare_wy_repr_bwd_kernel(
         b_dk = tl.load(p_dk, boundary_check=(0, 1))
         b_k_beta = (b_k * b_beta[:, None]).to(b_k.dtype)
         b_A += tl.dot(b_k_beta, tl.trans(b_k))
-        b_dk_beta = tl.dot(b_dA, b_k, allow_tf32=False)
+        b_dk_beta = tl.dot(b_dA, b_k)
         b_dbeta += tl.sum(b_dk_beta * b_k, 1)
-        b_dk += tl.dot(tl.trans(b_dA), b_k_beta, allow_tf32=False)
+        b_dk += tl.dot(tl.trans(b_dA), b_k_beta)
         b_dk += b_dk_beta * b_beta[:, None]
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    b_dA2 *= b_A
-    b_dg = tl.sum(b_dA2, axis=1) - tl.sum(b_dA2, axis=0)
+
+    b_dA_A = b_dA * b_A
+    b_dg += tl.sum(b_dA_A, axis=1) - tl.sum(b_dA_A, axis=0)
     p_dg = tl.make_block_ptr(dg + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
     p_dbeta = tl.make_block_ptr(dbeta + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
@@ -150,8 +145,8 @@ def recompute_w_u_fwd_kernel(
     beta,
     w,
     u,
-    Aw,
-    Au,
+    A,
+    g,
     cu_seqlens,
     chunk_indices,
     T,
@@ -172,29 +167,26 @@ def recompute_w_u_fwd_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
     p_beta = tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    p_Au = tl.make_block_ptr(Au + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_g = tl.make_block_ptr(g + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_beta = tl.load(p_beta, boundary_check=(0,))
-    b_Au = tl.load(p_Au, boundary_check=(0, 1))
+    b_A = tl.load(p_A, boundary_check=(0, 1))
+    b_g = tl.exp(tl.load(p_g, boundary_check=(0,)))
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
-        b_u = tl.dot(b_Au, b_vb, allow_tf32=False)
+        b_u = tl.dot(b_A, b_vb, allow_tf32=False)
         tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
-
-    tl.debug_barrier()
-    b_Au = None
-    p_Aw = tl.make_block_ptr(Aw + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_Aw = tl.load(p_Aw, boundary_check=(0, 1))
 
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_kb = (b_k * b_beta[:, None]).to(b_k.dtype)
-        b_w = tl.dot(b_Aw, b_kb)
+        b_kb = (b_k * b_beta[:, None] * b_g[:, None]).to(b_k.dtype)
+        b_w = tl.dot(b_A, b_kb)
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -202,12 +194,12 @@ def recompute_w_u_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
-    Aw: torch.Tensor,
-    Au: torch.Tensor,
+    g_cumsum: torch.Tensor,
+    A: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = Aw.shape[-1]
+    BT = A.shape[-1]
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -222,8 +214,8 @@ def recompute_w_u_fwd(
         beta=beta,
         w=w,
         u=u,
-        Aw=Aw,
-        Au=Au,
+        A=A,
+        g=g_cumsum,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
@@ -242,8 +234,7 @@ def prepare_wy_repr_bwd(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    Aw: torch.Tensor,
-    Au: torch.Tensor,
+    A: torch.Tensor,
     dw: torch.Tensor,
     du: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor],
@@ -265,8 +256,7 @@ def prepare_wy_repr_bwd(
         v=v,
         beta=beta,
         g=g,
-        Aw=Aw,
-        Au=Au,
+        A=A,
         dw=dw,
         du=du,
         dk=dk,

@@ -151,7 +151,6 @@ def mean_pooling_bwd(
         H=H,
         D=D,
         BT=BT,
-        NT=NT
     )
     return dx
 

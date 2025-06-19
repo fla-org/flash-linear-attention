@@ -1088,24 +1088,24 @@ def chunk_abc(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
+            values of shape `[B, T, H, V]`.
         s (torch.Tensor):
-            slot representations of shape `[B, T, H, M]` if `head_first=False` else `[B, H, T, M]`
+            slot representations of shape `[B, T, H, M]`.
         initial_state (Optional[Tuple[torch.Tensor, torch.Tensor]]):
             Initial states of shape `[B, H, K, M]` and `[B, H, M, V]`. Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[B, H, K, M]` and `[B, H, M, V]`. Default: `False`.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, M]` and `[B, H, M, V]` if `output_final_state=True` else `None`.
     """

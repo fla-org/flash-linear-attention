@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use_cuda_graph
@@ -64,21 +62,21 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
 
     o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    p_q = q + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_k = k + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_a = a + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_b = b + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_gk = gk + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
-    p_v = v + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
-    p_o = o + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_q = q + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_k = k + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_a = a + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_b = b + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_gk = gk + (bos + ((T - 1) if REVERSE else 0)) * H*K + i_h * K + o_k
+    p_v = v + (bos + ((T - 1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    p_o = o + (bos + ((T - 1) if REVERSE else 0)) * H*V + i_h * V + o_v
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[None, :] & mask_v[:, None]
-    b_h = tl.zeros([BV, BK], dtype=tl.float32)
+    mask_h = mask_k[:, None] & mask_v[None, :]
+    b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
-        p_h0 = h0 + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
+        p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for _ in range(0, T):
@@ -89,9 +87,9 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
         b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
 
-        tmp = tl.sum(b_h * b_a[None, :], axis=1)
-        b_h = exp(b_gk)[None, :] * b_h + (tmp[:, None] * b_b[None, :] + b_k[None, :] * b_v[:, None])
-        b_o = tl.sum(b_h * b_q[None, :], axis=1)
+        b_h = exp(b_gk)[:, None] * b_h + b_b[:, None] * tl.sum(b_a[:, None] * b_h, 0)[None, :]
+        b_h += b_k[:, None] * b_v[None, :]
+        b_o = tl.sum(b_h * b_q[:, None], 0)
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
         p_q += (-1 if REVERSE else 1) * H*K
@@ -103,7 +101,7 @@ def fused_recurrent_dplr_delta_rule_fwd_kernel(
         p_o += (-1 if REVERSE else 1) * H*V
 
     if STORE_FINAL_STATE:
-        p_ht = ht + i_nh * K*V + o_k[None, :] * V + o_v[:, None]
+        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
@@ -207,32 +205,31 @@ def fused_recurrent_dplr_delta_rule(
     a: torch.Tensor,
     b: torch.Tensor,
     gk: torch.Tensor,
-    scale: Optional[float] = 1.0,
+    scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
-    head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
 
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         a (torch.Tensor):
-            a of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            a of shape `[B, T, H, K]`.
         b (torch.Tensor):
-            b of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            b of shape `[B, T, H, K]`.
         gk (torch.Tensor):
-            gk of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`. decay term in log space!
-        scale (Optional[int]):
+            gk of shape `[B, T, H, K]`. decay term in log space!
+        scale (Optional[float]):
             Scale factor for the RetNet attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: 1.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
@@ -244,23 +241,7 @@ def fused_recurrent_dplr_delta_rule(
         cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths of shape `[N + 1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `False`.
     """
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-        q, k, v, a, b, gk = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, a, b, gk))
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -274,8 +255,6 @@ def fused_recurrent_dplr_delta_rule(
             )
     if scale is None:
         scale = q.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
     o, final_state = FusedRecurrentDPLRDeltaRuleFunction.apply(
         q,
         k,
@@ -289,6 +268,4 @@ def fused_recurrent_dplr_delta_rule(
         reverse,
         cu_seqlens,
     )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

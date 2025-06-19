@@ -22,7 +22,7 @@ class BitNetConfig(PretrainedConfig):
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
         hidden_act: str = "swish",
-        initializer_range: float = 0.006,
+        initializer_range: float = 0.02,
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-6,
         use_cache: bool = True,
@@ -33,6 +33,7 @@ class BitNetConfig(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        use_l2warp: bool = False,
         vocab_size: int = 32000,
         **kwargs,
     ):
@@ -56,6 +57,7 @@ class BitNetConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
 
         super().__init__(

@@ -22,6 +22,7 @@ from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as GatedDeltaNetMLP
 from fla.modules import RMSNorm
+from fla.modules.l2warp import l2_warp
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -56,8 +57,10 @@ class GatedDeltaNetBlock(nn.Module):
                 expand_v=config.expand_v,
                 head_dim=config.head_dim,
                 num_heads=config.num_heads,
+                num_v_heads=config.num_v_heads,
                 use_gate=config.use_gate,
                 use_short_conv=config.use_short_conv,
+                allow_neg_eigval=config.allow_neg_eigval,
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,
                 layer_idx=layer_idx
@@ -121,7 +124,40 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: Optional[str] = 'rescale',
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, (nn.Linear, nn.Conv1d)):
+        if isinstance(module, GatedDeltaNet):
+
+            # --- A_log ---
+            A = torch.empty(module.num_v_heads, dtype=torch.float32).uniform_(0, 16)
+            with torch.no_grad():
+                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                    module.A_log.copy_(torch.log(A))
+                else:
+                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
+            module.A_log._no_weight_decay = True
+
+            # --- dt_bias ---
+            # hard coded for now
+            dt_min = 0.001
+            dt_max = 0.1
+            dt_init_floor = 1e-4
+            dt = torch.exp(
+                torch.rand(module.num_v_heads) * (math.log(dt_max) - math.log(dt_min))
+                + math.log(dt_min)
+            )
+            dt = torch.clamp(dt, min=dt_init_floor)
+            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+            inv_dt = dt + torch.log(-torch.expm1(-dt))
+            with torch.no_grad():
+                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                    module.dt_bias.copy_(inv_dt)
+                else:
+                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
+            # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
+            # name.endswith("bias") in param_grouping.py
+            module.dt_bias._no_weight_decay = True
+            module.dt_bias._no_reinit = True
+
+        elif isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
@@ -377,7 +413,7 @@ class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:
@@ -385,7 +421,7 @@ class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, GenerationMixin):
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss()
+                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
                 else:
@@ -398,6 +434,7 @@ class GatedDeltaNetForCausalLM(GatedDeltaNetPreTrainedModel, GenerationMixin):
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]

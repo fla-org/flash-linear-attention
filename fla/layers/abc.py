@@ -94,9 +94,24 @@ class ABCAttention(nn.Module):
 
         if use_short_conv:
             self.conv_size = conv_size
-            self.q_conv1d = ShortConvolution(self.key_dim, conv_size, activation='silu')
-            self.k_conv1d = ShortConvolution(self.key_dim, conv_size, activation='silu')
-            self.v_conv1d = ShortConvolution(self.value_dim, conv_size, activation='silu')
+            self.q_conv1d = ShortConvolution(
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
+            self.k_conv1d = ShortConvolution(
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
+            self.v_conv1d = ShortConvolution(
+                hidden_size=self.value_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
 
         if self.use_norm:
             if self.use_output_gate:

@@ -615,16 +615,11 @@ def fused_chunk_gla(
     scale: int = -1,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if scale == -1:
         scale = q.shape[-1] ** -0.5
-    if not head_first:
-        q, k, v, g = map(lambda x: x.transpose(1, 2), (q, k, v, g))
     seq_len = q.shape[-2]
     q, k, v, g = map(lambda x: pad(x), [q, k, v, g])
     o, final_state = FusedChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
     o = o[..., :seq_len, :].contiguous()
-    if not head_first:
-        o = o.transpose(1, 2)
     return o, final_state

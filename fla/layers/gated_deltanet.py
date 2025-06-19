@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import math
+import warnings
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from einops import rearrange
+from einops import rearrange, repeat
 from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
@@ -59,6 +60,9 @@ class GatedDeltaNet(nn.Module):
             The dimension of each head. Default: 256.
         num_heads (int, Optional):
             The number of heads. Default: 4.
+        num_v_heads (int, Optional):
+            The number of heads for the value projection, equal to `num_heads` if `None`.
+            GVA is applied if `num_v_heads` > `num_heads`. Default: `None`.
         mode (str, Optional):
             Which Gated DeltaNet kernel to use.
             Currently available: `chunk` and `fused_recurrent`.
@@ -69,6 +73,9 @@ class GatedDeltaNet(nn.Module):
             Whether to use output gate. Default: `True`.
         use_short_conv (bool, Optional):
             Whether to use short convolutions. Default: `True`.
+        allow_neg_eigval (bool, Optional):
+            Allow negative eigenvalues. Default: `False`. If set to `True`, the beta will be multiplied by 2.
+            See reference: [Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues](https://arxiv.org/abs/2411.12537)
         conv_size (int, Optional):
             The kernel size of the short convolution, only used when `use_short_conv` is `True`. Default: 4.
         conv_bias (bool, Optional):
@@ -85,9 +92,11 @@ class GatedDeltaNet(nn.Module):
         expand_v: float = 2,
         head_dim: int = 256,
         num_heads: int = 6,
+        num_v_heads: int = None,
         mode: str = 'chunk',
         use_gate: bool = True,
         use_short_conv: bool = True,
+        allow_neg_eigval: bool = False,
         conv_size: int = 4,
         conv_bias: bool = False,
         layer_idx: int = None,
@@ -97,7 +106,7 @@ class GatedDeltaNet(nn.Module):
         super().__init__()
 
         self.mode = mode
-
+        self.allow_neg_eigval = allow_neg_eigval
         self.hidden_size = hidden_size
         self.expand_v = expand_v
 
@@ -108,19 +117,25 @@ class GatedDeltaNet(nn.Module):
 
         self.head_dim = head_dim
         self.num_heads = num_heads
+        self.num_v_heads = num_v_heads if num_v_heads is not None else num_heads
 
-        self.key_dim = int(self.num_heads * self.head_dim)
-        self.value_dim = int(self.key_dim * self.expand_v)
         self.head_k_dim = head_dim
-        self.head_v_dim = int(head_dim * self.expand_v)
+        self.head_v_dim = int(self.head_dim * self.expand_v)
+        self.key_dim = int(self.num_heads * self.head_k_dim)
+        self.value_dim = int(self.num_v_heads * self.head_v_dim)
         self.layer_idx = layer_idx
 
         # Consistency check: Ensure expand_v produces integer values
-        if not math.isclose(self.key_dim * expand_v, self.value_dim, rel_tol=1e-5):
+        if not math.isclose(self.num_v_heads * self.head_dim * expand_v, self.value_dim, rel_tol=1e-5):
             raise ValueError(
                 f"expand_v={expand_v} does not produce an integer value when multiplied by key_dim={self.key_dim}. "
-                f"Resulting value_dim would be {self.key_dim * expand_v}, which is invalid for nn.Linear."
+                f"Resulting value_dim would be {self.num_v_heads * self.head_dim * expand_v}, which is invalid for nn.Linear."
             )
+        if self.num_v_heads > self.num_heads and self.num_v_heads % self.num_heads != 0:
+            raise ValueError(
+                f"num_v_heads={self.num_v_heads} must be divisible by num_heads={self.num_heads}."
+            )
+
         if not math.isclose(head_dim * expand_v, self.head_v_dim, rel_tol=1e-5):
             raise ValueError(
                 f"expand_v={expand_v} does not produce an integer value when multiplied by head_dim={head_dim}. "
@@ -131,10 +146,10 @@ class GatedDeltaNet(nn.Module):
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.v_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-        self.a_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
-        self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
+        self.a_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
+        self.b_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
 
-        A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
+        A = torch.empty(self.num_v_heads, dtype=torch.float32).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
         self.A_log._no_weight_decay = True
         # hard coded for now
@@ -142,7 +157,7 @@ class GatedDeltaNet(nn.Module):
         dt_max = 0.1
         dt_init_floor = 1e-4
         dt = torch.exp(
-            torch.rand(self.num_heads) * (math.log(dt_max) - math.log(dt_min))
+            torch.rand(self.num_v_heads) * (math.log(dt_max) - math.log(dt_min))
             + math.log(dt_min)
         )
         dt = torch.clamp(dt, min=dt_init_floor)
@@ -158,20 +173,23 @@ class GatedDeltaNet(nn.Module):
             self.q_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
         else:
-            raise UserWarning(
+            warnings.warn(
                 "ShortConvolution is crucial to the performance. "
                 "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing."
             )
@@ -242,7 +260,14 @@ class GatedDeltaNet(nn.Module):
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
+
+        if self.num_v_heads > self.num_heads:
+            q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
+
         beta = self.b_proj(hidden_states).sigmoid()
+        if self.allow_neg_eigval:
+            beta = beta * 2.
+
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None

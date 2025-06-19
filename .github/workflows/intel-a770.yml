@@ -62,10 +62,11 @@ jobs:
       - name: Setup python
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         run: |
+          pip install -U uv
           pip uninstall -y flash-linear-attention
-          pip install -U pytest setuptools wheel ninja
-          pip install -U torch pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
-          pip install --no-use-pep517 .
+          uv pip install -U pytest setuptools wheel ninja
+          uv pip install -U torch~=2.7.0 pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu
+          pip install .
 
       - name: Check GPU status
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
@@ -83,8 +84,8 @@ jobs:
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run pytest on test files
-        continue-on-error: true
         if: steps.find-dependent-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
+        continue-on-error: true
         run: |
           FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
@@ -105,15 +106,15 @@ jobs:
 
       # skip full pytest because it takes too long
       - name: Run full pytest on test files
-        continue-on-error: true
         if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
+        continue-on-error: true
         run: |
           FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }}
 
       - name: Run full pytest on varlen test files
-        continue-on-error: true
         if: false && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && steps.check_skip.outputs.skip_tests == 'false'
+        continue-on-error: true
         run: |
           FLA_COMPILER_MODE=0 TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
             pytest ${{ steps.find-dependent-tests.outputs.test_files }} || \

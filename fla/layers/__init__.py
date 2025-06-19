@@ -5,6 +5,7 @@ from .abc import ABCAttention
 from .attn import Attention
 from .based import BasedLinearAttention
 from .bitattn import BitAttention
+from .comba import Comba
 from .delta_net import DeltaNet
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
@@ -15,9 +16,14 @@ from .hgrn import HGRNAttention
 from .hgrn2 import HGRN2Attention
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
+from .mamba import Mamba
+from .mamba2 import Mamba2
+from .mesa_net import MesaNet
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
+from .path_attn import PaTHAttention
 from .rebased import ReBasedLinearAttention
+from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
 
@@ -26,6 +32,7 @@ __all__ = [
     'Attention',
     'BasedLinearAttention',
     'BitAttention',
+    'Comba',
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
@@ -36,9 +43,15 @@ __all__ = [
     'HGRN2Attention',
     'LightNetAttention',
     'LinearAttention',
+    'Mamba',
+    'Mamba2',
     'MultiScaleRetention',
     'NativeSparseAttention',
     'ReBasedLinearAttention',
     'RWKV6Attention',
     'RWKV7Attention',
+    'RodimusAttention',
+    'SlidingWindowSharedKeyAttention',
+    'PaTHAttention',
+    'MesaNet',
 ]

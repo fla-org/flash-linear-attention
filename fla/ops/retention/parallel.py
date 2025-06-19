@@ -5,7 +5,6 @@ import warnings
 from typing import Optional, Tuple
 
 import torch
-from einops import rearrange
 
 from fla.ops.simple_gla.parallel import parallel_simple_gla
 
@@ -22,12 +21,12 @@ def parallel_retention(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`
-        scale (Optional[int]):
+            values of shape `[B, T, H, V]`.
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         output_attentions (bool):
@@ -37,10 +36,11 @@ def parallel_retention(
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, H, V]`.
         attn (torch.Tensor):
             Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`
     """
@@ -49,7 +49,6 @@ def parallel_retention(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-        q, k, v = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
@@ -69,6 +68,4 @@ def parallel_retention(
         output_attentions=output_attentions,
         cu_seqlens=cu_seqlens
     )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, attn

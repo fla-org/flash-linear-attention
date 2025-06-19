@@ -2,6 +2,7 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -34,6 +35,16 @@ def prepare_position_ids_kernel(
 @tensor_cache
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
+
+
+@tensor_cache
+def prepare_lens_from_mask(mask: torch.BoolTensor) -> torch.LongTensor:
+    return mask.sum(dim=-1, dtype=torch.int32)
+
+
+@tensor_cache
+def prepare_cu_seqlens_from_mask(mask: torch.BoolTensor, out_dtype: torch.dtype = torch.int32) -> torch.LongTensor:
+    return F.pad(prepare_lens_from_mask(mask).cumsum(dim=0, dtype=out_dtype), (1, 0))
 
 
 @tensor_cache

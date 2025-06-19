@@ -14,6 +14,7 @@ from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.rotary import RotaryEmbedding
 from fla.ops.retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
+from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -119,9 +120,24 @@ class MultiScaleRetention(nn.Module):
 
         if use_short_conv:
             self.conv_size = conv_size
-            self.q_conv1d = ShortConvolution(self.key_dim, conv_size, activation='silu')
-            self.k_conv1d = ShortConvolution(self.key_dim_per_group, conv_size, activation='silu')
-            self.v_conv1d = ShortConvolution(self.value_dim_per_group, conv_size, activation='silu')
+            self.q_conv1d = ShortConvolution(
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
+            self.k_conv1d = ShortConvolution(
+                hidden_size=self.key_dim_per_group,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
+            self.v_conv1d = ShortConvolution(
+                hidden_size=self.value_dim_per_group,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu'
+            )
 
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
@@ -214,7 +230,7 @@ class MultiScaleRetention(nn.Module):
 
             if attention_mask is not None and seqlen_offset > 0:
                 # to deliminate the offsets of padding tokens
-                seqlen_offset = attention_mask.sum(-1) - q_len
+                seqlen_offset = prepare_lens_from_mask(attention_mask) - q_len
                 max_seqlen = q_len + seqlen_offset.max().item()
 
         q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)

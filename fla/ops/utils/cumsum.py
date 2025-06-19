@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional
 
 import torch
@@ -392,6 +393,13 @@ def chunk_local_cumsum(
     output_dtype: Optional[torch.dtype] = torch.float,
     **kwargs
 ) -> torch.Tensor:
+    if not head_first and g.shape[1] < g.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({g.shape[1]}) < num_heads ({g.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
     if len(g.shape) == 3:

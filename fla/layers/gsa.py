@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
+from einops import rearrange, repeat
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import RMSNorm, ShortConvolution
@@ -103,9 +103,24 @@ class GatedSlotAttention(nn.Module):
 
         if use_short_conv:
             self.conv_size = conv_size
-            self.q_conv1d = ShortConvolution(self.key_dim, conv_size, activation='silu')
-            self.k_conv1d = ShortConvolution(self.key_dim_per_group, conv_size, activation='silu')
-            self.v_conv1d = ShortConvolution(self.value_dim_per_group, conv_size, activation='silu')
+            self.q_conv1d = ShortConvolution(
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu',
+            )
+            self.k_conv1d = ShortConvolution(
+                hidden_size=self.key_dim_per_group,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu',
+            )
+            self.v_conv1d = ShortConvolution(
+                hidden_size=self.value_dim_per_group,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation='silu',
+            )
 
         self.g_norm = RMSNorm(self.hidden_size, elementwise_affine, eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
@@ -177,6 +192,9 @@ class GatedSlotAttention(nn.Module):
 
         f = F.logsigmoid(f) / self.gate_logit_normalizer
         s = (1 - f.exp()).to(f.dtype)
+
+        if self.num_kv_groups > 1:
+            k, v, f, s = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_kv_groups), (k, v, f, s))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'fused_recurrent':

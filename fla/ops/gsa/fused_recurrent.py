@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2024, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
 from fla.ops.utils import chunk_global_cumsum
@@ -95,13 +93,9 @@ def fused_recurrent_gsa_inference(
     initial_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     output_final_state: bool = False,
     scale: float = 1.,
-    head_first: bool = False
 ) -> torch.Tensor:
-    if head_first:
-        B, H, T, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    else:
-        B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    HQ = q.shape[1] if head_first else q.shape[2]
+    B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
+    HQ = q.shape[2]
     BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NG = HQ // H
 
@@ -117,7 +111,7 @@ def fused_recurrent_gsa_inference(
         else:
             hkt, hvt = q.new_empty(B, H, K, M, dtype=torch.float), q.new_empty(B, H, M, V, dtype=torch.float)
 
-    o = v.new_empty(B, HQ, T, V) if head_first else v.new_empty(B, T, HQ, V)
+    o = v.new_empty(B, T, HQ, V)
     grid = (B * HQ,)
     fused_recurrent_gsa_inference_kernel[grid](
         q,
@@ -152,14 +146,10 @@ def fused_recurrent_gsa_fwd(
     scale: float = 1.,
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor]]:
-    if head_first:
-        B, H, T, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
-    else:
-        B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
+    B, T, H, K, V, M = *k.shape, v.shape[-1], s.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    HQ = q.shape[1] if head_first else q.shape[2]
+    HQ = q.shape[2]
     if HQ != H:
         raise ValueError("GQA not supported yet.")
 
@@ -438,21 +428,20 @@ def fused_recurrent_gsa(
     output_final_state: Optional[bool] = False,
     reverse: Optional[bool] = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         s (torch.Tensor):
-            slot representations of shape `[B, T, H, M]` if `head_first=False` else `[B, H, T, M]`.
+            slot representations of shape `[B, T, H, M]`.
         g (torch.Tensor):
             Forget gates of shape `[B, H, T, M]` applied to keys.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[Tuple[torch.Tensor]]):
@@ -467,13 +456,10 @@ def fused_recurrent_gsa(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, H, V]`.
         final_state (Tuple[torch.Tensor]):
             Final state tuple having tensors of shape `[N, H, K, M]` and `[N, H, M, V]`.
 
@@ -509,19 +495,6 @@ def fused_recurrent_gsa(
         >>> assert hk.allclose(hk_var)
         >>> assert hv.allclose(hv_var)
     """
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-        q, k, v, s, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, s, g))
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -549,6 +522,4 @@ def fused_recurrent_gsa(
         reverse,
         cu_seqlens,
     )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

@@ -39,7 +39,7 @@ class MambaConfig(PretrainedConfig):
             Shape of the state space latents. Default: 16.
         num_hidden_layers (`int`, *optional*):
             Number of hidden layers in the model. Default: 48.
-        layer_norm_epsilon (`float`, *optional*):
+        norm_eps (`float`, *optional*):
             The epsilon to use in the layer normalization layers. Default: 1e-5.
         pad_token_id (`int`, *optional*):
             Padding token id. Default: 0.
@@ -106,7 +106,7 @@ class MambaConfig(PretrainedConfig):
         hidden_size: int = 2048,
         state_size: int = 16,
         num_hidden_layers: int = 48,
-        layer_norm_epsilon=1e-5,
+        norm_eps=1e-5,
         pad_token_id: int = 0,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
@@ -127,6 +127,7 @@ class MambaConfig(PretrainedConfig):
         use_cache: bool = True,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        use_l2warp: bool = False,
         tie_word_embeddings: bool = False,
         **kwargs,
     ):
@@ -134,7 +135,7 @@ class MambaConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.state_size = state_size
         self.num_hidden_layers = num_hidden_layers
-        self.layer_norm_epsilon = layer_norm_epsilon
+        self.norm_eps = norm_eps
         self.conv_kernel = conv_kernel
         self.expand = expand
         self.intermediate_size = int(expand * self.hidden_size)
@@ -156,6 +157,7 @@ class MambaConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.use_l2warp = use_l2warp
 
         super().__init__(
             bos_token_id=bos_token_id,

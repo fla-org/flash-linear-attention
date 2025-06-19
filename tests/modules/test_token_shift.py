@@ -4,35 +4,37 @@ import torch
 from fla.modules.token_shift import token_shift, token_shift_ref
 from fla.utils import assert_close, device
 
+test_b_list = [4]
+test_t_list = [512, 4096]
+test_h_list = [2560, 4096]
+test_cu_seqlens_list = [
+    None,
+    [0, 4, 7, 40, 128],
+    [0, 10, 20, 64],
+    [0, 32],
+    [0, 1, 3, 4]
+]
+test_dtype_list = [torch.float]
 
-@pytest.mark.parametrize(
-    "test_case,batch_size,seq_len,hidden_size,cu_seqlens,dtype",
-    [
-        ("fixed_length_standard", 8, 128, 128, None, torch.float32),
-        ("fixed_length_different_dims", 4, 256, 64, None, torch.float32),
-        ("var_length_standard", 1, 128, 128, [0, 4, 7, 40, 128], torch.float32),
-        ("var_length_fewer_seqs", 1, 64, 64, [0, 10, 20, 64], torch.float32),
-        ("var_length_single_seq", 1, 32, 32, [0, 32], torch.float32),
-        ("edge_case_len_1", 1, 4, 64, [0, 1, 3, 4], torch.float32),
-        ("dtype_float16", 2, 32, 64, None, torch.float16),
-        ("dtype_bfloat16", 2, 32, 64, None, torch.bfloat16)
-    ]
-)
-def test_token_shift(test_case, batch_size, seq_len, hidden_size, cu_seqlens, dtype):
-    """Comprehensive test for token shift operation"""
 
-    # Set random seed for reproducibility
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('cu_seqlens_val', test_cu_seqlens_list)
+@pytest.mark.parametrize('dtype', test_dtype_list)
+def test_token_shift(B, T, H, cu_seqlens_val, dtype):
+    if cu_seqlens_val is not None:
+        B = 1
+        T = cu_seqlens_val[-1]
+        cu_seqlens_tensor = torch.tensor(cu_seqlens_val, dtype=torch.int32, device=device)
+    else:
+        cu_seqlens_tensor = None
+
     torch.manual_seed(42)
 
-    # Create test tensors
-    x = torch.randn(batch_size, seq_len, hidden_size, device=device).to(dtype).requires_grad_(True)
+    x = torch.randn(B, T, H, device=device).to(dtype).requires_grad_(True)
     dy = torch.randn_like(x)
 
-    cu_seqlens_tensor = None
-    if cu_seqlens is not None:
-        cu_seqlens_tensor = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-
-    # Forward pass
     ref = token_shift_ref(x, cu_seqlens_tensor)
     tri = token_shift(x, cu_seqlens_tensor)
 

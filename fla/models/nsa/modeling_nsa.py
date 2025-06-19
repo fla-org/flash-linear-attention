@@ -21,6 +21,7 @@ from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as NSAMLP
 from fla.modules import RMSNorm
+from fla.modules.l2warp import l2_warp
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -363,7 +364,7 @@ class NSAForCausalLM(NSAPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         if not fuse_linear_and_cross_entropy or labels is None:
@@ -371,7 +372,7 @@ class NSAForCausalLM(NSAPreTrainedModel, GenerationMixin):
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss()
+                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
                 else:
@@ -384,6 +385,7 @@ class NSAForCausalLM(NSAPreTrainedModel, GenerationMixin):
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]
