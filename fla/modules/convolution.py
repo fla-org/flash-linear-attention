@@ -15,7 +15,9 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.utils import prepare_chunk_indices, prepare_sequence_ids
-from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils import get_multiprocessor_count, input_guard, is_amd
+
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -35,7 +37,7 @@ except ImportError:
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps)
         for BD in [16, 32, 64, 128]
-        for num_warps in [4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['B', 'D', 'W', 'NB'],
 )
