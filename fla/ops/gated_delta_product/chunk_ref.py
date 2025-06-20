@@ -30,7 +30,8 @@ def chunk_gated_delta_product_ref(
     assert k.shape == (B, T*num_householder, H, K)
     assert v.shape == (B, T*num_householder, H, V)
     assert beta.shape == (B, T*num_householder, H)
-    assert g.shape == (B, T, H)
+    if g is not None:
+        assert g.shape == (B, T, H)
     q_new = q.new_zeros(B, T, num_householder, H, K)
     q_new[:, :, -1] = q
     q = rearrange(q_new, 'b t n h d -> b (t n) h d')
@@ -39,7 +40,6 @@ def chunk_gated_delta_product_ref(
         g_new = g.new_zeros(B, T, num_householder, H, dtype=torch.float32)
         g_new[:, :, 0] = g
         g = rearrange(g_new, 'b t n h -> b (t n) h')
-
         o, final_state = chunk_gated_delta_rule(
             q=q,
             k=k,
@@ -57,7 +57,6 @@ def chunk_gated_delta_product_ref(
             q=q,
             k=k,
             v=v,
-            g=g,
             beta=beta,
             initial_state=initial_state,
             output_final_state=output_final_state,

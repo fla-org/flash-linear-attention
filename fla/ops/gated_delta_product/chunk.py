@@ -8,8 +8,10 @@ from einops import rearrange
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.delta_rule.chunk import chunk_delta_rule_bwd
+from fla.ops.delta_rule.wy_fast import recompute_w_u_fwd as dn_recompute_w_u_fwd
 from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd
-from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
+from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd as gdn_recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -43,14 +45,23 @@ def chunk_gated_delta_product_fwd(q, k, v, g, beta, scale, cu_seqlens,
         cu_seqlens=cu_seqlens_dp,
         output_dtype=k.dtype
     )
-    w, u = recompute_w_u_fwd(
-        k=k,
-        v=v,
-        beta=beta,
-        A=A,
-        g_cumsum=g_interleaved,
-        cu_seqlens=cu_seqlens_dp,
-    )
+    if g is not None:
+        w, u = gdn_recompute_w_u_fwd(
+            k=k,
+            v=v,
+            beta=beta,
+            A=A,
+            g_cumsum=g_interleaved,
+            cu_seqlens=cu_seqlens_dp,
+        )
+    else:
+        w, u = dn_recompute_w_u_fwd(
+            k=k,
+            v=v,
+            beta=beta,
+            A=A,
+            cu_seqlens=cu_seqlens_dp,
+        )
     h, v_new, final_state = chunk_gated_delta_product_fwd_h(
         k=k,
         w=w,
@@ -137,25 +148,40 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         do = rearrange(do_new, 'b t n h d -> b (t n) h d')
         # call the gated deltanet kernel for now.
         # TODO: optimize the backward pass like the forward pass.
-        dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            A=A,
-            scale=ctx.scale,
-            initial_state=initial_state,
-            do=do,
-            dht=dht,
-            cu_seqlens=cu_seqlens * ctx.num_householder if cu_seqlens is not None else None,
-        )
+        if g is not None:
+            dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                A=A,
+                scale=ctx.scale,
+                initial_state=initial_state,
+                do=do,
+                dht=dht,
+                cu_seqlens=cu_seqlens * ctx.num_householder if cu_seqlens is not None else None,
+            )
+            dg = rearrange(dg, 'b (l n) h  -> b l n h ', n=ctx.num_householder)[:, :, 0].contiguous().to(g)
+        else:
+            dq, dk, dv, db, dh0 = chunk_delta_rule_bwd(
+                q=q,
+                k=k,
+                v=v,
+                beta=beta,
+                A=A,
+                scale=ctx.scale,
+                initial_state=initial_state,
+                do=do,
+                dht=dht,
+                cu_seqlens=cu_seqlens * ctx.num_householder if cu_seqlens is not None else None,
+            )
+            dg = None
         dq = rearrange(dq, 'b (l n) h d -> b l n h d', n=ctx.num_householder)[:, :, -1].contiguous()
-        dg = rearrange(dg, 'b (l n) h  -> b l n h ', n=ctx.num_householder)[:, :, 0].contiguous()
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q_orig, dq)
             dk = l2norm_bwd(k_orig, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, db.to(beta), None, None, dh0, None, None, None
 
 
 @torch.compiler.disable
@@ -241,7 +267,8 @@ def chunk_gated_delta_product(
     assert k.shape == (B, T*num_householder, H, K)
     assert v.shape == (B, T*num_householder, H, V)
     assert beta.shape == (B, T*num_householder, H)
-    assert g.shape == (B, T, H)
+    if g is not None:
+        assert g.shape == (B, T, H)
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:
