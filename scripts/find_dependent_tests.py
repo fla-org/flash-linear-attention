@@ -1,4 +1,5 @@
 import ast
+import os
 import sys
 from collections import defaultdict
 from functools import lru_cache
@@ -41,9 +42,20 @@ def get_imports_from_tree(tree) -> set:
 class DependencyFinder:
     def __init__(self, search_dirs, test_dir):
         self.test_dir = Path(test_dir).resolve()
+        models_test_dir = self.test_dir / "models"
 
         source_files = [p for s_dir in search_dirs for p in Path(s_dir).resolve().rglob("*.py") if p.name != '__init__.py']
-        test_files = [p for p in self.test_dir.rglob("*.py") if p.name != '__init__.py']
+        test_scope = os.environ.get("TEST_SCOPE", "ALL").upper()
+        if test_scope == "MODELS_ONLY":
+            # Scope: Only files inside the tests/models/ directory.
+            test_files = [p for p in models_test_dir.rglob("*.py") if p.name != '__init__.py']
+        elif test_scope == "EXCLUDE_MODELS":
+            # Scope: All test files except for those inside tests/models/.
+            all_files = self.test_dir.rglob("*.py")
+            test_files = [p for p in all_files if p.name != '__init__.py' and models_test_dir not in p.parents]
+        else:
+            # Scope: All test files.
+            test_files = [p for p in self.test_dir.rglob("*.py") if p.name != '__init__.py']
         self.all_project_files = source_files + test_files
         self.all_test_files = set(test_files)
 
