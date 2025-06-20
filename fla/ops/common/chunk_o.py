@@ -571,10 +571,10 @@ def chunk_bwd_dv(
 def chunk_bwd_dv_local(
     q: torch.Tensor,
     k: torch.Tensor,
-    g: torch.Tensor,
-    g_gamma: torch.Tensor,
     do: torch.Tensor,
     scale: float,
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> torch.Tensor:
@@ -619,11 +619,11 @@ def chunk_bwd_dqkwg(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
-    g_gamma: torch.Tensor,
     do: torch.Tensor,
     h: torch.Tensor,
     dh: torch.Tensor,
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
     dv: Optional[torch.Tensor] = None,
     w: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
