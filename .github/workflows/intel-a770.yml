@@ -15,7 +15,7 @@ on:
       - '*'
 
 jobs:
-  test:
+  test-ops:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: 'intel-a770'
     env:
@@ -46,7 +46,7 @@ jobs:
           (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/'))) &&
           (steps.check_skip.outputs.skip_tests != 'true' || github.event_name != 'push')
         id: changed-files
-        uses: tj-actions/changed-files@v46.0.3
+        uses: tj-actions/changed-files@v46.0.5
 
       - name: Find dependent test files
         if: |
@@ -56,7 +56,7 @@ jobs:
         id: find-dependent-tests
         run: |
           # Run the Python script to find dependent test files
-          TEST_FILES=$(python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
+          TEST_FILES=$(TEST_SCOPE=EXCLUDE_MODELS python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
       - name: Setup python

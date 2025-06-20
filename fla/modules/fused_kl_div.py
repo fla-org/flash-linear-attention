@@ -9,13 +9,14 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import input_guard
+from fla.utils import input_guard, is_amd
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19
 # However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
+STATIC_WARPS = 32 if not is_amd else 16
 
 
 @triton.jit
@@ -166,7 +167,7 @@ def fused_kl_div_forward(
             N=N,
             V=V,
             BV=BV,
-            num_warps=32
+            num_warps=STATIC_WARPS
         )
 
         # gradient of logits is computed in-place by the above triton kernel and is of shape: C x V
@@ -202,7 +203,7 @@ def fused_kl_div_backward(
             g=do,
             N=N*H,
             B=B,
-            num_warps=32,
+            num_warps=STATIC_WARPS,
         )
 
         # handle dw
@@ -213,7 +214,7 @@ def fused_kl_div_backward(
                 g=do,
                 N=V*H,
                 B=B,
-                num_warps=32,
+                num_warps=STATIC_WARPS,
             )
 
     return dx, dw
