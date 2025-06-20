@@ -20,9 +20,9 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4]
+        for num_warps in [1, 2, 4, 8]
     ],
-    key=["BK", "BV", "USE_GK", "USE_GV", "USE_G"],
+    key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_fwd_kernel(
@@ -30,6 +30,7 @@ def fused_recurrent_fwd_kernel(
     k,
     v,
     g,
+    g_gamma,
     gk,
     gv,
     o,
@@ -46,6 +47,7 @@ def fused_recurrent_fwd_kernel(
     BV: tl.constexpr,
     REVERSE: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
@@ -74,10 +76,12 @@ def fused_recurrent_fwd_kernel(
         p_gk = gk + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
     if USE_GV:
         p_gv = gv + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    if USE_G_GAMMA:
+        b_g_gamma = tl.load(g_gamma + i_h)
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[None, :] & mask_v[:, None]
+    mask_h = mask_k[:, None] & mask_v[None, :]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
@@ -91,6 +95,8 @@ def fused_recurrent_fwd_kernel(
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
             b_h = b_h * exp(b_g)
+        if USE_G_GAMMA:
+            b_h = b_h * exp(b_g_gamma)
         if USE_GK:
             b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
             b_h = b_h * exp(b_gk[:, None])
@@ -105,12 +111,12 @@ def fused_recurrent_fwd_kernel(
         p_k += (-1 if REVERSE else 1) * H*K
         p_v += (-1 if REVERSE else 1) * H*V
         p_o += (-1 if REVERSE else 1) * H*V
+        if USE_G:
+            p_g += (-1 if REVERSE else 1) * H
         if USE_GK:
             p_gk += (-1 if REVERSE else 1) * H*K
         if USE_GV:
             p_gv += (-1 if REVERSE else 1) * H*V
-        if USE_G:
-            p_g += (-1 if REVERSE else 1) * H
 
     if STORE_FINAL_STATE:
         p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -129,7 +135,7 @@ def fused_recurrent_fwd_kernel(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4]
     ],
-    key=['BK', 'BV', 'USE_GK', 'USE_GV', 'USE_G'],
+    key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_bwd_kernel(
@@ -137,6 +143,7 @@ def fused_recurrent_bwd_kernel(
     k,
     v,
     g,
+    g_gamma,
     gk,
     gv,
     h0,
@@ -158,6 +165,7 @@ def fused_recurrent_bwd_kernel(
     BV: tl.constexpr,
     REVERSE: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
@@ -188,6 +196,8 @@ def fused_recurrent_bwd_kernel(
         p_gk = gk + (bos + ((T-1) if REVERSE else 0)) * H*K + i_h * K + o_k
     if USE_GV:
         p_gv = gv + (bos + ((T-1) if REVERSE else 0)) * H*V + i_h * V + o_v
+    if USE_G_GAMMA:
+        b_g_gamma = tl.load(g_gamma + i_h)
 
     mask_k = o_k < K
     mask_v = o_v < V
@@ -205,6 +215,8 @@ def fused_recurrent_bwd_kernel(
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
             b_h = b_h * exp(b_g)
+        if USE_G_GAMMA:
+            b_h = b_h * exp(b_g_gamma)
         if USE_GK:
             b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
             b_h = b_h * exp(b_gk[:, None])
@@ -263,6 +275,8 @@ def fused_recurrent_bwd_kernel(
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
             b_dh *= exp(b_g)
+        if USE_G_GAMMA:
+            b_dh *= exp(b_g_gamma)
         if USE_GK:
             b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
             b_dh *= exp(b_gk)[:, None]
@@ -295,6 +309,7 @@ def fused_recurrent_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
     gk: Optional[torch.Tensor] = None,
     gv: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
@@ -318,6 +333,7 @@ def fused_recurrent_fwd(
         k,
         v,
         g,
+        g_gamma,
         gk,
         gv,
         o,
@@ -333,6 +349,7 @@ def fused_recurrent_fwd(
         BK=BK,
         BV=BV,
         USE_G=g is not None,
+        USE_G_GAMMA=g_gamma is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
         REVERSE=reverse,
@@ -346,6 +363,7 @@ def fused_recurrent_bwd(
     k: torch.Tensor,
     v: torch.Tensor,
     g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
     gk: Optional[torch.Tensor] = None,
     gv: Optional[torch.Tensor] = None,
     o: Optional[torch.Tensor] = None,
@@ -383,6 +401,7 @@ def fused_recurrent_bwd(
         k,
         v,
         g,
+        g_gamma,
         gk,
         gv,
         h0,
@@ -403,6 +422,7 @@ def fused_recurrent_bwd(
         BK=BK,
         BV=BV,
         USE_G=g is not None,
+        USE_G_GAMMA=g_gamma is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
         REVERSE=reverse,
@@ -412,13 +432,13 @@ def fused_recurrent_bwd(
     dv = dv.sum(0)
     if g is not None:
         dg = chunk_global_cumsum((dq * q.float() - dk * k.float()).sum(-1), reverse=not reverse, cu_seqlens=cu_seqlens)
-        dg += (ht * dht).sum()
+        dg += (ht * dht).sum((2, 3)).unsqueeze(1)
     if gk is not None:
         dgk = chunk_global_cumsum(dq * q.float() - dk * k.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
-        dgk += (ht * dht).sum(1)
+        dgk += (ht * dht).sum(3).unsqueeze(1)
     if gv is not None:
         dgv = chunk_global_cumsum(do.float() * o.float() - dv * v.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
-        dgv += (ht * dht).sum(0)
+        dgv += (ht * dht).sum(2).unsqueeze(1)
 
     return dq, dk, dv, dg, dgk, dgv, dh0
 
@@ -434,6 +454,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         k: torch.Tensor,
         v: torch.Tensor,
         g: Optional[torch.Tensor] = None,
+        g_gamma: Optional[torch.Tensor] = None,
         gk: Optional[torch.Tensor] = None,
         gv: Optional[torch.Tensor] = None,
         scale: Optional[float] = None,
@@ -447,6 +468,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             k=k,
             v=v,
             g=g,
+            g_gamma=g_gamma,
             gk=gk,
             gv=gv,
             scale=scale,
@@ -455,7 +477,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             reverse=reverse,
             cu_seqlens=cu_seqlens,
         )
-        ctx.save_for_backward(q, k, v, g, gk, gv, initial_state, o)
+        ctx.save_for_backward(q, k, v, g, g_gamma, gk, gv, initial_state, o)
         ctx.scale = scale
         ctx.reverse = reverse
         ctx.cu_seqlens = cu_seqlens
@@ -465,12 +487,13 @@ class FusedRecurrentFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
-        q, k, v, g, gk, gv, initial_state, o = ctx.saved_tensors
+        q, k, v, g, g_gamma, gk, gv, initial_state, o = ctx.saved_tensors
         dq, dk, dv, dg, dgk, dgv, dh0 = fused_recurrent_bwd(
             q=q,
             k=k,
             v=v,
             g=g,
+            g_gamma=g_gamma,
             gk=gk,
             gv=gv,
             o=o,
@@ -481,7 +504,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             reverse=ctx.reverse,
             cu_seqlens=ctx.cu_seqlens,
         )
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, dgk, dgv, None, dh0, None, None, None
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, None, dgk, dgv, None, dh0, None, None, None
 
 
 def fused_recurrent(
@@ -489,6 +512,7 @@ def fused_recurrent(
     k: torch.Tensor,
     v: torch.Tensor,
     g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
     gk: Optional[torch.Tensor] = None,
     gv: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
@@ -504,6 +528,7 @@ def fused_recurrent(
         k,
         v,
         g,
+        g_gamma,
         gk,
         gv,
         scale,

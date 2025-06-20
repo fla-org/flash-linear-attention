@@ -7,18 +7,20 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import check_pytorch_version, input_guard, use_cuda_graph
+from fla.utils import check_pytorch_version, input_guard, is_amd, use_cuda_graph
 
 logger = logging.getLogger(__name__)
 
 if not check_pytorch_version('2.4'):
     logger.warning('PyTorch < 2.4 detected - computations may be slower due to lack of optimizations')
 
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
+
 
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
     use_cuda_graph=use_cuda_graph,
@@ -77,7 +79,7 @@ def fused_addcmul_fwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
     use_cuda_graph=use_cuda_graph,

@@ -102,9 +102,9 @@ def chunk_mesa_net_fwd_kernel_h(
         b_h *= exp(b_g_last)
         b_h_kv *= exp(b_g_last)
         b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
-        b_k_decay = ((b_k * exp(b_g_last - b_g)[:, None]) * b_beta[:, None]).to(b_k.dtype)
+        b_k_decay = ((b_k * exp(b_g_last - b_g)[:, None]) * b_beta[:, None]).to(b_k2.dtype)
         b_h += tl.dot(tl.trans(b_k_decay), b_k2)
-        b_h_kv += tl.dot(tl.trans(b_k_decay), b_v)
+        b_h_kv += tl.dot(tl.trans(b_k_decay), b_v.to(b_k2.dtype))
 
     if STORE_FINAL_STATE:
         p_ht = tl.make_block_ptr(h_final + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
@@ -144,6 +144,7 @@ def chunk_mesa_fwd_h(
     h_kv_final = k.new_empty(N, H, K, V, dtype=torch.float)
 
     def grid(meta): return (triton.cdiv(K, 64), triton.cdiv(V, 64), N * H)
+
     chunk_mesa_net_fwd_kernel_h[grid](
         k=k,
         v=v,

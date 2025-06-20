@@ -241,7 +241,7 @@ def chunk_mesa_net_h_kv_bwd_intra_separate_fn(
 
     BK = triton.next_power_of_2(K)
     BV = triton.next_power_of_2(V)
-    dq = torch.empty_like(q_star)
+    dq = torch.empty_like(q_star, dtype=torch.float32)
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
     dg = torch.empty_like(g)

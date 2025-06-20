@@ -7,7 +7,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, get_multiprocessor_count, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, get_multiprocessor_count, input_guard, is_amd
+
+NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
 sigmoid_fwd_codestring = """
 template <typename T> T sigmoid_fwd(T x) {
@@ -54,7 +56,7 @@ sigmoid = SigmoidFunction.apply
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D']
 )
@@ -81,7 +83,7 @@ def logsigmoid_fwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D']
 )

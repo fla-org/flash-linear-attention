@@ -85,7 +85,6 @@ def chunk_comba_ref(
         p = F.pad(p, (0, 0, 0, pad_len))
         beta = F.pad(beta, (0, pad_len))
         g = F.pad(g, (0, pad_len))
-    q, k, v, p, beta, g = map(lambda x: x.to(torch.float32), [q, k, v, p, beta, g])
     decay = g
     chunk_size = BT
     b, h, l, d_k = q.shape
@@ -116,7 +115,7 @@ def chunk_comba_ref(
     v = k_cumsum
     S = k.new_zeros(b, h, d_k, d_v)
     if initial_state is not None:
-        S = initial_state
+        S += initial_state
     o = torch.zeros_like(v)
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=1)
     for i in range(0, l // chunk_size):
@@ -137,25 +136,83 @@ def chunk_comba_ref(
     return o, S
 
 
-@pytest.mark.parametrize('B', [4, 8, 16])
-@pytest.mark.parametrize('T', [1024, 1314, 2048])
-@pytest.mark.parametrize('H', [2, 4])
-@pytest.mark.parametrize('D', [128, 256])
-@pytest.mark.parametrize('gate_logit_normalizer', [1])
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
+@pytest.mark.parametrize('scale', [1])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+)
+def test_fused_recurrent(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+    gate_logit_normalizer: float,
+):
+    torch.manual_seed(42)
+    q = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn(B, T, H, D, dtype=dtype)
+    p = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    g = g / gate_logit_normalizer
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q, k, v, p, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, p, beta, g, h0))
+    ref, ref_ht = chunk_comba_ref(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        p=p.clone(),
+        beta=beta.clone(),
+        g=g.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    tri, tri_ht = fused_recurrent_comba(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        p=p.clone(),
+        beta=beta.clone(),
+        g=g.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    assert_close('  o', ref, tri, 0.002)
+    assert_close(' ht', ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
 @pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize('mask_p', [0, 0.5])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
     reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
-def test_chunk_dplr(
+def test_chunk(
     B: int,
     T: int,
     H: int,
     D: int,
     dtype: torch.dtype,
     scale: float,
-    gate_logit_normalizer: float
+    gate_logit_normalizer: float,
+    mask_p: float,
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
@@ -166,17 +223,18 @@ def test_chunk_dplr(
     p = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
-    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     g = g / gate_logit_normalizer
+    g = g * (torch.rand_like(g) > mask_p)
+    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     q, k, v, p, beta, g, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, p, beta, g, h0))
 
     tri, tri_ht = chunk_comba(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        g.clone(),
-        beta.clone(),
-        p.clone(),
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        p=p.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
@@ -188,18 +246,18 @@ def test_chunk_dplr(
     q.grad = k.grad = v.grad = p.grad = beta.grad = g.grad = h0.grad = None
 
     ref, ref_ht = chunk_comba_ref(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        p.clone(),
-        g.clone(),
-        beta.clone(),
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        p=p.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
     )
 
-    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
     ref_dq, ref_dk, ref_dv, ref_dp, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, p.grad, beta.grad, g.grad, h0.grad
 
     assert_close("  o", ref, tri, 0.005)
@@ -208,68 +266,99 @@ def test_chunk_dplr(
     assert_close(" dk", ref_dk, tri_dk, 0.008)
     assert_close(" dv", ref_dv, tri_dv, 0.005)
     assert_close(" dp", ref_dp, tri_dp, 0.008)
+    if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:
+        assert_close(" dg", ref_dg, tri_dg, 0.02)
     assert_close(" db", ref_dbeta, tri_dbeta, 0.005)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
-    if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:
-        assert_close("dg", ref_dg, tri_dg, 0.02)
 
 
-@pytest.mark.parametrize('B', [4, 8, 16])
-@pytest.mark.parametrize('T', [1024, 1314, 2048])
-@pytest.mark.parametrize('H', [2, 4])
-@pytest.mark.parametrize('D', [64, 128, 256])
-@pytest.mark.parametrize('gate_logit_normalizer', [1])
+@pytest.mark.parametrize('N', test_b_list)
+@pytest.mark.parametrize('T', test_t_varlen_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
 @pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize('mask_p', [0, 0.5])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
-def test_forward(
-    B: int,
+def test_chunk_varlen(
+    N: int,
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype,
     scale: float,
-    gate_logit_normalizer: float
+    mask_p: float,
+    dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    # randomly split the sequence into N segments
+    cu_seqlens = torch.cat([
+        torch.tensor([0], dtype=torch.long),
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
+        torch.tensor([T], dtype=torch.long)
+    ], 0).to(device).sort()[0]
 
-    q = torch.randn(B, T, H, D, dtype=dtype)
-    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn(B, T, H, D, dtype=dtype)
-    p = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
-    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
-    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
-    g = g / gate_logit_normalizer
-    q, k, v, p, beta, g, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, p, beta, g, h0))
+    q = torch.randn((1, T, H, D), dtype=dtype)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    v = torch.randn((1, T, H, D), dtype=dtype)
+    p = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
+    g = g * (torch.rand_like(g) > mask_p)
+    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
+    h0 = torch.randn((N, H, D, D), dtype=dtype)
+
+    q, k, v, p, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, p, beta, g, h0))
+    do = torch.randn_like(v)
+    dht = torch.rand_like(h0)
 
     tri, tri_ht = chunk_comba(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        g.clone(),
-        beta.clone(),
-        p.clone(),
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        p=p.clone(),
+        beta=beta.clone(),
+        g=g.clone(),
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
+        cu_seqlens=cu_seqlens,
     )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
 
-    ref, ref_ht = fused_recurrent_comba(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        g.clone(),
-        beta.clone(),
-        p.clone(),
-        scale=scale,
-        output_final_state=True,
-        initial_state=h0.clone(),
-    )
+    ref = []
+    ref_ht = []
+    for i in range(N):
+        ref_i, ref_ht_i = chunk_comba_ref(
+            q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            p=p[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            beta=beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            scale=scale,
+            initial_state=h0[i],
+            output_final_state=True,
+        )
+        ref.append(ref_i)
+        ref_ht.append(ref_ht_i)
+    ref = torch.cat(ref, 1)
+    ref_ht = torch.cat(ref_ht, 0)
 
-    assert_close("  o", ref, tri, 0.005)
-    assert_close(" ht", ref_ht, tri_ht, 0.005)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
+
+    assert_close('  o', ref, tri, 0.005)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.007)
+    assert_close(' dk', ref_dk, tri_dk, 0.008)
+    assert_close(' dv', ref_dv, tri_dv, 0.007)
+    assert_close(' db', ref_dbeta, tri_dbeta, 0.015)
+    assert_close(' dg', ref_dg, tri_dg, 0.015)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.007)

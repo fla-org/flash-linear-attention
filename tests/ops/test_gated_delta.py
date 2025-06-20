@@ -200,6 +200,7 @@ def test_recurrent_forward(
 @pytest.mark.parametrize('D', test_d_list)
 @pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
 @pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize('mask_p', [0, 0.5])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
@@ -212,7 +213,8 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     scale: float,
-    gate_logit_normalizer: float
+    gate_logit_normalizer: float,
+    mask_p: float,
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
@@ -224,6 +226,7 @@ def test_chunk(
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     g = g / gate_logit_normalizer
+    g = g * (torch.rand_like(g) > mask_p)
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
 
     tri, tri_ht = chunk_gated_delta_rule(
@@ -271,6 +274,7 @@ def test_chunk(
 @pytest.mark.parametrize('H', test_h_list)
 @pytest.mark.parametrize('D', test_d_list)
 @pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize('mask_p', [0, 0.5])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
@@ -282,6 +286,7 @@ def test_chunk_varlen(
     H: int,
     D: int,
     scale: float,
+    mask_p: float,
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
@@ -299,6 +304,7 @@ def test_chunk_varlen(
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
     g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
+    g = g * (torch.rand_like(g) > mask_p)
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=dtype)
 
