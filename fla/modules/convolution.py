@@ -18,6 +18,8 @@ from fla.ops.utils import prepare_chunk_indices, prepare_sequence_ids
 from fla.utils import get_multiprocessor_count, input_guard, is_amd
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
+STATIC_WARPS = 32 if not is_amd else 16
+
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -402,7 +404,7 @@ def causal_conv1d_update(
         BD=BD,
         BW=BW,
         ACTIVATION=activation,
-        num_warps=32,
+        num_warps=STATIC_WARPS,
     )
     return y.view(shape), cache
 

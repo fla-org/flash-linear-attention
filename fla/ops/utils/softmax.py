@@ -7,17 +7,15 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, is_amd
+
+NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-        triton.Config({}, num_warps=16),
-        triton.Config({}, num_warps=32)
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D']
 )
@@ -42,12 +40,8 @@ def softmax_fwd_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-        triton.Config({}, num_warps=16),
-        triton.Config({}, num_warps=32)
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D']
 )

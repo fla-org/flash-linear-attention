@@ -18,7 +18,9 @@ import triton
 import triton.language as tl
 
 from fla.modules.layernorm import RMSNorm
-from fla.utils import get_multiprocessor_count, input_guard, require_version
+from fla.utils import get_multiprocessor_count, input_guard, is_amd, require_version
+
+NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
 
 def activation_quant(x):
@@ -57,12 +59,8 @@ def weight_quant(w):
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-        triton.Config({}, num_warps=16),
-        triton.Config({}, num_warps=32),
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
 )
@@ -195,12 +193,8 @@ def layer_norm_fwd_quant(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-        triton.Config({}, num_warps=16),
-        triton.Config({}, num_warps=32),
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS"],
 )
