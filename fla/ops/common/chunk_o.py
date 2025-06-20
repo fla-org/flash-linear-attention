@@ -173,12 +173,14 @@ def chunk_bwd_kernel_dqkwg(
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        all = T
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
+        all = B * T
 
     # offset calculation
     v += (bos * H + i_h) * V
@@ -192,12 +194,12 @@ def chunk_bwd_kernel_dqkwg(
 
     # for delta rule only
     if USE_DW:
+        w += (bos * H + i_h) * K
         dw += (bos * H + i_h) * K
         dv += (bos * H + i_h) * V
-        w += (bos * H + i_h) * K
 
     if USE_G:
-        dg += i_k * B * T * H
+        dg += i_k * all * H
         b_dg_last = tl.zeros([1,], dtype=tl.float32) if USE_G else None
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
