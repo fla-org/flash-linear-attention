@@ -8,9 +8,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.ops.simple_gla import chunk_simple_gla
-from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
-from fla.ops.simple_gla.parallel import parallel_simple_gla
+from fla.ops.simple_gla import chunk_simple_gla, fused_chunk_simple_gla, fused_recurrent_simple_gla, parallel_simple_gla
 from fla.utils import COMPILER_MODE, assert_close, device
 
 if COMPILER_MODE:
@@ -230,6 +228,153 @@ def test_chunk_varlen(
     ref_dh0, h0.grad = h0.grad.clone(), None
 
     tri, tri_ht = chunk_simple_gla(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+    ((tri * do).sum() + (dht * tri_ht).sum()).backward()
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dg, g.grad = g.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
+
+    assert_close('  o', ref, tri, 0.004)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
+    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize('B', test_b_list)
+@pytest.mark.parametrize('T', test_t_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
+@pytest.mark.parametrize('dtype', [torch.float])
+@pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+)
+def test_fused_chunk(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+    scale: float,
+    gate_logit_normalizer: float
+):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    g = torch.randn((B, T, H), dtype=torch.float32, device=device)
+    h0 = torch.rand((B, H, D, D), dtype=torch.float32, device=device).requires_grad_(True)
+    dht = torch.randn_like(h0)
+    g = (F.logsigmoid(g) / gate_logit_normalizer).requires_grad_(True)
+    do = torch.randn_like(v)
+
+    ref, ref_ht = fused_recurrent_simple_gla(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True,
+    )
+    ((ref * do).sum() + (dht * ref_ht).sum()).backward()
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dg, g.grad = g.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
+
+    tri, tri_ht = fused_chunk_simple_gla(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        scale=scale,
+        initial_state=h0,
+        output_final_state=True
+    )
+    ((tri * do).sum() + (dht * tri_ht).sum()).backward()
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dg, g.grad = g.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
+
+    assert_close('  o', ref, tri, 0.004)
+    assert_close(' ht', ref_ht, tri_ht, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
+    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize('N', test_b_list)
+@pytest.mark.parametrize('T', test_t_varlen_list)
+@pytest.mark.parametrize('H', test_h_list)
+@pytest.mark.parametrize('D', test_d_list)
+@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+)
+def test_fused_chunk_varlen(
+    N: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+
+    # randomly split the sequence into N segments
+    cu_seqlens = torch.cat([
+        torch.tensor([0], dtype=torch.long),
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
+        torch.tensor([T], dtype=torch.long)
+    ], 0).to(device).sort()[0]
+    # seq-first required for inputs with variable lengths
+    q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((1, T, H), dtype=dtype, device=device)).requires_grad_()
+    h0 = torch.randn((N, H, D, D), dtype=torch.float32, device=device).requires_grad_()
+    dht = torch.randn_like(h0)
+    do = torch.randn_like(v)
+
+    ref, ref_ht = fused_recurrent_simple_gla(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        initial_state=h0,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+    ((ref * do).sum() + (dht * ref_ht).sum()).backward()
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dg, g.grad = g.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
+
+    tri, tri_ht = fused_chunk_simple_gla(
         q=q,
         k=k,
         v=v,

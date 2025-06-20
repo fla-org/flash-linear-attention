@@ -40,7 +40,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
     key=['H', 'K', 'V', 'BT'],
 )
 @triton.jit(do_not_specialize=['T'])
-def fused_chunk_fwd_kernel(
+def fused_chunk_simple_gla_fwd_kernel(
     q,
     k,
     v,
@@ -112,7 +112,7 @@ def fused_chunk_fwd_kernel(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BT, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min(i_t * BT + BT, T) - 1
 
         # [BT, BT]
         b_s = tl.dot(b_q, b_k)
@@ -126,8 +126,8 @@ def fused_chunk_fwd_kernel(
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
-        if USE_G_GAMMA and (i_t == NT - 1 and (T % BT) != 0):
-            b_g_last = b_gamma * (T % BT)
+        if USE_G_GAMMA:
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
         if USE_G or USE_G_GAMMA:
@@ -169,7 +169,7 @@ def fused_chunk_fwd_kernel(
     key=['H', 'K', 'V', 'BT'],
 )
 @triton.jit(do_not_specialize=['T'])
-def fused_chunk_bwd_kernel(
+def fused_chunk_simple_gla_bwd_kernel(
     q,
     k,
     v,
@@ -179,6 +179,7 @@ def fused_chunk_bwd_kernel(
     dq,
     dk,
     dv,
+    dg,
     h0,
     dht,
     dh0,
@@ -245,7 +246,7 @@ def fused_chunk_bwd_kernel(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         # [BT, BV]
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min(i_t * BT + BT, T) - 1
 
         # [BT, BT]
         b_ds = tl.dot(b_do, b_v) * scale
@@ -259,8 +260,8 @@ def fused_chunk_bwd_kernel(
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
-        if USE_G_GAMMA and (i_t == NT - 1 and (T % BT) != 0):
-            b_g_last = b_gamma * (T % BT)
+        if USE_G_GAMMA:
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
         if USE_G or USE_G_GAMMA:
@@ -282,21 +283,28 @@ def fused_chunk_bwd_kernel(
 
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
-    # sync threads
-    b_h = None
-    tl.debug_barrier()
-
     # [BK, BV]
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_FINAL_STATE:
         p_dh = tl.make_block_ptr(dht + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_dh = tl.load(p_dh, boundary_check=(0, 1)).to(tl.float32)
+        b_dh += tl.load(p_dh, boundary_check=(0, 1)).to(tl.float32)
+
+    if USE_G:
+        b_dg = tl.zeros([BT,], dtype=tl.float32)
+        b_dg_last = tl.zeros([BK,], dtype=tl.float32)
+        b_hdh = tl.sum(tl.trans(b_h) * b_dh)
+
+    # sync threads
+    b_h = None
+    tl.debug_barrier()
+
     for i_t in range(NT - 1, -1, -1):
         o_t = i_t * BT + tl.arange(0, BT)
         p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dq = tl.make_block_ptr(dq, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
         p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         # [BK, BT]
@@ -307,42 +315,62 @@ def fused_chunk_bwd_kernel(
         # [BT, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min(i_t * BT + BT, T) - 1
 
         # [BT, BT]
         b_s = tl.dot(b_k, b_q)
         b_ds = tl.dot(b_v, tl.trans(b_do))
 
         if USE_G:
+            m_t = o_t < T
             p_g = g + (bos + o_t) * H + i_h
-            b_g = tl.load(p_g, mask=(o_t < T), other=0.)
+            p_dg = dg + (i_v * B * T + (bos + o_t)).to(tl.int64) * H + i_h
+            b_g = tl.load(p_g, mask=m_t, other=0.)
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
 
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
-        if USE_G_GAMMA:
-            if i_t == NT - 1 and (T % BT) != 0:
-                b_g_last = b_gamma * (T % BT)
-            else:
-                b_g_last = b_gamma * BT
-            b_gk = exp(b_g_last - b_g)
-            b_gn = exp(b_g_last)
-
-        if USE_G or USE_G_GAMMA:
             b_gs = tl.trans(tl.where(m_s, exp(b_g[:, None] - b_g[None, :]), 0))
 
-            b_s = (b_s * b_gs).to(b_q.dtype)
-            b_ds = (b_ds * b_gs).to(b_k.dtype)
+            b_s = b_s * b_gs
+            b_ds = b_ds * b_gs
 
-            b_dk = tl.dot(b_ds, tl.trans(b_q)) + tl.dot(b_v, tl.trans(b_dh).to(b_v.dtype)) * b_gk[:, None]
+            b_dq = tl.load(p_dq, boundary_check=(0, 1))
+            # [BT, BK]
+            b_dk = tl.dot(b_ds.to(b_k.dtype), tl.trans(b_q)) + tl.dot(b_v, tl.trans(b_dh).to(b_v.dtype)) * b_gk[:, None]
+            # [BT, BK]
+            b_dg_t = tl.trans(b_q * b_dq) - b_k * b_dk
+            b_dg_first = b_dg_last + tl.sum(b_dg_t, 0)
+            b_dg = b_hdh + tl.sum(b_dg_first[None, :] - tl.cumsum(b_dg_t, 0) + b_dg_t, 1)
+            b_dg_last = b_dg_first
             # [BT, BV]
             b_dv = tl.dot(b_s.to(b_q.dtype), b_do) + tl.dot(b_k, b_dh.to(b_k.dtype)) * b_gk[:, None]
+            # [BK, BV]
             b_dh = b_dh * b_gn + tl.dot(b_q, (b_do * b_gq[:, None]).to(b_do.dtype))
+
+            tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), mask=m_t)
+
+        elif USE_G_GAMMA:
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_gk = exp(b_g_last - b_g)
+            b_gn = exp(b_g_last)
+            b_gs = tl.trans(tl.where(m_s, exp(b_g[:, None] - b_g[None, :]), 0))
+
+            b_s = b_s * b_gs
+            b_ds = b_ds * b_gs
+
+            b_dk = tl.dot(b_ds.to(b_k.dtype), tl.trans(b_q)) + tl.dot(b_v, tl.trans(b_dh).to(b_v.dtype)) * b_gk[:, None]
+            # [BT, BV]
+            b_dv = tl.dot(b_s.to(b_q.dtype), b_do) + tl.dot(b_k, b_dh.to(b_k.dtype)) * b_gk[:, None]
+            # [BK, BV]
+            b_dh = b_dh * b_gn + tl.dot(b_q, (b_do * b_gq[:, None]).to(b_do.dtype))
+
         else:
-            b_dk = tl.dot(b_ds, tl.trans(b_q)) + tl.dot(b_v, tl.trans(b_dh).to(b_v.dtype))
+            b_dk = tl.dot(b_ds.to(b_q.dtype), tl.trans(b_q)) + tl.dot(b_v, tl.trans(b_dh).to(b_v.dtype))
             # [BT, BV]
             b_dv = tl.dot(b_s.to(b_q.dtype), b_do) + tl.dot(b_k, b_dh.to(b_k.dtype))
+            # [BK, BV]
             b_dh += tl.dot(b_q, b_do)
 
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -353,7 +381,7 @@ def fused_chunk_bwd_kernel(
         tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), boundary_check=(0, 1))
 
 
-def fused_chunk_fwd(
+def fused_chunk_simple_gla_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -371,11 +399,10 @@ def fused_chunk_fwd(
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     NK = triton.cdiv(K, BK)
 
-    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
     o = v.new_empty(NK, *v.shape, dtype=torch.float) if NK > 1 else torch.empty_like(v)
     ht = k.new_empty(N, H, K, V, dtype=torch.float) if output_final_state else None
     def grid(meta): return (triton.cdiv(V, meta['BV']), NK, N * H)
-    fused_chunk_fwd_kernel[grid](
+    fused_chunk_simple_gla_fwd_kernel[grid](
         q=q,
         k=k,
         v=v,
@@ -396,13 +423,14 @@ def fused_chunk_fwd(
     )
     if NK > 1:
         o = o.sum(0).to(v)
-    return g, o, ht
+    return o, ht
 
 
-def fused_chunk_bwd(
+def fused_chunk_simple_gla_bwd(
     q,
     k,
     v,
+    g,
     g_gamma,
     do,
     scale,
@@ -418,22 +446,27 @@ def fused_chunk_bwd(
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
-    dq = q.new_empty(NV, B, T, H, K, dtype=torch.float) if NV > 1 else torch.empty_like(q)
-    dk = q.new_empty(NV, B, T, H, K, dtype=torch.float) if NV > 1 else torch.empty_like(q)
-    dv = q.new_empty(NK, B, T, H, V, dtype=torch.float) if NK > 1 else torch.empty_like(v)
+    dq = q.new_empty(NV, *q.shape, dtype=torch.float) if NV > 1 else torch.empty_like(q)
+    dk = k.new_empty(NV, *k.shape, dtype=torch.float) if NV > 1 else torch.empty_like(k)
+    dv = v.new_empty(NK, *v.shape, dtype=torch.float) if NK > 1 else torch.empty_like(v)
+    if g is not None:
+        dg = g.new_empty(NV, *g.shape, dtype=torch.float) if NV > 1 else torch.empty_like(g)
+    else:
+        dg = None
     dh0 = torch.empty_like(initial_state) if initial_state is not None else None
 
     grid = (NV, NK, N * H)
-    fused_chunk_bwd_kernel[grid](
+    fused_chunk_simple_gla_bwd_kernel[grid](
         q=q,
         k=k,
         v=v,
-        g=None,
+        g=g,
         g_gamma=g_gamma,
         do=do,
         dq=dq,
         dk=dk,
         dv=dv,
+        dg=dg,
         h0=initial_state,
         dht=dht,
         dh0=dh0,
@@ -451,7 +484,9 @@ def fused_chunk_bwd(
     dq = dq.sum(0).to(q) if NV > 1 else dq
     dk = dk.sum(0).to(k) if NV > 1 else dk
     dv = dv.sum(0).to(v) if NK > 1 else dv
-    return dq, dk, dv, dh0
+    if dg is not None:
+        dg = dg.sum(0).to(g) if NV > 1 else dg
+    return dq, dk, dv, dg, dh0
 
 
 class FusedChunkSimpleGLAFunction(torch.autograd.Function):
@@ -476,7 +511,8 @@ class FusedChunkSimpleGLAFunction(torch.autograd.Function):
         cu_seqlens
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
-        g, o, ht = fused_chunk_fwd(
+        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
+        o, ht = fused_chunk_simple_gla_fwd(
             q=q,
             k=k,
             v=v,
@@ -501,7 +537,7 @@ class FusedChunkSimpleGLAFunction(torch.autograd.Function):
     def backward(ctx, do, dht=None):
         q, k, v, g, g_gamma, initial_state = ctx.saved_tensors
 
-        dq, dk, dv, dg, dh0 = fused_chunk_bwd(
+        dq, dk, dv, dg, dh0 = fused_chunk_simple_gla_bwd(
             q=q,
             k=k,
             v=v,
@@ -516,7 +552,7 @@ class FusedChunkSimpleGLAFunction(torch.autograd.Function):
         )
         if g is not None:
             dg = dg.to(g)
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, dh0, None, None
 
 
 def fused_chunk_simple_gla(
@@ -559,8 +595,7 @@ def fused_chunk_simple_gla(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
             This argument has been deprecated.
 
     Returns:
@@ -583,8 +618,6 @@ def fused_chunk_simple_gla(
         )
     if g is not None and g_gamma is not None:
         raise ValueError("Only one of g or g_gamma should be provided.")
-    if g is None and g_gamma is None:
-        raise ValueError("Either g or g_gamma must be provided.")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = FusedChunkSimpleGLAFunction.apply(
