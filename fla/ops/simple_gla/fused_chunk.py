@@ -68,6 +68,7 @@ def fused_chunk_simple_gla_fwd_kernel(
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
 
+    all = B * T
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -94,7 +95,7 @@ def fused_chunk_simple_gla_fwd_kernel(
     q = q + (bos*H + i_h) * K
     k = k + (bos*H + i_h) * K
     v = v + (bos*H + i_h) * V
-    o = o + (i_k * B * T + bos).to(tl.int64) * H*V + i_h * V
+    o = o + (i_k * all + bos).to(tl.int64) * H*V + i_h * V
     if USE_INITIAL_STATE:
         p_h = tl.make_block_ptr(h0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
         b_h = tl.load(p_h, boundary_check=(0, 1)).to(tl.float32)
@@ -201,12 +202,15 @@ def fused_chunk_simple_gla_bwd_kernel(
 ):
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
+
+    all = B * T
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
     NT = tl.cdiv(T, BT)
+    NV = tl.cdiv(V, BV)
 
     o_i = tl.arange(0, BT)
     if USE_G_GAMMA:
@@ -223,9 +227,9 @@ def fused_chunk_simple_gla_bwd_kernel(
     k = k + (bos*H + i_h) * K
     v = v + (bos*H + i_h) * V
     do = do + (bos*H + i_h) * V
-    dq = dq + (i_v * B * T + bos).to(tl.int64) * H*K + i_h * K
-    dk = dk + (i_v * B * T + bos).to(tl.int64) * H*K + i_h * K
-    dv = dv + (i_k * B * T + bos).to(tl.int64) * H*V + i_h * V
+    dq = dq + (i_v * all + bos).to(tl.int64) * H*K + i_h * K
+    dk = dk + (i_v * all + bos).to(tl.int64) * H*K + i_h * K
+    dv = dv + (i_k * all + bos).to(tl.int64) * H*V + i_h * V
 
     # [BV, BK]
     b_h = tl.zeros([BV, BK], dtype=tl.float32)
@@ -324,7 +328,7 @@ def fused_chunk_simple_gla_bwd_kernel(
         if USE_G:
             m_t = o_t < T
             p_g = g + (bos + o_t) * H + i_h
-            p_dg = dg + (i_v * B * T + (bos + o_t)).to(tl.int64) * H + i_h
+            p_dg = dg + ((i_k * NV + i_v) * all + (bos + o_t)).to(tl.int64) * H + i_h
             b_g = tl.load(p_g, mask=m_t, other=0.)
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
 
@@ -450,7 +454,7 @@ def fused_chunk_simple_gla_bwd(
     dk = k.new_empty(NV, *k.shape, dtype=torch.float) if NV > 1 else torch.empty_like(k)
     dv = v.new_empty(NK, *v.shape, dtype=torch.float) if NK > 1 else torch.empty_like(v)
     if g is not None:
-        dg = g.new_empty(NV, *g.shape, dtype=torch.float) if NV > 1 else torch.empty_like(g)
+        dg = g.new_empty(NK*NV, *g.shape, dtype=torch.float) if NV > 1 else torch.empty_like(g)
     else:
         dg = None
     dh0 = torch.empty_like(initial_state) if initial_state is not None else None
