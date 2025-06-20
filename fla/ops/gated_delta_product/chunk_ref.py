@@ -4,6 +4,7 @@
 from typing import Optional
 
 import torch
+from einops import rearrange
 
 from fla.ops.delta_rule import chunk_delta_rule
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
@@ -32,12 +33,12 @@ def chunk_gated_delta_product_ref(
     assert g.shape == (B, T, H)
     q_new = q.new_zeros(B, T, num_householder, H, K)
     q_new[:, :, -1] = q
-    q = q_new.view(B, T * num_householder, H, K)
+    q = rearrange(q_new, 'b t n h d -> b (t n) h d')
 
     if g is not None:
         g_new = g.new_zeros(B, T, num_householder, H, dtype=torch.float32)
         g_new[:, :, 0] = g
-        g = g_new.view(B, T * num_householder, H)
+        g = rearrange(g_new, 'b t n h -> b (t n) h')
 
         o, final_state = chunk_gated_delta_rule(
             q=q,
@@ -64,6 +65,5 @@ def chunk_gated_delta_product_ref(
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             scale=scale,
         )
-    o = o.view(B, T, num_householder, H, V)
-
+    o = rearrange(o, 'b (t n) h d -> b t n h d', n=num_householder)
     return o[:, :, -1].contiguous(), final_state
