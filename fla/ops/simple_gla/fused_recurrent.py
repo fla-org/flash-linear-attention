@@ -12,7 +12,8 @@ def fused_recurrent_simple_gla(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
+    g: torch.Tensor = None,
+    g_gamma: torch.Tensor = None,
     scale: Optional[float] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
@@ -30,6 +31,10 @@ def fused_recurrent_simple_gla(
         g (torch.Tensor):
             Forget gates of shape `[B, T, H]`.
             Compared to GLA, the gating is head-wise instead of elementwise.
+        g_gamma (torch.Tensor):
+            Log decay of shape `[H]`.
+            Head-wise data-independent decay is used if `g_gamma` is provided.
+            Only one of `g` or `g_gamma` should be provided.
         scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -78,8 +83,6 @@ def fused_recurrent_simple_gla(
             output_final_state=True,
             cu_seqlens=cu_seqlens
         )
-        >>> assert o.allclose(o_var.view(o.shape))
-        >>> assert ht.allclose(ht_var)
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -99,6 +102,7 @@ def fused_recurrent_simple_gla(
         k=k,
         v=v,
         g=g,
+        g_gamma=g_gamma,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,
