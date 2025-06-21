@@ -69,6 +69,7 @@ However, official Triton and PyTorch do not provide pre-built binaries for this 
 For users on ARM (aarch64) systems, directly installing triton and pytorch from their official channels can be challenging as pre-built binaries for this architecture are often unavailable. The FLA organization provides custom-built Triton binaries to address this, ensuring compatibility with specific PyTorch versions.
 
 To ensure a smooth installation of flash-linear-attention with the necessary Triton and PyTorch dependencies on ARM, it's crucial to align their versions. The FLA builds of Triton are designed to be compatible with particular PyTorch releases.
+
 **Version Compatibility:**
 
 Below is a guide to compatible triton and pytorch versions when using FLA's Triton builds:
