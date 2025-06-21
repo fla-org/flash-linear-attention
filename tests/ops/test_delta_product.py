@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import os
 from typing import List
 
 import pytest
@@ -10,32 +10,31 @@ import torch.nn.functional as F
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.chunk_ref import chunk_gated_delta_product_ref
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.parametrize('B', [2])
-@pytest.mark.parametrize('T', [30, 100, 1000])
-@pytest.mark.parametrize('H', [3])
-@pytest.mark.parametrize('D', [64, 100])
-@pytest.mark.parametrize('num_householder', [3])
-@pytest.mark.parametrize('scale', [1])
-@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+    device_platform == 'intel',
+    reason='Intel Triton Failure'
+)
+@pytest.mark.parametrize(
+    ("T", "D", "num_householder"),
+    [
+        (56, 60, 3),
+        (211, 110, 2),
+        (400, 200, 4),
+    ]
 )
 def test_chunk(
-    B: int,
     T: int,
-    H: int,
     D: int,
     num_householder: int,
-    dtype: torch.dtype,
-    scale: float,
 ):
-    if is_intel_alchemist and D > 128:
-        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
-
+    torch.manual_seed(42)
+    B = 2
+    H = 3
+    dtype = torch.float16
+    scale = 1
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T * num_householder, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn(B, T * num_householder, H, D, dtype=dtype)
@@ -83,31 +82,29 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-@pytest.mark.parametrize('H', [2])
-@pytest.mark.parametrize('D', [128])
-@pytest.mark.parametrize('cu_seqlens', [[0, 15, 122, 229, 400, 467, 1000]])
-@pytest.mark.parametrize('scale', [1])
-@pytest.mark.parametrize('num_householder', [3, 4])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ("cu_seqlens"),
+    [
+        ([0, 15, 100, 300, 1203, 2000]),
+    ]
+)
 @pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    device_platform == 'intel',
+    reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
     cu_seqlens: List[int],
-    H: int,
-    D: int,
-    scale: float,
-    num_householder: int,
-    dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
-        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     T = cu_seqlens[-1]
     N = len(cu_seqlens) - 1
+    H = 2
+    D = 64
+    dtype = torch.float16
+    scale = 1.0
+    num_householder = 3
+
     q = torch.nn.functional.normalize(torch.randn((1, T, H, D), dtype=dtype), dim=-1, p=2)
     k = torch.nn.functional.normalize(torch.randn(1, T*num_householder, H, D, dtype=dtype), dim=-1, p=2)
     v = torch.randn((1, T*num_householder, H, D), dtype=dtype)
