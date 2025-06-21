@@ -1,5 +1,10 @@
 # Triton FAQs and Common Issues
 
+* [MMA Assertion](#1-mma-assertion-error-on-h100)
+* [AsstibuteError](#2-attributeerror-nonetype-object-has-no-attribute-start)
+* [LinearLayout](#3-h100-linearlayout-assertion-error)
+* [Triton on Arm](#4-triton-support-for-arm-aarch64-architecture)
+
 ## Recommended Setup Approach
 
 > [!IMPORTANT]
