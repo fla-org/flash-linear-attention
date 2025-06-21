@@ -274,11 +274,11 @@ def fused_recurrent_bwd_kernel(
         b_dgv = tl.sum(b_h * b_dh, 0)
 
     for _ in range(T):
-        b_q = tl.load(p_q, mask=m_k, other=0).to(tl.float32) * scale
+        b_q = tl.load(p_q, mask=m_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
         b_do = tl.load(p_do, mask=m_v, other=0).to(tl.float32)
-        b_dh += b_q[:, None] * b_do[None, :]
+        b_dh += (b_q * scale)[:, None] * b_do[None, :]
         b_dk = tl.sum(b_dh * b_v[None, :], axis=1)
         b_dv = tl.sum(b_dh * b_k[:, None], axis=0)
         if USE_G:
