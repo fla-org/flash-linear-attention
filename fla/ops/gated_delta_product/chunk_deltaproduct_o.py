@@ -93,6 +93,8 @@ def chunk_fwd_kernel_o(
         m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
         b_m = tl.where(m_A, exp(b_g[:, None] - b_g[None, :]), 0)
         b_o = b_o * exp(b_g)[:, None]
+    else:
+        b_m = ((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)).to(tl.float32)
 
     for i_dp in range(num_householder):
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
