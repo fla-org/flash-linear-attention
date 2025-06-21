@@ -109,6 +109,10 @@ pip install einops ninja datasets transformers numpy
 pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 ```
 
+**ARM (aarch64) Support for fla**
+
+You need to choose a specific version to install, see [FAQs](FAQs.md)
+
 ## Usage
 
 ### Token Mixing

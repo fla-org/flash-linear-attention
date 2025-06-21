@@ -27,7 +27,7 @@ pip install -U --pre torch --index-url https://download.pytorch.org/whl/nightly/
 
 # Install Triton nightly
 pip uninstall triton pytorch-triton -y
-pip install -U triton-nightly --index-url http://pypi.fla-org.com/simple --trusted-host pypi.fla-org.com
+pip install -U triton-nightly --index-url https://pypi.fla-org.com/simple
 
 # Instal flash-linear-attention
 pip install einops ninja datasets transformers numpy
@@ -58,3 +58,26 @@ mlir::triton::LinearLayout::reshapeOuts(...) failed.
 
 **Solution:**
 This is a known issue ([triton-lang/triton#5609](https://github.com/triton-lang/triton/issues/5609)). Follow the same installation steps as in Issue #1 above.
+
+### 4. Triton Support for ARM (aarch64) Architecture
+Triton now supports the ARM (aarch64) architecture.
+
+However, official Triton and PyTorch do not provide pre-built binaries for this architecture. The FLA organization has manually built and provided support for Triton on ARM, currently covering Triton versions 3.2.x, 3.3.x, and nightly builds.
+
+**Installation for ARM (aarch64):**
+
+For users on ARM (aarch64) systems, directly installing triton and pytorch from their official channels can be challenging as pre-built binaries for this architecture are often unavailable. The FLA organization provides custom-built Triton binaries to address this, ensuring compatibility with specific PyTorch versions.
+
+To ensure a smooth installation of flash-linear-attention with the necessary Triton and PyTorch dependencies on ARM, it's crucial to align their versions. The FLA builds of Triton are designed to be compatible with particular PyTorch releases.
+**Version Compatibility:**
+
+Below is a guide to compatible triton and pytorch versions when using FLA's Triton builds:
+
+- Triton 3.2.0 is compatible with PyTorch 2.6.0
+- Triton 3.3.0 is compatible with PyTorch 2.7.0
+- Triton 3.3.1 is compatible with PyTorch 2.7.1
+
+```shell
+pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+pip install -U triton==3.3.1 --index-url https://pypi.fla-org.com/simple
+```
