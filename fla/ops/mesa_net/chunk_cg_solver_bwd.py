@@ -80,7 +80,7 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     p_h = tl.make_block_ptr(h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
 
     b_h = tl.load(p_h, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
+    b_k = tl.load(p_k, boundary_check=(0, 1))
     b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
 
     p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
@@ -99,9 +99,8 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     b_r = tl.zeros([BT, BK], dtype=tl.float32)
 
     b_x += b_q * 0.
-
-    b_r = b_q - chunk_update_once(b_x, b_k, b_k, b_m, b_g_exp_q, b_h, b_lamb)
-    b_p += b_r
+    b_r += b_q
+    b_p += b_q
     b_delta_old = tl.sum(b_r*b_r, axis=1)
     for i in range(max_CG_iteration):
         b_o = chunk_update_once(b_p, b_k, b_k, b_m, b_g_exp_q, b_h, b_lamb)

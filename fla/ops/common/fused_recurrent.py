@@ -432,14 +432,16 @@ def fused_recurrent_bwd(
     dv = dv.sum(0)
     if g is not None:
         dg = chunk_global_cumsum((dq * q.float() - dk * k.float()).sum(-1), reverse=not reverse, cu_seqlens=cu_seqlens)
-        dg += (ht * dht).sum((2, 3)).unsqueeze(1)
+        if dht is not None:
+            dg += (ht * dht).sum((2, 3)).unsqueeze(1)
     if gk is not None:
         dgk = chunk_global_cumsum(dq * q.float() - dk * k.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
-        dgk += (ht * dht).sum(3).unsqueeze(1)
+        if dht is not None:
+            dgk += (ht * dht).sum(3).unsqueeze(1)
     if gv is not None:
         dgv = chunk_global_cumsum(do.float() * o.float() - dv * v.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
-        dgv += (ht * dht).sum(2).unsqueeze(1)
-
+        if dht is not None:
+            dgv += (ht * dht).sum(2).unsqueeze(1)
     return dq, dk, dv, dg, dgk, dgv, dh0
 
 
