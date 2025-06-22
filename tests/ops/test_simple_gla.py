@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 
 import os
-from typing import Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 
-from fla.ops.simple_gla import chunk_simple_gla
+from fla.ops.simple_gla.chunk import chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
+from fla.ops.simple_gla.naive import naive_parallel_simple_gla
 from fla.ops.simple_gla.parallel import parallel_simple_gla
 from fla.utils import COMPILER_MODE, assert_close, device
 
@@ -28,91 +27,12 @@ else:
 test_h_list = [2]
 
 
-def chunk_simple_gla_ref(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = False,
-    chunk_size: int = 64,
-    scale: Optional[float] = None,
-):
-    q, k, v = map(lambda x: rearrange(x, 'b t h ... -> b h t ...'), [q, k, v])
-    if g is not None:
-        g = rearrange(g, 'b t h ... -> b h t ...')
-    if scale is None:
-        scale = 1.0 / q.shape[-1] ** 0.5
-
-    T = q.shape[-2]
-    BT = chunk_size
-    pad_len = (BT - (T % BT)) % BT
-    if pad_len > 0:
-        # Pad all tensors
-        q = F.pad(q, (0, 0, 0, pad_len))
-        k = F.pad(k, (0, 0, 0, pad_len))
-        v = F.pad(v, (0, 0, 0, pad_len))
-        g = F.pad(g, (0, pad_len))
-    q, k, v, g = map(lambda x: x.to(torch.float32), [q, k, v, g])
-    decay = g
-    b, h, t, d_k = q.shape
-    d_v = v.shape[-1]
-    q = q * scale
-    q, k, v, decay = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size), [q, k, v, decay.unsqueeze(-1)])
-    decay = decay.squeeze(-1).cumsum(-1)
-    L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
-    S = k.new_zeros(b, h, d_k, d_v)
-    if initial_state is not None:
-        S = initial_state
-    o = torch.zeros_like(v)
-    for i in range(0, t // chunk_size):
-        q_i, k_i, v_i = q[:, :, i], k[:, :, i], v[:, :, i]
-        attn = (q_i @ k_i.transpose(-1, -2) * L_mask[:, :, i])
-        o_inter = (q_i * decay[:, :, i, :, None].exp()) @ S
-        o[:, :, i] = o_inter + attn @ v_i
-        S = S * decay[:, :, i, -1, None, None].exp() + \
-            (k_i * (decay[:, :, i, -1, None] - decay[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_i
-    if not output_final_state:
-        S = None
-    # unpad
-    o = rearrange(o, 'b h n c d -> b h (n c) d')
-    o = o[:, :, :T]
-    o = o.transpose(1, 2)
-    return o, S
-
-
-def parallel_simple_gla_ref(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    scale: Optional[float] = None
-):
-    q, k, v = map(lambda x: rearrange(x, 'b t h ... -> b h t ...'), [q, k, v])
-    if g is not None:
-        g = rearrange(g, 'b t h ... -> b h t ...')
-    if scale is None:
-        scale = 1.0 / q.shape[-1] ** 0.5
-    original_dtype = q.dtype
-    q, k, v, g = map(lambda x: x.float() if x is not None else None, [q, k, v, g])
-    A = (q @ k.transpose(-1, -2) * scale)
-    if g is not None:
-        g = g.cumsum(-1)
-        D = (g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().tril()
-        A = A * D
-    else:
-        A = A.tril()
-    o = A @ v
-    o = o.transpose(1, 2)
-    return o.to(original_dtype), A
-
-
 @pytest.mark.parametrize('B', test_b_list)
 @pytest.mark.parametrize('T', test_t_list)
 @pytest.mark.parametrize('H', test_h_list)
 @pytest.mark.parametrize('D', test_d_list)
 @pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('dtype', [torch.float])
+@pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.parametrize('scale', [1, 0.1])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
@@ -284,7 +204,7 @@ def test_parallel(
     g = (g / gate_logit_normalizer).requires_grad_(True) if USE_G else None
     do = torch.randn_like(v)
 
-    ref, ref_A = parallel_simple_gla_ref(q=q, k=k, v=v, g=g, scale=scale)
+    ref, ref_A = naive_parallel_simple_gla(q=q, k=k, v=v, g=g, scale=scale)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
