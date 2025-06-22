@@ -42,29 +42,29 @@ class Cache(transformers.cache_utils.Cache):
 
     def update(
         self,
-        recurrent_state: torch.Tensor = None,
-        attn_state: Tuple[torch.Tensor] = None,
-        conv_state: Tuple[torch.Tensor] = None,
-        ffn_state: torch.Tensor = None,
+        recurrent_state: Optional[Tuple[torch.Tensor]] = None,
+        attn_state: Optional[Tuple[torch.Tensor]] = None,
+        conv_state: Optional[Tuple[torch.Tensor]] = None,
+        ffn_state: Optional[Tuple[torch.Tensor]] = None,
         layer_idx: int = 0,
         offset: Optional[int] = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Updates the cache with the new `recurrent_state`/`attn_state`/`conv_state` for the layer `layer_idx`.
-
         Args:
-            recurrent_state (`torch.Tensor`, `Optional`):
+            recurrent_state (`torch.Tensor`):
                 The new recurrent state to cache.
-            attn_state (`Tuple[torch.Tensor]`, `Optional`):
+            attn_state (`Tuple[torch.Tensor]`):
                 The new attention key/value states to cache.
-            conv_state (`Tuple[torch.Tensor]`, `Optional`):
+            conv_state (`Tuple[torch.Tensor]`):
                 The new convolution state to cache.
+            ffn_state (`Tuple[torch.Tensor]`):
+                The new feed-forward state to cache.
             layer_idx (`int`, defaults to 0):
                 The index of the layer to cache the states for.
-            offset (`int`, `Optional`, defaults to 1):
+            offset (`int`, defaults to 1):
                 The number of new tokens being processed.
-            cache_kwargs (`Dict[str, Any]`, `Optional`):
+            cache_kwargs (`Dict[str, Any]`):
                 Additional arguments for the cache subclass.
 
         Return:
