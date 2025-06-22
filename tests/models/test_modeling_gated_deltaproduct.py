@@ -21,7 +21,7 @@ from .testing_utils import init_weights_recursively
 @pytest.mark.parametrize("D", [64, 128])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("use_l2warp", [True, False])
-def test_gateddeltaproduct_modeling(L, B, T, H, D, dtype, use_l2warp):
+def test_modeling(L, B, T, H, D, dtype, use_l2warp):
     run_test_model_forward_backward(L, B, T, H, D, GatedDeltaProductConfig, dtype, use_l2warp)
 
 
@@ -32,7 +32,7 @@ def test_gateddeltaproduct_modeling(L, B, T, H, D, dtype, use_l2warp):
 @pytest.mark.parametrize("B", [5])
 @pytest.mark.parametrize("T", [4000])
 @pytest.mark.parametrize("dtype", [torch.float16])
-def test_gateddeltaproduct_generation(L, B, T, dtype):
+def test_generation(L, B, T, dtype):
     config = GatedDeltaProductConfig()
     config.num_hidden_layers = L
     config.use_forget_gate = False

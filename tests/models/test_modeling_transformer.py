@@ -21,7 +21,7 @@ from .testing_utils import init_weights_recursively
 @pytest.mark.parametrize("D", [64, 128])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("use_l2warp", [True, False])
-def test_transformer_modeling(L, B, T, H, D, dtype, use_l2warp):
+def test_modeling(L, B, T, H, D, dtype, use_l2warp):
     run_test_model_forward_backward(L, B, T, H, D, TransformerConfig, dtype, use_l2warp)
 
 
@@ -34,7 +34,7 @@ def test_transformer_modeling(L, B, T, H, D, dtype, use_l2warp):
 @pytest.mark.parametrize("H", [3])
 @pytest.mark.parametrize("D", [64])
 @pytest.mark.parametrize("dtype", [torch.float16])
-def test_transformer_generation(L, B, T, H, D, dtype):
+def test_generation(L, B, T, H, D, dtype):
     config = TransformerConfig()
     config.num_hidden_layers = L
     config.num_heads = H
