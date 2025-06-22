@@ -65,7 +65,7 @@ jobs:
           # Installed by hand to avoid issues with pip
           # pip install -U pytest setuptools wheel ninja torch triton
           # MAX_JOBS=4 pip install -U flash-attn --no-build-isolation
-          # pip install git+https://github.com/Dao-AILab/causal-conv1d.git --no-build-isolation
+          # pip install git+https://github.com/Dao-AILab/causal-conv1d.git@a4b40 --no-build-isolation
           pip install -U uv
           pip uninstall -y flash-linear-attention
           uv pip install -U pytest setuptools wheel ninja
