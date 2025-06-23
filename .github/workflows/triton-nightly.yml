@@ -2,8 +2,8 @@ name: triton-nightly
 on:
   workflow_dispatch:
     inputs:
-      run_n100_test:
-        description: 'Run N100-specific tests (only for N100 runner)'
+      run_x64_test:
+        description: 'Run x64-specific tests (only for x64 runner)'
         required: false
         type: boolean
         default: false
@@ -17,7 +17,7 @@ on:
 jobs:
 
   Build-Wheels:
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.run_n100_test != 'true'
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.run_x64_test != 'true'
     timeout-minutes: ${{ matrix.config.arch == 'aarch64' && 720 || 120 }}
     runs-on: ${{ matrix.config.runs_on }}
 
@@ -106,13 +106,13 @@ jobs:
                     ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
                     HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
           elif [[ "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=4 \
+            export CIBW_ENVIRONMENT="MAX_JOBS=$(nproc) \
                       TRITON_BUILD_WITH_CLANG_LLD=1 \
                       SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} \
                       ALL_PROXY=${{ secrets.PI_PROXY_ENV }} \
                       HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
           else
-            export CIBW_ENVIRONMENT="MAX_JOBS=4 \
+            export CIBW_ENVIRONMENT="MAX_JOBS=$(nproc) \
                     TRITON_BUILD_WITH_CLANG_LLD=1"
           fi
 
@@ -122,7 +122,7 @@ jobs:
             export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
                   -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
                   -i.bak \
-                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
+                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y && pip config set global.index-url https://mirrors.aliyun.com/pypi/simple"
           else
             export CIBW_BEFORE_ALL="dnf install clang lld -y"
           fi
@@ -211,10 +211,10 @@ jobs:
             exit 1
           fi
   
-  Run-N100-Test:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_n100_test == 'true'
+  Run-x64-Test:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_x64_test == 'true'
     timeout-minutes: 120
-    runs-on: ['self-hosted', 'n100']
+    runs-on: ['self-hosted', 'x64-docker']
 
 
     steps:
@@ -293,13 +293,13 @@ jobs:
                     ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
                     HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
           elif [[ "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=4 \
+            export CIBW_ENVIRONMENT="MAX_JOBS=$(nproc) \
                       TRITON_BUILD_WITH_CLANG_LLD=1 \
                       SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} \
                       ALL_PROXY=${{ secrets.PI_PROXY_ENV }} \
                       HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
           else
-            export CIBW_ENVIRONMENT="MAX_JOBS=4 \
+            export CIBW_ENVIRONMENT="MAX_JOBS=$(nproc) \
                     TRITON_BUILD_WITH_CLANG_LLD=1"
           fi
 
@@ -309,7 +309,7 @@ jobs:
             export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
                   -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
                   -i.bak \
-                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
+                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y && pip config set global.index-url https://mirrors.aliyun.com/pypi/simple"
           else
             export CIBW_BEFORE_ALL="dnf install clang lld -y"
           fi
