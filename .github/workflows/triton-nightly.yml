@@ -122,7 +122,7 @@ jobs:
             export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
                   -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
                   -i.bak \
-                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y && pip config set global.index-url https://mirrors.aliyun.com/pypi/simple"
+                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
           else
             export CIBW_BEFORE_ALL="dnf install clang lld -y"
           fi
@@ -309,7 +309,7 @@ jobs:
             export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
                   -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
                   -i.bak \
-                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y && pip config set global.index-url https://mirrors.aliyun.com/pypi/simple"
+                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
           else
             export CIBW_BEFORE_ALL="dnf install clang lld -y"
           fi
