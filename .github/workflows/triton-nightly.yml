@@ -179,13 +179,26 @@ jobs:
           if [ "$ALL_WHEELS_PROCESSED" = true ]; then
             echo "Installing twine and uploading processed wheels..."
             python3 -m pip install twine pkginfo -U
-            python3 -m twine upload \
-              --repository-url http://pypi-upload.fla-org.com/ \
-              --username fla \
-              --password ${{ secrets.FLA_PYPI_PASSWD }} \
-              --verbose \
-              --non-interactive \
-              triton_nightly-*.whl
+            readarray -d '' -t WHEEL_FILES < <(find . -maxdepth 1 -name "triton_nightly-*.whl" -print0)
+            if [ ${#WHEEL_FILES[@]} -eq 0 ]; then
+              echo "Error: No triton_nightly-*.whl files found to upload in the current directory."
+              exit 1
+            fi
+            for WHL_FILE in "${WHEEL_FILES[@]}"; do
+              echo "Uploading: ${WHL_FILE}"
+              python3 -m twine upload \
+                --repository-url http://pypi-upload.fla-org.com/ \
+                --username fla \
+                --password ${{ secrets.FLA_PYPI_PASSWD }}  \
+                --verbose \
+                --non-interactive \
+                "${WHL_FILE}"
+              if [ $? -ne 0 ]; then
+                echo "Error uploading ${WHL_FILE}. Aborting."
+                exit 1
+              fi
+            done
+            echo "All triton_nightly-*.whl files uploaded successfully!"
           else
             echo "One or more wheels failed to process. Skipping upload."
             exit 1
