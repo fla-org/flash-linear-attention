@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
 
@@ -12,6 +12,7 @@ from fla.utils import is_gather_supported
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     div = tldevice.fast_dividef
     exp = tldevice.fast_expf
+    exp2 = tldevice.exp2
     log = tldevice.fast_logf
     log2 = tldevice.fast_log2f
 else:
@@ -20,6 +21,7 @@ else:
         return x / y
     div = div_normal
     exp = tl.exp
+    exp2 = tl.math.exp2
     log = tl.log
     log2 = tl.log2
 
