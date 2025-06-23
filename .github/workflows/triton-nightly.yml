@@ -17,6 +17,7 @@ on:
 jobs:
 
   Build-Wheels:
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.run_n100_test != 'true'
     timeout-minutes: ${{ matrix.config.arch == 'aarch64' && 720 || 120 }}
     runs-on: ${{ matrix.config.runs_on }}
 
