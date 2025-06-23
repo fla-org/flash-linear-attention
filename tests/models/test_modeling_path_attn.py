@@ -15,7 +15,7 @@ from .test_modeling_base import run_test_generation, run_test_model_forward_back
 @pytest.mark.parametrize("B", [4])
 @pytest.mark.parametrize("T", [1024])
 @pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [64, 128])
+@pytest.mark.parametrize("D", [32, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("use_l2warp", [True, False])
 def test_modeling(L, B, T, H, D, dtype, use_l2warp):

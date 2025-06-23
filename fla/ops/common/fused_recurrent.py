@@ -19,7 +19,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
+        for num_warps in [4, 8]
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
 )
@@ -131,7 +131,7 @@ def fused_recurrent_fwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4]
+        for num_warps in [4]
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
 )

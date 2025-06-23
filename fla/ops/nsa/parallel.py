@@ -326,6 +326,7 @@ def parallel_nsa_bwd_kernel_dq(
     i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
+    all = B * T
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
@@ -337,7 +338,7 @@ def parallel_nsa_bwd_kernel_dq(
     do += (bos + i_t) * HQ*V
     lse += (bos + i_t) * HQ
     delta += (bos + i_t) * HQ
-    dq += (i_v * B * T + bos + i_t) * HQ*K
+    dq += (i_v * all + bos + i_t) * HQ*K
     block_indices += (bos + i_t) * H*S + i_h * S
 
     if USE_BLOCK_COUNTS:
@@ -432,6 +433,7 @@ def parallel_nsa_bwd_kernel_dkv(
     i_v, i_s, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
+    all = B * T
     if IS_VARLEN:
         i_n, i_s = tl.load(chunk_indices + i_s * 2).to(tl.int32), tl.load(chunk_indices + i_s * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
@@ -441,7 +443,7 @@ def parallel_nsa_bwd_kernel_dkv(
 
     p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_s * BS, 0), (BS, BK), (1, 0))
     p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s * BS, i_v * BV), (BS, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + (i_v * B*T*H + bos * H + i_h) * K, (T, K), (H*K, 1), (i_s * BS, 0), (BS, BK), (1, 0))
+    p_dk = tl.make_block_ptr(dk + (i_v * all * H + bos * H + i_h) * K, (T, K), (H*K, 1), (i_s * BS, 0), (BS, BK), (1, 0))
     p_dv = tl.make_block_ptr(dv + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s * BS, i_v * BV), (BS, BV), (1, 0))
 
     # [BS, BK]
