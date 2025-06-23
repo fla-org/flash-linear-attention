@@ -111,14 +111,12 @@ jobs:
                     ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
                     HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
           elif [[ "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=$(nproc) \
-                      TRITON_BUILD_WITH_CLANG_LLD=1 \
+            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1 \
                       SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} \
                       ALL_PROXY=${{ secrets.PI_PROXY_ENV }} \
                       HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
           else
-            export CIBW_ENVIRONMENT="MAX_JOBS=$(nproc) \
-                    TRITON_BUILD_WITH_CLANG_LLD=1"
+            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1"
           fi
 
           # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
@@ -303,14 +301,12 @@ jobs:
                     ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
                     HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
           elif [[ "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=$(nproc) \
-                      TRITON_BUILD_WITH_CLANG_LLD=1 \
+            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1 \
                       SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} \
                       ALL_PROXY=${{ secrets.PI_PROXY_ENV }} \
                       HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
           else
-            export CIBW_ENVIRONMENT="MAX_JOBS=$(nproc) \
-                    TRITON_BUILD_WITH_CLANG_LLD=1"
+            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1"
           fi
 
           # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
