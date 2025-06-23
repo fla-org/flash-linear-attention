@@ -99,9 +99,8 @@ def parallel_simple_gla_fwd_kernel(
     # Q block and K block have overlap.
     # masks required
     if USE_G:
-        p_gq = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
         # [BT,]
-        b_gq = tl.load(p_gq, boundary_check=(0,)).to(tl.float32)
+        b_gq = tl.load(g + o_q * H, mask=m_q, other=float('-inf')).to(tl.float32)
         # rescale interchunk output
     else:
         b_gq = None
@@ -120,8 +119,7 @@ def parallel_simple_gla_fwd_kernel(
         m_s = (o_q[:, None] >= o_k[None, :]) & (m_q[:, None] & m_k[None, :])
         b_s = tl.dot(b_q, b_k)
         if USE_G:
-            p_gk = tl.make_block_ptr(g, (T,), (H,), (i_s,), (BS,), (0,))
-            b_gk = tl.load(p_gk, boundary_check=(0,))
+            b_gk = tl.load(g + o_k * H, mask=m_k, other=0)
             b_s *= exp(b_gq[:, None] - b_gk[None, :])
         b_s = tl.where(m_s, b_s, 0)
         # [BT, BV]
@@ -144,8 +142,7 @@ def parallel_simple_gla_fwd_kernel(
         m_s = m_q[:, None] & m_k[None, :]
         b_s = tl.dot(b_q, b_k)
         if USE_G:
-            p_g = tl.make_block_ptr(g, (T,), (H,), (i_s,), (BS,), (0,))
-            b_g = tl.load(p_g, boundary_check=(0,))
+            b_g = tl.load(g + o_k * H, mask=m_k, other=0)
             b_gn = tl.load(g + (min(i_s + BS, T) - 1) * H)
             b_gp = tl.load(g + (i_s-1) * H) if i_s % BT > 0 else 0.
             # No concrete meaning. Just to avoid some layout bugs.
@@ -235,8 +232,7 @@ def parallel_simple_gla_bwd_kernel_dq(
         # [BT, BV] @ [BV, BS] = [BT, BS]
         b_ds = tl.dot(b_do, b_v)
         if USE_G:
-            p_gk = tl.make_block_ptr(g, (T,), (H,), (i_s,), (BS,), (0,))
-            b_gk = tl.load(p_gk, boundary_check=(0,))
+            b_gk = tl.load(g + o_k * H, mask=m_k, other=0)
             b_ds *= exp(b_gq[:, None] - b_gk[None, :])
         m_s = (o_q[:, None] >= o_k[None, :]) & (m_q[:, None] & m_k[None, :])
         b_ds = tl.where(m_s, b_ds, 0)
