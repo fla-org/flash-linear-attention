@@ -21,7 +21,15 @@ from .testing_utils import init_weights_recursively
 @pytest.mark.parametrize("D", [64, 128])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("use_l2warp", [True, False])
-def test_modeling(L, B, T, H, D, dtype, use_l2warp):
+def test_modeling(
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+    use_l2warp: bool,
+):
     run_test_model_forward_backward(L, B, T, H, D, GatedDeltaProductConfig, dtype, use_l2warp)
 
 
