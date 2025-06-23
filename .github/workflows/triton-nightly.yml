@@ -64,6 +64,13 @@ jobs:
             echo "wheel command found at: $WHEEL_PATH"
           fi
 
+      - name: Setup Python
+        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
+        working-directory: triton
+        run: |
+          # Make sure cibuildwheel is updated to latest, this will enable latest python builds
+          pip3 install cibuildwheel -U
+
       - name: Patch setup.py
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
         working-directory: triton
@@ -94,8 +101,6 @@ jobs:
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
         working-directory: triton
         run: |
-          # Make sure cibuildwheel is updated to latest, this will enable latest python builds
-          python3 -m pip install cibuildwheel -U
           # Pass MAX_JOBS=16 because, at time of writing, the VM "only" has 64GB
           # of RAM and OOMs while building if we give it the default number of
           # workers (2 * NUM_CPUs).
@@ -251,6 +256,13 @@ jobs:
             echo "wheel command found at: $WHEEL_PATH"
           fi
 
+      - name: Setup Python
+        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
+        working-directory: triton
+        run: |
+          # Make sure cibuildwheel is updated to latest, this will enable latest python builds
+          pip3 install cibuildwheel -U
+
       - name: Patch setup.py
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
         working-directory: triton
@@ -281,8 +293,6 @@ jobs:
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
         working-directory: triton
         run: |
-          # Make sure cibuildwheel is updated to latest, this will enable latest python builds
-          python3 -m pip install cibuildwheel -U
           # Pass MAX_JOBS=16 because, at time of writing, the VM "only" has 64GB
           # of RAM and OOMs while building if we give it the default number of
           # workers (2 * NUM_CPUs).
