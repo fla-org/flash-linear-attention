@@ -130,13 +130,13 @@ jobs:
             export CIBW_BEFORE_ALL="dnf install clang lld -y"
           fi
 
-          if [[ ${{ matrix.config.arch }} == 'x86_64' ]]; then
+          if [[ $(uname -m) == 'x86_64' ]]; then
             export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
           else
             export CIBW_MANYLINUX_AARCH64_IMAGE="quay.io/pypa/manylinux_2_28_aarch64:latest"
           fi
           # Since fla only support 3.10 +
-          export CIBW_BUILD="cp3{10,11,12,13}-manylinux_${{ matrix.config.arch }}"
+          export CIBW_BUILD="cp3{10,11,12,13}-manylinux_$(uname -m)"
           export CIBW_SKIP="cp{35,36,37,38,39,13t}-*"
           export CIBW_FREE_THREADED_SUPPORT=1
           rm -rf ./wheelhouse* || :
@@ -320,13 +320,13 @@ jobs:
             export CIBW_BEFORE_ALL="dnf install clang lld -y"
           fi
 
-          if [[ ${{ matrix.config.arch }} == 'x86_64' ]]; then
+          if [[ $(uname -m) == 'x86_64' ]]; then
             export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
           else
             export CIBW_MANYLINUX_AARCH64_IMAGE="quay.io/pypa/manylinux_2_28_aarch64:latest"
           fi
           # Since fla only support 3.10 +
-          export CIBW_BUILD="cp312-manylinux_${{ matrix.config.arch }}"
+          export CIBW_BUILD="cp312-manylinux_$(uname -m)"
           export CIBW_SKIP="cp{35,36,37,38,39,10,11,13,13t}-*"
           export CIBW_FREE_THREADED_SUPPORT=1
           rm -rf ./wheelhouse* || :
