@@ -15,6 +15,7 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 * [News](#news)
 * [Models](#models)
 * [Installation](#installation)
+  * [ARM (aarch64) Support for Triton](#arm-aarch64-support-for-triton)
 * [Usage](#usage)
   * [Token Mixing](#token-mixing)
   * [Fused Modules](#fused-modules)
@@ -108,6 +109,10 @@ If you have installed `triton-nightly` and `torch` pre version, please use the f
 pip install einops ninja datasets transformers numpy
 pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 ```
+
+### ARM (aarch64) Support for Triton
+
+You need to choose a specific version to install, see [FAQs](FAQs.md)
 
 ## Usage
 

@@ -25,8 +25,14 @@ from .testing_utils import (
     reason="Skipping test on Intel Alchemist due to known issues with SRAM."
 )
 def run_test_model_forward_backward(
-    L: int, B: int, T: int, H: int, D: int,
-    config_class: type, dtype: torch.dtype, use_l2warp: bool
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    config_class: type,
+    dtype: torch.dtype,
+    use_l2warp: bool,
 ):
     """
     A foundational test for the forward and backward passes of a model.
@@ -60,10 +66,15 @@ def run_test_model_forward_backward(
 # ===================================================================================
 def run_test_generation(
     L: int,
-    B: int, T: int, H: int, D: int,
-    config_class: type, dtype: torch.dtype,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    config_class: type,
+    dtype: torch.dtype,
     use_l2warp: bool = False,
-    model: Optional[torch.nn.Module] = None, config: Optional[PretrainedConfig] = None,
+    model: Optional[torch.nn.Module] = None,
+    config: Optional[PretrainedConfig] = None,
     tol: float = 2e-3,
 ):
     """

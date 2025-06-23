@@ -106,9 +106,8 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     b_r = tl.zeros([BT, BK], dtype=tl.float32)
 
     b_x += b_q * 0.
-
-    b_r = b_q - chunk_update_once(b_x, b_k, b_k, b_m, b_g_exp_q, b_h, b_lamb)
-    b_p = b_r
+    b_r += b_q
+    b_p += b_r
     b_delta_old = tl.sum(b_r*b_r, axis=1)
     for i in range(max_CG_iteration):
         b_o = chunk_update_once(b_p, b_k, b_k, b_m, b_g_exp_q, b_h, b_lamb)

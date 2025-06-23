@@ -8,15 +8,16 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from fla.utils import input_guard
+from fla.utils import input_guard, is_amd
 
 BT_LIST = [8, 16, 32, 64, 128]
+NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
 
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D']
 )
@@ -46,7 +47,7 @@ def l2norm_fwd_kernel1(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D']
 )

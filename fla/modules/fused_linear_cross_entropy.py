@@ -17,13 +17,14 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.ops.utils import logsumexp_fwd
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import input_guard, is_amd
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19
 # However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
+STATIC_WARPS = 32 if not is_amd else 16
 
 
 @triton.jit
@@ -259,7 +260,7 @@ def fused_linear_cross_entropy_forward(
             reduction=reduction,
             V=V,
             BV=BV,
-            num_warps=32
+            num_warps=STATIC_WARPS
         )
         if use_l2warp:
             # a. Calculate the L2 gradient w.r.t logits (g_logits_l2)
@@ -321,7 +322,7 @@ def fused_linear_cross_entropy_backward(
             g=do,
             N=N*H,
             B=B,
-            num_warps=32,
+            num_warps=STATIC_WARPS,
         )
 
         # handle dw
@@ -332,7 +333,7 @@ def fused_linear_cross_entropy_backward(
                 g=do,
                 N=V*H,
                 B=B,
-                num_warps=32,
+                num_warps=STATIC_WARPS,
             )
 
         if db is not None:
@@ -342,7 +343,7 @@ def fused_linear_cross_entropy_backward(
                 g=do,
                 N=V,
                 B=B,
-                num_warps=32,
+                num_warps=STATIC_WARPS,
             )
     return dx, dw, db
 

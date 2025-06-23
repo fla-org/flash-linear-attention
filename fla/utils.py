@@ -357,8 +357,11 @@ def get_multiprocessor_count(tensor_idx: int = 0) -> int:
     try:
         return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
     except BaseException:
-        _cpu_device_warning()
-        return -1
+        # Maybe we use a NPU device.
+        if triton.runtime.driver.active.get_current_target().backend == 'npu':
+            return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['num_vectorcore']
+        else:
+            return 1
 
 
 @lru_cache(maxsize=None)
@@ -371,7 +374,7 @@ def get_available_device() -> str:
 
 
 @lru_cache(maxsize=None)
-def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa']:
+def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa', 'npu']:
     device = get_available_device()
     if device == 'cuda':
         return 'nvidia'
