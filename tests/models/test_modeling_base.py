@@ -11,7 +11,7 @@ from fla.utils import assert_close, device, is_intel_alchemist, is_nvidia_hopper
 from .testing_utils import (
     GENERATION_UNSUPPORTED,
     HOPPER_EXCLUSIVE,
-    MODELING_UNSUPPORTED_VAR_LEN,
+    MODELING_UNSUPPORTED_VARLEN,
     NOT_READY_FOR_TESTING,
     create_model_and_config
 )
@@ -49,7 +49,7 @@ def run_test_model_forward_backward(
     output_fixed = model(input_ids, output_hidden_states=True).hidden_states[-1]
     assert output_fixed.shape == (B, T, config.hidden_size)
 
-    if config_class.__name__ in MODELING_UNSUPPORTED_VAR_LEN:
+    if config_class.__name__ in MODELING_UNSUPPORTED_VARLEN:
         pytest.skip(f"Variable length not supported for {config_class.__name__}.")
 
     cu_seqlens = torch.arange(0, B * T + 1, T, dtype=torch.int32, device=device)
