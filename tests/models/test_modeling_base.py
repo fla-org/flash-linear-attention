@@ -11,7 +11,7 @@ from fla.utils import assert_close, device, is_intel_alchemist, is_nvidia_hopper
 from .testing_utils import (
     GENERATION_UNSUPPORTED,
     HOPPER_EXCLUSIVE,
-    MODELING_UNSUPPORTED_VAR_LEN,
+    MODELING_UNSUPPORTED_VARLEN,
     NOT_READY_FOR_TESTING,
     create_model_and_config
 )
@@ -31,8 +31,8 @@ def run_test_model_forward_backward(
     H: int,
     D: int,
     config_class: type,
-    dtype: torch.dtype,
     use_l2warp: bool,
+    dtype: torch.dtype,
 ):
     """
     A foundational test for the forward and backward passes of a model.
@@ -44,12 +44,12 @@ def run_test_model_forward_backward(
     if config_class.__name__ in NOT_READY_FOR_TESTING:
         pytest.skip(f"{config_class.__name__} is not yet ready for testing.")
 
-    model, config = create_model_and_config(config_class, L, H, D, dtype, use_l2warp=use_l2warp)
+    model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype)
     input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T), device=device)
     output_fixed = model(input_ids, output_hidden_states=True).hidden_states[-1]
     assert output_fixed.shape == (B, T, config.hidden_size)
 
-    if config_class.__name__ in MODELING_UNSUPPORTED_VAR_LEN:
+    if config_class.__name__ in MODELING_UNSUPPORTED_VARLEN:
         pytest.skip(f"Variable length not supported for {config_class.__name__}.")
 
     cu_seqlens = torch.arange(0, B * T + 1, T, dtype=torch.int32, device=device)
@@ -87,7 +87,7 @@ def run_test_generation(
         pytest.skip(f"{config_class.__name__} is not yet ready for testing.")
 
     if model is None:
-        model, config = create_model_and_config(config_class, L, H, D, dtype, use_l2warp=use_l2warp)
+        model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype)
     model.eval()
     model = model.to(dtype).to(device)
 
