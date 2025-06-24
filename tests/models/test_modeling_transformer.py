@@ -31,10 +31,10 @@ def test_modeling(
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype,
     use_l2warp: bool,
+    dtype: torch.dtype,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, TransformerConfig, dtype, use_l2warp)
+    run_test_model_forward_backward(L, B, T, H, D, TransformerConfig, use_l2warp=use_l2warp, dtype=dtype)
 
 
 # ===================================================================================
