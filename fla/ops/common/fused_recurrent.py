@@ -24,7 +24,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_fwd_kernel(
     q,
     k,
@@ -38,8 +38,8 @@ def fused_recurrent_fwd_kernel(
     ht,
     cu_seqlens,
     scale,
+    B,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -137,7 +137,7 @@ def fused_recurrent_fwd_kernel(
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_bwd_kernel(
     q,
     k,
@@ -156,8 +156,8 @@ def fused_recurrent_bwd_kernel(
     dh0,
     cu_seqlens,
     scale,
+    B,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -320,7 +320,7 @@ def fused_recurrent_fwd(
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = min(K, 64), min(V, 64)
+    BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
     h0 = initial_state
@@ -377,7 +377,7 @@ def fused_recurrent_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
-    BK, BV = min(K, 64), min(V, 64)
+    BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
     h0 = initial_state
