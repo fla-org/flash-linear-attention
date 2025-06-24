@@ -31,7 +31,7 @@ dev = ["pytest"]
 Homepage = "https://github.com/fla-org/flash-linear-attention"
 
 [build-system]
-requires = ["setuptools>=45", "wheel", "ninja", "torch"]
+requires = ["setuptools>=45", "wheel"]
 
 [tool.isort]
 line_length = 127

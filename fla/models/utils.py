@@ -42,38 +42,34 @@ class Cache(transformers.cache_utils.Cache):
 
     def update(
         self,
-        recurrent_state: torch.Tensor = None,
-        attn_state: Tuple[torch.Tensor] = None,
-        conv_state: Tuple[torch.Tensor] = None,
-        ffn_state: torch.Tensor = None,
+        recurrent_state: Optional[Tuple[torch.Tensor]] = None,
+        attn_state: Optional[Tuple[torch.Tensor]] = None,
+        conv_state: Optional[Tuple[torch.Tensor]] = None,
+        ffn_state: Optional[Tuple[torch.Tensor]] = None,
         layer_idx: int = 0,
         offset: Optional[int] = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Updates the cache with the new `recurrent_state`/`attn_state`/`conv_state` for the layer `layer_idx`.
-
         Args:
-            recurrent_state (`torch.Tensor`, `optional`):
+            recurrent_state (`torch.Tensor`):
                 The new recurrent state to cache.
-            attn_state (`Tuple[torch.Tensor]`, `optional`):
+            attn_state (`Tuple[torch.Tensor]`):
                 The new attention key/value states to cache.
-            conv_state (`Tuple[torch.Tensor]`, `optional`):
+            conv_state (`Tuple[torch.Tensor]`):
                 The new convolution state to cache.
+            ffn_state (`Tuple[torch.Tensor]`):
+                The new feed-forward state to cache.
             layer_idx (`int`, defaults to 0):
                 The index of the layer to cache the states for.
-            offset (`int`, `optional`, defaults to 1):
+            offset (`int`, defaults to 1):
                 The number of new tokens being processed.
-            cache_kwargs (`Dict[str, Any]`, `optional`):
+            cache_kwargs (`Dict[str, Any]`):
                 Additional arguments for the cache subclass.
 
         Return:
             Dictionary of the updated state.
         """
-
-        # Update the number of seen tokens
-        if layer_idx == 0:
-            self._seen_tokens += offset
 
         if cache_kwargs is None:
             cache_kwargs = {}
@@ -83,6 +79,9 @@ class Cache(transformers.cache_utils.Cache):
             if not (isinstance(attn_state, Tuple) or isinstance(attn_state, List)):
                 raise ValueError("`attn_state` must be a tuple of tensors for key/value states")
         if len(self.states) <= layer_idx:
+            # update the number of seen tokens
+            if layer_idx == 0:
+                self._seen_tokens += offset
             if attn_state is not None:
                 if window_size is not None and input_size > window_size:
                     attn_state = [state[:, -window_size:].contiguous() for state in attn_state]
@@ -94,6 +93,9 @@ class Cache(transformers.cache_utils.Cache):
             )
             self.states.append(state)
         else:
+            # update the number of seen tokens
+            if layer_idx == len(self.states) - 1:
+                self._seen_tokens += offset
             state = self.states[layer_idx]
             if recurrent_state is not None:
                 state['recurrent_state'] = recurrent_state

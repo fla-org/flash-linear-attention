@@ -16,7 +16,7 @@ except ImportError:
 @pytest.mark.parametrize('B', [4])
 @pytest.mark.parametrize('T', [1, 500, 1024])
 @pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize('W', [4])
+@pytest.mark.parametrize('W', [3, 4])
 @pytest.mark.parametrize('activation', [None, 'swish'])
 @pytest.mark.parametrize('has_bias', [False, True])
 @pytest.mark.parametrize('has_residual', [False, True])
@@ -35,6 +35,8 @@ def test_conv(
     has_residual: bool,
     dtype: torch.dtype
 ):
+    if has_bias is False:
+        pytest.skip("causal_conv1d_fn has a bug with no bias")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
@@ -81,7 +83,7 @@ def test_conv(
 @pytest.mark.parametrize("N", [4])
 @pytest.mark.parametrize("T", [500, 1024])
 @pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize("W", [4])
+@pytest.mark.parametrize("W", [3, 4])
 @pytest.mark.parametrize("activation", [None, 'swish'])
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("has_residual", [False, True])
@@ -154,7 +156,7 @@ def test_conv_varlen(
 @pytest.mark.parametrize('B', [4])
 @pytest.mark.parametrize('T', [1, 500, 1024])
 @pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize('W', [4])
+@pytest.mark.parametrize('W', [3, 4])
 @pytest.mark.parametrize('activation', [None, 'swish'])
 @pytest.mark.parametrize('has_bias', [False, True])
 @pytest.mark.parametrize('has_residual', [False, True])

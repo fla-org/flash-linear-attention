@@ -18,13 +18,12 @@ def fused_recurrent_retention(
     reverse: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    s = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
-    g = s[None, None, :].expand(q.shape[0], q.shape[1], q.shape[2]).contiguous()
+    g_gamma = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
     o, final_state = fused_recurrent_simple_gla(
         q=q,
         k=k,
         v=v,
-        g=g,
+        g_gamma=g_gamma,
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,

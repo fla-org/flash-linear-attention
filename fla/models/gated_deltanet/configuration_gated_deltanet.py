@@ -16,6 +16,7 @@ class GatedDeltaNetConfig(PretrainedConfig):
         expand_v: int = 2,
         use_gate: bool = True,
         use_short_conv: bool = True,
+        allow_neg_eigval: bool = False,
         conv_size: int = 4,
         head_dim: int = 256,
         num_heads: int = 6,
@@ -36,6 +37,7 @@ class GatedDeltaNetConfig(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        use_l2warp: bool = False,
         vocab_size: int = 32000,
         **kwargs
     ):
@@ -62,7 +64,9 @@ class GatedDeltaNetConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.allow_neg_eigval = allow_neg_eigval
 
         if attn is not None:
             if not isinstance(attn, Dict):

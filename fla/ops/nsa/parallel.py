@@ -7,7 +7,6 @@ from typing import Optional, Union
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange
 
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.nsa.compression import parallel_nsa_compression
@@ -327,6 +326,7 @@ def parallel_nsa_bwd_kernel_dq(
     i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
+    all = B * T
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
@@ -338,7 +338,7 @@ def parallel_nsa_bwd_kernel_dq(
     do += (bos + i_t) * HQ*V
     lse += (bos + i_t) * HQ
     delta += (bos + i_t) * HQ
-    dq += (i_v * B * T + bos + i_t) * HQ*K
+    dq += (i_v * all + bos + i_t) * HQ*K
     block_indices += (bos + i_t) * H*S + i_h * S
 
     if USE_BLOCK_COUNTS:
@@ -433,6 +433,7 @@ def parallel_nsa_bwd_kernel_dkv(
     i_v, i_s, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
+    all = B * T
     if IS_VARLEN:
         i_n, i_s = tl.load(chunk_indices + i_s * 2).to(tl.int32), tl.load(chunk_indices + i_s * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
@@ -442,7 +443,7 @@ def parallel_nsa_bwd_kernel_dkv(
 
     p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_s * BS, 0), (BS, BK), (1, 0))
     p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s * BS, i_v * BV), (BS, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + (i_v * B*T*H + bos * H + i_h) * K, (T, K), (H*K, 1), (i_s * BS, 0), (BS, BK), (1, 0))
+    p_dk = tl.make_block_ptr(dk + (i_v * all * H + bos * H + i_h) * K, (T, K), (H*K, 1), (i_s * BS, 0), (BS, BK), (1, 0))
     p_dv = tl.make_block_ptr(dv + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s * BS, i_v * BV), (BS, BV), (1, 0))
 
     # [BS, BK]
@@ -780,12 +781,12 @@ def parallel_nsa(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, HQ, T, K]`.
+            queries of shape `[B, T, HQ, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         g_cmp (torch.Tensor):
             Gate score for compressed attention of shape `[B, T, HQ]` if  `head_first=False` else `[B, HQ, T]`.
         g_slc (torch.Tensor):
@@ -805,29 +806,30 @@ def parallel_nsa(
             Selected block size. Default: 64.
         window_size (int):
             Sliding window size. Default: 0.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        head_first (Optional[bool]):
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
+            Outputs of shape `[B, T, HQ, V]`.
     """
     assert block_counts is not None, "block counts must be provided for selection"
+    if head_first:
+        raise DeprecationWarning(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
-    if head_first:
-        q, k, v = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v))
-        g_cmp, g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h') if x is not None else None, (g_cmp, g_slc, g_swa))
-        if not isinstance(block_counts, int):
-            block_counts = rearrange(block_counts, 'b h t -> b t h')
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
     k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
@@ -876,6 +878,4 @@ def parallel_nsa(
                 window_size=(window_size-1, 0)
             )
         o = torch.addcmul(o, o_swa, g_swa.unsqueeze(-1))
-    if head_first:
-        o = rearrange(o, 'b t h d -> b h t d')
     return o

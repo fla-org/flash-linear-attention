@@ -441,7 +441,7 @@ def fused_recurrent_gsa(
             slot representations of shape `[B, T, H, M]`.
         g (torch.Tensor):
             Forget gates of shape `[B, H, T, M]` applied to keys.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[Tuple[torch.Tensor]]):

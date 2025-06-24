@@ -5,7 +5,6 @@ import warnings
 from typing import Optional, Tuple
 
 import torch
-from einops import rearrange
 
 from fla.ops.simple_gla.chunk import chunk_simple_gla
 
@@ -24,12 +23,12 @@ def chunk_retention(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
-        scale (Optional[int]):
+            values of shape `[B, T, H, V]`.
+        scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
@@ -42,12 +41,12 @@ def chunk_retention(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
 
@@ -57,7 +56,6 @@ def chunk_retention(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-        q, k, v = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
@@ -65,18 +63,15 @@ def chunk_retention(
             "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
         )
-    s = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
-    g = s[None, None, :].expand(q.shape[0], q.shape[1], q.shape[2]).contiguous()
+    g_gamma = (1 - q.new_tensor(2., dtype=torch.float).pow(-5. - q.new_tensor(range(q.shape[2]), dtype=torch.float))).log()
     o, final_state = chunk_simple_gla(
         q=q,
         k=k,
         v=v,
         scale=scale,
-        g=g,
+        g_gamma=g_gamma,
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens
     )
-    if head_first:
-        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

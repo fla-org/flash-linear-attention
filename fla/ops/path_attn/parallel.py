@@ -84,7 +84,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
         BS = 64
         S = 512
         cu_seqlens = ctx.cu_seqlens
-        A, _ = chunk_scaled_dot_kkt_fwd(
+        A = chunk_scaled_dot_kkt_fwd(
             k=w,
             beta=beta,
             cu_seqlens=cu_seqlens,

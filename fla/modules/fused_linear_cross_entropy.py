@@ -17,13 +17,14 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.ops.utils import logsumexp_fwd
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import input_guard, is_amd
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19
 # However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
+STATIC_WARPS = 32 if not is_amd else 16
 
 
 @triton.jit
@@ -195,7 +196,9 @@ def fused_linear_cross_entropy_forward(
     label_smoothing: float = 0.0,
     logit_scale: float = 1.0,
     num_chunks: int = 8,
-    reduction: str = "mean"
+    reduction: str = "mean",
+    use_l2warp: bool = False,
+    l2_penalty_factor: float = 1e-4
 ):
     device = x.device
     # inputs have shape: [N, H]
@@ -241,6 +244,8 @@ def fused_linear_cross_entropy_forward(
 
         # unreduced loss
         c_loss = loss[start:end]
+        if use_l2warp:
+            c_maxx, c_ids = torch.max(c_logits, -1, keepdim=True)
 
         # Here we calculate the gradient of c_logits in place so we can save memory.
         cross_entropy_kernel[(c_logits.shape[0],)](
@@ -255,12 +260,34 @@ def fused_linear_cross_entropy_forward(
             reduction=reduction,
             V=V,
             BV=BV,
-            num_warps=32
+            num_warps=STATIC_WARPS
         )
+        if use_l2warp:
+            # a. Calculate the L2 gradient w.r.t logits (g_logits_l2)
+            g_logits_l2 = torch.zeros_like(c_logits)
+
+            # Normalize factor by B*T, which is the 'total' variable here
+            l2_factor = l2_penalty_factor / total if reduction == 'mean' else l2_penalty_factor
+            penalty_grad = c_maxx * l2_factor
+            g_logits_l2.scatter_(-1, c_ids, penalty_grad)
+
+            # b. Backpropagate g_logits_l2 to get its effect on dx, dw, db
+            # and add it to the main gradients.
+            # Total_dx = CE_dx + L2_dx
+            # Total_dw = CE_dw + L2_dw
+            # Total_db = CE_db + L2_db
+            if weight is not None:
+                dw.add_(g_logits_l2.t() @ c_x)
+            if bias is not None:
+                db.add_(g_logits_l2.sum(0))
+            # The dx contribution must be added to the final dx calculation
+            dx_l2_contribution = torch.mm(g_logits_l2, weight)
+        else:
+            dx_l2_contribution = 0.0
 
         # gradient of logits is computed in-place by the above triton kernel and is of shape: C x V
         # thus dx should be of shape: C x H
-        dx[start:end] = torch.mm(c_logits, weight)
+        dx[start:end] = torch.mm(c_logits, weight) + dx_l2_contribution
 
         # keep dw in fp32 to maintain precision
         if weight is not None:
@@ -295,7 +322,7 @@ def fused_linear_cross_entropy_backward(
             g=do,
             N=N*H,
             B=B,
-            num_warps=32,
+            num_warps=STATIC_WARPS,
         )
 
         # handle dw
@@ -306,7 +333,7 @@ def fused_linear_cross_entropy_backward(
                 g=do,
                 N=V*H,
                 B=B,
-                num_warps=32,
+                num_warps=STATIC_WARPS,
             )
 
         if db is not None:
@@ -316,7 +343,7 @@ def fused_linear_cross_entropy_backward(
                 g=do,
                 N=V,
                 B=B,
-                num_warps=32,
+                num_warps=STATIC_WARPS,
             )
     return dx, dw, db
 
@@ -335,7 +362,9 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
         label_smoothing: float = 0.0,
         logit_scale: float = 1.0,
         num_chunks: int = 8,
-        reduction: str = "mean"
+        reduction: str = "mean",
+        use_l2warp: bool = False,
+        l2_penalty_factor: float = 1e-4,
     ):
         """
         Fusing the last linear layer with cross-entropy loss
@@ -368,6 +397,10 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             'mean': the weighted mean of the output is taken,
             'sum': the output will be summed.
             Default: 'mean'.
+        use_l2warp: bool = False,
+            Whether to use L2 regularization on the logits to prevent overconfidence.
+            Default: False
+        l2_penalty_factor: float = 1e-4,
         """
         loss, dx, dw, db = fused_linear_cross_entropy_forward(
             x,
@@ -378,7 +411,9 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             label_smoothing,
             logit_scale,
             num_chunks,
-            reduction
+            reduction,
+            use_l2warp,
+            l2_penalty_factor
         )
         # downcast to dtype and store for backward
         ctx.save_for_backward(
@@ -393,7 +428,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
     def backward(ctx, do):
         dx, dw, db = ctx.saved_tensors
         dx, dw, db = fused_linear_cross_entropy_backward(do, dx, dw, db)
-        return dx, None, dw, db, None, None, None, None, None
+        return dx, None, dw, db, None, None, None, None, None, None, None
 
 
 def fused_linear_cross_entropy_loss(
@@ -405,7 +440,9 @@ def fused_linear_cross_entropy_loss(
     label_smoothing: float = 0.0,
     logit_scale: float = 1.0,
     num_chunks: int = 8,
-    reduction: str = "mean"
+    reduction: str = "mean",
+    use_l2warp: bool = False,
+    l2_penalty_factor: float = 1e-4,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
@@ -442,7 +479,9 @@ def fused_linear_cross_entropy_loss(
         label_smoothing,
         logit_scale,
         num_chunks,
-        reduction
+        reduction,
+        use_l2warp,
+        l2_penalty_factor
     )
 
 
@@ -454,7 +493,9 @@ class FusedLinearCrossEntropyLoss(nn.Module):
         label_smoothing: float = 0.0,
         logit_scale: float = 1.0,
         num_chunks: int = 8,
-        reduction: str = "mean"
+        reduction: str = "mean",
+        use_l2warp: bool = False,
+        l2_penalty_factor: float = 1e-4,
     ):
         """
         Args:
@@ -482,6 +523,8 @@ class FusedLinearCrossEntropyLoss(nn.Module):
         self.logit_scale = logit_scale
         self.num_chunks = num_chunks
         self.reduction = reduction
+        self.use_l2warp = use_l2warp
+        self.l2_penalty_factor = l2_penalty_factor
 
     @torch.compiler.disable
     def forward(
@@ -512,7 +555,9 @@ class FusedLinearCrossEntropyLoss(nn.Module):
             label_smoothing=self.label_smoothing,
             logit_scale=self.logit_scale,
             num_chunks=self.num_chunks,
-            reduction=self.reduction
+            reduction=self.reduction,
+            use_l2warp=self.use_l2warp,
+            l2_penalty_factor=self.l2_penalty_factor
         )
         return loss
 

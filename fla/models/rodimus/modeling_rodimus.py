@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 from functools import partial
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -17,12 +17,13 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
-from fla.models.rodimus.configuration_rodimus import RodimusConfig
 from fla.layers.rodimus import RodimusAttention, SlidingWindowSharedKeyAttention, align_multiple
+from fla.models.rodimus.configuration_rodimus import RodimusConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as RodimusMLP
 from fla.modules import RMSNorm
+from fla.modules.l2warp import l2_warp
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -325,13 +326,18 @@ class RodimusModel(RodimusPreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.block_residual_in_fp32 = config.block_residual_in_fp32
-        
+
         if config.block_residual_in_fp32:
             if not config.residual_in_fp32:
-                logger.warning_once('`residual_in_fp32=False` is incompatible with `block_residual_in_fp32=True` Setting `residual_in_fp32=True`...')
+                warning_message = (
+                    "`residual_in_fp32=False` is incompatible with `block_residual_in_fp32=True`. "
+                    "Setting `residual_in_fp32=True`..."
+                )
+                logger.warning_once(warning_message)
                 config.residual_in_fp32 = True
             if not config.fuse_norm:
-                logger.warning_once('`fuse_norm=False` is incompatible with `block_residual_in_fp32=True` Setting `fuse_norm=True`...')
+                logger.warning_once(
+                    '`fuse_norm=False` is incompatible with `block_residual_in_fp32=True` Setting `fuse_norm=True`...')
                 config.fuse_norm = True
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
@@ -414,7 +420,7 @@ class RodimusModel(RodimusPreTrainedModel):
                     residual=residual,
                     **kwargs
                 )
-                
+
             if self.block_residual_in_fp32:
                 hidden_states, residual = hidden_states
             else:
@@ -570,7 +576,7 @@ class RodimusForCausalLM(RodimusPreTrainedModel, GenerationMixin):
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if fuse_linear_and_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss()
+                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
                 else:
@@ -583,6 +589,7 @@ class RodimusForCausalLM(RodimusPreTrainedModel, GenerationMixin):
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
+                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]

@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-from einops import rearrange, reduce
+from einops import reduce
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
@@ -1009,18 +1009,18 @@ def chunk_gsa(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]` if `head_first=False` else `[B, H, T, K]`.
+            queries of shape `[B, T, HQ, K]`..
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            keys of shape `[B, T, H, K]`.
             GQA is performed if `H` is not equal to `HQ`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            values of shape `[B, T, H, V]`.
         s (torch.Tensor):
-            slot representations of shape `[B, T, H, M]` if `head_first=False` else `[B, H, T, M]`.
+            slot representations of shape `[B, T, H, M]`..
         g (torch.Tensor):
-            Forget gates of shape `[B, H, T, M]` applied to keys.
+            Forget gates of shape `[B, T, H, M]` applied to keys.
             If not provided, this function is equivalent to vanilla ABC.
-        scale (Optional[int]):
+        scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[Tuple[torch.Tensor]]):
@@ -1040,12 +1040,12 @@ def chunk_gsa(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
-            Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `False`.
+            Whether the inputs are in the head-first format. Default: `False`.
+            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, H, V]`.
         final_state (Tuple[torch.Tensor]):
             Final state tuple having tensors of shape `[N, H, K, M]` and `[N, H, M, V]` if `output_final_state=True`.
             `None` otherwise.
@@ -1087,7 +1087,6 @@ def chunk_gsa(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-        q, k, v, s, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, s, g))
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
@@ -1131,6 +1130,4 @@ def chunk_gsa(
         checkpoint_level,
         cu_seqlens
     )
-    if head_first:
-        o = rearrange(o, 'b h t ... -> b t h ...')
     return o, final_state

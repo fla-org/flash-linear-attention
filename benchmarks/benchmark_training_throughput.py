@@ -143,8 +143,8 @@ if __name__ == "__main__":
     parser.add_argument("--seq_len", default=2048, type=int)
     parser.add_argument("--context_len", default=None, type=int)
     parser.add_argument("--varlen", action='store_true')
-    parser.add_argument("--warmup_steps", default=16, type=int)
-    parser.add_argument("--steps", default=32, type=int)
+    parser.add_argument("--warmup_steps", default=64, type=int)
+    parser.add_argument("--steps", default=256, type=int)
     parser.add_argument("--compile", action='store_true')
     args = parser.parse_args()
     profile(

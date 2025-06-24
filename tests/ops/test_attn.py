@@ -35,7 +35,7 @@ test_h_list = [2]
 @pytest.mark.parametrize('H', test_h_list)
 @pytest.mark.parametrize('HQ', test_hq_list)
 @pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [0.1])
+@pytest.mark.parametrize('scale', [1, 0.1])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     not HAS_FLASH,

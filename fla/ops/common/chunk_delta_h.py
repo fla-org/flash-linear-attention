@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp, safe_exp
+from fla.ops.utils.op import exp
 from fla.utils import is_nvidia_hopper, use_cuda_graph
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
@@ -145,11 +145,12 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             tl.store(p_v_new, b_v_new.to(p_v_new.dtype.element_ty), boundary_check=(0, 1))
 
         if USE_G:
+            m_t = (i_t * BT + tl.arange(0, BT)) < T
             last_idx = min((i_t + 1) * BT, T) - 1
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_v_new = b_v_new * safe_exp(b_g_last - b_g)[:, None]
+            b_v_new = b_v_new * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
             b_g_last = exp(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
@@ -308,10 +309,10 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_g_exp = None
 
         p_dv = tl.make_block_ptr(dv, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_wo = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_dv2 = tl.make_block_ptr(dv2, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
-        b_wo = tl.load(p_wo, boundary_check=(0, 1))
+        b_do = tl.load(p_do, boundary_check=(0, 1))
         b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
         # Update dv
@@ -335,7 +336,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
 
         if USE_G:
-            b_dv *= safe_exp(bg_last - b_g)[:, None]
+            m_t = (i_t * BT + tl.arange(0, BT)) < T
+            b_dv *= tl.where(m_t, exp(bg_last - b_g), 0)[:, None]
         b_dv += tl.load(p_dv, boundary_check=(0, 1))
 
         tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
@@ -348,7 +350,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dh1 *= bg_last_exp
             b_q = b_q * b_g_exp[None, :]
         b_q = (b_q * scale).to(b_q.dtype)
-        b_dh1 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+        b_dh1 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 64:
             p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
@@ -358,7 +360,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_dh2 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
             b_q = (b_q * scale).to(b_q.dtype)
-            b_dh2 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+            b_dh2 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 128:
             p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
@@ -368,7 +370,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_dh3 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
             b_q = (b_q * scale).to(b_q.dtype)
-            b_dh3 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+            b_dh3 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 192:
             p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
@@ -378,7 +380,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_dh4 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
             b_q = (b_q * scale).to(b_q.dtype)
-            b_dh4 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+            b_dh4 += tl.dot(b_q, b_do.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
 
     if USE_INITIAL_STATE:
         p_dh0 = tl.make_block_ptr(dh0, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))

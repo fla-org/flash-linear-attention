@@ -135,6 +135,8 @@ class Attention(nn.Module):
 
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
+            if q.shape[1] == 1 and self.window_size is not None:
+                attention_mask = attention_mask[:, -self.window_size:]
             q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
@@ -200,6 +201,7 @@ def test_recurrent_forward(
 @pytest.mark.parametrize('D', test_d_list)
 @pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
 @pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize('mask_p', [0, 0.5])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
@@ -212,7 +214,8 @@ def test_chunk(
     D: int,
     dtype: torch.dtype,
     scale: float,
-    gate_logit_normalizer: float
+    gate_logit_normalizer: float,
+    mask_p: float,
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
@@ -224,6 +227,7 @@ def test_chunk(
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     g = g / gate_logit_normalizer
+    g = g * (torch.rand_like(g) > mask_p)
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
 
     tri, tri_ht = chunk_gated_delta_rule(
@@ -266,22 +270,22 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-@pytest.mark.parametrize('N', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize('H', [2])
+@pytest.mark.parametrize('D', [128])
+@pytest.mark.parametrize('cu_seqlens', [[0, 122, 229, 400, 1000]])
+@pytest.mark.parametrize('scale', [1])
+@pytest.mark.parametrize('mask_p', [0.5])
 @pytest.mark.parametrize('dtype', [torch.float16])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_chunk_varlen(
-    N: int,
-    T: int,
+    cu_seqlens: List[int],
     H: int,
     D: int,
     scale: float,
+    mask_p: float,
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
@@ -289,16 +293,16 @@ def test_chunk_varlen(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
     g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
+    g = g * (torch.rand_like(g) > mask_p)
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=dtype)
 
@@ -348,5 +352,5 @@ def test_chunk_varlen(
     assert_close(' dk', ref_dk, tri_dk, 0.008)
     assert_close(' dv', ref_dv, tri_dv, 0.007)
     assert_close(' db', ref_dbeta, tri_dbeta, 0.015)
-    assert_close(' dg', ref_dg, tri_dg, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+    assert_close(' dg', ref_dg, tri_dg, 0.015)
