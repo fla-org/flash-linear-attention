@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-import os
 from typing import List, Optional
 
 import pytest
@@ -34,26 +33,31 @@ def naive_forgetting_attn(
 
 
 @pytest.mark.parametrize(
-    ("H", "HQ", "T", "D"),
+    ('B', 'T', 'H', 'HQ', 'D', 'scale'),
     [
-        (2, 8, 1000, 60),
-        (2, 2, 211, 110),
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 1.0),
+            (3, 111, 2, 2, 100, 1.0),
+            (3, 1024, 2, 8, 60, 0.1),
+            (3, 1024, 2, 8, 128, 0.1),
+            (4, 2048, 2, 8, 64, 0.1)
+        ]
     ]
 )
 def test_parallel(
+    B: int,
+    T: int,
     H: int,
     HQ: int,
-    T: int,
     D: int,
+    scale: float,
 ):
-    B = 3
-    scale = D**-0.5
+    torch.manual_seed(42)
     dtype = torch.float16
     if not check_shared_mem('hopper') and D > 128:
         # maybe we can enable this test on Triton 3.3.0
         pytest.skip("Skipping test because global shared memory is not available")
-    torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
@@ -84,9 +88,14 @@ def test_parallel(
 
 
 @pytest.mark.parametrize(
-    ("cu_seqlens"),
+    ('H', 'HQ', 'D', 'cu_seqlens'),
     [
-        ([0, 15, 100, 300, 1203, 2000]),
+        pytest.param(*test, id="H{}-HQ{}-D{}-cu_seqlens{}".format(*test))
+        for test in [
+            (2, 2, 64, [0, 15]),
+            (2, 8, 64, [0, 256, 500, 1000]),
+            (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
+        ]
     ]
 )
 @pytest.mark.skipif(
@@ -94,15 +103,14 @@ def test_parallel(
     reason="Intel Triton Failure"
 )
 def test_parallel_varlen(
+    H: int,
+    HQ: int,
+    D: int,
     cu_seqlens: List[int],
 ):
     torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     T = cu_seqlens[-1]
-    HQ = 2
-    H = 2
-    D = 64
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     dtype = torch.float16
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()

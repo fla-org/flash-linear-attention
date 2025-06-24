@@ -18,17 +18,25 @@ except Exception:
 
 
 @pytest.mark.parametrize(
-    ("H", "HQ", "T", "D"),
+    ('B', 'T', 'H', 'HQ', 'D', 'scale'),
     [
-        (2, 8, 1000, 60),
-        (2, 2, 211, 110),
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 1.0),
+            (3, 111, 2, 2, 100, 1.0),
+            (3, 1024, 2, 8, 60, 0.1),
+            (3, 1024, 2, 8, 128, 0.1),
+            (4, 2048, 2, 8, 64, 0.1)
+        ]
     ]
 )
 def test_parallel(
+    B: int,
+    T: int,
     H: int,
     HQ: int,
-    T: int,
     D: int,
+    scale: float,
 ):
     if not check_shared_mem('hopper') and D > 128:
         pytest.skip(reason="Skip test, do not have enough shard mem")
@@ -36,8 +44,6 @@ def test_parallel(
         pytest.skip(reason="Skipping test because flash-attn is not installed")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    B = 3
-    scale = D**-0.5
     q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
     k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
     v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
@@ -62,19 +68,24 @@ def test_parallel(
 
 
 @pytest.mark.parametrize(
-    ("cu_seqlens"),
+    ('H', 'HQ', 'D', 'cu_seqlens'),
     [
-        ([0, 15, 100, 300, 1203, 2000]),
+        pytest.param(*test, id="H{}-HQ{}-D{}-cu_seqlens{}".format(*test))
+        for test in [
+            (2, 2, 64, [0, 15]),
+            (2, 8, 64, [0, 256, 500, 1000]),
+            (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
+        ]
     ]
 )
 def test_parallel_varlen(
+    H: int,
+    HQ: int,
+    D: int,
     cu_seqlens: List[int],
 ):
-    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     T = cu_seqlens[-1]
-    HQ = 2
-    H = 2
-    D = 64
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     dtype = torch.float16
 
     q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
