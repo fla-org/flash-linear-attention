@@ -38,7 +38,6 @@ class RWKV7Attention(nn.Module):
         elementwise_affine: Optional[bool] = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
-        is_first_layer: bool = True,
         fuse_norm: bool = False,
         value_dim: int = None,
         num_hidden_layers: int = None,
@@ -51,8 +50,7 @@ class RWKV7Attention(nn.Module):
         self.hidden_size = hidden_size
 
         self.key_dim = hidden_size
-        #self.value_dim = value_dim if value_dim is not None else hidden_size
-        self.value_dim = hidden_size
+        self.value_dim = value_dim if value_dim is not None else hidden_size
         if head_dim is None and num_heads is None:
             raise ValueError("Either `head_dim` or `num_heads` must be specified.")
         elif head_dim is not None:
@@ -61,12 +59,34 @@ class RWKV7Attention(nn.Module):
         elif num_heads is not None:
             self.head_dim = int(hidden_size // num_heads)
             self.num_heads = num_heads
-        self.decay_low_rank_dim = decay_low_rank_dim
-        self.gate_low_rank_dim = gate_low_rank_dim
-        self.a_low_rank_dim = a_low_rank_dim
-        self.v_low_rank_dim = v_low_rank_dim
+        self.head_v_dim = int(self.value_dim // self.num_heads)
+
+        if decay_low_rank_dim is None:
+            decay_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
+            self.decay_low_rank_dim = decay_low_rank_dim
+        else:
+            self.decay_low_rank_dim = decay_low_rank_dim
+
+        if gate_low_rank_dim is None:
+            gate_low_rank_dim = max(32, int(round((0.6 * (hidden_size**0.8)) / 32) * 32))
+            self.gate_low_rank_dim = gate_low_rank_dim
+        else:
+            self.gate_low_rank_dim = gate_low_rank_dim
+
+        if a_low_rank_dim is None:
+            a_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
+            self.a_low_rank_dim = a_low_rank_dim
+        else:
+            self.a_low_rank_dim = a_low_rank_dim
+
+        if v_low_rank_dim is None:
+            v_low_rank_dim = max(32, int(round((1.3 * (hidden_size**0.5)) / 32) * 32))
+            self.v_low_rank_dim = v_low_rank_dim
+        else:
+            self.v_low_rank_dim = v_low_rank_dim
+
         self.layer_idx = layer_idx
-        self.is_first_layer = is_first_layer
+        self.num_hidden_layers = num_hidden_layers
         self.fuse_norm = fuse_norm
 
         self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
@@ -87,7 +107,7 @@ class RWKV7Attention(nn.Module):
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
         self.w_lora = LoRA(hidden_size, self.key_dim, low_rank_dim=decay_low_rank_dim, activation='tanh')
-        if not is_first_layer:
+        if self.layer_idx != 0:
             self.v_lora = LoRA(hidden_size, self.value_dim, low_rank_dim=v_low_rank_dim, activation=None)
         self.a_lora = LoRA(hidden_size, self.key_dim, low_rank_dim=a_low_rank_dim, activation=None)
         self.g_lora = LoRA(hidden_size, self.value_dim, low_rank_dim=gate_low_rank_dim, activation='sigmoid', bias=False)
@@ -238,7 +258,7 @@ class RWKV7Attention(nn.Module):
         k = self.k_proj(xk)
         v = self.v_proj(xv)
 
-        if self.is_first_layer:
+        if self.layer_idx == 0:
             v_first = v
         else:
             v = torch.lerp(v, v_first, self.v_lora(xv).sigmoid())
@@ -262,26 +282,39 @@ class RWKV7Attention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            v = v * attention_mask[:, -v.shape[-2]:, None]
-        r, w, k, v, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, v, a))
+            v = v * attention_mask[:, -seq_len:, None]
 
-        recurrent_state = last_state['recurrent_state'] if last_state is not None else None
+        r, w, k, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, a))
+        v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
 
-        rwkv7_fn = chunk_rwkv7 if mode == 'chunk' else fused_recurrent_rwkv7
-        cu_seqlens = kwargs.get('cu_seqlens', None)
-        o, recurrent_state = rwkv7_fn(
-            r=r,
-            w=w,
-            k=k,
-            v=v,
-            a=-kk,
-            b=kk * a,
-            scale=1.,
-            initial_state=recurrent_state,
-            output_final_state=use_cache,
-            cu_seqlens=cu_seqlens,
-            head_first=False
-        )
+        if self.training or seq_len >= 64:
+            # if training, use chunk mode no matter how short the sequence is
+            # launching the triton kernel for just one token will actually be slower
+            o, recurrent_state = chunk_rwkv7(
+                r=r,
+                w=w,
+                k=k,
+                v=v,
+                a=-kk,
+                b=kk * a,
+                scale=1.,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
+            )
+        else:
+            o, recurrent_state = fused_mul_recurrent_rwkv7(
+                r=r,
+                w=w,
+                k=k,
+                v=v,
+                kk=kk,
+                a=a,
+                scale=1.,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
+            )
 
         if past_key_values is not None:
             past_key_values.update(
@@ -295,11 +328,8 @@ class RWKV7Attention(nn.Module):
             o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))
         else:
             o = self.g_norm(rearrange(o, 'b t h d -> (b t) (h d)')).view(batch_size, seq_len, -1)
-        
-        right_term = (r * k * self.r_k).sum(-1, keepdim=True) * v
-        right_term = rearrange(right_term, 'b t h d -> b t (h d)') 
 
-        o = o + right_term
+        o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
         o = self.o_proj(o * g)
 
         return o, None, past_key_values, v_first

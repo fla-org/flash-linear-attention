@@ -108,15 +108,14 @@ class RWKV7Block(nn.Module):
     def __init__(
         self,
         config: RWKV7Config,
-        layer_idx: int,
-        is_first_layer: bool
+        layer_idx: int
     ) -> RWKV7Block:
         super().__init__()
 
         self.config = config
         self.layer_idx = layer_idx
 
-        if config.norm_first and is_first_layer:
+        if config.norm_first and layer_idx == 0:
             self.pre_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
                 config.hidden_size,
                 bias=config.norm_bias,
@@ -151,8 +150,8 @@ class RWKV7Block(nn.Module):
                 norm_eps=config.norm_eps,
                 fuse_norm=config.fuse_norm,
                 layer_idx=layer_idx,
-                is_first_layer=is_first_layer,
-                value_dim=config.value_dim[layer_idx]
+                value_dim=config.value_dim[layer_idx],
+                num_hidden_layers=config.num_hidden_layers
             )
         self.ffn_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
             config.hidden_size,
