@@ -592,3 +592,4 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+    

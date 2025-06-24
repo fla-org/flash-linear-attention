@@ -335,3 +335,4 @@ class RWKV7Attention(nn.Module):
         o = self.o_proj(o * g)
 
         return o, None, past_key_values, v_first
+    
