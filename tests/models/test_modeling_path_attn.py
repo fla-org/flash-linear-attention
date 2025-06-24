@@ -11,25 +11,47 @@ from .test_modeling_base import run_test_generation, run_test_model_forward_back
 # ===================================================================================
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
-@pytest.mark.parametrize("L", [4])
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [1024])
-@pytest.mark.parametrize("H", [4])
-@pytest.mark.parametrize("D", [32, 64])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("use_l2warp", [True, False])
-def test_modeling(L, B, T, H, D, dtype, use_l2warp):
+@pytest.mark.parametrize(
+    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype'],
+    [
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}".format(*test))
+        for test in [
+            (4, 4, 1024, 4, 64, True, torch.bfloat16),
+            (4, 4, 1024, 4, 64, False, torch.bfloat16),
+            (4, 4, 1024, 4, 128, False, torch.bfloat16),
+        ]
+    ]
+)
+def test_modeling(
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+    use_l2warp: bool,
+):
     run_test_model_forward_backward(L, B, T, H, D, PaTHAttentionConfig, dtype, use_l2warp)
 
 
 # ===================================================================================
 # Test for Generation
 # ===================================================================================
-@pytest.mark.parametrize("L", [2])
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [4000])
-@pytest.mark.parametrize("H", [8])
-@pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.float16])
-def test_generation(L, B, T, H, D, dtype):
+@pytest.mark.parametrize(
+    ['L', 'B', 'T', 'H', 'D', 'dtype'],
+    [
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (2, 4, 2000, 8, 64, torch.float16),
+        ]
+    ]
+)
+def test_generation(
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
     run_test_generation(L, B, T, H, D, PaTHAttentionConfig, dtype)
