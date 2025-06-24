@@ -116,6 +116,25 @@ class Mamba2Cache:
             self.conv_states[layer_idx].zero_()
         for layer_idx in self.ssm_states:
             self.ssm_states[layer_idx].zero_()
+    
+    def clone(self) -> "Mamba2Cache":
+        """
+        Creates a deep copy of the cache with cloned tensors.
+        
+        Returns:
+            A new Mamba2Cache instance with cloned state tensors.
+        """
+
+        new_cache = Mamba2Cache.__new__(Mamba2Cache)
+        
+        for attr, value in self.__dict__.items():
+            if not isinstance(value, torch.Tensor):
+                setattr(new_cache, attr, value)
+        
+        new_cache.conv_states = self.conv_states.detach().clone()
+        new_cache.ssm_states = self.ssm_states.detach().clone()
+        
+        return new_cache
 
 
 class Mamba2Block(nn.Module):
@@ -144,6 +163,7 @@ class Mamba2Block(nn.Module):
             use_bias=config.use_bias,
             norm_eps=config.norm_eps,
             layer_idx=layer_idx,
+            use_segment_input=config.use_segment_input,
         )
 
     def forward(
@@ -158,15 +178,26 @@ class Mamba2Block(nn.Module):
         if self.residual_in_fp32:
             residual = residual.to(torch.float32)
 
-        hidden_states = self.mixer(
-            hidden_states,
-            cache_params=cache_params,
-            cache_position=cache_position,
-            attention_mask=attention_mask,
-        )
+        if self.config.use_segment_input:
+            hidden_states, cache_params = self.mixer(
+                hidden_states,
+                cache_params=cache_params,
+                cache_position=cache_position,
+                attention_mask=attention_mask,
+            )
+        else:
+            hidden_states = self.mixer(
+                hidden_states,
+                cache_params=cache_params,
+                cache_position=cache_position,
+                attention_mask=attention_mask,
+            )
+
         hidden_states = residual + hidden_states
         if self.residual_in_fp32:
             hidden_states = hidden_states.to(dtype=self.norm.weight.dtype)
+        if self.config.use_segment_input:
+            return hidden_states, cache_params
         return hidden_states
 
 

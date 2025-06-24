@@ -127,6 +127,7 @@ class Mamba2(nn.Module):
         use_bias: bool = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
+        use_segment_input: bool = False,
     ) -> Mamba2:
         super().__init__()
 
@@ -152,6 +153,8 @@ class Mamba2(nn.Module):
         self.time_step_limit = time_step_limit
         self.time_step_min = time_step_min
         self.time_step_max = time_step_max
+
+        self.use_segment_input = use_segment_input
 
         self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.ssm_state_size
         self.conv1d = nn.Conv1d(
@@ -310,7 +313,7 @@ class Mamba2(nn.Module):
 
                 # 2. Convolution sequence transformation
                 # Init cache
-                if cache_params is not None:
+                if cache_params is not None and not self.use_segment_input:
                     hidden_states_B_C_transposed = hidden_states_B_C.transpose(1, 2)
                     conv_states = nn.functional.pad(
                         hidden_states_B_C_transposed,
@@ -319,6 +322,43 @@ class Mamba2(nn.Module):
                     cache_params.update_conv_state(
                         layer_idx=self.layer_idx, new_conv_state=conv_states, cache_init=True
                     )
+                elif cache_params is not None and self.use_segment_input:
+                    prev_conv_states = cache_params.conv_states[self.layer_idx]
+                    current_states = hidden_states_B_C.transpose(1, 2)
+                    
+                    if prev_conv_states is not None:
+                        if prev_conv_states.shape[1] != current_states.shape[1]:
+                            print(f"⚠️ Warning: Channel dimensions do not match! prev_conv_states: {prev_conv_states.shape}, current_states: {current_states.shape}")
+                            current_states = current_states[:, :prev_conv_states.shape[1], :]
+                        
+                        # Cat history states and current input
+                        combined_states = torch.cat([prev_conv_states, current_states], dim=-1)
+                        conv_output = self.conv1d(combined_states)
+                        current_output = conv_output[..., :seq_len]
+
+                        new_cache_end = combined_states[..., -cache_params.conv_kernel_size:]
+                        new_cache_end = new_cache_end.transpose(1, 2)
+                        
+                        cache_params.update_conv_state(
+                            layer_idx=self.layer_idx,
+                            new_conv_state=new_cache_end,
+                            cache_init=False
+                        )
+                        hidden_states_B_C = self.act(current_output.transpose(1, 2))
+                    else:
+                        padded_states = nn.functional.pad(
+                            current_states,
+                            (cache_params.conv_kernel_size - current_states.shape[-1], 0)
+                        )
+                        
+                        cache_params.update_conv_state(
+                            layer_idx=self.layer_idx,
+                            new_conv_state=padded_states,
+                            cache_init=True
+                        )
+                        
+                        conv_output = self.conv1d(padded_states)[..., :seq_len]
+                        hidden_states_B_C = self.act(conv_output.transpose(1, 2))
 
                 if self.activation not in ["silu", "swish"]:
                     hidden_states_B_C = self.act(
@@ -349,6 +389,7 @@ class Mamba2(nn.Module):
                     chunk_size=self.chunk_size,
                     D=self.D,
                     z=None,
+                    initial_states=cache_params.ssm_states[self.layer_idx] if cache_params is not None else None,
                     seq_idx=None,
                     return_final_states=True,
                     dt_bias=self.dt_bias,
@@ -366,6 +407,8 @@ class Mamba2(nn.Module):
 
                 # 4. Final linear projection
                 out = self.out_proj(scan_output)
+        if self.use_segment_input:
+            return out, cache_params
         return out
 
     # fmt: off
@@ -401,6 +444,43 @@ class Mamba2(nn.Module):
             if self.use_conv_bias:
                 hidden_states_B_C = hidden_states_B_C + self.conv1d.bias
             hidden_states_B_C = self.act(hidden_states_B_C)
+        elif self.use_segment_input and cache_params is not None:
+            prev_conv_states = cache_params.conv_states[self.layer_idx]
+            current_states = hidden_states_B_C.transpose(1, 2)
+            
+            if prev_conv_states is not None:
+                if prev_conv_states.shape[1] != current_states.shape[1]:
+                    print(f"⚠️ Warning: Channel dimensions do not match! prev_conv_states: {prev_conv_states.shape}, current_states: {current_states.shape}")
+                    current_states = current_states[:, :prev_conv_states.shape[1], :]
+                
+                # Cat history states and current input
+                combined_states = torch.cat([prev_conv_states, current_states], dim=-1)
+                conv_output = self.conv1d(combined_states)
+                current_output = conv_output[..., :seq_len]
+
+                new_cache_end = combined_states[..., -cache_params.conv_kernel_size:]
+                new_cache_end = new_cache_end.transpose(1, 2)
+                
+                cache_params.update_conv_state(
+                    layer_idx=self.layer_idx,
+                    new_conv_state=new_cache_end,
+                    cache_init=False
+                )
+                hidden_states_B_C = self.act(current_output.transpose(1, 2))
+            else:
+                padded_states = nn.functional.pad(
+                    current_states,
+                    (cache_params.conv_kernel_size - current_states.shape[-1], 0)
+                )
+                
+                cache_params.update_conv_state(
+                    layer_idx=self.layer_idx,
+                    new_conv_state=padded_states,
+                    cache_init=True
+                )
+                
+                conv_output = self.conv1d(padded_states)[..., :seq_len]
+                hidden_states_B_C = self.act(conv_output.transpose(1, 2))
         else:
             # Init cache
             if cache_params is not None:
@@ -481,6 +561,8 @@ class Mamba2(nn.Module):
             # [bsz, num_heads, head_dim] -> [bsz, 1, intermediate_size]
             y = y.reshape(batch_size, -1)[:, None, ...]
         else:
+            # if self.use_segment_input:
+            #     self.chunk_size = seq_len
             # begin ssd naive implementation without einsums
             dt = nn.functional.softplus(dt + self.dt_bias)
             dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
@@ -530,6 +612,11 @@ class Mamba2(nn.Module):
             # (middle term of factorization of off-diag blocks; A terms)
             if cache_params is not None and cache_position is not None and cache_position[0] > 0:
                 previous_states = cache_params.ssm_states[self.layer_idx][:, None, ...].to(device=states.device)
+            elif self.use_segment_input and cache_params is not None:
+                if cache_params.ssm_states[self.layer_idx] is not None:
+                    previous_states = cache_params.ssm_states[self.layer_idx][:, None, ...].to(device=states.device)
+                else:
+                    previous_states = torch.zeros_like(states[:, :1])
             else:
                 previous_states = torch.zeros_like(states[:, :1])
             states = torch.cat([previous_states, states], dim=1)
@@ -566,6 +653,10 @@ class Mamba2(nn.Module):
 
         # 4. Final linear projection
         contextualized_states = self.out_proj(scan_output.to(dtype))  # [batch, seq_len, hidden_size]
+        
+        if self.use_segment_input:
+            return contextualized_states, cache_params
+        
         return contextualized_states
     # fmt: on
 
@@ -582,5 +673,4 @@ class Mamba2(nn.Module):
         if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
             # tune out hidden states for pad tokens, see https://github.com/state-spaces/mamba/issues/66
             hidden_states = (hidden_states * attention_mask[:, :, None]).to(dtype)
-
         return self.torch_forward(hidden_states, cache_params, cache_position, attention_mask)
