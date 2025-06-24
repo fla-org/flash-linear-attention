@@ -120,7 +120,7 @@ class MesaNetPreTrainedModel(PreTrainedModel):
     def _init_weights(
         self,
         module: nn.Module,
-        prenorm_residual_strategy: Optional[str] = 'rescale',
+        prenorm_residual_strategy: Optional[str] = None,
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, (nn.Linear, nn.Conv1d)):
