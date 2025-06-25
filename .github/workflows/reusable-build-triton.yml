@@ -148,7 +148,7 @@ jobs:
         if: ${{ steps.check-version.outputs.new_commit == 'true' }}
         working-directory: triton
         env:
-          FLA_PYPI_PASSWD: ${{ secrets.FLA_PYPI_PASS }}
+          FLA_PYPI_PASSWD: ${{ secrets.FLA_TRITON_PYPI_PASSWD }}
           PACKAGE_NAME: ${{ inputs.package-name }}
         run: |
           cd wheelhouse
