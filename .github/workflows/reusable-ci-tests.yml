@@ -139,6 +139,8 @@ jobs:
               echo "Using nightly index URL: $NIGHTLY_URL"
               $CONDA_BIN_PATH/pip install -U torch --index-url $NIGHTLY_URL
               $CONDA_BIN_PATH/pip install -U packaging psutil ninja
+              $CONDA_BIN_PATH/pip uninstall -y triton pytorch-triton -y
+              $CONDA_BIN_PATH/pip install -U triton-nightly --index-url https://pypi.fla-org.com/simple
               if [ "${{ inputs.runner }}" = "nvidia-h100" ]; then
                 echo "Installing causal-conv1d for H100"
                 $CONDA_BIN_PATH/pip install git+https://github.com/Dao-AILab/causal-conv1d.git@a4b40 --no-build-isolation
