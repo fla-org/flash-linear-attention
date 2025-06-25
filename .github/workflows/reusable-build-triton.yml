@@ -150,7 +150,6 @@ jobs:
         env:
           FLA_PYPI_PASSWD: ${{ secrets.FLA_TRITON_PYPI_PASSWD }}
           PACKAGE_NAME: ${{ inputs.package-name }}
-          PACKAGE_NAME: ${{ inputs.package-name }}
         run: |
           cd wheelhouse
           set -e  # Exit immediately if any command fails
