@@ -86,6 +86,7 @@ def fused_recurrent_comba_fwd_kernel(
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
             b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
+            b_p = b_p / (tl.sqrt(tl.sum(b_p * b_p)) + 1e-6)
         b_q = b_q * scale
         # [BV]
         b_v -= tl.sum(b_h * b_p[:, None], 0)
