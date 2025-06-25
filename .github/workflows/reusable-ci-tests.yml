@@ -152,7 +152,7 @@ jobs:
                 echo "Installing flash-attn for NVIDIA"
                 $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
               fi
-            fi  
+            fi
           elif [ "${{ inputs.gpu_type }}" = "intel" ]; then
             XPU_URL="https://download.pytorch.org/whl/xpu"
             echo "Using XPU index URL: $XPU_URL"
