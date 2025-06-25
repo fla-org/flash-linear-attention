@@ -23,6 +23,9 @@ on:
 jobs:
   test-ops:
     runs-on: ${{ inputs.runner }}
+    defaults:
+      run:
+        shell: bash -l {0}
     env:
       FLA_CI_ENV: 1
       PYTORCH_CUDA_VERSION: 'cu128'
@@ -156,6 +159,9 @@ jobs:
 
   test-models:
     runs-on: ${{ inputs.runner }}
+    defaults:
+      run:
+        shell: bash -l {0}
     needs: test-ops
     if: always()
     env:
