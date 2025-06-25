@@ -1,0 +1,283 @@
+name: Reusable CI
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The self-hosted runner to use (e.g., nvidia-h100)'
+        required: true
+        type: string
+      gpu_type:
+        description: 'The type of GPU (nvidia or intel)'
+        required: true
+        type: string
+      conda_env_name:
+        description: 'The exact name of the pre-existing Conda environment to activate on the runner.'
+        required: true
+        type: string
+      pytorch_version:
+        description: 'The PyTorch version to install (e.g., 2.7.0, nightly)'
+        required: true
+        type: string
+      pytorch_cuda_version:
+        description: 'The PyTorch CUDA version to use (e.g., cu128 for CUDA 12.8)'
+        required: false
+        type: string
+        default: 'cu128'
+      nvcc_toolkit_version:
+        description: 'The NVCC toolkit version to install (e.g., 12.8.1)'
+        required: false
+        type: string
+        default: '12.8.1'
+      skip_gpu_check:
+        description: 'Whether to skip the GPU check (default: false)'
+        required: false
+        type: boolean
+        default: false
+
+
+jobs:
+  test-ops:
+    runs-on: ${{ inputs.runner }}
+    env:
+      FLA_CI_ENV: 1
+
+    steps:
+      # =================================================================
+      # STAGE 1: SETUP (Runs only once for the entire job)
+      # =================================================================
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Discover Conda Path and Set Env Vars
+        id: find_conda
+        shell: bash
+        run: |
+          set -e
+          echo "Searching for Conda installation in home directory ($HOME)..."
+          POSSIBLE_NAMES=("miniforge3" "miniconda3" "anaconda3")
+          FOUND_PATH=""
+          for name in "${POSSIBLE_NAMES[@]}"; do
+            CANDIDATE_PATH="$HOME/$name"
+            echo "--> Checking for path: ${CANDIDATE_PATH}"
+            if [ -d "${CANDIDATE_PATH}" ] && [ -x "${CANDIDATE_PATH}/bin/conda" ]; then
+              echo "    Found valid Conda installation: ${CANDIDATE_PATH}"
+              FOUND_PATH="${CANDIDATE_PATH}"
+              break
+            fi
+          done
+          if [ -n "${FOUND_PATH}" ]; then
+            echo "Setting CONDA environment variable to: ${FOUND_PATH}"
+            echo "CONDA=${FOUND_PATH}" >> $GITHUB_ENV
+            # MODIFICATION: Set both CONDA and CONDA_BIN_PATH here.
+            # This makes them available to all subsequent steps.
+            echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${{ inputs.conda_env_name }}/bin" >> $GITHUB_ENV
+          else
+            echo "::error::Could not automatically find a Conda installation."
+            exit 1
+          fi
+
+      - name: Verify Environment and GPU
+        shell: bash
+        run: |
+          # Now $CONDA_BIN_PATH is available from the previous step.
+          echo "Python executable path: $CONDA_BIN_PATH/python"
+          echo "PyTorch version: $($CONDA_BIN_PATH/python -c 'import torch; print(torch.__version__)')"
+          # check if skip test
+          if [ "${{ inputs.skip_gpu_check }}" = "true" ]; then
+            echo "Skipping GPU check as per input parameter."
+          else
+            echo "Running GPU check..."
+            if $CONDA_BIN_PATH/python -c "import fla; print('FLA imported successfully')"; then
+              echo "FLA is available. Running GPU check."
+              $CONDA_BIN_PATH/python scripts/check_gpu.py
+              if [ $? -ne 0 ]; then
+                echo "::error::GPU is occupied. Stopping the workflow."
+                exit 1
+              fi
+            else
+              echo "::warning::FLA not found or import failed. Skipping dependent GPU check."
+            fi
+          fi
+
+      - name: Check skip keyword in LATEST commit (Push only)
+        id: check_skip
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && ! [[ "${{ github.ref }}" =~ ^refs/tags/ ]]; then
+            COMMIT_MSG=$(jq -r '.head_commit.message' <<< '${{ toJSON(github.event) }}')
+            echo "Latest commit message: $COMMIT_MSG"
+            if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
+              echo "::notice::Tests skipped by commit message"
+              echo "skip_tests=true" >> $GITHUB_OUTPUT
+            else
+              echo "skip_tests=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get changed files
+        if: steps.check_skip.outputs.skip_tests == 'false'
+        id: changed-files
+        uses: tj-actions/changed-files@v46.0.5
+
+      - name: Install/Update Dependencies
+        if: steps.check_skip.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
+          $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
+
+          echo "Installing PyTorch version: ${{ inputs.pytorch_version }} for GPU: ${{ inputs.gpu_type }}"
+
+          if [ "${{ inputs.gpu_type }}" = "nvidia" ]; then
+            $CONDA/bin/conda install -n ${{ inputs.conda_env_name }} nvidia/label/cuda-${{ inputs.nvcc_toolkit_version }}::cuda-nvcc -y
+            if [ "${{ inputs.pytorch_version }}" = "nightly" ];
+            then
+              NIGHTLY_URL="https://download.pytorch.org/whl/nightly/${{ inputs.pytorch_cuda_version }}"
+              echo "Using nightly index URL: $NIGHTLY_URL"
+              $CONDA_BIN_PATH/pip install -U torch --index-url $NIGHTLY_URL
+              $CONDA_BIN_PATH/pip install -U packaging psutil ninja einops datasets transformers
+              $CONDA_BIN_PATH/pip uninstall -y triton pytorch-triton triton-nightly -y
+              $CONDA_BIN_PATH/pip install -U triton-nightly --index-url https://pypi.fla-org.com/simple
+              $CONDA_BIN_PATH/pip install --no-deps .
+            else
+              STABLE_URL="https://download.pytorch.org/whl/${{ inputs.pytorch_cuda_version }}"
+              echo "Using stable index URL: $STABLE_URL"
+              $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} triton --index-url $STABLE_URL
+              $CONDA_BIN_PATH/pip install .
+              if [ "${{ inputs.runner }}" = "nvidia-h100" ]; then
+                echo "Installing causal-conv1d for H100"
+                $CONDA_BIN_PATH/pip install git+https://github.com/Dao-AILab/causal-conv1d.git@a4b40 --no-build-isolation
+                echo "Installing flash-attn for NVIDIA"
+                $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
+              fi
+            fi
+          elif [ "${{ inputs.gpu_type }}" = "intel" ]; then
+            XPU_URL="https://download.pytorch.org/whl/xpu"
+            echo "Using XPU index URL: $XPU_URL"
+            $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} pytorch-triton-xpu --index-url $XPU_URL
+            $CONDA_BIN_PATH/pip install .
+          else
+            echo "::error::Unsupported GPU type: ${{ inputs.gpu_type }}"
+            exit 1
+          fi
+
+      # =================================================================
+      # STAGE 2: OPS TESTS
+      # =================================================================
+      - name: Find dependent test files for Ops
+        if: steps.check_skip.outputs.skip_tests == 'false'
+        id: find-ops-tests
+        shell: bash
+        run: |
+          TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
+          echo "Found ops test files: $TEST_FILES"
+          echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
+
+      - name: Run pytest on ops test files
+        if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
+            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }}
+
+      - name: Run pytest on ops varlen test files
+        if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
+            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }} || \
+            echo "Varlen tests failed for ops (non-critical)"
+
+      - name: Verify FLA import
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/python -c "import fla; print('FLA imported successfully')"
+
+  test-models:
+    runs-on: ${{ inputs.runner }}
+    needs: test-ops
+    if: always()
+    env:
+      # MODIFICATION: Removed CONDA_BIN_PATH from here.
+      FLA_CI_ENV: 1
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Discover Conda Path and Set Env Vars
+        id: find_conda
+        shell: bash
+        run: |
+          set -e
+          POSSIBLE_NAMES=("miniforge3" "miniconda3" "anaconda3")
+          FOUND_PATH=""
+          for name in "${POSSIBLE_NAMES[@]}"; do
+            CANDIDATE_PATH="$HOME/$name"
+            if [ -d "${CANDIDATE_PATH}" ] && [ -x "${CANDIDATE_PATH}/bin/conda" ]; then
+              FOUND_PATH="${CANDIDATE_PATH}"
+              break
+            fi
+          done
+          if [ -n "${FOUND_PATH}" ]; then
+            echo "CONDA=${FOUND_PATH}" >> $GITHUB_ENV
+            # MODIFICATION: Set both CONDA and CONDA_BIN_PATH here.
+            echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${{ inputs.conda_env_name }}/bin" >> $GITHUB_ENV
+          else
+            echo "::error::Could not automatically find a Conda installation."
+            exit 1
+          fi
+
+      - name: Verify Environment
+        shell: bash
+        run: |
+          echo "Conda environment bin path is set to: $CONDA_BIN_PATH"
+          echo "Python executable path is: $CONDA_BIN_PATH/python"
+
+      - name: Check skip keyword in LATEST commit (Push only)
+        id: check_skip
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && ! [[ "${{ github.ref }}" =~ ^refs/tags/ ]]; then
+            COMMIT_MSG=$(jq -r '.head_commit.message' <<< '${{ toJSON(github.event) }}')
+            if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
+              echo "skip_tests=true" >> $GITHUB_OUTPUT
+            else
+              echo "skip_tests=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get changed files
+        if: steps.check_skip.outputs.skip_tests == 'false'
+        id: changed-files
+        uses: tj-actions/changed-files@v46.0.5
+
+      # =================================================================
+      # STAGE 3: MODELS TESTS (Reuses the same activated environment)
+      # =================================================================
+      - name: Find dependent test files for Models
+        if: steps.check_skip.outputs.skip_tests == 'false'
+        id: find-models-tests
+        shell: bash
+        run: |
+          TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
+          echo "Found models test files: $TEST_FILES"
+          echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
+
+      - name: Run pytest on models test files
+        if: steps.find-models-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
+            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }}
+
+      - name: Run pytest on models varlen test files
+        if: steps.find-models-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
+        shell: bash
+        run: |
+          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
+            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }} || \
+            echo "Varlen tests failed for models (non-critical)"
