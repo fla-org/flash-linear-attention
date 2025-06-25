@@ -38,12 +38,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Activate self-hosted Conda environment
-        uses: conda-incubator/setup-miniconda@v3
-        with:
-          activate-environment: ${{ inputs.conda_env_name }}
-          auto-update-conda: false
-          auto-activate-base: false
-          use-mamba: false
+        run: |
+          conda activate ${{ inputs.conda_env_name }}
+          echo "Python executable path: $(which python)"
 
       - name: Verify Environment and GPU
         run: |
