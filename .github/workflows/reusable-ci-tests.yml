@@ -23,6 +23,9 @@ on:
 jobs:
   test-ops:
     runs-on: ${{ inputs.runner }}
+    defaults:
+      run:
+        shell: bash -el {0}
     env:
       FLA_CI_ENV: 1
       PYTORCH_CUDA_VERSION: 'cu128'
@@ -67,8 +70,6 @@ jobs:
           activate-environment: ${{ inputs.conda_env_name }}
           auto-update-conda: false
           auto-activate-base: false
-
-
 
       - name: Verify Environment and GPU
         run: |
@@ -185,6 +186,9 @@ jobs:
 
   test-models:
     runs-on: ${{ inputs.runner }}
+    defaults:
+      run:
+        shell: bash -el {0}
     needs: test-ops
     if: always()
     env:
