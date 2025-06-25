@@ -67,9 +67,11 @@ jobs:
       - name: Set up Conda from Discovered Path
         uses: conda-incubator/setup-miniconda@v3
         with:
-          activate-environment: ${{ inputs.conda_env_name }}
+          activate-environment: ""
           auto-update-conda: false
           auto-activate-base: false
+        run:
+          conda activate "${{ inputs.conda_env_name }}"
 
       - name: Verify Environment and GPU
         run: |
@@ -232,9 +234,11 @@ jobs:
       - name: Set up Conda from Discovered Path
         uses: conda-incubator/setup-miniconda@v3
         with:
-          activate-environment: ${{ inputs.conda_env_name }}
+          activate-environment: ""
           auto-update-conda: false
           auto-activate-base: false
+        run:
+          conda activate "${{ inputs.conda_env_name }}"
 
 
       - name: Check skip keyword in LATEST commit (Push only)
