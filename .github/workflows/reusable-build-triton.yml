@@ -42,7 +42,7 @@ on:
         type: string
 
     secrets:
-      FLA_PYPI_PASS:
+      FLA_TRITON_PYPI_PASSWD:
         required: true
       A770_PROXY_ENV:
         required: false
