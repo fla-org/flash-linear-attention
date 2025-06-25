@@ -120,6 +120,7 @@ jobs:
           echo "Installing PyTorch version: ${{ inputs.pytorch_version }} for GPU: ${{ inputs.gpu_type }}"
 
           if [ "${{ inputs.gpu_type }}" = "nvidia" ]; then
+            conda install nvidia/label/cuda-12.8.1::cuda-nvcc -y
             if [ "${{ inputs.pytorch_version }}" = "nightly" ]; then
               # Install PyTorch Nightly for NVIDIA
               NIGHTLY_URL="https://download.pytorch.org/whl/nightly/${PYTORCH_CUDA_VERSION}"
