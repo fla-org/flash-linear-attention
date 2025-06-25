@@ -70,11 +70,10 @@ jobs:
           activate-environment: ""
           auto-update-conda: false
           auto-activate-base: false
-        run:
-          conda activate "${{ inputs.conda_env_name }}"
 
       - name: Verify Environment and GPU
         run: |
+          conda activate "${{ inputs.conda_env_name }}"
           echo "Successfully activated Conda environment: $CONDA_DEFAULT_ENV"
           echo "Python executable path: $(which python)"
           echo "PyTorch version: $(python -c 'import torch; print(torch.__version__)')"
@@ -237,9 +236,11 @@ jobs:
           activate-environment: ""
           auto-update-conda: false
           auto-activate-base: false
-        run:
-          conda activate "${{ inputs.conda_env_name }}"
 
+      - name: Verify Environment and GPU
+        run: |
+          conda activate "${{ inputs.conda_env_name }}"
+          echo "Successfully activated Conda environment: $CONDA_DEFAULT_ENV"
 
       - name: Check skip keyword in LATEST commit (Push only)
         id: check_skip
