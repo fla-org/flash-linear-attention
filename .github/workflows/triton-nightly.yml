@@ -71,12 +71,6 @@ jobs:
                 },
                 "cibw_build_spec": "cp${py_ver_nodot}-manylinux_x86_64"
               },
-              {
-                "config": {
-                  "runs_on": "['self-hosted', 'aarch64-docker']", "arch": "aarch64", "timeout": 720
-                },
-                "cibw_build_spec": "cp${py_ver_nodot}-manylinux_aarch64"
-              }
             ]
           }
           EOF
