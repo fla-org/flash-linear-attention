@@ -47,9 +47,8 @@ jobs:
     secrets: inherit
 
   # ===================================================================
-  # JOB 2: Single Python Version Test Build (Manually Triggered) - REFACTORED
+  # JOB 2: Single Python Version Test Build (Manually Triggered)
   # ===================================================================
-  # This job now only calculates and outputs a single, simple variable.
   prepare-test-build:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_single_version_test
     runs-on: ['self-hosted', 'x64-docker']
@@ -62,14 +61,12 @@ jobs:
           py_ver_nodot=$(echo "${{ github.event.inputs.python_test_version }}" | tr -d '.')
           echo "cibw_build_spec=cp${py_ver_nodot}-manylinux_x86_64" >> $GITHUB_OUTPUT
 
-  # This job now has its own simple matrix and consumes the simple variable from the previous job.
   execute-test-build:
     needs: prepare-test-build
     if: needs.prepare-test-build.outputs.cibw_build_spec != ''
     strategy:
       fail-fast: false
       matrix:
-        # The matrix is now simple and defined directly here, only for x86.
         config:
         - {runs_on: "['self-hosted', 'x64-docker']", arch: 'x86_64', timeout: 120}
         # - {runs_on: "['self-hosted', 'aarch64-docker']", arch: 'aarch64', timeout: 720}
@@ -80,31 +77,46 @@ jobs:
       timeout: ${{ matrix.config.timeout }}
       checkout-ref: 'main'
       package-name: 'triton-nightly'
-      # Directly uses the simple string output from the prepare job. No JSON involved.
       cibw-build: ${{ needs.prepare-test-build.outputs.cibw_build_spec }}
     secrets: inherit
 
   # ===================================================================
-  # JOB 3: Latest Release Tag Build (Manually Triggered)
+  # JOB 3: Latest Release Tag Build (Manually Triggered) - OPTIMIZED
   # ===================================================================
+  # This job now uses the GitHub API, which is much faster than cloning the repo.
   discover-latest-tag:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_latest_release_build
     runs-on: ['self-hosted', 'x64-docker']
     outputs:
       tag: ${{ steps.get-tag.outputs.tag }}
     steps:
-      - name: Checkout Triton repo to find its tags
-        uses: actions/checkout@v4
-        with:
-          repository: triton-lang/triton
-          fetch-depth: 0
-      - name: Get latest tag name
+      - name: Get latest Triton release tag via GitHub API
         id: get-tag
+        env:
+          # The GITHUB_TOKEN is automatically created by Actions to authenticate API calls.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          latest_tag=$(git describe --tags --abbrev=0)
+          # This step uses 'curl' to call the GitHub API and 'jq' to parse the JSON response.
+          # It fetches the latest non-prerelease, non-draft release directly.
+          # Prerequisite: The runner must have 'jq' installed.
+          if ! command -v jq &> /dev/null; then
+            echo "::error::'jq' is not installed on this runner. Please install it to proceed."
+            exit 1
+          fi
+
+          echo "Fetching latest release from api.github.com..."
+          latest_tag=$(curl -sL -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/triton-lang/triton/releases/latest | jq -r .tag_name)
+
+          if [ -z "$latest_tag" ] || [ "$latest_tag" == "null" ]; then
+            echo "::error::Failed to fetch the latest tag from GitHub API."
+            exit 1
+          fi
+
           echo "Discovered latest Triton tag: ${latest_tag}"
           echo "tag=${latest_tag}" >> $GITHUB_OUTPUT
 
+  # This job executes the build using the tag discovered in the previous job.
   execute-release-build:
     needs: discover-latest-tag
     if: needs.discover-latest-tag.outputs.tag != ''
