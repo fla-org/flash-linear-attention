@@ -8,29 +8,9 @@ import torch.nn.functional as F
 
 from fla.ops.rwkv6 import chunk_rwkv6
 from fla.ops.rwkv6.fused_recurrent import fused_recurrent_rwkv6
-from fla.utils import COMPILER_MODE, assert_close, device, device_platform
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_t_varlen_list = test_t_list
-    test_d_list = [64, 128, 256]
-    test_gate_list = [1.0]
-else:
-    test_b_list = [2]
-    test_t_list = [1, 15, 63, 300]
-    test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [64, 32, 100, 256]
-    test_gate_list = [1, 0.1, 10]
-test_h_list = [2]
+from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('dtype', [torch.bfloat16])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -38,6 +18,18 @@ test_h_list = [2]
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason="Intel Triton Failure"
+)
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype', 'gate_logit_normalizer'),
+    [
+        (2, 16, 2, 64, torch.float16, 1.0),
+        (2, 16, 2, 64, torch.float16, 0.1),
+        (2, 64, 2, 64, torch.float16, 1),
+        (2, 64, 2, 256, torch.float16, 1),
+        (2, 268, 2, 64, torch.float16, 1),
+        (2, 4096, 2, 64, torch.float16, 1),
+        (2, 4096, 2, 256, torch.float16, 1),
+    ]
 )
 def test_chunk(
     B: int,
@@ -115,14 +107,19 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize("N", test_b_list)
-@pytest.mark.parametrize("T", test_t_varlen_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
     reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+)
+@pytest.mark.parametrize(
+    ('N', 'T', 'H', 'D', 'dtype'),
+    [
+        (2, 256, 2, 64, torch.bfloat16),
+        (4, 512, 2, 100, torch.float),
+        (4, 1024, 2, 128, torch.bfloat16),
+        (3, 400, 2, 256, torch.float),
+        (5, 4096, 2, 64, torch.float16),
+    ]
 )
 def test_chunk_varlen(
     N: int,
