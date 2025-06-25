@@ -23,9 +23,6 @@ on:
 jobs:
   test-ops:
     runs-on: ${{ inputs.runner }}
-    defaults:
-      run:
-        shell: bash -l {0}
     env:
       FLA_CI_ENV: 1
       PYTORCH_CUDA_VERSION: 'cu128'
@@ -37,10 +34,41 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Activate self-hosted Conda environment
+      - name: Discover Conda Path by Searching Home Directory
+        id: find_conda
+        shell: bash
         run: |
-          conda activate ${{ inputs.conda_env_name }}
-          echo "Python executable path: $(which python)"
+          set -e
+          echo "Searching for Conda installation in home directory ($HOME)..."
+          POSSIBLE_NAMES=("miniforge3" "miniconda3" "anaconda3")
+          FOUND_PATH=""
+
+          for name in "${POSSIBLE_NAMES[@]}"; do
+            CANDIDATE_PATH="$HOME/$name"
+            echo "--> Checking for path: ${CANDIDATE_PATH}"
+            if [ -d "${CANDIDATE_PATH}" ] && [ -x "${CANDIDATE_PATH}/bin/conda" ]; then
+              echo "    Found valid Conda installation: ${CANDIDATE_PATH}"
+              FOUND_PATH="${CANDIDATE_PATH}"
+              break
+            fi
+          done
+
+          if [ -z "${FOUND_PATH}" ]; then
+            echo "::error::Could not automatically find a Conda installation in $HOME from the list: ${POSSIBLE_NAMES[*]}"
+            exit 1
+          fi
+
+          echo "conda_path=${FOUND_PATH}" >> $GITHUB_OUTPUT
+
+      - name: Set up Conda from Discovered Path
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: ${{ inputs.conda_env_name }}
+          auto-update-conda: false
+          auto-activate-base: false
+          miniconda-path: ${{ steps.find_conda.outputs.conda_path }}
+
+
 
       - name: Verify Environment and GPU
         run: |
@@ -156,9 +184,6 @@ jobs:
 
   test-models:
     runs-on: ${{ inputs.runner }}
-    defaults:
-      run:
-        shell: bash -l {0}
     needs: test-ops
     if: always()
     env:
@@ -172,21 +197,40 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Activate self-hosted Conda environment
+      - name: Discover Conda Path by Searching Home Directory
+        id: find_conda
+        shell: bash
         run: |
-          conda activate ${{ inputs.conda_env_name }}
-          echo "Python executable path: $(which python)"
+          set -e
+          echo "Searching for Conda installation in home directory ($HOME)..."
+          POSSIBLE_NAMES=("miniforge3" "miniconda3" "anaconda3")
+          FOUND_PATH=""
 
-      - name: Verify Environment and GPU
-        run: |
-          echo "Successfully activated Conda environment: $CONDA_DEFAULT_ENV"
-          echo "Python executable path: $(which python)"
-          echo "PyTorch version: $(python -c 'import torch; print(torch.__version__)')"
-          python scripts/check_gpu.py
-          if [ $? -ne 0 ]; then
-            echo "::error::GPU is occupied. Stopping the workflow."
+          for name in "${POSSIBLE_NAMES[@]}"; do
+            CANDIDATE_PATH="$HOME/$name"
+            echo "--> Checking for path: ${CANDIDATE_PATH}"
+            if [ -d "${CANDIDATE_PATH}" ] && [ -x "${CANDIDATE_PATH}/bin/conda" ]; then
+              echo "    Found valid Conda installation: ${CANDIDATE_PATH}"
+              FOUND_PATH="${CANDIDATE_PATH}"
+              break
+            fi
+          done
+
+          if [ -z "${FOUND_PATH}" ]; then
+            echo "::error::Could not automatically find a Conda installation in $HOME from the list: ${POSSIBLE_NAMES[*]}"
             exit 1
           fi
+
+          echo "conda_path=${FOUND_PATH}" >> $GITHUB_OUTPUT
+
+      - name: Set up Conda from Discovered Path
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: ${{ inputs.conda_env_name }}
+          auto-update-conda: false
+          auto-activate-base: false
+          miniconda-path: ${{ steps.find_conda.outputs.conda_path }}
+
 
       - name: Check skip keyword in LATEST commit (Push only)
         id: check_skip
