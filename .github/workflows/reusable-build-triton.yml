@@ -1,4 +1,3 @@
-# file: .github/workflows/reusable-build-triton.yml
 name: Reusable Triton Build Job
 
 on:

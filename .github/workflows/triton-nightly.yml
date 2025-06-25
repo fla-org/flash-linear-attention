@@ -1,4 +1,4 @@
-name: Triton Builder
+name: Triton Nightly Build
 
 on:
   schedule:
