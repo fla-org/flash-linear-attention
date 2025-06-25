@@ -138,7 +138,7 @@ jobs:
               echo "Using nightly index URL: $NIGHTLY_URL"
               $CONDA_BIN_PATH/pip install -U torch --index-url $NIGHTLY_URL
               $CONDA_BIN_PATH/pip install -U packaging psutil ninja einops datasets transformers
-              $CONDA_BIN_PATH/pip uninstall -y triton pytorch-triton -y
+              $CONDA_BIN_PATH/pip uninstall -y triton pytorch-triton triton-nightly -y
               $CONDA_BIN_PATH/pip install -U triton-nightly --index-url https://pypi.fla-org.com/simple
               $CONDA_BIN_PATH/pip install --no-deps .
             else
