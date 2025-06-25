@@ -20,7 +20,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
-      runner: 'nvidia-h100-groups'
+      runner: 'nvidia-h100-1'
       gpu_type: 'nvidia'
       conda_env_name: 'pytorch_2_7'
       pytorch_version: '2.7.0'
@@ -31,7 +31,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
-      runner: 'nvidia-h100-groups'
+      runner: 'nvidia-h100-2'
       gpu_type: 'nvidia'
       conda_env_name: 'pytorch_nightly'
       pytorch_version: 'nightly'
@@ -42,7 +42,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
-      runner: 'nvidia-h100-groups'
+      runner: 'nvidia-h100-3'
       gpu_type: 'nvidia'
       conda_env_name: 'pytorch_2_6'
       pytorch_version: '2.6.0'
