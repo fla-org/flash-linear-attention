@@ -1,405 +1,146 @@
-name: triton-nightly
+name: Triton Builder
+
 on:
-  workflow_dispatch:
-    inputs:
-      run_x64_test:
-        description: 'Run x64-specific tests (only for x64 runner)'
-        required: false
-        type: boolean
-        default: false
-  pull_request:
-    paths:
-      - .github/workflows/wheels.yml
   schedule:
     - cron: "0 8 * * *"
 
+  workflow_dispatch:
+    inputs:
+      run_single_version_test:
+        description: '▶️ Run a test build for a single Python version?'
+        type: boolean
+        default: false
+      python_test_version:
+        description: '🐍 Python version for the test build (e.g., 3.12)'
+        type: string
+        default: '3.12'
+      run_latest_release_build:
+        description: '🚀 Build a full release from the LATEST Triton release tag?'
+        type: boolean
+        default: false
 
 jobs:
-
-  Build-Wheels:
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.run_x64_test != 'true'
-    timeout-minutes: ${{ matrix.config.arch == 'aarch64' && 720 || 120 }}
-    runs-on: ${{ matrix.config.runs_on }}
-
+  # ===================================================================
+  # JOB 1: Regular Nightly Build (from main branch)
+  # ===================================================================
+  nightly-build:
+    # Run on schedule, or when manually dispatched without other options selected
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       !github.event.inputs.run_single_version_test &&
+       !github.event.inputs.run_latest_release_build)
     strategy:
       fail-fast: false
       matrix:
         config:
-        - {runs_on: ['self-hosted', 'x64-docker'], arch: 'x86_64'}
-        - {runs_on: ['self-hosted', 'aarch64-docker'], arch: 'aarch64'}
+        - {runs_on: "['self-hosted', 'x64-docker']", arch: 'x86_64', timeout: 120}
+        - {runs_on: "['self-hosted', 'aarch64-docker']", arch: 'aarch64', timeout: 720}
+    uses: ./.github/workflows/reusable-build-triton.yml
+    with:
+      runner: ${{ matrix.config.runs_on }}
+      arch: ${{ matrix.config.arch }}
+      timeout: ${{ matrix.config.timeout }}
+      checkout-ref: 'main'  # For nightly, we always use the main branch
+      package-name: 'triton-nightly'
+      cibw-build: 'cp3{10,11,12,13}-manylinux_${{ matrix.config.arch }}'
+      cibw-skip: 'cp{35,36,37,38,39,13t}-*'
+    secrets: inherit
 
-
-    steps:
-
-      - name: Prune stale docker containers
-        run: |
-          # If cibuildwheel crashes (or, say, is OOM-killed), it leaves behind a
-          # docker container.  Eventually these consume all the disk space on
-          # this machine.
-          RUNNER_NAME=${{ runner.name }}
-          echo "Current runner: $RUNNER_NAME"
-          docker container prune -f
-
-      - name: Checkout Triton
-        uses: actions/checkout@v4
-        with:
-           repository: triton-lang/triton
-           path: triton
-
-
-      # The LATEST_DATE here should be kept in sync with the one in Patch setup.py
-      - id: check-version
-        name: Set up version
-        working-directory: triton
-        run: |
-          echo "new_commit=true" >> "$GITHUB_OUTPUT"
-          export BUILD_DATE=$(date -u +"%Y%m%d%H%M")
-          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
-          python3 -m pip install wheel -U
-          WHEEL_PATH=$(whereis wheel | cut -d: -f2 | xargs)
-          if [ -z "$WHEEL_PATH" ]; then
-            echo "ERROR: wheel command not found. This will cause the build to fail later."
-            exit 1
-          else
-            echo "wheel command found at: $WHEEL_PATH"
-          fi
-
-      - name: Setup Python
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          # Make sure cibuildwheel is updated to latest, this will enable latest python builds
-          pip3 install cibuildwheel -U
-
-      - name: Patch setup.py
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          echo "" >> python/setup.cfg
-          echo "[build_ext]" >> python/setup.cfg
-          echo "base-dir=/project" >> python/setup.cfg
-          # mirror
-
-      - name: Patch setup.py mirror
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          if [ -f "python/setup.py" ]; then
-            file_path="python/setup.py"
-          elif [ -f "setup.py" ]; then
-            file_path="setup.py"
-          else
-            echo "Error: Neither python/setup.py nor setup.py found"
-            exit 1
-          fi
-
-          sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' "$file_path"
-          grep "llvm.fla-org.com" "$file_path" || (echo "URL replacement failed"; exit 1)
-
-
-      - name: Build wheels
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          # Pass MAX_JOBS=16 because, at time of writing, the VM "only" has 64GB
-          # of RAM and OOMs while building if we give it the default number of
-          # workers (2 * NUM_CPUs).
-          if [[ "${{ runner.name }}" == "intel-a770" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=16 \
-                    TRITON_BUILD_WITH_CLANG_LLD=1 \
-                    SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} \
-                    ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
-                    HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
-          elif [[ "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1 \
-                      SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} \
-                      ALL_PROXY=${{ secrets.PI_PROXY_ENV }} \
-                      HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
-          else
-            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1"
-          fi
-
-          # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
-          # With this install, it gets clang 16.0.6.
-          if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
-                  -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
-                  -i.bak \
-                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
-          else
-            export CIBW_BEFORE_ALL="dnf install clang lld -y"
-          fi
-
-          if [[ $(uname -m) == 'x86_64' ]]; then
-            export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
-          else
-            export CIBW_MANYLINUX_AARCH64_IMAGE="quay.io/pypa/manylinux_2_28_aarch64:latest"
-          fi
-          # Since fla only support 3.10 +
-          export CIBW_BUILD="cp3{10,11,12,13}-manylinux_$(uname -m)"
-          export CIBW_SKIP="cp{35,36,37,38,39,13t}-*"
-          export CIBW_FREE_THREADED_SUPPORT=1
-          rm -rf ./wheelhouse* || :
-          if [ -f "python/setup.py" ]; then
-            python3 -m cibuildwheel python --output-dir wheelhouse
-          elif [ -f "setup.py" ]; then
-            python3 -m cibuildwheel . --output-dir wheelhouse
-          else
-            echo "Error: Neither python/setup.py nor setup.py found"
-            exit 1
-          fi
-
-
-      - name: Publish wheels to fla
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          cd wheelhouse
-          set -e  # Exit immediately if any command fails
-
-          # Flag to track if any wheel processing fails
-          ALL_WHEELS_PROCESSED=true
-
-          for whl in triton-*.whl; do
-            # Create a subshell for error handling
-            if (
-              set -e
-              echo "Processing: $whl"
-              wheel unpack "$whl" -d tmp_pkg &&
-              OLD_VERSION=$(unzip -p "$whl" *dist-info/METADATA | grep "^Version:" | cut -d' ' -f2) &&
-              NEW_VERSION=$(echo "$OLD_VERSION" | sed 's/+git.*$/.dev'"$BUILD_DATE"'/') &&
-              mv "tmp_pkg/triton-${OLD_VERSION}" "tmp_pkg/triton_nightly-${NEW_VERSION}" &&
-              mv "tmp_pkg/triton_nightly-${NEW_VERSION}/triton-${OLD_VERSION}.dist-info" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info" &&
-              sed -i -e "s/^Name: triton$/Name: triton-nightly/" -e "s/^Version: ${OLD_VERSION}$/Version: ${NEW_VERSION}/" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info/METADATA" &&
-              wheel pack "tmp_pkg/triton_nightly-${NEW_VERSION}" -d . --build-number ""
-            ); then
-              # Successfully processed
-              rm -f "$whl"
-              echo "Successfully processed: $whl → triton_nightly-${NEW_VERSION}-*.whl"
-            else
-              # Failed to process this wheel
-              ALL_WHEELS_PROCESSED=false
-              echo "Failed to process: $whl"
-            fi
-            # Always clean up temp directory
-            rm -rf tmp_pkg
-          done
-
-          # Only upload if ALL wheels were successfully processed
-          if [ "$ALL_WHEELS_PROCESSED" = true ]; then
-            echo "Installing twine and uploading processed wheels..."
-            python3 -m pip install twine pkginfo -U
-            readarray -d '' -t WHEEL_FILES < <(find . -maxdepth 1 -name "triton_nightly-*.whl" -print0)
-            if [ ${#WHEEL_FILES[@]} -eq 0 ]; then
-              echo "Error: No triton_nightly-*.whl files found to upload in the current directory."
-              exit 1
-            fi
-            for WHL_FILE in "${WHEEL_FILES[@]}"; do
-              echo "Uploading: ${WHL_FILE}"
-              python3 -m twine upload \
-                --repository-url http://pypi-upload.fla-org.com/ \
-                --username fla \
-                --password ${{ secrets.secrets.FLA_TRITON_PYPI_PASSWD }}  \
-                --verbose \
-                --non-interactive \
-                "${WHL_FILE}"
-              if [ $? -ne 0 ]; then
-                echo "Error uploading ${WHL_FILE}. Aborting."
-                exit 1
-              fi
-            done
-            echo "All triton_nightly-*.whl files uploaded successfully!"
-          else
-            echo "One or more wheels failed to process. Skipping upload."
-            exit 1
-          fi
-
-  Run-x64-Test:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_x64_test == 'true'
-    timeout-minutes: 120
+  # ===================================================================
+  # JOB 2: Single Python Version Test Build (Manually Triggered)
+  # ===================================================================
+  # This first job just prepares the python version string for the matrix in the next job
+  prepare-test-build:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_single_version_test
+    # This setup job runs on your runner. It just needs shell access.
     runs-on: ['self-hosted', 'x64-docker']
-
-
+    outputs:
+      matrix: ${{ steps.prepare-vars.outputs.matrix }}
     steps:
-
-      - name: Prune stale docker containers
+      - id: prepare-vars
         run: |
-          # If cibuildwheel crashes (or, say, is OOM-killed), it leaves behind a
-          # docker container.  Eventually these consume all the disk space on
-          # this machine.
-          RUNNER_NAME=${{ runner.name }}
-          echo "Current runner: $RUNNER_NAME"
-          docker container prune -f
+          py_ver_nodot=$(echo "${{ github.event.inputs.python_test_version }}" | tr -d '.')
+          # Create a matrix for the next job
+          MATRIX_JSON=$(cat <<EOF
+          {
+            "include": [
+              {
+                "config": {
+                  "runs_on": "['self-hosted', 'x64-docker']", "arch": "x86_64", "timeout": 120
+                },
+                "cibw_build_spec": "cp${py_ver_nodot}-manylinux_x86_64"
+              },
+              {
+                "config": {
+                  "runs_on": "['self-hosted', 'aarch64-docker']", "arch": "aarch64", "timeout": 720
+                },
+                "cibw_build_spec": "cp${py_ver_nodot}-manylinux_aarch64"
+              }
+            ]
+          }
+          EOF
+          )
+          echo "matrix=${MATRIX_JSON}" >> $GITHUB_OUTPUT
 
-      - name: Checkout Triton
+  # This job executes the actual test build using the matrix from the previous job
+  execute-test-build:
+    needs: prepare-test-build
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare-test-build.outputs.matrix) }}
+    uses: ./.github/workflows/reusable-build-triton.yml
+    with:
+      runner: ${{ matrix.config.runs_on }}
+      arch: ${{ matrix.config.arch }}
+      timeout: ${{ matrix.config.timeout }}
+      checkout-ref: 'main' # Test builds are also from the main branch
+      package-name: 'triton-nightly'
+      cibw-build: ${{ matrix.cibw_build_spec }}
+    secrets: inherit
+
+  # ===================================================================
+  # JOB 3: Latest Release Tag Build (Manually Triggered)
+  # ===================================================================
+  # This job checks out the Triton repo just to find the latest tag name
+  discover-latest-tag:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_latest_release_build
+    # This discovery job runs on your runner. It must have git installed.
+    runs-on: ['self-hosted', 'x64-docker']
+    outputs:
+      tag: ${{ steps.get-tag.outputs.tag }}
+    steps:
+      - name: Checkout Triton repo to find its tags
         uses: actions/checkout@v4
         with:
-           repository: triton-lang/triton
-           path: triton
-
-
-      - id: check-version
-        name: Set up version
-        working-directory: triton
+          repository: triton-lang/triton
+          fetch-depth: 0 # Fetch all history/tags, not just the latest commit
+      - name: Get latest tag name
+        id: get-tag
         run: |
-          echo "new_commit=true" >> "$GITHUB_OUTPUT"
-          export BUILD_DATE=$(date -u +"%Y%m%d%H%M")
-          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
-          python3 -m pip install wheel -U
-          WHEEL_PATH=$(whereis wheel | cut -d: -f2 | xargs)
-          if [ -z "$WHEEL_PATH" ]; then
-            echo "ERROR: wheel command not found. This will cause the build to fail later."
-            exit 1
-          else
-            echo "wheel command found at: $WHEEL_PATH"
-          fi
+          # 'git describe' gets the most recent tag. '--abbrev=0' removes the commit hash suffix.
+          latest_tag=$(git describe --tags --abbrev=0)
+          echo "Discovered latest Triton tag: ${latest_tag}"
+          echo "tag=${latest_tag}" >> $GITHUB_OUTPUT
 
-      - name: Setup Python
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          # Make sure cibuildwheel is updated to latest, this will enable latest python builds
-          pip3 install cibuildwheel -U
-
-      - name: Patch setup.py
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          echo "" >> python/setup.cfg
-          echo "[build_ext]" >> python/setup.cfg
-          echo "base-dir=/project" >> python/setup.cfg
-          # mirror
-
-      - name: Patch setup.py mirror
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          if [ -f "python/setup.py" ]; then
-            file_path="python/setup.py"
-          elif [ -f "setup.py" ]; then
-            file_path="setup.py"
-          else
-            echo "Error: Neither python/setup.py nor setup.py found"
-            exit 1
-          fi
-
-          sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' "$file_path"
-          grep "llvm.fla-org.com" "$file_path" || (echo "URL replacement failed"; exit 1)
-
-
-      - name: Build wheels
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          # Pass MAX_JOBS=16 because, at time of writing, the VM "only" has 64GB
-          # of RAM and OOMs while building if we give it the default number of
-          # workers (2 * NUM_CPUs).
-          if [[ "${{ runner.name }}" == "intel-a770" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=16 \
-                    TRITON_BUILD_WITH_CLANG_LLD=1 \
-                    SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} \
-                    ALL_PROXY=${{ secrets.A770_PROXY_ENV }} \
-                    HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
-          elif [[ "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1 \
-                      SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} \
-                      ALL_PROXY=${{ secrets.PI_PROXY_ENV }} \
-                      HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
-          else
-            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1"
-          fi
-
-          # many_linux_2_28 image comes with GCC 12.2.1, but not clang.
-          # With this install, it gets clang 16.0.6.
-          if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' \
-                  -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
-                  -i.bak \
-                  /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
-          else
-            export CIBW_BEFORE_ALL="dnf install clang lld -y"
-          fi
-
-          if [[ $(uname -m) == 'x86_64' ]]; then
-            export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
-          else
-            export CIBW_MANYLINUX_AARCH64_IMAGE="quay.io/pypa/manylinux_2_28_aarch64:latest"
-          fi
-          # Since fla only support 3.10 +
-          export CIBW_BUILD="cp312-manylinux_$(uname -m)"
-          export CIBW_SKIP="cp{35,36,37,38,39,10,11,13,13t}-*"
-          export CIBW_FREE_THREADED_SUPPORT=1
-          rm -rf ./wheelhouse* || :
-          if [ -f "python/setup.py" ]; then
-            python3 -m cibuildwheel python --output-dir wheelhouse
-          elif [ -f "setup.py" ]; then
-            python3 -m cibuildwheel . --output-dir wheelhouse
-          else
-            echo "Error: Neither python/setup.py nor setup.py found"
-            exit 1
-          fi
-
-
-      - name: Publish wheels to fla
-        if: ${{ steps.check-version.outputs.new_commit == 'true' }}
-        working-directory: triton
-        run: |
-          cd wheelhouse
-          set -e  # Exit immediately if any command fails
-
-          # Flag to track if any wheel processing fails
-          ALL_WHEELS_PROCESSED=true
-
-          for whl in triton-*.whl; do
-            # Create a subshell for error handling
-            if (
-              set -e
-              echo "Processing: $whl"
-              wheel unpack "$whl" -d tmp_pkg &&
-              OLD_VERSION=$(unzip -p "$whl" *dist-info/METADATA | grep "^Version:" | cut -d' ' -f2) &&
-              NEW_VERSION=$(echo "$OLD_VERSION" | sed 's/+git.*$/.dev'"$BUILD_DATE"'/') &&
-              mv "tmp_pkg/triton-${OLD_VERSION}" "tmp_pkg/triton_nightly-${NEW_VERSION}" &&
-              mv "tmp_pkg/triton_nightly-${NEW_VERSION}/triton-${OLD_VERSION}.dist-info" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info" &&
-              sed -i -e "s/^Name: triton$/Name: triton-nightly/" -e "s/^Version: ${OLD_VERSION}$/Version: ${NEW_VERSION}/" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info/METADATA" &&
-              wheel pack "tmp_pkg/triton_nightly-${NEW_VERSION}" -d . --build-number ""
-            ); then
-              # Successfully processed
-              rm -f "$whl"
-              echo "Successfully processed: $whl → triton_nightly-${NEW_VERSION}-*.whl"
-            else
-              # Failed to process this wheel
-              ALL_WHEELS_PROCESSED=false
-              echo "Failed to process: $whl"
-            fi
-            # Always clean up temp directory
-            rm -rf tmp_pkg
-          done
-
-          # Only upload if ALL wheels were successfully processed
-          if [ "$ALL_WHEELS_PROCESSED" = true ]; then
-            echo "Installing twine and uploading processed wheels..."
-            python3 -m pip install twine pkginfo -U
-            readarray -d '' -t WHEEL_FILES < <(find . -maxdepth 1 -name "triton_nightly-*.whl" -print0)
-            if [ ${#WHEEL_FILES[@]} -eq 0 ]; then
-              echo "Error: No triton_nightly-*.whl files found to upload in the current directory."
-              exit 1
-            fi
-            for WHL_FILE in "${WHEEL_FILES[@]}"; do
-              echo "Uploading: ${WHL_FILE}"
-              python3 -m twine upload \
-                --repository-url http://pypi-upload.fla-org.com/ \
-                --username fla \
-                --password ${{ secrets.FLA_TRITON_PYPI_PASSWD }}  \
-                --verbose \
-                --non-interactive \
-                "${WHL_FILE}"
-              if [ $? -ne 0 ]; then
-                echo "Error uploading ${WHL_FILE}. Aborting."
-                exit 1
-              fi
-            done
-            echo "All triton_nightly-*.whl files uploaded successfully!"
-          else
-            echo "One or more wheels failed to process. Skipping upload."
-            exit 1
-          fi
+  # This job executes the build using the tag discovered in the previous job
+  execute-release-build:
+    needs: discover-latest-tag
+    if: needs.discover-latest-tag.outputs.tag != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - {runs_on: "['self-hosted', 'x64-docker']", arch: 'x86_64', timeout: 120}
+        # - {runs_on: "['self-hosted', 'aarch64-docker']", arch: 'aarch64', timeout: 720}
+    uses: ./.github/workflows/reusable-build-triton.yml
+    with:
+      runner: ${{ matrix.config.runs_on }}
+      arch: ${{ matrix.config.arch }}
+      timeout: ${{ matrix.config.timeout }}
+      # Use the tag discovered from the previous job
+      checkout-ref: ${{ needs.discover-latest-tag.outputs.tag }}
+      package-name: 'triton' # This is a release build
+      cibw-build: 'cp3*-manylinux_${{ matrix.config.arch }}'
+      cibw-skip: 'cp{35,36,37,38,39}-*'
+    secrets: inherit
