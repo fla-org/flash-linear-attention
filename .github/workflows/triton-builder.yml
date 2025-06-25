@@ -3,68 +3,78 @@ name: Triton Stable Build
 on:
   workflow_dispatch:
     inputs:
-      run_latest_release_build:
-        description: '🚀 Build a full release from the LATEST Triton release tag?'
-        type: boolean
-        default: false
+      build_architecture:
+        description: '🏗️ Architecture for the release build'
+        type: choice
+        options:
+        - x86_64
+        - aarch64
+        - all
+        default: 'all'
 
 jobs:
   # ===================================================================
-  # JOB 1: Latest Release Tag Build (Manually Triggered)
+  # JOB 1: Discover tag AND prepare the matrix in a single step
   # ===================================================================
-  # This job now uses the GitHub API, which is much faster than cloning the repo.
-  discover-latest-tag:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_latest_release_build
+  prepare-release-build:
     runs-on: ['self-hosted', 'x64-docker']
     outputs:
-      tag: ${{ steps.get-tag.outputs.tag }}
+      tag: ${{ steps.discover-tag.outputs.tag }}
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
     steps:
       - name: Get latest Triton tag via GitHub API
-        id: get-tag
+        id: discover-tag
         env:
-          # The GITHUB_TOKEN is automatically created by Actions to authenticate API calls.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # This step uses 'curl' to get the list of all tags and 'jq' to parse the first one.
-          # It relies on the assumption that the /tags API endpoint returns tags in reverse chronological order.
-          # Prerequisite: The runner must have 'jq' installed.
-          if ! command -v jq &> /dev/null; then
-            echo "::error::'jq' is not installed on this runner. Please install it to proceed."
-            exit 1
-          fi
-
-          echo "Fetching tags list from api.github.com/repos/triton-lang/triton/tags..."
-          # The jq query '.[0].name' gets the 'name' field from the first object in the returned JSON array.
-          latest_tag=$(curl -sL -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/triton-lang/triton/tags | jq -r '.[0].name')
-
-          if [ -z "$latest_tag" ] || [ "$latest_tag" == "null" ]; then
-            echo "::error::Failed to fetch the latest tag from GitHub API using the /tags endpoint."
-            exit 1
-          fi
-
+          if ! command -v jq &> /dev/null; then echo "::error::'jq' not installed."; exit 1; fi
+          latest_tag=$(curl -sL -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/triton-lang/triton/tags | jq -r '.[0].name')
+          if [ -z "$latest_tag" ] || [ "$latest_tag" == "null" ]; then echo "::error::Failed to fetch tag."; exit 1; fi
           echo "Discovered latest Triton tag: ${latest_tag}"
           echo "tag=${latest_tag}" >> $GITHUB_OUTPUT
 
+      - name: Generate execution matrix for release
+        id: generate-matrix
+        run: |
+          arch_choice="${{ github.event.inputs.build_architecture }}"
+
+          # Define configurations for each architecture
+          x64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'x64-docker']\", \"arch\": \"x86_64\", \"timeout\": 120}}"
+          aarch64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'aarch64-docker']\", \"arch\": \"aarch64\", \"timeout\": 720}}"
+
+          # Build the final JSON matrix string
+          matrix_content=""
+          if [[ "$arch_choice" == "x86_64" || "$arch_choice" == "all" ]]; then
+            matrix_content="$x64_config"
+          fi
+          if [[ "$arch_choice" == "aarch64" || "$arch_choice" == "all" ]]; then
+            if [ -n "$matrix_content" ]; then
+              matrix_content="$matrix_content,$aarch64_config"
+            else
+              matrix_content="$aarch64_config"
+            fi
+          fi
+
+          # Wrap the content in the final JSON structure
+          final_matrix="{\"include\":[$matrix_content]}"
+          echo "Generated Matrix for Release: $final_matrix"
+          echo "matrix=$final_matrix" >> $GITHUB_OUTPUT
+
   # ===================================================================
-  # JOB 2: Stable Triton Build (Manually Triggered)
+  # JOB 2: Execute the release build using the combined outputs
   # ===================================================================
-  # This job executes the build using the tag discovered in the previous job.
   execute-release-build:
-    needs: discover-latest-tag
-    if: needs.discover-latest-tag.outputs.tag != ''
+    needs: prepare-release-build
+    if: needs.prepare-release-build.outputs.tag != '' && needs.prepare-release-build.outputs.matrix != ''
     strategy:
       fail-fast: false
-      matrix:
-        config:
-        - {runs_on: "['self-hosted', 'x64-docker']", arch: 'x86_64', timeout: 120}
-        - {runs_on: "['self-hosted', 'aarch64-docker']", arch: 'aarch64', timeout: 720}
+      matrix: ${{ fromJson(needs.prepare-release-build.outputs.matrix) }}
     uses: ./.github/workflows/reusable-build-triton.yml
     with:
       runner: ${{ matrix.config.runs_on }}
       arch: ${{ matrix.config.arch }}
       timeout: ${{ matrix.config.timeout }}
-      checkout-ref: ${{ needs.discover-latest-tag.outputs.tag }}
+      checkout-ref: ${{ needs.prepare-release-build.outputs.tag }} # Use output from the single 'needs' job
       package-name: 'triton'
       cibw-build: 'cp3*-manylinux_${{ matrix.config.arch }}'
       cibw-skip: 'cp{35,36,37,38,39}-*'

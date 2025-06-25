@@ -14,6 +14,14 @@ on:
         description: '🐍 Python version for the test build (e.g., 3.12)'
         type: string
         default: '3.12'
+      build_architecture:
+        description: '🏗️ Architecture for the test build'
+        type: choice
+        options:
+        - x86_64
+        - aarch64
+        - all
+        default: 'x86_64'
 
 jobs:
   # ===================================================================
@@ -44,27 +52,45 @@ jobs:
   # ===================================================================
   # JOB 2: Single Python Version Test Build (Manually Triggered)
   # ===================================================================
-  prepare-test-build:
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_single_version_test
-    runs-on: ['self-hosted', 'x64-docker']
+  prepare-test-matrix:
+    runs-on: ['self-hosted']
     outputs:
-      cibw_build_spec: ${{ steps.prepare-vars.outputs.cibw_build_spec }}
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
     steps:
-      - id: prepare-vars
-        name: Prepare Build Variables for x86 Test
+      - name: Generate execution matrix
+        id: generate-matrix
         run: |
           py_ver_nodot=$(echo "${{ github.event.inputs.python_test_version }}" | tr -d '.')
-          echo "cibw_build_spec=cp${py_ver_nodot}-manylinux_x86_64" >> $GITHUB_OUTPUT
+          arch_choice="${{ github.event.inputs.build_architecture }}"
+
+          # Define the configurations for each architecture
+          x64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'x64-docker']\", \"arch\": \"x86_64\", \"timeout\": 120}, \"cibw_build_spec\": \"cp${py_ver_nodot}-manylinux_x86_64\"}"
+          aarch64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'aarch64-docker']\", \"arch\": \"aarch64\", \"timeout\": 720}, \"cibw_build_spec\": \"cp${py_ver_nodot}-manylinux_aarch64\"}"
+
+          # Build the final JSON matrix string based on the user's choice
+          matrix_content=""
+          if [[ "$arch_choice" == "x86_64" || "$arch_choice" == "all" ]]; then
+            matrix_content="$x64_config"
+          fi
+          if [[ "$arch_choice" == "aarch64" || "$arch_choice" == "all" ]]; then
+            if [ -n "$matrix_content" ]; then
+              matrix_content="$matrix_content,$aarch64_config"
+            else
+              matrix_content="$aarch64_config"
+            fi
+          fi
+
+          # Wrap the content in the final JSON structure for the matrix
+          final_matrix="{\"include\":[$matrix_content]}"
+          echo "Generated Matrix: $final_matrix"
+          echo "matrix=$final_matrix" >> $GITHUB_OUTPUT
 
   execute-test-build:
-    needs: prepare-test-build
-    if: needs.prepare-test-build.outputs.cibw_build_spec != ''
+    needs: prepare-test-matrix
+    if: needs.prepare-test-matrix.outputs.matrix != ''
     strategy:
       fail-fast: false
-      matrix:
-        config:
-        - {runs_on: "['self-hosted', 'x64-docker']", arch: 'x86_64', timeout: 120}
-        - {runs_on: "['self-hosted', 'aarch64-docker']", arch: 'aarch64', timeout: 720}
+      matrix: ${{ fromJson(needs.prepare-test-matrix.outputs.matrix) }}
     uses: ./.github/workflows/reusable-build-triton.yml
     with:
       runner: ${{ matrix.config.runs_on }}
@@ -72,5 +98,5 @@ jobs:
       timeout: ${{ matrix.config.timeout }}
       checkout-ref: 'main'
       package-name: 'triton-nightly'
-      cibw-build: ${{ needs.prepare-test-build.outputs.cibw_build_spec }}
+      cibw-build: ${{ matrix.cibw_build_spec }}
     secrets: inherit
