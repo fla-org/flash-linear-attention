@@ -150,37 +150,46 @@ jobs:
         env:
           FLA_PYPI_PASSWD: ${{ secrets.FLA_TRITON_PYPI_PASSWD }}
           PACKAGE_NAME: ${{ inputs.package-name }}
+          PACKAGE_NAME: ${{ inputs.package-name }}
         run: |
           cd wheelhouse
           set -e  # Exit immediately if any command fails
 
           # Flag to track if any wheel processing fails
           ALL_WHEELS_PROCESSED=true
+          if [ "${PACKAGE_NAME}" == "triton-nightly" ]; then
+            echo "--- Processing Nightly Build: Renaming packages to 'triton-nightly' ---"
+            for whl in triton-*.whl; do
+              # Create a subshell for error handling
+              if (
+                set -e
+                echo "Processing: $whl"
+                wheel unpack "$whl" -d tmp_pkg &&
+                OLD_VERSION=$(unzip -p "$whl" *dist-info/METADATA | grep "^Version:" | cut -d' ' -f2) &&
+                NEW_VERSION=$(echo "$OLD_VERSION" | sed 's/+git.*$/.dev'"$BUILD_DATE"'/') &&
+                mv "tmp_pkg/triton-${OLD_VERSION}" "tmp_pkg/triton_nightly-${NEW_VERSION}" &&
+                mv "tmp_pkg/triton_nightly-${NEW_VERSION}/triton-${OLD_VERSION}.dist-info" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info" &&
+                sed -i -e "s/^Name: triton$/Name: triton-nightly/" -e "s/^Version: ${OLD_VERSION}$/Version: ${NEW_VERSION}/" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info/METADATA" &&
+                wheel pack "tmp_pkg/triton_nightly-${NEW_VERSION}" -d . --build-number ""
+              ); then
+                # Successfully processed
+                rm -f "$whl"
+                echo "Successfully processed: $whl → triton_nightly-${NEW_VERSION}-*.whl"
+              else
+                # Failed to process this wheel
+                ALL_WHEELS_PROCESSED=false
+                echo "Failed to process: $whl"
+              fi
+              # Always clean up temp directory
+              rm -rf tmp_pkg
+              echo "Successfully processed: $whl"
+            done
+          else
+            echo "--- Processing Release Build: No renaming needed. ---"
+            # For release builds, we do nothing to the wheels.
+          fi
 
-          for whl in triton-*.whl; do
-            # Create a subshell for error handling
-            if (
-              set -e
-              echo "Processing: $whl"
-              wheel unpack "$whl" -d tmp_pkg &&
-              OLD_VERSION=$(unzip -p "$whl" *dist-info/METADATA | grep "^Version:" | cut -d' ' -f2) &&
-              NEW_VERSION=$(echo "$OLD_VERSION" | sed 's/+git.*$/.dev'"$BUILD_DATE"'/') &&
-              mv "tmp_pkg/triton-${OLD_VERSION}" "tmp_pkg/triton_nightly-${NEW_VERSION}" &&
-              mv "tmp_pkg/triton_nightly-${NEW_VERSION}/triton-${OLD_VERSION}.dist-info" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info" &&
-              sed -i -e "s/^Name: triton$/Name: triton-nightly/" -e "s/^Version: ${OLD_VERSION}$/Version: ${NEW_VERSION}/" "tmp_pkg/triton_nightly-${NEW_VERSION}/triton_nightly-${NEW_VERSION}.dist-info/METADATA" &&
-              wheel pack "tmp_pkg/triton_nightly-${NEW_VERSION}" -d . --build-number ""
-            ); then
-              # Successfully processed
-              rm -f "$whl"
-              echo "Successfully processed: $whl → triton_nightly-${NEW_VERSION}-*.whl"
-            else
-              # Failed to process this wheel
-              ALL_WHEELS_PROCESSED=false
-              echo "Failed to process: $whl"
-            fi
-            # Always clean up temp directory
-            rm -rf tmp_pkg
-          done
+          
 
           # Only upload if ALL wheels were successfully processed
           if [ "$ALL_WHEELS_PROCESSED" = true ]; then
