@@ -199,7 +199,7 @@ jobs:
               python3 -m twine upload \
                 --repository-url http://pypi-upload.fla-org.com/ \
                 --username fla \
-                --password ${{ secrets.FLA_PYPI_PASSWD }}  \
+                --password ${{ secrets.secrets.FLA_TRITON_PYPI_PASSWD }}  \
                 --verbose \
                 --non-interactive \
                 "${WHL_FILE}"
@@ -389,7 +389,7 @@ jobs:
               python3 -m twine upload \
                 --repository-url http://pypi-upload.fla-org.com/ \
                 --username fla \
-                --password ${{ secrets.FLA_PYPI_PASSWD }}  \
+                --password ${{ secrets.FLA_TRITON_PYPI_PASSWD }}  \
                 --verbose \
                 --non-interactive \
                 "${WHL_FILE}"

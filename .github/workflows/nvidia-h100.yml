@@ -70,7 +70,7 @@ jobs:
           pip uninstall -y flash-linear-attention
           uv pip install -U pytest setuptools wheel ninja
           uv pip install torch~=2.7.0 triton -U --index-url https://download.pytorch.org/whl/cu128
-          # uv pip install git+https://github.com/Dao-AILab/causal-conv1d.git@a4b40 -U --no-cache-dir --no-build-isolation
+          uv pip install git+https://github.com/Dao-AILab/causal-conv1d.git@a4b40 -U --no-cache-dir --no-build-isolation
           uv pip install flash-attn -U --no-cache-dir --no-build-isolation
           pip install .
 
