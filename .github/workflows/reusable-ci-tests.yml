@@ -53,12 +53,13 @@ jobs:
             fi
           done
 
-          if [ -z "${FOUND_PATH}" ]; then
-            echo "::error::Could not automatically find a Conda installation in $HOME from the list: ${POSSIBLE_NAMES[*]}"
+          if [ -n "${FOUND_PATH}" ]; then
+            echo "Setting CONDA environment variable to: ${FOUND_PATH}"
+            echo "CONDA=${FOUND_PATH}" >> $GITHUB_ENV
+          else
+            echo "::error::Could not automatically find a Conda installation."
             exit 1
           fi
-
-          echo "conda_path=${FOUND_PATH}" >> $GITHUB_OUTPUT
 
       - name: Set up Conda from Discovered Path
         uses: conda-incubator/setup-miniconda@v3
@@ -66,7 +67,6 @@ jobs:
           activate-environment: ${{ inputs.conda_env_name }}
           auto-update-conda: false
           auto-activate-base: false
-          miniconda-path: ${{ steps.find_conda.outputs.conda_path }}
 
 
 
@@ -216,12 +216,13 @@ jobs:
             fi
           done
 
-          if [ -z "${FOUND_PATH}" ]; then
-            echo "::error::Could not automatically find a Conda installation in $HOME from the list: ${POSSIBLE_NAMES[*]}"
+          if [ -n "${FOUND_PATH}" ]; then
+            echo "Setting CONDA environment variable to: ${FOUND_PATH}"
+            echo "CONDA=${FOUND_PATH}" >> $GITHUB_ENV
+          else
+            echo "::error::Could not automatically find a Conda installation."
             exit 1
           fi
-
-          echo "conda_path=${FOUND_PATH}" >> $GITHUB_OUTPUT
 
       - name: Set up Conda from Discovered Path
         uses: conda-incubator/setup-miniconda@v3
@@ -229,7 +230,6 @@ jobs:
           activate-environment: ${{ inputs.conda_env_name }}
           auto-update-conda: false
           auto-activate-base: false
-          miniconda-path: ${{ steps.find_conda.outputs.conda_path }}
 
 
       - name: Check skip keyword in LATEST commit (Push only)
