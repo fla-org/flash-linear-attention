@@ -9,7 +9,7 @@ from transformers import AutoModelForCausalLM
 from fla.utils import device
 
 # Models that do not yet support variable sequence lengths (for modeling tests)
-MODELING_UNSUPPORTED_VAR_LEN = [
+MODELING_UNSUPPORTED_VARLEN = [
     "ABCConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
     "RodimusConfig",

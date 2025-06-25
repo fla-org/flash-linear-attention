@@ -23,7 +23,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_fwd_kernel(
     q,
     k,
@@ -37,8 +37,8 @@ def fused_recurrent_fwd_kernel(
     ht,
     cu_seqlens,
     scale,
+    B,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -135,7 +135,7 @@ def fused_recurrent_fwd_kernel(
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_bwd_kernel(
     q,
     k,
@@ -157,8 +157,8 @@ def fused_recurrent_bwd_kernel(
     dh0,
     cu_seqlens,
     scale,
+    B,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -246,7 +246,11 @@ def fused_recurrent_bwd_kernel(
     p_q = q + (bos + ((T - 1) if not REVERSE else 0)) * H*K + i_h * K + o_k
     p_k = k + (bos + ((T - 1) if not REVERSE else 0)) * H*K + i_h * K + o_k
     p_v = v + (bos + ((T - 1) if not REVERSE else 0)) * H*V + i_h * V + o_v
+<<<<<<< chunk-parallel
     p_o = o + (bos + ((T - 1) if not REVERSE else 0)) * H*V + i_h * V + o_v
+=======
+
+>>>>>>> main
     p_do = do + (bos + ((T - 1) if not REVERSE else 0)) * H*V + i_h * V + o_v
     p_dq = dq + ((i_v * all + bos) + ((T - 1) if not REVERSE else 0)) * H*K + i_h * K + o_k
     p_dk = dk + ((i_v * all + bos) + ((T - 1) if not REVERSE else 0)) * H*K + i_h * K + o_k
@@ -258,6 +262,7 @@ def fused_recurrent_bwd_kernel(
         p_gk = gk + (bos + ((T - 1) if not REVERSE else 0)) * H*K + i_h * K + o_k
         p_dgk = dgk + ((i_v * all + bos) + ((T - 1) if not REVERSE else 0)) * H*K + i_h * K + o_k
     if USE_GV:
+        p_o = o + (bos + ((T - 1) if not REVERSE else 0)) * H*V + i_h * V + o_v
         p_gv = gv + (bos + ((T - 1) if not REVERSE else 0)) * H*V + i_h * V + o_v
         p_dgv = dgv + ((i_k * all + bos) + ((T - 1) if not REVERSE else 0)) * H*V + i_h * V + o_v
 
@@ -281,6 +286,7 @@ def fused_recurrent_bwd_kernel(
         b_dh += (b_q * scale)[:, None] * b_do[None, :]
         b_dk = tl.sum(b_dh * b_v[None, :], axis=1)
         b_dv = tl.sum(b_dh * b_k[:, None], axis=0)
+
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
             b_dq = tl.load(p_dq, mask=m_k, other=0).to(tl.float32)
@@ -298,16 +304,29 @@ def fused_recurrent_bwd_kernel(
         if USE_GV:
             b_o = tl.load(p_o, mask=m_v, other=0).to(tl.float32)
             b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
+<<<<<<< chunk-parallel
             b_dgv += b_o * b_do - b_v * b_dv
             b_dh *= exp(b_gv)[None, :]
             tl.store(p_dgv, b_dgv.to(p_dgv.dtype.element_ty), mask=m_v)
+=======
+            if i_k == 0:
+                b_dgv += b_o * b_do
+            b_dgv -= b_v * b_dv
+            b_dh *= exp(b_gv)[None, :]
+            tl.store(p_dgv, b_dgv.to(p_dgv.dtype.element_ty), mask=m_v)
+
+>>>>>>> main
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=m_k)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=m_v)
 
         p_q += (1 if REVERSE else -1) * H*K
         p_k += (1 if REVERSE else -1) * H*K
         p_v += (1 if REVERSE else -1) * H*V
+<<<<<<< chunk-parallel
         p_o += (1 if REVERSE else -1) * H*V
+=======
+
+>>>>>>> main
         p_do += (1 if REVERSE else -1) * H*V
         p_dq += (1 if REVERSE else -1) * H*K
         p_dk += (1 if REVERSE else -1) * H*K
@@ -319,6 +338,7 @@ def fused_recurrent_bwd_kernel(
             p_gk += (1 if REVERSE else -1) * H*K
             p_dgk += (1 if REVERSE else -1) * H*K
         if USE_GV:
+            p_o += (1 if REVERSE else -1) * H*V
             p_gv += (1 if REVERSE else -1) * H*V
             p_dgv += (1 if REVERSE else -1) * H*V
 
@@ -343,7 +363,7 @@ def fused_recurrent_fwd(
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = min(K, 64), min(V, 64)
+    BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
     h0 = initial_state
@@ -400,7 +420,7 @@ def fused_recurrent_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
-    BK, BV = min(K, 64), min(V, 64)
+    BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
     h0 = initial_state
