@@ -10,7 +10,7 @@ on:
     types: [opened, synchronize, reopened, closed]
   push:
     branches:
-      - '*'
+      - main
     tags:
       - '*'
 
