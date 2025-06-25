@@ -41,7 +41,6 @@ jobs:
     runs-on: ${{ inputs.runner }}
     env:
       FLA_CI_ENV: 1
-      PYTORCH_CUDA_VERSION: 'cu128'
 
     steps:
       # =================================================================
@@ -203,7 +202,6 @@ jobs:
     env:
       # MODIFICATION: Removed CONDA_BIN_PATH from here.
       FLA_CI_ENV: 1
-      PYTORCH_CUDA_VERSION: 'cu128'
 
     steps:
       - name: Check out repo
