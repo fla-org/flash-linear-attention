@@ -8,7 +8,6 @@ import triton
 import triton.language as tl
 
 from fla.ops.common.fused_recurrent import fused_recurrent_bwd_kernel, fused_recurrent_fwd_kernel
-from fla.ops.utils import chunk_global_cumsum
 from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -153,7 +152,7 @@ def fused_recurrent_gsa_fwd(
     if HQ != H:
         raise ValueError("GQA not supported yet.")
 
-    BK, BV, BM = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64), min(M, 64)
+    BK, BV, BM = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64), min(triton.next_power_of_2(M), 64)
     NK, NV, NM = triton.cdiv(K, BK), triton.cdiv(V, BV), triton.cdiv(M, BM)
 
     hk0, hv0 = None, None
@@ -190,7 +189,7 @@ def fused_recurrent_gsa_fwd(
         USE_G_GAMMA=False,
         USE_GK=False,
         USE_GV=True,
-        REVERSE=reverse
+        REVERSE=reverse,
     )
     ok = ok.sum(0)
 
@@ -254,10 +253,9 @@ def fused_recurrent_gsa_bwd(
     dqv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
     dsv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
     dv = q.new_empty(NM, B, T, H, V, dtype=torch.float)
-    dhk0 = torch.empty_like(hk0)if hk0 is not None else None
+    dgv = q.new_empty(NV, B, T, H, M, dtype=torch.float)
     dhv0 = torch.empty_like(hv0)if hv0 is not None else None
 
-    gk, gv = g, None
     grid = (NV, NM, N * H)
     fused_recurrent_bwd_kernel[grid](
         q=qv,
@@ -265,14 +263,17 @@ def fused_recurrent_gsa_bwd(
         v=v,
         g=None,
         g_gamma=None,
-        gk=gk,
-        gv=gv,
+        gk=g,
+        gv=None,
+        o=None,
         h0=hv0,
-        ht=None,
         do=do,
         dq=dqv,
         dk=dsv,
         dv=dv,
+        dg=None,
+        dgk=dgv,
+        dgv=None,
         dht=dhvt,
         dh0=dhv0,
         cu_seqlens=cu_seqlens,
@@ -293,13 +294,15 @@ def fused_recurrent_gsa_bwd(
     dqv = dqv.sum(0)
     dsv = dsv.sum(0)
     dv = dv.sum(0)
-    dgk = chunk_global_cumsum(dqv * qv.float() - dsv * s.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
+    dgv = dgv.sum(0)
 
     dok = qv * (dqv - (qv * dqv).sum(-1, True))
     dq = q.new_empty(NM, B, T, H, K, dtype=torch.float)
     dk = q.new_empty(NM, B, T, H, K, dtype=torch.float)
     dsk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
-    gk, gv = None, g
+    dgk = q.new_empty(NK, B, T, H, M, dtype=torch.float)
+    dhk0 = torch.empty_like(hk0)if hk0 is not None else None
+
     grid = (NM, NK, N * H)
     fused_recurrent_bwd_kernel[grid](
         q=q,
@@ -307,14 +310,17 @@ def fused_recurrent_gsa_bwd(
         v=s,
         g=None,
         g_gamma=None,
-        gk=gk,
-        gv=gv,
+        gk=None,
+        gv=g,
+        o=ok,
         h0=hk0,
-        ht=None,
         do=dok,
         dq=dq,
         dk=dk,
         dv=dsk,
+        dg=None,
+        dgk=None,
+        dgv=dgk,
         dht=dhkt,
         dh0=dhk0,
         cu_seqlens=cu_seqlens,
@@ -335,8 +341,7 @@ def fused_recurrent_gsa_bwd(
     dq = dq.sum(0)
     dk = dk.sum(0)
     dsk = dsk.sum(0)
-
-    dgv = chunk_global_cumsum(dok.float() * ok.float() - dsk * s.float(), reverse=not reverse, cu_seqlens=cu_seqlens)
+    dgk = dgk.sum(0)
 
     ds = dsk.add_(dsv)
     dg = dgk.add_(dgv)
@@ -403,10 +408,6 @@ class FusedRecurrentGSAFunction(torch.autograd.Function):
         reverse = ctx.reverse
         cu_seqlens = ctx.cu_seqlens
 
-        # not supported yet.
-        if dhkt is not None or dhvt is not None:
-            if g is not None:
-                assert g.requires_grad is False, "Cannot load final state gradient and use gates at the same time"
         dq, dk, dv, ds, dg, dhk0, dhv0 = fused_recurrent_gsa_bwd(
             q=q,
             k=k,

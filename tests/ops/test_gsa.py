@@ -27,15 +27,22 @@ else:
 test_h_list = [2]
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('M', test_m_list)
-@pytest.mark.parametrize('dtype', [torch.float])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'M', 'gate_logit_normalizer', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-M{}-gate_logit_normalizer{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 32, 1, torch.float),
+            (2, 1024, 4, 60, 64, 1, torch.float),
+            (2, 1024, 8, 128, 64, 0.1, torch.float),
+            (2, 1024, 8, 128, 32, 1, torch.float),
+            (2, 1024, 8, 128, 64, 1, torch.float),
+            (2, 1024, 8, 128, 64, 10, torch.float),
+            (4, 2048, 8, 64, 64, 1, torch.float),
+            (2, 1024, 8, 128, 64, 0.1, torch.float16),
+            (2, 1024, 8, 128, 64, 10, torch.float16),
+        ]
+    ]
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
@@ -47,6 +54,7 @@ def test_fused_recurrent(
     H: int,
     D: int,
     M: int,
+    gate_logit_normalizer: float,
     dtype: torch.dtype
 ):
     torch.manual_seed(42)
@@ -55,13 +63,15 @@ def test_fused_recurrent(
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     s = torch.randn((B, T, H, M), dtype=dtype, device=device).requires_grad_()
-    g = F.logsigmoid(torch.randn((B, T, H, M), dtype=dtype, device=device)).requires_grad_()
+    g = (F.logsigmoid(torch.randn((B, T, H, M), dtype=dtype, device=device)) / gate_logit_normalizer).requires_grad_()
     hk0 = torch.randn(B, H, D, M, device=device).requires_grad_()
     hv0 = torch.randn(B, H, M, D, device=device).requires_grad_()
-
     do = torch.randn_like(v)
+    dhkt = torch.randn(hk0)
+    dhvt = torch.randn(hv0)
+
     ref, (ref_hkt, ref_hvt) = naive_recurrent_gsa(q, k, v, s, g, initial_state=(hk0, hv0), output_final_state=True)
-    ref.backward(do)
+    ((ref * do).sum() + (ref_hkt * dhkt).sum() + (ref_hvt * dhvt).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
@@ -79,16 +89,7 @@ def test_fused_recurrent(
         initial_state=(hk0, hv0),
         output_final_state=True,
     )
-    tri, _ = fused_recurrent_gsa(
-        q=q,
-        k=k,
-        v=v,
-        s=s,
-        g=g,
-        initial_state=(hk0, hv0),
-        output_final_state=False,
-    )
-    tri.backward(do)
+    ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None

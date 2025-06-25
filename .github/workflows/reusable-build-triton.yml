@@ -194,9 +194,9 @@ jobs:
           if [ "$ALL_WHEELS_PROCESSED" = true ]; then
             echo "Installing twine and uploading processed wheels..."
             python3 -m pip install twine pkginfo -U
-            readarray -d '' -t WHEEL_FILES < <(find . -maxdepth 1 -name "triton_nightly-*.whl" -print0)
+            readarray -d '' -t WHEEL_FILES < <(find . -maxdepth 1 -name "*.whl" -print0)
             if [ ${#WHEEL_FILES[@]} -eq 0 ]; then
-              echo "Error: No triton_nightly-*.whl files found to upload in the current directory."
+              echo "Error: No *.whl files found to upload in the current directory."
               exit 1
             fi
             for WHL_FILE in "${WHEEL_FILES[@]}"; do
@@ -213,7 +213,7 @@ jobs:
                 exit 1
               fi
             done
-            echo "All triton_nightly-*.whl files uploaded successfully!"
+            echo "All *.whl files uploaded successfully!"
           else
             echo "One or more wheels failed to process. Skipping upload."
             exit 1
