@@ -70,7 +70,7 @@ jobs:
                   "runs_on": "['self-hosted', 'x64-docker']", "arch": "x86_64", "timeout": 120
                 },
                 "cibw_build_spec": "cp${py_ver_nodot}-manylinux_x86_64"
-              },
+              }
             ]
           }
           EOF
@@ -80,6 +80,7 @@ jobs:
   # This job executes the actual test build using the matrix from the previous job
   execute-test-build:
     needs: prepare-test-build
+    if: needs.prepare-test-build.outputs.matrix != ''
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare-test-build.outputs.matrix) }}
