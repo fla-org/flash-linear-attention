@@ -90,26 +90,27 @@ jobs:
     outputs:
       tag: ${{ steps.get-tag.outputs.tag }}
     steps:
-      - name: Get latest Triton release tag via GitHub API
+      - name: Get latest Triton tag via GitHub API
         id: get-tag
         env:
           # The GITHUB_TOKEN is automatically created by Actions to authenticate API calls.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # This step uses 'curl' to call the GitHub API and 'jq' to parse the JSON response.
-          # It fetches the latest non-prerelease, non-draft release directly.
+          # This step uses 'curl' to get the list of all tags and 'jq' to parse the first one.
+          # It relies on the assumption that the /tags API endpoint returns tags in reverse chronological order.
           # Prerequisite: The runner must have 'jq' installed.
           if ! command -v jq &> /dev/null; then
             echo "::error::'jq' is not installed on this runner. Please install it to proceed."
             exit 1
           fi
 
-          echo "Fetching latest release from api.github.com..."
+          echo "Fetching tags list from api.github.com/repos/triton-lang/triton/tags..."
+          # The jq query '.[0].name' gets the 'name' field from the first object in the returned JSON array.
           latest_tag=$(curl -sL -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/triton-lang/triton/releases/latest | jq -r .tag_name)
+            https://api.github.com/repos/triton-lang/triton/tags | jq -r '.[0].name')
 
           if [ -z "$latest_tag" ] || [ "$latest_tag" == "null" ]; then
-            echo "::error::Failed to fetch the latest tag from GitHub API."
+            echo "::error::Failed to fetch the latest tag from GitHub API using the /tags endpoint."
             exit 1
           fi
 
