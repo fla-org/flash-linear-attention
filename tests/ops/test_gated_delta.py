@@ -150,7 +150,7 @@ def chunk_gated_delta_rule_ref(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
     reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
 )
-def test_recurrent_forward(
+def test_fused_recurrent(
     B: int,
     T: int,
     H: int,
