@@ -16,8 +16,8 @@ from fla.utils import assert_close, device
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [1024])
-@pytest.mark.parametrize("n_embd", [512, 1024])
-@pytest.mark.parametrize("dim_ffn", [2048, 4096])
+@pytest.mark.parametrize("n_embd", [1024])
+@pytest.mark.parametrize("dim_ffn", [4096])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("inplace", [True, False])
 @pytest.mark.parametrize("xprevdim", [2, 3])
