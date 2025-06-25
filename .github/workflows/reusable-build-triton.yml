@@ -106,11 +106,11 @@ jobs:
         run: |
           # Environment setup based on runner name
           if [[ "${{ runner.name }}" == "intel-a770" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=16 TRITON_BUILD_WITH_CLANG_LLD=1 SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} ALL_PROXY=${{ secrets.A770_PROXY_ENV }} HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
+            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1 SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} ALL_PROXY=${{ secrets.A770_PROXY_ENV }} HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
           elif [[ "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_ENVIRONMENT="MAX_JOBS=4 TRITON_BUILD_WITH_CLANG_LLD=1 SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} ALL_PROXY=${{ secrets.PI_PROXY_ENV }} HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
+            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1 SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} ALL_PROXY=${{ secrets.PI_PROXY_ENV }} HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
           else
-            export CIBW_ENVIRONMENT="MAX_JOBS=4 TRITON_BUILD_WITH_CLANG_LLD=1"
+            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1"
           fi
 
           # Prerequisite installation based on runner name
