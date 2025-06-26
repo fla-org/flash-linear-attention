@@ -59,8 +59,8 @@ for causal in causal_vals:
             v = torch.randn(
                 B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype
             )
-            w = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)
-            b = torch.randn(H, headdim, device=device, requires_grad=True, dtype=dtype)
+            w = torch.randn(seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
+            b = torch.randn(seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             theta = torch.rand(
                 B, H, seqlen, 1, dtype=dtype, device=device, requires_grad=True
             )

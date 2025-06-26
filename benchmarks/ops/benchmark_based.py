@@ -47,12 +47,15 @@ def benchmark(T, provider):
         q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
         k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
         v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
-    else:
+    elif provider in ('torch', 'torch_bwd', 'parallel_chunk_bwd', 'parallel_chunk'):
         q = torch.randn(B, H, T, 16, device=device, requires_grad=requires_grad, dtype=dtype)
         k = torch.randn(B, H, T, 16, device=device, requires_grad=requires_grad, dtype=dtype)
         v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    else:
+        q = torch.randn(B, T, H, 16, device=device, requires_grad=requires_grad, dtype=dtype)
+        k = torch.randn(B, T, H, 16, device=device, requires_grad=requires_grad, dtype=dtype)
+        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
     do = torch.ones_like(v, dtype=dtype)
-
     quantiles = [0.5, 0.2, 0.8]
     results = 0, 0, 0
     if provider == 'torch':
