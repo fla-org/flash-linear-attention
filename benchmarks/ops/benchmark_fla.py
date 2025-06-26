@@ -48,9 +48,9 @@ def benchmark(T, provider):
         k = torch.randn(B, T, H, 16, device=device, requires_grad=requires_grad, dtype=dtype)
         v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
     elif "gla" in provider:
-        q = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        k = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
         g = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
     else:
         q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
