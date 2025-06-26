@@ -246,7 +246,7 @@ class RodimusPreTrainedModel(PreTrainedModel):
     def _init_weights(
         self,
         module: nn.Module,
-        prenorm_residual_strategy: Optional[str] = 'rescale',
+        prenorm_residual_strategy: Optional[str] = None,
     ):
         num_residuals_per_layer = self.num_residuals_per_layer
 

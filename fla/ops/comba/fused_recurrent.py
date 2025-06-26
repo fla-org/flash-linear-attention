@@ -20,8 +20,8 @@ from fla.utils import input_guard
 def fused_recurrent_comba_fwd_kernel(
     q,
     k,
-    v,
     p,
+    v,
     g,
     beta,
     o,
@@ -86,6 +86,7 @@ def fused_recurrent_comba_fwd_kernel(
         if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
             b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
+            b_p = b_p / (tl.sqrt(tl.sum(b_p * b_p)) + 1e-6)
         b_q = b_q * scale
         # [BV]
         b_v -= tl.sum(b_h * b_p[:, None], 0)
@@ -147,8 +148,8 @@ def fused_recurrent_comba_fwd(
     fused_recurrent_comba_fwd_kernel[grid](
         q=q,
         k=k,
-        v=v,
         p=p,
+        v=v,
         g=g,
         beta=beta,
         o=o,
@@ -181,8 +182,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
         ctx,
         q: torch.Tensor,
         k: torch.Tensor,
-        v: torch.Tensor,
         p: torch.Tensor,
+        v: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
         scale: float,
@@ -194,8 +195,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
         o, final_state = fused_recurrent_comba_fwd(
             q=q,
             k=k,
-            v=v,
             p=p,
+            v=v,
             g=g,
             beta=beta,
             scale=scale,
@@ -220,8 +221,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
 def fused_recurrent_comba(
     q: torch.Tensor,
     k: torch.Tensor,
-    v: torch.Tensor,
     p: torch.Tensor,
+    v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor = None,
     scale: float = None,
@@ -236,11 +237,11 @@ def fused_recurrent_comba(
             queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
+        p (torch.Tensor):
+            auxiliary keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, HV, V]`.
             GVA is applied if `HV > H`.
-        p (torch.Tensor):
-            auxiliary keys of shape `[B, T, H, K]`.
         g (torch.Tensor):
             g (decays) of shape `[B, T, HV]`.
         beta (torch.Tensor):
@@ -289,7 +290,7 @@ def fused_recurrent_comba(
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
         >>> o_var, ht_var = fused_recurrent_comba(
-            q, k, v, p, g, beta,
+            q, k, p, v, g, beta,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
@@ -315,8 +316,8 @@ def fused_recurrent_comba(
     o, final_state = FusedRecurrentFunction.apply(
         q,
         k,
-        v,
         p,
+        v,
         g,
         beta,
         scale,
