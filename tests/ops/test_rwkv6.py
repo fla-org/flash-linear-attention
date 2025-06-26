@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
@@ -16,15 +17,18 @@ from fla.utils import assert_close, device, device_platform
     reason="Intel Triton Failure"
 )
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype', 'gate_logit_normalizer'),
+    ('B', 'T', 'H', 'D', 'gate_logit_normalizer', 'dtype'),
     [
-        (2, 16, 2, 64, torch.float16, 1.0),
-        (2, 16, 2, 64, torch.float16, 0.1),
-        (2, 64, 2, 64, torch.float16, 1),
-        (2, 64, 2, 256, torch.float16, 1),
-        (2, 268, 2, 64, torch.float16, 1),
-        (2, 4096, 2, 64, torch.float16, 1),
-        (2, 4096, 2, 256, torch.float16, 1),
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_logit_normalizer{}-{}".format(*test))
+        for test in [
+            (1, 15, 2, 60, 1.0, torch.float16),
+            (3, 60, 3, 64, 0.1, torch.float16),
+            (3, 64, 2, 64, 1, torch.float16),
+            (4, 500, 3, 256, 1, torch.float16),
+            (4, 1000, 4, 64, 10, torch.float16),
+            (4, 2048, 4, 64, 1, torch.float16),
+            (4, 2048, 4, 256, 1, torch.float16),
+        ]
     ]
 )
 def test_chunk(
@@ -32,8 +36,8 @@ def test_chunk(
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype,
     gate_logit_normalizer: float,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -104,30 +108,28 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('N', 'T', 'H', 'D', 'dtype'),
+    ('H', 'D', 'cu_seqlens', 'dtype'),
     [
-        (2, 256, 2, 64, torch.bfloat16),
-        (4, 512, 2, 100, torch.float),
-        (4, 1024, 2, 128, torch.bfloat16),
-        (3, 400, 2, 256, torch.float),
-        (5, 4096, 2, 64, torch.float16),
+        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (4, 64, [0, 15], torch.float16),
+            (4, 64, [0, 256, 500, 1000], torch.float16),
+            (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
+        ]
     ]
 )
 def test_chunk_varlen(
-    N: int,
-    T: int,
     H: int,
     D: int,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    N = len(cu_seqlens) - 1
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
