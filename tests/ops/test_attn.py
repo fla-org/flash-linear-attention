@@ -84,6 +84,8 @@ def test_parallel_varlen(
     D: int,
     cu_seqlens: List[int],
 ):
+    if not HAS_FLASH:
+        pytest.skip(reason="Skipping test because flash-attn is not installed")
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     dtype = torch.float16
