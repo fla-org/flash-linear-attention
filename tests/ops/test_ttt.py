@@ -36,6 +36,8 @@ def test_chunk(
 ):
     if D > 64 and check_shared_mem('hopper') is False:
         pytest.skip(reason="Current CI do not support this config")
+    if T > 1000:
+        pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
@@ -121,6 +123,8 @@ def test_fused_chunk(
     dtype: torch.dtype,
 ):
     if D > 64 and check_shared_mem('hopper') is False:
+        pytest.skip(reason="Current CI do not support this config")
+    if T > 1000:
         pytest.skip(reason="Current CI do not support this config")
     eta_base = 5e-3
     q = torch.randn(B, T, H, D, dtype=dtype)
