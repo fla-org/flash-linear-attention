@@ -1,12 +1,12 @@
 import copy
 import dataclasses
-import logging
 import re
 import uuid
 from copy import deepcopy
 from enum import IntEnum, auto
 from typing import Dict, List, Optional, Tuple
-from transformers.utils import TensorType, logging
+
+from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 

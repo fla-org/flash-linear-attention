@@ -21,10 +21,15 @@ import triton
 import triton.language as tl
 from einops import rearrange
 from torch.distributed import DeviceMesh
-from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_module
+from torch.distributed.tensor import Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.utils import get_multiprocessor_count, input_guard
+
+try:
+    from torch.distributed.tensor import DTensor
+except (ImportError, AttributeError):
+    DTensor = None
 
 
 def layer_norm_ref(
