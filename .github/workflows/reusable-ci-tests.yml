@@ -166,11 +166,12 @@ jobs:
       # =================================================================
       # STAGE 2: OPS TESTS
       # =================================================================
-      - name: Find dependent test files for Ops
+      - name: Find dependent OP test files for Ops
         if: steps.check_skip.outputs.skip_tests == 'false'
         id: find-ops-tests
         shell: bash
         run: |
+          export TEST_SCOPE="EXCLUDE_MODELS"
           TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
           echo "Found ops test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
@@ -258,11 +259,12 @@ jobs:
       # =================================================================
       # STAGE 3: MODELS TESTS (Reuses the same activated environment)
       # =================================================================
-      - name: Find dependent test files for Models
+      - name: Find dependent Model test files for Models
         if: steps.check_skip.outputs.skip_tests == 'false'
         id: find-models-tests
         shell: bash
         run: |
+          export TEST_SCOPE="MODELS_ONLY"
           TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
           echo "Found models test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
