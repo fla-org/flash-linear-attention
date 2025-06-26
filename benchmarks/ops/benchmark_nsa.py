@@ -52,12 +52,12 @@ def benchmark(T, provider):
     results = 0, 0, 0
     if provider == 'nsa':
         results = triton.testing.do_bench(
-            lambda: parallel_nsa(q, k, v, indices, block_size),
+            lambda: parallel_nsa(q, k, v, block_indices=indices, block_size=block_size),
             quantiles=quantiles
         )
     elif provider == 'nsa_bwd':
         results = triton.testing.do_bench(
-            lambda: parallel_nsa(q, k, v, indices, block_size).backward(do),
+            lambda: parallel_nsa(q, k, v, block_indices=indices, block_size=block_size).backward(do),
             quantiles=quantiles
         )
     elif provider == 'flash':
