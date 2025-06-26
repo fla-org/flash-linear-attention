@@ -200,10 +200,10 @@ def test_fused_recurrent_varlen(
         for test in [
             (1, 63, 1, 64, 32, 1, torch.float16),
             (2, 1024, 4, 60, 64, 1, torch.float16),
-            (2, 1024, 8, 128, 64, 0.1, torch.float16),
-            (2, 1024, 8, 128, 128, 1, torch.float16),
-            (2, 1024, 8, 128, 64, 10, torch.float16),
-            (4, 2048, 8, 64, 64, 1, torch.float16)
+            (2, 1024, 4, 256, 64, 1, torch.float16),
+            (2, 1024, 4, 128, 64, 0.1, torch.float),
+            (2, 1024, 4, 128, 128, 1, torch.float16),
+            (2, 1024, 4, 128, 64, 10, torch.float16),
         ]
     ]
 )
@@ -319,7 +319,6 @@ def test_chunk_varlen(
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
-    # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()

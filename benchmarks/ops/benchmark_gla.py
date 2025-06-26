@@ -35,13 +35,20 @@ from fla.ops.retention.naive import naive_retention
 def benchmark(T, provider):
     from fla.utils import device
     dtype = torch.bfloat16
+#    dtype = torch.float32
     requires_grad = True
     B, H, D = 16, 8, 128
 
-    q = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-    k = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, H, T, D, device=device, dtype=dtype)).clamp_min(-5).requires_grad_(requires_grad)
-    v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    if provider in ("fused_chunk_gla", "fused_chunk_gla_bwd"):
+        q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        g = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    else:
+        q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        g = F.logsigmoid(torch.randn(B, T, H, D, device=device, dtype=dtype)).clamp_min(-5).requires_grad_(requires_grad)
+        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
 
     do = torch.ones_like(q, dtype=dtype)
 
@@ -67,7 +74,7 @@ def benchmark(T, provider):
     elif provider == 'chunk_retention_bwd':
         results = triton.testing.do_bench(lambda: chunk_retention(q, k, v)[0].backward(do), quantiles=quantiles)
     elif provider == 'recurrent_gla_bwd':
-        results = triton.testing.do_bench(lambda: fused_recurrent_gla(q, k, v, g)[0].backward(do), quantiles=quantiles)
+        results = triton.testing.do_bench(lambda: fused_recurrent_gla(q, k, v, gk=g)[0].backward(do), quantiles=quantiles)
     elif provider == 'fused_chunk_gla_bwd':
         results = triton.testing.do_bench(lambda: fused_chunk_gla(q, k, v, g)[0].backward(do), quantiles=quantiles)
     elif provider == 'chunk_gla_bwd':

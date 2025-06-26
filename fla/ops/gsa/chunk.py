@@ -13,7 +13,7 @@ from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp, safe_exp
+from fla.ops.utils.op import exp
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
 from fla.utils import input_guard
 
@@ -470,7 +470,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         p_do = tl.make_block_ptr(do + (bos*HQ+i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_j*BC, i_v*BV), (BC, BV), (1, 0))
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1)) * safe_exp(b_g - b_gn[None, :])
+        b_do = tl.load(p_do, boundary_check=(0, 1)) * exp(b_g - b_gn[None, :])
         # [BC, BC]
         b_A = tl.load(p_A, boundary_check=(0, 1))
         # [BC, BV]
