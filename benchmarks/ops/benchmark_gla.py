@@ -73,7 +73,7 @@ def benchmark(T, provider):
             return results
     elif provider == 'chunk_retention_bwd':
         results = triton.testing.do_bench(lambda: chunk_retention(q, k, v)[0].backward(do), quantiles=quantiles)
-   elif provider == 'recurrent_gla_bwd':
+    elif provider == 'recurrent_gla_bwd':
         results = triton.testing.do_bench(lambda: fused_recurrent_gla(q, k, v, gk=g)[0].backward(do), quantiles=quantiles)
     elif provider == 'fused_chunk_gla_bwd':
         results = triton.testing.do_bench(lambda: fused_chunk_gla(q, k, v, g)[0].backward(do), quantiles=quantiles)
