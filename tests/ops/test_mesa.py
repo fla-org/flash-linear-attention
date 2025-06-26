@@ -21,12 +21,20 @@ else:
 test_h_list = [3]
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1], [1, 1]])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'gate_range', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-gate_range{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, [0.8, 0.99], torch.float16),
+            (2, 500, 4, 60, [0.8, 0.99], torch.float16),
+            (2, 1024, 8, 128, [0.8, 0.99], torch.float16),
+            (2, 1024, 8, 128, [0.01, 0.1], torch.float16),
+            (2, 1024, 8, 128, [1, 1], torch.float16),
+            (4, 2048, 8, 64, [0.8, 0.99], torch.float16)
+        ]
+    ]
+)
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure'
@@ -36,8 +44,8 @@ def test_chunk(
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype,
     gate_range: Tuple[float, float],
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     q = torch.rand(B, T, H, D, dtype=dtype) / 10
@@ -91,24 +99,31 @@ def test_chunk(
     ref_dh_kk_init, ref_dh_kv_init = h_kk_init.grad, h_kv_init.grad
     q.grad = k.grad = v.grad = beta.grad = g.grad = lamb.grad = h_kk_init.grad = h_kv_init.grad = None
 
-    assert_close('  o', ref, tri, 0.006)
-    assert_close(' h_kk_final', ref_hkk_final, tri_kk_final, 0.008)
-    assert_close(' h_kv_final', ref_hkv_final, tri_kv_final, 0.008)
-    assert_close(' dq', ref_dq, tri_dq, 0.008)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.008)
-    assert_close(' db', ref_dbeta, tri_dbeta, 0.008)
-    assert_close(' dg', ref_dg, tri_dg, 0.008)
-    assert_close(' dlamb', ref_dlamb, tri_dlamb, 0.015)
-    assert_close(' dh_kk_init', ref_dh_kk_init, tri_dh_kk_init, 0.008)
-    assert_close(' dh_kv_init', ref_dh_kv_init, tri_dh_kv_init, 0.008)
+    assert_close('o', ref, tri, 0.006)
+    assert_close('h_kk_final', ref_hkk_final, tri_kk_final, 0.008)
+    assert_close('h_kv_final', ref_hkv_final, tri_kv_final, 0.008)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('db', ref_dbeta, tri_dbeta, 0.008)
+    assert_close('dg', ref_dg, tri_dg, 0.008)
+    assert_close('dlamb', ref_dlamb, tri_dlamb, 0.015)
+    assert_close('dh_kk_init', ref_dh_kk_init, tri_dh_kk_init, 0.008)
+    assert_close('dh_kv_init', ref_dh_kv_init, tri_dh_kv_init, 0.008)
 
 
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_range', [[0.8, 0.99], [0.01, 0.1], [1, 1]])
-@pytest.mark.parametrize('cu_seqlens', [[0, 14, 121, 421, 500], [0, 32, 222, 333, 444, 555, 666, 777, 888, 999, 1000]])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('H', 'D', 'gate_range', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-gate_range{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (3, 50, [0.8, 0.99], [0, 15], torch.float16),
+            (4, 64, [0.8, 0.99], [0, 14, 121, 421, 500], torch.float16),
+            (4, 64, [0.01, 0.1], [0, 256, 500, 1000], torch.float16),
+            (4, 100, [1, 1], [0, 15, 100, 300, 1200, 2000], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
@@ -192,28 +207,31 @@ def test_chunk_varlen(
         q.grad, k.grad, v.grad, beta.grad, g.grad, lamb.grad, h_kk_init.grad, h_kv_init.grad
     q.grad = k.grad = v.grad = beta.grad = g.grad = lamb.grad = h_kk_init.grad = h_kv_init.grad = None
 
-    assert_close('  o', ref, tri, 0.006)
-    assert_close(' h_kk_final', ref_h_kk_t, tri_h_kk_final, 0.008)
-    assert_close(' h_kv_final', ref_h_kv_t, tri_h_kv_final, 0.008)
-    assert_close(' dq', ref_dq, tri_dq, 0.008)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.008)
-    assert_close(' db', ref_dbeta, tri_dbeta, 0.015)
-    assert_close(' dlamb', ref_dlamb, tri_dlamb, 0.015)
-    assert_close(' dg', ref_dg, tri_dg, 0.015)
+    assert_close('o', ref, tri, 0.006)
+    assert_close('h_kk_final', ref_h_kk_t, tri_h_kk_final, 0.008)
+    assert_close('h_kv_final', ref_h_kv_t, tri_h_kv_final, 0.008)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('db', ref_dbeta, tri_dbeta, 0.015)
+    assert_close('dlamb', ref_dlamb, tri_dlamb, 0.015)
+    assert_close('dg', ref_dg, tri_dg, 0.015)
     assert_close('dh_kk_0', ref_dh_kk_init, tri_dh_kk_init, 0.007)
     assert_close('dh_kv_0', ref_dh_kv_init, tri_dh_kv_init, 0.007)
 
 
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_range', [[0.95, 0.99]])
-@pytest.mark.parametrize('max_CG_step', [1, 5, 30])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+@pytest.mark.parametrize(
+    ('B', 'H', 'D', 'gate_range', 'max_CG_step', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-H{}-D{}-gate_range{}-max_CG_step{}-{}".format(*test))
+        for test in [
+            (1, 3, 50, [0.95, 0.99], 1, torch.float16),
+            (2, 4, 60, [0.95, 0.99], 5, torch.float16),
+            (2, 8, 128, [0.95, 0.99], 1, torch.float16),
+            (2, 8, 128, [0.95, 0.99], 5, torch.float16),
+            (2, 8, 128, [0.95, 0.99], 30, torch.float16),
+        ]
+    ]
 )
 def test_decoding_one_step(
     B: int,
