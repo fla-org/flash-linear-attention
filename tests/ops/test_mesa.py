@@ -8,17 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step, naive_mesa_net_decoding_one_step, naive_mesa_net_exact
-from fla.utils import COMPILER_MODE, assert_close, device, device_platform, is_intel_alchemist
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [512]
-    test_d_list = [128]
-else:
-    test_b_list = [2]
-    test_t_list = [15, 63, 300, 1000]
-    test_d_list = [128, 64, 50, 100]
-test_h_list = [3]
+from fla.utils import assert_close, device, device_platform, is_intel_alchemist
 
 
 @pytest.mark.parametrize(

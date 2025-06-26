@@ -10,47 +10,35 @@ import torch.nn.functional as F
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.chunk_ref import chunk_gated_delta_product_ref
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
-from fla.utils import COMPILER_MODE, assert_close, device, is_intel_alchemist
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_t_varlen_list = test_t_list
-    test_d_list = [64, 128, 256]
-    test_gate_list = [1.0]
-else:
-    test_b_list = [2]
-    test_t_list = [63, 300, 1000]
-    test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [64, 32, 100, 256]
-    test_gate_list = [1, 0.1, 10]
-test_h_list = [2]
-test_hv_list = [4]
+from fla.utils import assert_close, device, is_intel_alchemist
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('num_householder', [3])
-@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('scale', [1])
-@pytest.mark.parametrize('mask_p', [0.5])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'num_householder', 'gate_logit_normalizer', 'mask_p', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-num_householder{}-gate_logit_normalizer{}-mask_p{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 0.1, 1, 1, 0, torch.float16),
+            (2, 200, 3, 60, 0.1, 1, 1, 0, torch.float16),
+            (2, 1000, 4, 64, 0.1, 2, 0.1, 0.5, torch.float16),
+            (2, 1024, 4, 64, 1, 2, 1, 0, torch.float16),
+            (2, 1024, 6, 100, 1, 2, 10, 0, torch.float16),
+            (4, 1500, 8, 128, 0.1, 3, 1, 0.5, torch.float16),
+            (2, 2048, 8, 128, 1, 3, 1, 0, torch.float16),
+            (2, 2048, 8, 128, 1, 3, 1, 0, torch.float16),
+        ]
+    ]
 )
 def test_chunk(
     B: int,
     T: int,
     H: int,
     D: int,
-    num_householder: int,
-    dtype: torch.dtype,
     scale: float,
+    num_householder: int,
     gate_logit_normalizer: float,
     mask_p: float,
+    dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
@@ -107,24 +95,27 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-@pytest.mark.parametrize('H', [2])
-@pytest.mark.parametrize('D', [128])
-@pytest.mark.parametrize('cu_seqlens', [[0, 15, 122, 229, 400, 467, 1000]])
-@pytest.mark.parametrize('scale', [1])
-@pytest.mark.parametrize('mask_p', [0.2])
-@pytest.mark.parametrize('num_householder', [3, 4])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+@pytest.mark.parametrize(
+    ('H', 'D', 'num_householder', 'mask_p', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-num_householder{}-mask_p{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 64, 3, 0, [0, 63], torch.float16),
+            (2, 100, 2, 0, [0, 63, 100, 500, 1000], torch.float16),
+            (2, 100, 2, 0, [0, 100, 256, 512, 1500, 1500], torch.float16),
+            (2, 128, 2, 0, [0, 100, 300, 800, 1500, 2000], torch.float16),
+            (2, 128, 2, 0.5, [0, 31, 111, 799, 1000, 1500, 1800, 2000], torch.float16),
+            (2, 128, 2, 0.5, [0, 63, 300, 800, 1000, 1399, 2048], torch.float16),
+            (2, 256, 3, 0, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),
+        ]
+    ]
 )
 def test_chunk_varlen(
-    cu_seqlens: List[int],
     H: int,
     D: int,
-    scale: float,
-    mask_p: float,
     num_householder: int,
+    mask_p: float,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
@@ -146,6 +137,7 @@ def test_chunk_varlen(
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
     do = torch.randn_like(q)
     dht = torch.rand_like(h0)
+    scale = D ** -0.5
 
     tri, tri_ht = chunk_gated_delta_product(
         q=q.clone(),
@@ -199,7 +191,7 @@ def test_chunk_varlen(
         g_i = g[:, start:end, :]
         beta_i = beta[:, start*num_householder:end*num_householder, :]
         o3_i, h3_i = naive_recurrent_gated_delta_product(
-            q_i, k_i, v_i, g_i, beta_i, scale=1.0, cu_seqlens=None, output_final_state=True, num_householder=num_householder
+            q_i, k_i, v_i, g_i, beta_i, scale=scale, cu_seqlens=None, output_final_state=True, num_householder=num_householder
         )
         torch_ref[:, start:end, :, :] = o3_i
         torch_ref_ht[i, :, :, :] = h3_i.squeeze(0)
