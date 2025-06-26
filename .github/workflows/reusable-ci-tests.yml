@@ -180,16 +180,7 @@ jobs:
         if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
-          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
-            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }}
-
-      - name: Run pytest on ops varlen test files
-        if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
-        shell: bash
-        run: |
-          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
-            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }} || \
-            echo "Varlen tests failed for ops (non-critical)"
+          $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }}
 
       - name: Verify FLA import
         shell: bash
@@ -273,13 +264,4 @@ jobs:
         if: steps.find-models-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
-          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
-            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }}
-
-      - name: Run pytest on models varlen test files
-        if: steps.find-models-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
-        shell: bash
-        run: |
-          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
-            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }} || \
-            echo "Varlen tests failed for models (non-critical)"
+          $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }}
