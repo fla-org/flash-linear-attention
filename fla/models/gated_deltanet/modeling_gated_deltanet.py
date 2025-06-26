@@ -24,6 +24,11 @@ from fla.modules import GatedMLP as GatedDeltaNetMLP
 from fla.modules import RMSNorm
 from fla.modules.l2warp import l2_warp
 
+try:
+    from torch.distributed.tensor import DTensor
+except (ImportError, AttributeError):
+    DTensor = None
+
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
@@ -129,7 +134,7 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
             # --- A_log ---
             A = torch.empty(module.num_v_heads, dtype=torch.float32).uniform_(0, 16)
             with torch.no_grad():
-                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                if not isinstance(module.A_log, DTensor):
                     module.A_log.copy_(torch.log(A))
                 else:
                     logger.warning_once("`A_log` is a DTensor, skipping initialization")
@@ -148,7 +153,7 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
             # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
-                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                if not isinstance(module.dt_bias, DTensor):
                     module.dt_bias.copy_(inv_dt)
                 else:
                     logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
