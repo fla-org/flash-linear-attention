@@ -40,9 +40,9 @@ def benchmark(T, provider):
     B, H, D = 16, 8, 128
 
     if provider in ("fused_chunk_gla", "fused_chunk_gla_bwd"):
-        q = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        k = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
         g = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
     else:
         q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
@@ -73,8 +73,8 @@ def benchmark(T, provider):
             return results
     elif provider == 'chunk_retention_bwd':
         results = triton.testing.do_bench(lambda: chunk_retention(q, k, v)[0].backward(do), quantiles=quantiles)
-#    elif provider == 'recurrent_gla_bwd':
-#        results = triton.testing.do_bench(lambda: fused_recurrent_gla(q, k, v, gk=g)[0].backward(do), quantiles=quantiles)
+   elif provider == 'recurrent_gla_bwd':
+        results = triton.testing.do_bench(lambda: fused_recurrent_gla(q, k, v, gk=g)[0].backward(do), quantiles=quantiles)
     elif provider == 'fused_chunk_gla_bwd':
         results = triton.testing.do_bench(lambda: fused_chunk_gla(q, k, v, g)[0].backward(do), quantiles=quantiles)
     elif provider == 'chunk_gla_bwd':
