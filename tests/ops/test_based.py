@@ -1,38 +1,30 @@
 # -*- coding: utf-8 -*-
 
-import os
-
 import pytest
 import torch
 
 from fla.ops.based import fused_chunk_based, parallel_based
 from fla.ops.based.naive import naive_parallel_based
-from fla.utils import COMPILER_MODE, device
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_d_list = [64, 128, 256]
-else:
-    test_b_list = [2]
-    test_t_list = [1, 15, 63, 300]
-    test_d_list = [64, 32, 100, 256]
-test_h_list = [2]
+from fla.utils import device
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float32])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 60, torch.float16),
+            (3, 111, 2, 64, torch.float16),
+            (3, 1024, 4, 100, torch.float16),
+            (3, 1024, 8, 128, torch.float16),
+            (4, 2048, 8, 256, torch.float16)
+        ]
+    ]
 )
 def test_based(
     B: int,
-    H: int,
     T: int,
+    H: int,
     D: int,
     dtype: torch.dtype
 ):

@@ -10,27 +10,33 @@ from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 from fla.utils import assert_close, device, device_platform
 
 
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, torch.float16),
+            (2, 100, 4, 60, 0.1, torch.float16),
+            (2, 1024, 3, 128, 0.1, torch.float16),
+            (2, 1024, 4, 128, 1, torch.float16),
+            (3, 2000, 4, 128, 0.1, torch.float16),
+            (4, 2048, 8, 64, 0.1, torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure'
 )
-@pytest.mark.parametrize(
-    ("T", "D"),
-    [
-        (56, 60),
-        (211, 110),
-        (400, 200),
-    ]
-)
 def test_chunk(
+    B: int,
     T: int,
+    H: int,
     D: int,
+    scale: float,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    B = 2
-    H = 3
-    dtype = torch.float16
-    scale = D**-0.5
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn(B, T, H, D, dtype=dtype)
@@ -75,9 +81,15 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ("cu_seqlens"),
+    ('H', 'D', 'cu_seqlens', 'dtype'),
     [
-        ([0, 15, 100, 300, 1203, 2000]),
+        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 64, [0, 15], torch.float16),
+            (3, 60, [0, 111, 500], torch.float16),
+            (3, 64, [0, 256, 500, 900, 1000], torch.float16),
+            (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
+        ]
     ]
 )
 @pytest.mark.skipif(
@@ -85,15 +97,15 @@ def test_chunk(
     reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
+    H: int,
+    D: int,
     cu_seqlens: List[int],
+    dtype: torch.dtype,
 ):
-    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    torch.manual_seed(42)
     T = cu_seqlens[-1]
-    H = 2
-    D = 64
-    dtype = torch.float16
-    scale = 1.0
     N = len(cu_seqlens) - 1
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
@@ -110,7 +122,6 @@ def test_chunk_varlen(
         k.clone(),
         v.clone(),
         beta.clone(),
-        scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
         cu_seqlens=cu_seqlens,
@@ -124,7 +135,6 @@ def test_chunk_varlen(
         k.clone(),
         v.clone(),
         beta.clone(),
-        scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
         cu_seqlens=cu_seqlens,

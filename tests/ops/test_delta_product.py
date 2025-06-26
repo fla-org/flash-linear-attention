@@ -13,28 +13,36 @@ from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_produc
 from fla.utils import assert_close, device, device_platform
 
 
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'num_householder', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-num_householder{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, 1, torch.float16),
+            (2, 1024, 4, 60, 1, 1, torch.float16),
+            (2, 1024, 8, 128, 1, 2, torch.float16),
+            (2, 1024, 8, 128, 0.1, 2, torch.float16),
+            (2, 1024, 8, 128, 1, 2, torch.float16),
+            (4, 2048, 8, 64, 0.1, 3, torch.float16),
+            (2, 1024, 8, 128, 1, 3, torch.float16),
+            (2, 1024, 8, 128, 1, 3, torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure'
 )
-@pytest.mark.parametrize(
-    ("T", "D", "num_householder"),
-    [
-        (56, 60, 3),
-        (211, 110, 2),
-        (400, 200, 4),
-    ]
-)
 def test_chunk(
+    B: int,
     T: int,
+    H: int,
     D: int,
+    scale: float,
     num_householder: int,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    B = 2
-    H = 3
-    dtype = torch.float16
-    scale = 1
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = F.normalize(torch.randn(B, T * num_householder, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn(B, T * num_householder, H, D, dtype=dtype)
@@ -83,9 +91,12 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ("cu_seqlens"),
+    ('H', 'D', 'num_householder', 'cu_seqlens', 'dtype'),
     [
-        ([0, 15, 100, 300, 1203, 2000]),
+        (2, 64, 3, [0, 63, ], torch.float16),
+        (2, 100, 2, [0, 63, 100, 500, 1000], torch.float16),
+        (2, 128, 2, [0, 100, 300, 800, 1500, 2000], torch.float16),
+        (2, 256, 3, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),
     ]
 )
 @pytest.mark.skipif(
@@ -93,17 +104,18 @@ def test_chunk(
     reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
+    H: int,
+    D: int,
+    num_householder: int,
     cu_seqlens: List[int],
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+
     T = cu_seqlens[-1]
     N = len(cu_seqlens) - 1
-    H = 2
-    D = 64
-    dtype = torch.float16
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     scale = 1.0
-    num_householder = 3
 
     q = torch.nn.functional.normalize(torch.randn((1, T, H, D), dtype=dtype), dim=-1, p=2)
     k = torch.nn.functional.normalize(torch.randn(1, T*num_householder, H, D, dtype=dtype), dim=-1, p=2)
@@ -164,7 +176,7 @@ def test_chunk_varlen(
         v_i = v[:, start*num_householder:end*num_householder, :, :]
         beta_i = beta[:, start*num_householder:end*num_householder, :]
         o3_i, h3_i = naive_recurrent_gated_delta_product(
-            q_i, k_i, v_i, None, beta_i, scale=1.0, cu_seqlens=None, output_final_state=True, num_householder=num_householder
+            q_i, k_i, v_i, None, beta_i, scale=scale, cu_seqlens=None, output_final_state=True, num_householder=num_householder
         )
         torch_ref[:, start:end, :, :] = o3_i
         torch_ref_ht[i, :, :, :] = h3_i.squeeze(0)

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
@@ -129,15 +130,17 @@ def chunk_dplr_delta_rule_ref(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype', 'scale'),
+    ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [
-        (2, 16, 2, 64, torch.float16, 1.0),
-        (2, 16, 2, 64, torch.float16, 0.1),
-        (2, 64, 2, 100, torch.float16, 1),
-        (2, 64, 2, 256, torch.float16, 1),
-        (2, 268, 2, 128, torch.float16, 1),
-        (2, 4096, 2, 64, torch.float16, 1),
-        (2, 4096, 2, 256, torch.float16, 1),
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, torch.float),
+            (2, 1024, 4, 60, 1, torch.float),
+            (2, 1024, 8, 128, 1, torch.float),
+            (2, 1024, 8, 128, 0.1, torch.float),
+            (4, 2048, 8, 64, 0.1, torch.float),
+            (2, 1024, 8, 128, 1, torch.float16),
+        ]
     ]
 )
 def test_recurrent_fwd(
@@ -190,18 +193,19 @@ def test_recurrent_fwd(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype', 'scale'),
+    ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [
-        (2, 16, 2, 64, torch.float16, 1.0),
-        (2, 16, 2, 64, torch.float16, 0.1),
-        (2, 64, 2, 100, torch.float16, 1),
-        (2, 64, 2, 256, torch.float16, 1),
-        (2, 268, 2, 128, torch.float16, 1),
-        (2, 4096, 2, 64, torch.float16, 1),
-        (2, 4096, 2, 256, torch.float16, 1),
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, torch.float),
+            (2, 1024, 4, 60, 1, torch.float),
+            (2, 1024, 8, 100, 1, torch.float),
+            (2, 1024, 8, 128, 0.1, torch.float),
+            (4, 2048, 8, 64, 0.1, torch.float),
+        ]
     ]
 )
-def test_fused_recurrent_fwd(
+def test_fused_recurrent(
     B: int,
     T: int,
     H: int,
@@ -250,15 +254,19 @@ def test_fused_recurrent_fwd(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype', 'scale', 'gate_logit_normalizer', 'compile'),
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'dtype'),
     [
-        (2, 16, 2, 64, torch.float16, 1.0, 1.0, False),
-        (2, 16, 2, 64, torch.float16, 0.1, 1.0, False),
-        (2, 64, 2, 100, torch.float16, 1, 0.1, False),
-        (2, 64, 2, 256, torch.float16, 1, 1.0, False),
-        (2, 268, 2, 128, torch.float16, 1, 1.0, False),
-        (2, 4096, 2, 64, torch.float16, 1, 1.0, True),
-        (2, 4096, 2, 256, torch.float16, 1, 1.0, True),
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, 1, 0, torch.float16),
+            (2, 1000, 3, 60, 1, 1, 0, torch.float16),
+            (2, 1024, 3, 64, 0.1, 1, 0.5, torch.float16),
+            (2, 1024, 4, 100, 1, 0.1, 0, torch.float16),
+            (2, 1024, 4, 128, 0.1, 1, 0, torch.float16),
+            (2, 1024, 4, 128, 0.1, 1, 0.5, torch.float16),
+            (2, 1024, 4, 128, 0.1, 10, 0, torch.float16),
+            (4, 2048, 8, 64, 0.1, 1, 0, torch.float16)
+        ]
     ]
 )
 @pytest.mark.skipif(
@@ -272,8 +280,8 @@ def test_chunk(
     D: int,
     scale: float,
     gate_logit_normalizer: float,
+    mask_p: float,
     dtype: torch.dtype,
-    compile: bool,
 ):
     torch.manual_seed(42)
     q = torch.randn(B, T, H, D, dtype=dtype)
@@ -284,7 +292,9 @@ def test_chunk(
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
-    gk = F.logsigmoid(gk) / gate_logit_normalizer
+    gk = F.logsigmoid(gk)
+    gk = gk / gate_logit_normalizer
+    gk = gk * (torch.rand_like(gk) > mask_p)
 
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
     q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
@@ -305,9 +315,7 @@ def test_chunk(
     ref_dq, ref_dk, ref_dv, ref_da, ref_db, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, a.grad, b.grad, gk.grad, h0.grad
     q.grad = k.grad = v.grad = a.grad = b.grad = gk.grad = h0.grad = None
 
-    chunk_compiled = torch.compile(chunk_dplr_delta_rule) if compile else chunk_dplr_delta_rule
-
-    tri, tri_ht = chunk_compiled(
+    tri, tri_ht = chunk_dplr_delta_rule(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -335,13 +343,15 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
-    ('N', 'T', 'H', 'D', 'scale', 'dtype'),
+    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
     [
-        (2, 256, 2, 64, 1.0, torch.float16),
-        (4, 512, 2, 100, 1.0, torch.float16),
-        (4, 1024, 2, 128, 1.0, torch.float16),
-        (3, 400, 2, 256, 1.0, torch.float16),
-        (5, 4096, 2, 64, 1.0, torch.float16),
+        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (4, 64, 0, [0, 15], torch.float16),
+            (4, 64, 0, [0, 256, 500, 1000], torch.float16),
+            (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
+            (4, 100, 0, [0, 15, 100, 300, 1111, 1599, 2000], torch.float16),
+        ]
     ]
 )
 @pytest.mark.skipif(
@@ -349,21 +359,19 @@ def test_chunk(
     reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
-    N: int,
-    T: int,
     H: int,
     D: int,
-    scale: float,
+    mask_p: float,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+
+    N = len(cu_seqlens) - 1
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     # seq-first required for inputs with variable lengths
     q = torch.randn(1, T, H, D, dtype=dtype)
     k = torch.randn(1, T, H, D, dtype=dtype)
@@ -373,6 +381,7 @@ def test_chunk_varlen(
     a = F.normalize(a, p=2, dim=-1)
     b = -a
     gk = F.logsigmoid(gk)
+    gk = gk * (torch.rand_like(gk) > mask_p)
     h0 = torch.randn(N, H, D, D, dtype=torch.float)
     q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
 
@@ -383,7 +392,6 @@ def test_chunk_varlen(
         a=a.clone(),
         b=b.clone(),
         gk=gk.clone(),
-        scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
         cu_seqlens=cu_seqlens,
@@ -404,7 +412,6 @@ def test_chunk_varlen(
             a=a[:, cu_seqlens[i]:cu_seqlens[i+1]],
             b=b[:, cu_seqlens[i]:cu_seqlens[i+1]],
             gk=gk[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            scale=scale,
             initial_state=h0[i, None],
             output_final_state=True,
         )
