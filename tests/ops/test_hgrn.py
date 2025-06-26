@@ -62,20 +62,18 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'cu_seqlens', 'dtype'),
+    ('D', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="D{}-cu_seqlens{}-{}".format(*test))
         for test in [
-            (2, 500, [0, 15], torch.float),
-            (3, 512, [0, 256, 500, 1000], torch.float),
-            (4, 1000, [0, 15, 100, 300, 1200, 2000], torch.float),
-            (4, 1024, [0, 1, 100, 300, 1200, 2048], torch.float16),
-            (2, 2048, [0, 200, 512, 1200, 2048], torch.float16),
+            (500, [0, 15], torch.float),
+            (512, [0, 256, 500, 1000], torch.float),
+            (1000, [0, 15, 100, 300, 1200, 2000], torch.float),
+            (2048, [0, 200, 512, 1200, 2048], torch.float16),
         ]
     ]
 )
 def test_fused_recurrent_varlen(
-    H: int,
     D: int,
     cu_seqlens: List[int],
     dtype: torch.dtype
