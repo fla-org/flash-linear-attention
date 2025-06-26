@@ -16,11 +16,11 @@ from fla.utils import assert_close, device
         pytest.param(*test, id="B{}-T{}-H{}-K{}-expand_ratio{}-{}".format(*test))
         for test in [
             (1, 63, 1, 64, 1, torch.float16),
-            (2, 1024, 4, 60, 1, torch.float16),
-            (2, 1024, 8, 128, 1, torch.float16),
-            (2, 1024, 8, 128, 2, torch.float16),
-            (2, 1024, 8, 256, 2, torch.float16),
-            (4, 2048, 8, 64, 2, torch.float16)
+            (2, 1024, 3, 60, 1, torch.float16),
+            (2, 1024, 3, 100, 1, torch.float16),
+            (2, 1000, 3, 128, 2, torch.float16),
+            (2, 1024, 4, 256, 2, torch.float16),
+            (4, 2048, 4, 64, 2, torch.float16)
         ]
     ]
 )

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
@@ -10,30 +11,25 @@ from fla.ops.simple_gla.chunk import chunk_simple_gla
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
 from fla.ops.simple_gla.naive import naive_parallel_simple_gla, naive_recurrent_simple_gla
 from fla.ops.simple_gla.parallel import parallel_simple_gla
-from fla.utils import COMPILER_MODE, assert_close, device
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_t_varlen_list = test_t_list
-    test_d_list = [64, 128, 256]
-    test_gate_list = [1.0]
-else:
-    test_b_list = [2]
-    test_t_list = [1, 15, 63, 300]
-    test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [64, 32, 100, 256]
-    test_gate_list = [1, 0.1, 10]
-test_h_list = [2]
+from fla.utils import assert_close, device
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [1, 0.1])
-@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('dtype', [torch.float])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, 1, torch.float),
+            (2, 1024, 4, 60, 1, 1, torch.float),
+            (2, 1024, 8, 128, 1, 0.1, torch.float),
+            (2, 1024, 8, 128, 0.1, 1, torch.float),
+            (2, 1024, 8, 128, 1, 10, torch.float),
+            (4, 2048, 8, 64, 0.1, 1, torch.float),
+            (2, 1024, 8, 128, 1, 0.1, torch.float16),
+            (2, 1024, 8, 128, 1, 10, torch.float16),
+        ]
+    ]
+)
 def test_fused_recurrent(
     B: int,
     T: int,
@@ -94,30 +90,35 @@ def test_fused_recurrent(
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize('N', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [1, 0.1])
-@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('dtype', [torch.float])
+@pytest.mark.parametrize(
+    ('H', 'D', 'scale', 'gate_logit_normalizer', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-scale{}-gate_logit_normalizer{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (4, 64, 1, 1, [0, 15], torch.float),
+            (4, 64, 1, 1, [0, 256, 500, 1000], torch.float),
+            (4, 100, 0.1, 1, [0, 15, 100, 300, 1200, 2000], torch.float),
+            (4, 100, 1, 1, [0, 15, 100, 300, 1200, 2000], torch.float),
+            (4, 100, 1, 10, [0, 15, 100, 300, 1200, 2000], torch.float),
+            (4, 64, 1, 1, [0, 1, 100, 300, 1200, 2048], torch.float16),
+            (4, 128, 1, 1, [0, 200, 512, 1200, 2048], torch.float16),
+        ]
+    ]
+)
 def test_fused_recurrent_varlen(
-    N: int,
-    T: int,
     H: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
+    cu_seqlens: List[int],
     dtype: torch.dtype
 ):
     torch.manual_seed(42)
 
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    N = len(cu_seqlens) - 1
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -175,21 +176,28 @@ def test_fused_recurrent_varlen(
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize('scale', [1, 0.1])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, 1, torch.float16),
+            (2, 1024, 4, 60, 1, 1, torch.float16),
+            (2, 1024, 8, 128, 1, 0.1, torch.float16),
+            (2, 1024, 8, 128, 0.1, 1, torch.float16),
+            (2, 1024, 8, 128, 0.1, 10, torch.float16),
+            (4, 2048, 8, 64, 0.1, 1, torch.float16)
+        ]
+    ]
+)
 def test_chunk(
     B: int,
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype,
     scale: float,
-    gate_logit_normalizer: float
+    gate_logit_normalizer: float,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -243,31 +251,34 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize('N', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('H', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (4, 64, [0, 15], torch.float16),
+            (4, 64, [0, 256, 500, 1000], torch.float16),
+            (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_chunk_varlen(
-    N: int,
-    T: int,
     H: int,
     D: int,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    N = len(cu_seqlens) - 1
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -318,25 +329,28 @@ def test_chunk_varlen(
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('scale', [0.1])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, 1, torch.float16),
+            (2, 500, 3, 60, 1, 1, torch.float16),
+            (2, 1024, 4, 128, 0.1, 1, torch.float16),
+            (3, 1024, 4, 128, 0.1, 10, torch.float16),
+            (3, 1024, 4, 256, 0.1, 0.1, torch.float16),
+            (4, 2048, 4, 64, 0.1, 0.1, torch.float16)
+        ]
+    ]
 )
 def test_parallel(
     B: int,
-    H: int,
     T: int,
+    H: int,
     D: int,
-    dtype: torch.dtype,
     scale: float,
     gate_logit_normalizer: float,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -373,31 +387,33 @@ def test_parallel(
         assert_close('dg', ref_dg, tri_dg, 0.015)
 
 
-@pytest.mark.parametrize('N', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('H', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (4, 64, [0, 15], torch.float16),
+            (4, 64, [0, 256, 500, 1000], torch.float16),
+            (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_parallel_varlen(
-    N: int,
-    T: int,
     H: int,
     D: int,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     q = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -438,11 +454,14 @@ def test_parallel_varlen(
     assert_close('dg', ref_dg, tri_dg, 0.005)
 
 
-@pytest.mark.parametrize('vary_A', [True, False])
-@pytest.mark.parametrize('dtype', [torch.float, torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('vary_A', 'dtype'),
+    [
+        pytest.param(True, torch.float, id='vary_A{}-dtype{}'.format(True, torch.float)),
+        pytest.param(False, torch.float, id='vary_A{}-dtype{}'.format(False, torch.float)),
+        pytest.param(True, torch.float16, id='vary_A{}-dtype{}'.format(True, torch.float16)),
+        pytest.param(False, torch.float16, id='vary_A{}-dtype{}'.format(False, torch.float16))
+    ]
 )
 def test_simple_gla_to_mamba2(vary_A, dtype):
     try:
