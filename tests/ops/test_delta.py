@@ -65,12 +65,12 @@ def test_chunk(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
 
-    assert_close('  o', ref, tri, 0.006)
-    assert_close(' ht', ref_ht, tri_ht, 0.006)
-    assert_close(' dq', ref_dq, tri_dq, 0.008)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.008)
-    assert_close(' db', ref_dbeta, tri_dbeta, 0.008)
+    assert_close('o', ref, tri, 0.006)
+    assert_close('ht', ref_ht, tri_ht, 0.006)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('db', ref_dbeta, tri_dbeta, 0.008)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
@@ -132,10 +132,10 @@ def test_chunk_varlen(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
 
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.008)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.008)
-    assert_close(' db', ref_dbeta, tri_dbeta, 0.008)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('db', ref_dbeta, tri_dbeta, 0.008)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)

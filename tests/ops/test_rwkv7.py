@@ -127,7 +127,7 @@ def test_fused_mul_recurrent_fwd(
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    assert_close(' o', ref, tri, 0.002)
+    assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
 

@@ -85,12 +85,12 @@ def test_fused_recurrent(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.005)
-    assert_close(' dk', ref_dk, tri_dk, 0.005)
-    assert_close(' dv', ref_dv, tri_dv, 0.005)
-    assert_close(' dg', ref_dg, tri_dg, 0.005, err_atol=2e-4)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005, err_atol=2e-4)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
@@ -166,12 +166,12 @@ def test_fused_recurrent_varlen(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.005)
-    assert_close(' dk', ref_dk, tri_dk, 0.005)
-    assert_close(' dv', ref_dv, tri_dv, 0.005)
-    assert_close(' dg', ref_dg, tri_dg, 0.005, err_atol=2e-4)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005, err_atol=2e-4)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
@@ -234,12 +234,12 @@ def test_chunk(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close('  o', ref, tri, 0.004)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.005)
-    assert_close(' dk', ref_dk, tri_dk, 0.005)
-    assert_close(' dv', ref_dv, tri_dv, 0.005)
-    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('o', ref, tri, 0.004)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
@@ -309,12 +309,12 @@ def test_chunk_varlen(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close('  o', ref, tri, 0.004)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.005)
-    assert_close(' dk', ref_dk, tri_dk, 0.005)
-    assert_close(' dv', ref_dv, tri_dv, 0.005)
-    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('o', ref, tri, 0.004)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
@@ -364,8 +364,8 @@ def test_parallel(
     tri_dv, v.grad = v.grad.clone(), None
     if USE_G:
         tri_dg, g.grad = g.grad.clone(), None
-    assert_close(' o', ref, tri, 0.005)
-    assert_close(' A', ref_A, tri_A, 0.005)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('A', ref_A, tri_A, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
@@ -431,11 +431,11 @@ def test_parallel_varlen(
     tri_dv, v.grad = v.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None
 
-    assert_close('  o', ref, tri, 0.004)
-    assert_close(' dq', ref_dq, tri_dq, 0.005)
-    assert_close(' dk', ref_dk, tri_dk, 0.005)
-    assert_close(' dv', ref_dv, tri_dv, 0.005)
-    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('o', ref, tri, 0.004)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
 
 
 @pytest.mark.parametrize('vary_A', [True, False])

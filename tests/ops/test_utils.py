@@ -329,7 +329,7 @@ def test_pack_sequence(
     tri.backward(dy)
     tri_dx, x.grad = x.grad.clone(), None
 
-    assert_close(' y', ref, tri, 1e-3)
+    assert_close('y', ref, tri, 1e-3)
     assert_close('dx', ref_dx, tri_dx, 1e-3)
 
 
@@ -370,5 +370,5 @@ def test_unpack_sequence(
     tri.backward(dy)
     tri_dx, x.grad = x.grad.clone(), None
 
-    assert_close(' y', ref, tri, 1e-3)
+    assert_close('y', ref, tri, 1e-3)
     assert_close('dx', ref_dx, tri_dx, 1e-3)

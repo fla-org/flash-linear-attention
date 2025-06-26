@@ -62,10 +62,10 @@ def test_fused_recurrent(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dx', ref_dx, tri_dx, 0.005)
-    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dx', ref_dx, tri_dx, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
@@ -123,10 +123,10 @@ def test_fused_recurrent_varlen(
     tri_dg, g.grad = g.grad.clone(), None
     tri_dh0, h0.grad = h0.grad.clone(), None
 
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dx', ref_dx, tri_dx, 0.005)
-    assert_close(' dg', ref_dg, tri_dg, 0.005)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dx', ref_dx, tri_dx, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
@@ -164,6 +164,6 @@ def test_chunk(
     tri_dx, x.grad = x.grad.clone(), None
     tri_dg, g.grad = g.grad.clone(), None
 
-    assert_close(' o', ref, tri, 0.005)
+    assert_close('o', ref, tri, 0.005)
     assert_close('dx', ref_dx, tri_dx, 0.005)
     assert_close('dg', ref_dg, tri_dg, 0.005)

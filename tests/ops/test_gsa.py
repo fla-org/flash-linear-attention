@@ -83,14 +83,14 @@ def test_fused_recurrent(
     tri_dhk0, hk0.grad = hk0.grad.clone(), None
     tri_dhv0, hv0.grad = hv0.grad.clone(), None
 
-    assert_close('   o', ref, tri, 0.005)
-    assert_close(' hkt', ref_hkt, tri_hkt, 0.005)
-    assert_close(' hvt', ref_hvt, tri_hvt, 0.005)
-    assert_close('  dq', ref_dq, tri_dq, 0.005)
-    assert_close('  dk', ref_dk, tri_dk, 0.005)
-    assert_close('  dv', ref_dv, tri_dv, 0.005)
-    assert_close('  ds', ref_ds, tri_ds, 0.005)
-    assert_close('  dg', ref_dg, tri_dg, 0.005)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('hkt', ref_hkt, tri_hkt, 0.005)
+    assert_close('hvt', ref_hvt, tri_hvt, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('ds', ref_ds, tri_ds, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 
@@ -181,14 +181,14 @@ def test_fused_recurrent_varlen(
     tri_dhk0, hk0.grad = hk0.grad.clone(), None
     tri_dhv0, hv0.grad = hv0.grad.clone(), None
 
-    assert_close('   o', ref, tri, 0.005)
-    assert_close(' hkt', ref_hkt, tri_hkt, 0.005)
-    assert_close(' hvt', ref_hvt, tri_hvt, 0.005)
-    assert_close('  dq', ref_dq, tri_dq, 0.005)
-    assert_close('  dk', ref_dk, tri_dk, 0.005)
-    assert_close('  dv', ref_dv, tri_dv, 0.005)
-    assert_close('  ds', ref_ds, tri_ds, 0.005)
-    assert_close('  dg', ref_dg, tri_dg, 0.005)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('hkt', ref_hkt, tri_hkt, 0.005)
+    assert_close('hvt', ref_hvt, tri_hvt, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('ds', ref_ds, tri_ds, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 
@@ -273,14 +273,14 @@ def test_chunk(
     tri_dhk0, hk0.grad = hk0.grad.clone(), None
     tri_dhv0, hv0.grad = hv0.grad.clone(), None
 
-    assert_close('   o', ref, tri, 0.005)
-    assert_close(' hkt', ref_hkt, tri_hkt, 0.005)
-    assert_close(' hvt', ref_hvt, tri_hvt, 0.005)
-    assert_close('  dq', ref_dq, tri_dq, 0.005)
-    assert_close('  dk', ref_dk, tri_dk, 0.005)
-    assert_close('  dv', ref_dv, tri_dv, 0.005)
-    assert_close('  ds', ref_ds, tri_ds, 0.008)
-    assert_close('  dg', ref_dg, tri_dg, 0.008)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('hkt', ref_hkt, tri_hkt, 0.005)
+    assert_close('hvt', ref_hvt, tri_hvt, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('ds', ref_ds, tri_ds, 0.008)
+    assert_close('dg', ref_dg, tri_dg, 0.008)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 
@@ -371,14 +371,14 @@ def test_chunk_varlen(
     tri_dhk0, hk0.grad = hk0.grad.clone(), None
     tri_dhv0, hv0.grad = hv0.grad.clone(), None
 
-    assert_close('   o', ref, tri, 0.004)
-    assert_close(' hkt', ref_hkt, tri_hkt, 0.005)
-    assert_close(' hvt', ref_hvt, tri_hvt, 0.005)
-    assert_close('  dq', ref_dq, tri_dq, 0.005)
-    assert_close('  dk', ref_dk, tri_dk, 0.005)
-    assert_close('  dv', ref_dv, tri_dv, 0.005)
-    assert_close('  ds', ref_ds, tri_ds, 0.005)
-    assert_close('  dg', ref_dg, tri_dg, 0.005)
+    assert_close('o', ref, tri, 0.004)
+    assert_close('hkt', ref_hkt, tri_hkt, 0.005)
+    assert_close('hvt', ref_hvt, tri_hvt, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('ds', ref_ds, tri_ds, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dhk0', ref_dhk0, tri_dhk0, 0.005)
     assert_close('dhv0', ref_dhv0, tri_dhv0, 0.005)
 

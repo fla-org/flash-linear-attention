@@ -96,14 +96,14 @@ def test_chunk(
 
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.008)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.008)
-    assert_close(' db', ref_dbeta, tri_dbeta, 0.02)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('db', ref_dbeta, tri_dbeta, 0.02)
     if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:
-        assert_close(' dg', ref_dg, tri_dg, 0.02)
+        assert_close('dg', ref_dg, tri_dg, 0.02)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
@@ -179,14 +179,14 @@ def test_chunk_varlen(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
 
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.007)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.007)
-    assert_close(' db', ref_dbeta, tri_dbeta, 0.015)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.007)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.007)
+    assert_close('db', ref_dbeta, tri_dbeta, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
-    assert_close(' dg', ref_dg, tri_dg, 0.015)
+    assert_close('dg', ref_dg, tri_dg, 0.015)
     q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
 
     torch_ref = torch.zeros_like(ref)
@@ -206,11 +206,11 @@ def test_chunk_varlen(
 
     ((torch_ref * do).sum() + (torch_ref_ht * dht).sum()).backward(retain_graph=True)
 
-    assert_close('  o', ref, tri, 0.005)
-    assert_close(' ht', ref_ht, tri_ht, 0.005)
-    assert_close(' dq', ref_dq, tri_dq, 0.007)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.007)
-    assert_close(' db', ref_dbeta, tri_dbeta, 0.015)
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.007)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.007)
+    assert_close('db', ref_dbeta, tri_dbeta, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
-    assert_close(' dg', ref_dg, tri_dg, 0.015)
+    assert_close('dg', ref_dg, tri_dg, 0.015)

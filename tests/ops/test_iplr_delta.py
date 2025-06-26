@@ -178,7 +178,7 @@ def test_chunk(
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    assert_close(' o', ref, tri, 0.007)
+    assert_close('o', ref, tri, 0.007)
     assert_close('ht', ref_ht, tri_ht, 0.008)
 
 
@@ -231,11 +231,11 @@ def test_recurrent(
         output_final_state=True,
     )
     ((dht * tri_ht).sum() + (do * tri).sum()).backward()
-    assert_close('  o', ref, tri, 0.003)
-    assert_close(' ht', ref_ht, tri_ht, 0.003)
-    assert_close(' dq', dq, q.grad, 0.003)
-    assert_close(' dk', dk, k.grad, 0.003)
-    assert_close(' dv', dv, v.grad, 0.003)
-    assert_close(' da', da, a.grad, 0.003)
-    assert_close(' db', db, b.grad, 0.003)
+    assert_close('o', ref, tri, 0.003)
+    assert_close('ht', ref_ht, tri_ht, 0.003)
+    assert_close('dq', dq, q.grad, 0.003)
+    assert_close('dk', dk, k.grad, 0.003)
+    assert_close('dv', dv, v.grad, 0.003)
+    assert_close('da', da, a.grad, 0.003)
+    assert_close('db', db, b.grad, 0.003)
     assert_close('dh0', dh0, h0.grad, 0.003)
