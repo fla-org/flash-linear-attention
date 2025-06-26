@@ -89,7 +89,7 @@ jobs:
             # 2. MODIFIED LOGIC: Use the dynamically determined TARGET_CONDA_ENV variable.
             # Instead of using inputs.conda_env_name, we use the variable set in step 1.
             echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${TARGET_CONDA_ENV}/bin" >> $GITHUB_ENV
-            
+
             # 3. ADDED LOGIC: Also export the determined environment name itself.
             # This is very useful for subsequent 'conda activate' steps.
             echo "CONDA_ENV_NAME=${TARGET_CONDA_ENV}" >> $GITHUB_ENV
