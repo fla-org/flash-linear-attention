@@ -63,8 +63,8 @@ def benchmark(T, provider):
         return triton.testing.do_bench(lambda: chunk_gsa(q, k, v, s, f), quantiles=quantiles)
     elif provider == 'gla':
         return triton.testing.do_bench(lambda: chunk_gla(q, k, v, g), quantiles=quantiles)
-#    elif provider == 'gsa_recurrent_bwd':
-#        return triton.testing.do_bench(lambda: fused_recurrent_gsa(q, k, v, s, f)[0].backward(do), quantiles=quantiles)
+    elif provider == 'gsa_recurrent_bwd':
+        return triton.testing.do_bench(lambda: fused_recurrent_gsa(q, k, v, s, f)[0].backward(do), quantiles=quantiles)
     elif provider == 'gsa_chunk_bwd':
         return triton.testing.do_bench(lambda: chunk_gsa(q, k, v, s, f)[0].backward(do), quantiles=quantiles)
     elif provider == 'gla_bwd':
