@@ -11,14 +11,6 @@ from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_rec
 from fla.utils import assert_close, device, device_platform
 
 
-test_b_list = [2]
-test_t_list = [1, 15, 63, 300]
-test_t_varlen_list = [63, 286, 300, 512]
-test_d_list = [32, 64, 100, 256]
-test_gate_list = [1, 0.1, 10]
-test_h_list = [2]
-
-
 def recurrent_dplr_delta_rule_ref(
     q: torch.Tensor,
     k: torch.Tensor,
