@@ -216,7 +216,7 @@ jobs:
   test-models:
     runs-on: ${{ inputs.runner }}
     needs: test-ops
-    if: always()
+    if: success() || failure()
     env:
       # MODIFICATION: Removed CONDA_BIN_PATH from here.
       FLA_CI_ENV: 1
