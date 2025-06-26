@@ -12,10 +12,6 @@ from fla.utils import assert_close, device, device_platform
 
 
 @pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
-)
-@pytest.mark.skipif(
     device_platform == 'intel',
     reason="Intel Triton Failure"
 )
@@ -107,10 +103,6 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.005)
 
 
-@pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
-)
 @pytest.mark.parametrize(
     ('N', 'T', 'H', 'D', 'dtype'),
     [

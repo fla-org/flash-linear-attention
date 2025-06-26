@@ -8,20 +8,14 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
-from fla.utils import COMPILER_MODE, assert_close, device, device_platform
+from fla.utils import assert_close, device, device_platform
 
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_t_varlen_list = test_t_list
-    test_d_list = [64, 128, 256]
-    test_gate_list = [1.0]
-else:
-    test_b_list = [2]
-    test_t_list = [1, 15, 63, 300]
-    test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [32, 64, 100, 256]
-    test_gate_list = [1, 0.1, 10]
+
+test_b_list = [2]
+test_t_list = [1, 15, 63, 300]
+test_t_varlen_list = [63, 286, 300, 512]
+test_d_list = [32, 64, 100, 256]
+test_gate_list = [1, 0.1, 10]
 test_h_list = [2]
 
 
@@ -142,15 +136,17 @@ def chunk_dplr_delta_rule_ref(
     return o, S
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [0.25])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype', 'scale'),
+    [
+        (2, 16, 2, 64, torch.float16, 1.0),
+        (2, 16, 2, 64, torch.float16, 0.1),
+        (2, 64, 2, 100, torch.float16, 1),
+        (2, 64, 2, 256, torch.float16, 1),
+        (2, 268, 2, 128, torch.float16, 1),
+        (2, 4096, 2, 64, torch.float16, 1),
+        (2, 4096, 2, 256, torch.float16, 1),
+    ]
 )
 def test_recurrent_fwd(
     B: int,
@@ -201,15 +197,17 @@ def test_recurrent_fwd(
     assert_close('ht', ref_ht, tri_ht, 0.001)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [0.25])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype', 'scale'),
+    [
+        (2, 16, 2, 64, torch.float16, 1.0),
+        (2, 16, 2, 64, torch.float16, 0.1),
+        (2, 64, 2, 100, torch.float16, 1),
+        (2, 64, 2, 256, torch.float16, 1),
+        (2, 268, 2, 128, torch.float16, 1),
+        (2, 4096, 2, 64, torch.float16, 1),
+        (2, 4096, 2, 256, torch.float16, 1),
+    ]
 )
 def test_fused_recurrent_fwd(
     B: int,
@@ -259,17 +257,17 @@ def test_fused_recurrent_fwd(
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('scale', [0.25])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize('compile', [False, True])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype', 'scale', 'gate_logit_normalizer', 'compile'),
+    [
+        (2, 16, 2, 64, torch.float16, 1.0, 1.0, False),
+        (2, 16, 2, 64, torch.float16, 0.1, 1.0, False),
+        (2, 64, 2, 100, torch.float16, 1, 0.1, False),
+        (2, 64, 2, 256, torch.float16, 1, 1.0, False),
+        (2, 268, 2, 128, torch.float16, 1, 1.0, False),
+        (2, 4096, 2, 64, torch.float16, 1, 1.0, True),
+        (2, 4096, 2, 256, torch.float16, 1, 1.0, True),
+    ]
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
@@ -344,15 +342,15 @@ def test_chunk(
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-@pytest.mark.parametrize('N', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [0.25])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+@pytest.mark.parametrize(
+    ('N', 'T', 'H', 'D', 'scale', 'dtype'),
+    [
+        (2, 256, 2, 64, 1.0, torch.float16),
+        (4, 512, 2, 100, 1.0, torch.float16),
+        (4, 1024, 2, 128, 1.0, torch.float16),
+        (3, 400, 2, 256, 1.0, torch.float16),
+        (5, 4096, 2, 64, 1.0, torch.float16),
+    ]
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
