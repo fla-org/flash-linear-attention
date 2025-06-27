@@ -22,7 +22,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
+        for num_warps in [2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
     key=['B', 'H', 'HQ', 'G', 'K', 'V', 'BK', 'BV', 'USE_G', 'IS_VARLEN'],
@@ -177,7 +177,7 @@ def parallel_attn_bwd_kernel_preprocess(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
+        for num_warps in [2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
     key=['B', 'H', 'HQ', 'G', 'K', 'V', 'BK', 'BV', 'USE_G', 'IS_VARLEN'],
@@ -319,7 +319,7 @@ def parallel_attn_bwd_kernel_dq(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [1, 2, 4] + ([8] if check_shared_mem('hopper') else [])
+        for num_warps in [2, 4] + ([8] if check_shared_mem('hopper') else [])
         for num_stages in [2, 3, 4, 5]
     ],
     key=['B', 'H', 'HQ', 'G', 'K', 'V', 'BK', 'BV', 'USE_G', 'IS_VARLEN'],

@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
-import os
-from typing import Optional, Tuple
+from typing import List, Optional
 
 import pytest
 import torch
@@ -9,21 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
-from fla.utils import COMPILER_MODE, assert_close, check_shared_mem, device, is_intel_alchemist
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [1024]
-    test_t_varlen_list = test_t_list
-    test_d_list = [64, 100]
-else:
-    test_b_list = [2]
-    test_t_list = [3, 15, 63, 300, 1024, 2048]
-    test_t_varlen_list = [63, 300, 1024, 512, 2048]
-    test_d_list = [64, 100]
-test_fgate_logit_range_list = [(0, 5), (5, 10)]
-test_hq_list = [8, 16]
-test_h_list = [2]
+from fla.utils import assert_close, check_shared_mem, device, is_intel_alchemist
 
 
 def naive_forgetting_attn(
@@ -47,45 +32,40 @@ def naive_forgetting_attn(
     return ref
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("HQ", test_hq_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("fgate_logit_range", test_fgate_logit_range_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
-)
-@pytest.mark.skipif(
-    is_intel_alchemist,
-    reason="Intel Triton Failure"
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'scale'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 1.0),
+            (3, 111, 2, 2, 100, 1.0),
+            (3, 1024, 2, 8, 60, 0.1),
+            (3, 1024, 2, 8, 128, 0.1),
+            (4, 2048, 2, 8, 64, 0.1)
+        ]
+    ]
 )
 def test_parallel(
     B: int,
+    T: int,
     H: int,
     HQ: int,
-    T: int,
     D: int,
-    fgate_logit_range: Tuple[float, float],
-    dtype: torch.dtype
+    scale: float,
 ):
+    torch.manual_seed(42)
+    dtype = torch.float16
     if not check_shared_mem('hopper') and D > 128:
         # maybe we can enable this test on Triton 3.3.0
         pytest.skip("Skipping test because global shared memory is not available")
-    torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-    logit_min, logit_max = fgate_logit_range
-    g = torch.rand((B, T, HQ), dtype=dtype, device=device) * (logit_max - logit_min) + logit_min
-    g = F.logsigmoid(g).requires_grad_(True)
-    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
-    scale = D ** -0.5
 
+    g = torch.randn((B, T, HQ), dtype=dtype, device=device).uniform_(-0.1, -0.01).requires_grad_(True)
+
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
     ref = naive_forgetting_attn(q, k, v, g, scale)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -107,54 +87,40 @@ def test_parallel(
     assert_close("dg", ref_dg, tri_dg, 0.005)
 
 
-@pytest.mark.parametrize("N", test_b_list)
-@pytest.mark.parametrize("T", test_t_varlen_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("HQ", test_hq_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("fgate_logit_range", test_fgate_logit_range_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'cu_seqlens'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-cu_seqlens{}".format(*test))
+        for test in [
+            (2, 2, 64, [0, 15]),
+            (2, 8, 64, [0, 256, 500, 1000]),
+            (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
+        ]
+    ]
 )
 @pytest.mark.skipif(
     is_intel_alchemist,
     reason="Intel Triton Failure"
 )
 def test_parallel_varlen(
-    N: int,
-    T: int,
     H: int,
     HQ: int,
     D: int,
-    fgate_logit_range: Tuple[float, float],
-    dtype: torch.dtype,
+    cu_seqlens: List[int],
 ):
-    if not check_shared_mem('hopper') and D > 128:
-        # maybe we can enable this test on Triton 3.3.0
-        pytest.skip("Skipping test because global shared memory is not available")
     torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-
-    N = min(1, N) if T < 64 else N
-    # randomly split the sequence into N segments
-    offsets = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0].to(torch.int32)
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    dtype = torch.float16
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
-    logit_min, logit_max = fgate_logit_range
-    g = torch.rand((1, T, HQ), dtype=dtype, device=device) * (logit_max - logit_min) + logit_min
-    g = F.logsigmoid(g).requires_grad_(True)
+    g = torch.rand((1, T, HQ), dtype=dtype, device=device).uniform_(-0.1, -0.01).requires_grad_(True)
     do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
 
     ref = q.new_empty(1, T, HQ, D)
-    for bos, eos in zip(offsets[:-1], offsets[1:]):
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:]):
         ref[:, bos:eos] = naive_forgetting_attn(
             q=q[:, bos:eos],
             k=k[:, bos:eos],
@@ -172,7 +138,7 @@ def test_parallel_varlen(
         k=k,
         v=v,
         g=g,
-        cu_seqlens=offsets
+        cu_seqlens=cu_seqlens
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
@@ -9,47 +10,36 @@ import triton
 from fla.ops.nsa.naive import naive_nsa
 from fla.ops.nsa.parallel import parallel_nsa
 from fla.ops.utils import prepare_token_indices
-from fla.utils import COMPILER_MODE, assert_close, device
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_t_varlen_list = test_t_list
-else:
-    test_b_list = [2]
-    test_t_list = [256, 1024, 2000]
-    test_t_varlen_list = [63, 286, 300, 512]
-test_h_list = [2]
+from fla.utils import assert_close, device
 
 
 # FIXME
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('HQ', [64])
-@pytest.mark.parametrize('D', [100, 64])
-@pytest.mark.parametrize('S', [16])
-@pytest.mark.parametrize('block_size', [32])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize('scale', [0.1])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 16, 32, 1.0, torch.float16),
+            (3, 111, 2, 2, 100, 16, 32, 1.0, torch.float16),
+            (3, 1024, 2, 8, 60, 16, 32, 0.1, torch.float16),
+            (3, 1024, 2, 8, 128, 16, 32, 0.1, torch.float16),
+            (4, 2048, 2, 8, 64, 16, 32, 0.1, torch.float16)
+        ]
+    ]
 )
 @pytest.mark.skipif(
-    True,
-    reason='TBD'
+    True, reason='TBD'
 )
 def test_parallel(
     B: int,
+    T: int,
     H: int,
     HQ: int,
-    T: int,
     D: int,
     S: int,
     block_size: int,
+    scale: float,
     dtype: torch.dtype,
-    scale: float
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -85,41 +75,39 @@ def test_parallel(
     assert_close("dv", ref_dv, tri_dv, 0.005)
 
 
-@pytest.mark.parametrize('N', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('HQ', [64])
-@pytest.mark.parametrize('D', [100, 64])
-@pytest.mark.parametrize('S', [16])
-@pytest.mark.parametrize('block_size', [32])
-@pytest.mark.parametrize('dtype', [torch.bfloat16])
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'S', 'block_size', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 2, 64, 16, 32, [0, 15], torch.float16),
+            (2, 8, 64, 16, 32, [0, 256, 500, 1000], torch.float16),
+            (2, 2, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
 )
 @pytest.mark.skipif(
-    True,
-    reason='TBD'
+    True, reason='TBD'
 )
 def test_parallel_varlen(
-    N: int,
-    T: int,
     H: int,
     HQ: int,
     D: int,
     S: int,
     block_size: int,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -162,7 +150,7 @@ def test_parallel_varlen(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    assert_close(' o', ref, tri, 0.004)
+    assert_close('o', ref, tri, 0.004)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)

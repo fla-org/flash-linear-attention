@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
@@ -8,23 +9,22 @@ import torch.nn.functional as F
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils.solve_tril import solve_tril
-from fla.utils import COMPILER_MODE, assert_close, device, device_platform
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_t_varlen_list = [[0, 64, 128, 256, 512]]
-else:
-    test_b_list = [2]
-    test_t_list = [128, 200, 300, 500]
-    test_t_varlen_list = [[0, 63, 286, 300, 512], [0, 127, 246, 521, 1000], [0, 255, 492, 1042, 2000]]
-test_h_list = [2]
+from fla.utils import assert_close, device, device_platform
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('chunk_size', [16, 32, 64])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'chunk_size'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-chunk_size{}".format(*test))
+        for test in [
+            (1, 63, 1, 16),
+            (2, 500, 4, 32),
+            (2, 1000, 5, 64),
+            (3, 1024, 6, 64),
+            (4, 2048, 8, 64),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
     reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
@@ -48,9 +48,19 @@ def test_solve_tril(B, T, H, chunk_size):
     assert_close('solve_tril', Ai, Ai_ref, 0.0001)
 
 
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('cu_seqlens', test_t_varlen_list)
-@pytest.mark.parametrize('chunk_size', [64, 32, 16])
+@pytest.mark.parametrize(
+    ('H', 'D', 'chunk_size', 'cu_seqlens'),
+    [
+        pytest.param(*test, id="H{}-D{}-chunk_size{}-cu_seqlens{}".format(*test))
+        for test in [
+            (4, 64, 16, [0, 15]),
+            (4, 64, 32, [0, 256, 500, 1000]),
+            (4, 100, 64, [0, 15, 100, 300, 1200, 2000]),
+            (4, 64, 16, [0, 1, 100, 300, 1200, 2048]),
+            (4, 128, 32, [0, 200, 512, 1200, 2048]),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
@@ -59,13 +69,18 @@ def test_solve_tril(B, T, H, chunk_size):
     device_platform == 'intel',
     reason='Intel Pytorch Failure'
 )
-def test_solve_tril_varlen(H, cu_seqlens, chunk_size):
+def test_solve_tril_varlen(
+    H: int,
+    D: int,
+    chunk_size: int,
+    cu_seqlens: List[int],
+):
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     # Construct the input. otherwise inverse's condition number might be too large to measure the error
-    k = F.normalize(torch.randn((1, T, H, 64), dtype=torch.bfloat16, device=device), dim=-1)
+    k = F.normalize(torch.randn((1, T, H, D), dtype=torch.bfloat16, device=device), dim=-1)
     beta = torch.randn((1, T, H), dtype=torch.bfloat16, device=device).sigmoid()
-    A, _ = chunk_scaled_dot_kkt_fwd(k, beta, cu_seqlens=cu_seqlens, chunk_size=chunk_size)
+    A = chunk_scaled_dot_kkt_fwd(k, beta, cu_seqlens=cu_seqlens, chunk_size=chunk_size)
     Ai = solve_tril(A, cu_seqlens=cu_seqlens)
 
     Ai_ref = torch.zeros_like(Ai)

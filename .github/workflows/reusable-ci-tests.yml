@@ -54,6 +54,21 @@ jobs:
         shell: bash
         run: |
           set -e
+
+          # 1. ADDED LOGIC: Determine the target conda environment name based on the runner.
+          # This block implements the core requirement.
+          TARGET_CONDA_ENV=""
+          echo "Determining conda environment based on runner: ${{ runner.name }}"
+          if [[ "${{ runner.name }}" == "nvidia-h100-1" ]]; then
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}"
+          elif [[ "${{ runner.name }}" == "nvidia-h100-2" ]]; then
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}_1"
+          else
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}"
+            echo "Runner is not a special case, using input env: '${TARGET_CONDA_ENV}'"
+          fi
+          echo "--> Runner is '${{ runner.name }}', selected environment is '${TARGET_CONDA_ENV}'"
+
           echo "Searching for Conda installation in home directory ($HOME)..."
           POSSIBLE_NAMES=("miniforge3" "miniconda3" "anaconda3")
           FOUND_PATH=""
@@ -66,12 +81,23 @@ jobs:
               break
             fi
           done
+
           if [ -n "${FOUND_PATH}" ]; then
             echo "Setting CONDA environment variable to: ${FOUND_PATH}"
             echo "CONDA=${FOUND_PATH}" >> $GITHUB_ENV
-            # MODIFICATION: Set both CONDA and CONDA_BIN_PATH here.
-            # This makes them available to all subsequent steps.
-            echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${{ inputs.conda_env_name }}/bin" >> $GITHUB_ENV
+
+            # 2. MODIFIED LOGIC: Use the dynamically determined TARGET_CONDA_ENV variable.
+            # Instead of using inputs.conda_env_name, we use the variable set in step 1.
+            echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${TARGET_CONDA_ENV}/bin" >> $GITHUB_ENV
+
+            # 3. ADDED LOGIC: Also export the determined environment name itself.
+            # This is very useful for subsequent 'conda activate' steps.
+            echo "CONDA_ENV_NAME=${TARGET_CONDA_ENV}" >> $GITHUB_ENV
+
+            echo "Successfully set environment variables."
+            echo "CONDA = ${FOUND_PATH}"
+            echo "CONDA_ENV_NAME = ${TARGET_CONDA_ENV}"
+            echo "CONDA_BIN_PATH = ${FOUND_PATH}/envs/${TARGET_CONDA_ENV}/bin"
           else
             echo "::error::Could not automatically find a Conda installation."
             exit 1
@@ -166,11 +192,12 @@ jobs:
       # =================================================================
       # STAGE 2: OPS TESTS
       # =================================================================
-      - name: Find dependent test files for Ops
+      - name: Find dependent OP test files for Ops
         if: steps.check_skip.outputs.skip_tests == 'false'
         id: find-ops-tests
         shell: bash
         run: |
+          export TEST_SCOPE="EXCLUDE_MODELS"
           TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
           echo "Found ops test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
@@ -179,16 +206,7 @@ jobs:
         if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
-          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
-            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }}
-
-      - name: Run pytest on ops varlen test files
-        if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
-        shell: bash
-        run: |
-          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
-            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }} || \
-            echo "Varlen tests failed for ops (non-critical)"
+          $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }}
 
       - name: Verify FLA import
         shell: bash
@@ -198,9 +216,8 @@ jobs:
   test-models:
     runs-on: ${{ inputs.runner }}
     needs: test-ops
-    if: always()
+    if: success() || failure()
     env:
-      # MODIFICATION: Removed CONDA_BIN_PATH from here.
       FLA_CI_ENV: 1
 
     steps:
@@ -212,19 +229,50 @@ jobs:
         shell: bash
         run: |
           set -e
+
+          # 1. ADDED LOGIC: Determine the target conda environment name based on the runner.
+          # This block implements the core requirement.
+          TARGET_CONDA_ENV=""
+          echo "Determining conda environment based on runner: ${{ runner.name }}"
+          if [[ "${{ runner.name }}" == "nvidia-h100-1" ]]; then
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}"
+          elif [[ "${{ runner.name }}" == "nvidia-h100-2" ]]; then
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}_1"
+          else
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}"
+            echo "Runner is not a special case, using input env: '${TARGET_CONDA_ENV}'"
+          fi
+          echo "--> Runner is '${{ runner.name }}', selected environment is '${TARGET_CONDA_ENV}'"
+
+          echo "Searching for Conda installation in home directory ($HOME)..."
           POSSIBLE_NAMES=("miniforge3" "miniconda3" "anaconda3")
           FOUND_PATH=""
           for name in "${POSSIBLE_NAMES[@]}"; do
             CANDIDATE_PATH="$HOME/$name"
+            echo "--> Checking for path: ${CANDIDATE_PATH}"
             if [ -d "${CANDIDATE_PATH}" ] && [ -x "${CANDIDATE_PATH}/bin/conda" ]; then
+              echo "    Found valid Conda installation: ${CANDIDATE_PATH}"
               FOUND_PATH="${CANDIDATE_PATH}"
               break
             fi
           done
+
           if [ -n "${FOUND_PATH}" ]; then
+            echo "Setting CONDA environment variable to: ${FOUND_PATH}"
             echo "CONDA=${FOUND_PATH}" >> $GITHUB_ENV
-            # MODIFICATION: Set both CONDA and CONDA_BIN_PATH here.
-            echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${{ inputs.conda_env_name }}/bin" >> $GITHUB_ENV
+
+            # 2. MODIFIED LOGIC: Use the dynamically determined TARGET_CONDA_ENV variable.
+            # Instead of using inputs.conda_env_name, we use the variable set in step 1.
+            echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${TARGET_CONDA_ENV}/bin" >> $GITHUB_ENV
+
+            # 3. ADDED LOGIC: Also export the determined environment name itself.
+            # This is very useful for subsequent 'conda activate' steps.
+            echo "CONDA_ENV_NAME=${TARGET_CONDA_ENV}" >> $GITHUB_ENV
+
+            echo "Successfully set environment variables."
+            echo "CONDA = ${FOUND_PATH}"
+            echo "CONDA_ENV_NAME = ${TARGET_CONDA_ENV}"
+            echo "CONDA_BIN_PATH = ${FOUND_PATH}/envs/${TARGET_CONDA_ENV}/bin"
           else
             echo "::error::Could not automatically find a Conda installation."
             exit 1
@@ -258,11 +306,12 @@ jobs:
       # =================================================================
       # STAGE 3: MODELS TESTS (Reuses the same activated environment)
       # =================================================================
-      - name: Find dependent test files for Models
+      - name: Find dependent Model test files for Models
         if: steps.check_skip.outputs.skip_tests == 'false'
         id: find-models-tests
         shell: bash
         run: |
+          export TEST_SCOPE="MODELS_ONLY"
           TEST_FILES=$($CONDA_BIN_PATH/python scripts/find_dependent_tests.py "${{ steps.changed-files.outputs.all_changed_files }}")
           echo "Found models test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
@@ -271,13 +320,4 @@ jobs:
         if: steps.find-models-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
-          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=1 \
-            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }}
-
-      - name: Run pytest on models varlen test files
-        if: steps.find-models-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
-        shell: bash
-        run: |
-          TRITON_PRINT_AUTOTUNING=0 SKIP_TEST_CHUNK_VARLEN=0 \
-            $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }} || \
-            echo "Varlen tests failed for models (non-critical)"
+          $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }}

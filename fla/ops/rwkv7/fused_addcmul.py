@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import sys
 from typing import Optional
 
 import torch
@@ -13,6 +14,17 @@ logger = logging.getLogger(__name__)
 
 if not check_pytorch_version('2.4'):
     logger.warning('PyTorch < 2.4 detected - computations may be slower due to lack of optimizations')
+
+
+def identity_decorator(fn):
+    return fn
+
+
+if sys.version_info > (3, 10):
+    torch_compile = torch.compile(fullgraph=True)
+else:
+    logger.warning('torch.compile is not available in Python 3.10, using identity decorator instead')
+    torch_compile = identity_decorator
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
@@ -164,7 +176,7 @@ def addcmul_bwd1(d_xr, d_xw, d_xk, d_xv, d_xa, d_xg,
     return g_hiddn, g_delta
 
 
-@torch.compile(fullgraph=True)
+@torch_compile
 def addcmul_bwd2(d_oxr, d_xw, d_xk, d_xv, d_xa, d_xg, delta, use_xg: bool):
     g_xr = (d_oxr * delta).sum(dim=(0, 1), keepdim=True)
     g_xw = (d_xw * delta).sum(dim=(0, 1), keepdim=True)

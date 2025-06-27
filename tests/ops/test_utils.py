@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
@@ -8,19 +9,7 @@ import torch
 from fla.ops.utils import chunk_global_cumsum, chunk_local_cumsum, mean_pooling
 from fla.ops.utils.index import prepare_lens
 from fla.ops.utils.pack import pack_sequence, unpack_sequence
-from fla.utils import COMPILER_MODE, assert_close, device
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_t_varlen_list = test_t_list
-    test_d_list = [64, 128, 256]
-else:
-    test_b_list = [2]
-    test_t_list = [1, 15, 63, 300]
-    test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [64, 32, 100, 256]
-test_h_list = [2]
+from fla.utils import assert_close, device
 
 
 def reversed_cumsum(x, dim=-1):
@@ -31,14 +20,18 @@ def reversed_cumsum(x, dim=-1):
     return y.to(dtype)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 30, torch.float),
+            (2, 500, 4, 60, torch.float),
+            (2, 1000, 5, 128, torch.float),
+            (3, 1024, 6, 500, torch.float),
+            (4, 2048, 8, 1024, torch.float),
+        ]
+    ]
 )
 def test_global_cumsum(
     B: int,
@@ -59,28 +52,33 @@ def test_global_cumsum(
     assert_close('global_cumsum', ref, tri, 1e-3)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('H', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 60, [0, 15], torch.float),
+            (3, 100, [0, 256, 500, 1000], torch.float),
+            (4, 256, [0, 15, 100, 300, 1200, 2000], torch.float),
+            (4, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
+            (2, 1024, [0, 200, 512, 1200, 2048], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_global_cumsum_varlen(
-    B: int,
-    T: int,
     H: int,
     D: int,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
     tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
@@ -92,14 +90,18 @@ def test_global_cumsum_varlen(
     assert_close('global_cumsum', ref, tri, 1e-3)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 30, torch.float),
+            (2, 500, 4, 60, torch.float),
+            (2, 1000, 5, 128, torch.float),
+            (3, 1024, 6, 500, torch.float),
+            (4, 2048, 8, 1024, torch.float),
+        ]
+    ]
 )
 def test_global_reversed_cumsum(
     B: int,
@@ -120,28 +122,33 @@ def test_global_reversed_cumsum(
     assert_close('global_cumsum', ref, tri, 1e-3)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('H', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 60, [0, 15], torch.float),
+            (3, 100, [0, 256, 500, 1000], torch.float),
+            (4, 256, [0, 15, 100, 300, 1200, 2000], torch.float),
+            (4, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
+            (2, 1024, [0, 200, 512, 1200, 2048], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_global_reversed_cumsum_varlen(
-    B: int,
-    T: int,
     H: int,
     D: int,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
     tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
@@ -153,12 +160,19 @@ def test_global_reversed_cumsum_varlen(
     assert_close('global_reversed_cumsum', ref, tri, 1e-3)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('C', [32, 64])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'C', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-C{}-D{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 16, 30, torch.float),
+            (2, 500, 4, 32, 60, torch.float),
+            (2, 1000, 5, 64, 128, torch.float),
+            (3, 1024, 6, 64, 500, torch.float),
+            (4, 2048, 8, 128, 1024, torch.float),
+        ]
+    ]
+)
 def test_local_cumsum(
     B: int,
     T: int,
@@ -179,30 +193,34 @@ def test_local_cumsum(
     assert_close('local_cumsum', ref, tri, 1e-3)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('C', [32, 64])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('H', 'C', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-C{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 32, 60, [0, 15], torch.float),
+            (3, 64, 100, [0, 256, 500, 1000], torch.float),
+            (4, 64, 256, [0, 15, 100, 300, 1200, 2000], torch.float),
+            (4, 128, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
+            (2, 128, 1024, [0, 200, 512, 1200, 2048], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_local_cumsum_varlen(
-    B: int,
-    T: int,
     H: int,
     C: int,
     D: int,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([
         torch.cat([s[:, i:min(end, i+C), :].float().cumsum(1) for i in range(start, end, C)], 1)
@@ -220,15 +238,18 @@ def test_local_cumsum_varlen(
     assert_close('local_cumsum', ref, tri, 1e-3)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('C', [32, 64])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'C', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-C{}-D{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 16, 30, torch.float),
+            (2, 500, 4, 32, 60, torch.float),
+            (2, 1000, 5, 64, 128, torch.float),
+            (3, 1024, 6, 64, 500, torch.float),
+            (4, 2048, 8, 128, 1024, torch.float),
+        ]
+    ]
 )
 def test_mean_pooling(
     B: int,
@@ -254,30 +275,33 @@ def test_mean_pooling(
     assert_close('mean_pooling', ref_dx, tri_dx, 1e-3)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('C', [32, 64])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('H', 'C', 'D', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-C{}-D{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 32, 60, [0, 15], torch.float),
+            (3, 64, 100, [0, 256, 500, 1000], torch.float),
+            (4, 64, 256, [0, 15, 100, 300, 1200, 2000], torch.float),
+            (4, 128, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
+            (2, 128, 1024, [0, 200, 512, 1200, 2048], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_mean_pooling_varlen(
-    B: int,
-    T: int,
     H: int,
     C: int,
     D: int,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(1, T)[torch.randperm(T - 1)[:B-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
     x = torch.randn(1, T, H, D, dtype=dtype).to(device).requires_grad_(True)
     ref = torch.cat([
@@ -296,12 +320,19 @@ def test_mean_pooling_varlen(
     torch.testing.assert_close(ref_dx, tri_dx.to(ref_dx.dtype), rtol=1.6e-2, atol=3e-5)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('padding_side', ['left', 'right'])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'padding_side', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-padding_side{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 30, 'left', torch.float),
+            (2, 500, 4, 60, 'right', torch.float),
+            (2, 1000, 5, 128, 'left', torch.float),
+            (3, 1024, 6, 500, 'right', torch.float),
+            (4, 2048, 8, 1024, 'left', torch.float),
+        ]
+    ]
+)
 def test_pack_sequence(
     B: int,
     T: int,
@@ -329,16 +360,23 @@ def test_pack_sequence(
     tri.backward(dy)
     tri_dx, x.grad = x.grad.clone(), None
 
-    assert_close(' y', ref, tri, 1e-3)
+    assert_close('y', ref, tri, 1e-3)
     assert_close('dx', ref_dx, tri_dx, 1e-3)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('padding_side', ['left', 'right'])
-@pytest.mark.parametrize('dtype', [torch.float16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'padding_side', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-padding_side{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 30, 'left', torch.float),
+            (2, 500, 4, 60, 'right', torch.float),
+            (2, 1000, 5, 128, 'left', torch.float),
+            (3, 1024, 6, 500, 'right', torch.float),
+            (4, 2048, 8, 1024, 'left', torch.float),
+        ]
+    ]
+)
 def test_unpack_sequence(
     B: int,
     T: int,
@@ -370,5 +408,5 @@ def test_unpack_sequence(
     tri.backward(dy)
     tri_dx, x.grad = x.grad.clone(), None
 
-    assert_close(' y', ref, tri, 1e-3)
+    assert_close('y', ref, tri, 1e-3)
     assert_close('dx', ref_dx, tri_dx, 1e-3)

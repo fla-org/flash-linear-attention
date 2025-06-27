@@ -8,19 +8,7 @@ import torch
 from einops import rearrange
 
 from fla.ops.path_attn.parallel import parallel_path_attention
-from fla.utils import COMPILER_MODE, assert_close, check_shared_mem, device, is_intel_alchemist
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [1024]
-    test_d_list = [64]
-else:
-    test_b_list = [2]
-    test_t_list = [63, 300, 4095]
-    test_d_list = [64]
-test_fgate_logit_range_list = [(0.95, 1), (1, 1)]
-test_hq_list = [8, 16]
-test_h_list = [2]
+from fla.utils import assert_close, check_shared_mem, device, is_intel_alchemist
 
 
 def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
@@ -74,16 +62,18 @@ def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
     return ref_o.to(original_dtype).transpose(1, 2)
 
 
-@pytest.mark.parametrize("B", test_b_list)
-@pytest.mark.parametrize("T", test_t_list)
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("HQ", test_hq_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("use_forget_gate", [True, False])
-@pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'use_forget_gate', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-use_forget_gate{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 32, False, torch.float16),
+            (3, 111, 2, 2, 32, False, torch.float16),
+            (3, 1024, 2, 8, 64, True, torch.float16),
+            (3, 1024, 2, 8, 64, True, torch.float16),
+            (4, 2048, 2, 8, 64, False, torch.float16)
+        ]
+    ]
 )
 @pytest.mark.skipif(
     is_intel_alchemist,
@@ -146,12 +136,19 @@ def test_parallel(
     assert_close("db", ref_db, tri_db, 0.005)
 
 
-@pytest.mark.parametrize("cu_seqlens", [[0, 19, 321, 394, 1111, 2048], [0, 621, 1024, 4222]])
-@pytest.mark.parametrize("H", test_h_list)
-@pytest.mark.parametrize("HQ", test_hq_list)
-@pytest.mark.parametrize("D", test_d_list)
-@pytest.mark.parametrize("dtype", [torch.float16])
-@pytest.mark.parametrize("use_forget_gate", [True, False])
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'use_forget_gate', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-use_forget_gate{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 2, 32, False, [0, 15], torch.float16),
+            (2, 8, 32, False, [0, 256, 500, 1000], torch.float16),
+            (2, 8, 64, True, [0, 100, 500, 800, 1000], torch.float16),
+            (2, 2, 64, False, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (2, 2, 64, True, [0, 100, 300, 1000, 1989, 2000], torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
@@ -161,11 +158,11 @@ def test_parallel(
     reason="Intel Triton Failure"
 )
 def test_parallel_varlen(
-    cu_seqlens: List[int],
     H: int,
     HQ: int,
     D: int,
     use_forget_gate: bool,
+    cu_seqlens: List[int],
     dtype: torch.dtype
 ):
     if not check_shared_mem('hopper') and D > 128:

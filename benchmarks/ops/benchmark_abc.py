@@ -42,18 +42,15 @@ def benchmark(T, provider):
     requires_grad = True
     B, H, D, M = 16, 4, 128, 64
 
-    q = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-    k = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-    v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-    if provider.startswith('flash'):
-        q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+
     if provider.startswith('gla'):
-        g = F.logsigmoid(torch.randn(B, H, T, D, device=device, dtype=dtype))
+        g = F.logsigmoid(torch.randn(B, T, H, D, device=device, dtype=dtype))
         g = g.clamp_min(-5).requires_grad_(requires_grad)
     if provider.startswith('abc'):
-        s = torch.randn(B, H, T, M, device=device, requires_grad=requires_grad, dtype=dtype)
+        s = torch.randn(B, T, H, M, device=device, requires_grad=requires_grad, dtype=dtype)
 
     do = torch.ones_like(v, dtype=dtype)
 

@@ -23,7 +23,7 @@ BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [2, 4, 8, 16]
+        for num_warps in [2, 4] + ([] if check_shared_mem('hopper') else [8])
     ],
     key=['BT', 'BK', 'BV'],
     use_cuda_graph=use_cuda_graph,
@@ -104,11 +104,10 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
         for BK in BKV_LIST
         for BV in BKV_LIST
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3]
     ],
     key=['BT'],
     use_cuda_graph=use_cuda_graph,
