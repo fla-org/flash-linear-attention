@@ -62,6 +62,13 @@ class RWKV7FeedForward(nn.Module):
 
         self.layer_idx = layer_idx
         self.num_hidden_layers = num_hidden_layers
+
+        try:
+            from transformers.modeling_utils import _init_weights
+        except ImportError:
+            _init_weights = True
+        if _init_weights:
+            self.apply(self._initialize_weights)
         for name, module in self.named_modules():
             module._in_rwkv_module = True
 
@@ -75,7 +82,7 @@ class RWKV7FeedForward(nn.Module):
                 module.x_k.data = 1.0 - torch.pow(ddd, ratio_1_to_almost0**4).squeeze()
 
             # Initialize key and value weights as in CMix_x070
-            module.key.weight.data.uniform_(-0.5/(module.hidden_size**0.5), 0.5/(module.hidden_size**0.5))
+            torch.nn.init.orthogonal_(module.key.weight)
             module.value.weight.data.zero_()
 
     def forward(

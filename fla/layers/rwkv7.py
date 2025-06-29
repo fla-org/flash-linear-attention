@@ -190,9 +190,13 @@ class RWKV7Attention(nn.Module):
                 self.v_lora._initialize_weights(self.v_lora)
                 self.v_lora.set_bias_value(0.73 - linear*0.4)
 
-            self.r_proj.weight.data.uniform_(-0.5/(self.hidden_size**0.5), 0.5/(self.hidden_size**0.5))
-            self.k_proj.weight.data.uniform_(-0.05/(self.hidden_size**0.5), 0.05/(self.hidden_size**0.5))
-            self.v_proj.weight.data.uniform_(-0.5/(self.hidden_size**0.5), 0.5/(self.hidden_size**0.5))
+            # Initialize GroupNorm
+            self.g_norm.weight.data[:] = ((self.layer_idx + 1) / self.num_hidden_layers) ** 0.7
+
+            # Initialize Linear projections
+            nn.init.orthogonal_(self.r_proj.weight)
+            nn.init.orthogonal_(self.k_proj.weight, gain=0.1)
+            nn.init.orthogonal_(self.v_proj.weight)
             self.o_proj.weight.data.zero_()
 
             # Clean up temporary tensors to free memory
