@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
-from fla.ops.linear_attn.naive import naive_chunk_linear_attn
+from fla.ops.linear_attn.naive import naive_recurrent_linear_attn
 from fla.utils import assert_close, device
 
 
@@ -34,13 +34,13 @@ def test_fused_recurrent(
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
 
     do = torch.randn_like(v)
-    ref = naive_chunk_linear_attn(q, k, v, normalize=False)
+    ref = naive_recurrent_linear_attn(q, k, v, normalize=False, scale=1)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri, _ = fused_recurrent_linear_attn(q, k, v, normalize=False)
+    tri, _ = fused_recurrent_linear_attn(q, k, v, normalize=False, scale=1)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
