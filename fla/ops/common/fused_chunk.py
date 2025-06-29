@@ -360,7 +360,7 @@ def fused_chunk_bwd_kernel(
             b_dk = tl.dot(b_ds.to(b_k.dtype), tl.trans(b_q)) + tl.dot(b_v, tl.trans(b_dh).to(b_v.dtype)) * b_gk[:, None]
 
             # [BT]
-            b_dg_t = tl.load(p_dg, mask=m_t, other=0.) - tl.where(m_t, tl.sum(b_k * b_dk, 1), 0).to(tl.float32)
+            b_dg_t = tl.where(m_t, tl.load(p_dg, mask=m_t, other=0.) - tl.sum(b_k * b_dk, 1), 0)
             b_dg_last += tl.sum(b_dg_t, 0)
             b_dg = b_dg_last + b_dg_t - tl.cumsum(b_dg_t, 0)
 
@@ -470,7 +470,7 @@ def fused_chunk_bwd(
     BV = min(triton.next_power_of_2(V), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
-    dq = q.new_empty(NV, *q.shape, dtype=torch.float)
+    dq = q.new_empty(NV, *q.shape, dtype=torch.float) if NV > 1 else torch.empty_like(q)
     dk = k.new_empty(NV, *k.shape, dtype=torch.float) if NV > 1 else torch.empty_like(k)
     dv = v.new_empty(NK, *v.shape, dtype=torch.float) if NK > 1 else torch.empty_like(v)
     dg = g.new_empty(NK*NV, *g.shape, dtype=torch.float) if g is not None else None
@@ -502,9 +502,9 @@ def fused_chunk_bwd(
         BK=BK,
         BV=BV,
     )
-    dq = dq.sum(0).to(q)
-    dk = dk.sum(0).to(k) if NV > 1 else dk
-    dv = dv.sum(0).to(v) if NK > 1 else dv
+    dq = dq.sum(0) if NV > 1 else dq
+    dk = dk.sum(0) if NV > 1 else dk
+    dv = dv.sum(0) if NK > 1 else dv
     if dg is not None:
         dg = dg.sum(0).to(g)
 
