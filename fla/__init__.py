@@ -16,13 +16,15 @@ from fla.layers import (
     LightNetAttention,
     LinearAttention,
     MesaNet,
+    MomGatedDeltaNet,
     MultiScaleRetention,
     NativeSparseAttention,
     PaTHAttention,
     ReBasedLinearAttention,
     RodimusAttention,
     RWKV6Attention,
-    RWKV7Attention
+    RWKV7Attention,
+    
 )
 from fla.models import (
     ABCForCausalLM,
@@ -51,6 +53,8 @@ from fla.models import (
     LinearAttentionModel,
     MesaNetForCausalLM,
     MesaNetModel,
+    MomGatedDeltaNetForCausalLM, 
+    MomGatedDeltaNetModel
     NSAForCausalLM,
     NSAModel,
     PaTHAttentionForCausalLM,
@@ -64,7 +68,7 @@ from fla.models import (
     RWKV7ForCausalLM,
     RWKV7Model,
     TransformerForCausalLM,
-    TransformerModel
+    TransformerModel,
 )
 
 __all__ = [
@@ -83,6 +87,7 @@ __all__ = [
     'LightNetAttention', 'LightNetForCausalLM', 'LightNetModel',
     'LinearAttention', 'LinearAttentionForCausalLM', 'LinearAttentionModel',
     'MesaNet', 'MesaNetForCausalLM', 'MesaNetModel',
+    'MomGatedDeltaNet', 'MomGatedDeltaNetForCausalLM', 'MomGatedDeltaNetModel',
     'MultiScaleRetention', 'RetNetForCausalLM', 'RetNetModel',
     'NativeSparseAttention', 'NSAForCausalLM', 'NSAModel',
     'PaTHAttention', 'PaTHAttentionForCausalLM', 'PaTHAttentionModel',
