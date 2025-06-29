@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+from typing import Optional
+
 import pytest
 import torch
 
@@ -9,15 +11,17 @@ from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'dtype'),
+    ('B', 'T', 'H', 'D', 'scale', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
         for test in [
-            (1, 64, 1, 64, torch.float),
-            (2, 512, 4, 60, torch.float),
-            (3, 1024, 8, 128, torch.float),
-            (2, 2048, 8, 256, torch.float16),
-            (2, 2048, 4, 256, torch.float16),
+            (1, 64, 1, 64, None, torch.float),
+            (2, 512, 4, 60, None, torch.float),
+            (3, 1024, 8, 128, 1., torch.float),
+            (3, 1024, 8, 128, 0.1, torch.float),
+            (3, 1024, 8, 128, None, torch.float),
+            (2, 2048, 8, 256, None, torch.float16),
+            (2, 2048, 4, 256, None, torch.float16),
         ]
     ]
 )
@@ -26,30 +30,37 @@ def test_fused_recurrent(
     T: int,
     H: int,
     D: int,
+    scale: Optional[float],
     dtype: torch.dtype
 ):
     torch.manual_seed(42)
     q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-
+    h0 = torch.randn((B, H, D, D), dtype=torch.float, device=device).requires_grad_()
     do = torch.randn_like(v)
-    ref = naive_recurrent_linear_attn(q, k, v, normalize=False, scale=1)
-    ref.backward(do)
+    dht = torch.randn_like(h0)
+
+    ref, ref_ht = naive_recurrent_linear_attn(q, k, v, scale=scale, initial_state=h0, output_final_state=True, normalize=False)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
 
-    tri, _ = fused_recurrent_linear_attn(q, k, v, normalize=False, scale=1)
-    tri.backward(do)
+    tri, tri_ht = fused_recurrent_linear_attn(q, k, v, scale=scale, initial_state=h0, output_final_state=True, normalize=False)
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
 
     assert_close('o', ref, tri, 0.001)
+    assert_close('ht', ref_ht, tri_ht, 0.001)
     assert_close('dq', ref_dq, tri_dq, 0.001)
     assert_close('dk', ref_dk, tri_dk, 0.001)
     assert_close('dv', ref_dv, tri_dv, 0.001)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.001)
 
 
 @pytest.mark.parametrize(
@@ -76,22 +87,23 @@ def test_chunk(
     q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-    h0 = torch.randn((B, H, D, D), dtype=dtype, device=device).requires_grad_()
+    h0 = torch.randn((B, H, D, D), dtype=torch.float, device=device).requires_grad_()
     do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
     ref, ref_ht = fused_recurrent_linear_attn(
-        q=q.to(torch.float32),
-        k=k.to(torch.float32),
-        v=v.to(torch.float32),
-        initial_state=h0.to(torch.float32),
+        q.to(torch.float32),
+        k.to(torch.float32),
+        v.to(torch.float32),
+        initial_state=h0,
         output_final_state=True,
         normalize=False
     )
-    ref = ref.to(dtype)
-    ref_ht = ref_ht.to(dtype)
-    ref.backward(do)
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
 
     tri, tri_ht = chunk_linear_attn(
         q=q,
@@ -101,16 +113,18 @@ def test_chunk(
         output_final_state=True,
         normalize=False
     )
-    tri.backward(do)
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
 
     assert_close('o', ref, tri, 0.001)
     assert_close('ht', ref_ht, tri_ht, 0.001)
     assert_close('dq', ref_dq, tri_dq, 0.001)
     assert_close('dk', ref_dk, tri_dk, 0.001)
     assert_close('dv', ref_dv, tri_dv, 0.001)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.001)
 
 
 @pytest.mark.parametrize(
@@ -137,15 +151,15 @@ def test_fused_chunk(
     q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
-    h0 = torch.zeros((B, H, D, D), dtype=dtype, device=device).requires_grad_()
+    h0 = torch.randn((B, H, D, D), dtype=torch.float, device=device).requires_grad_()
     do = torch.randn_like(v)
-    dht = torch.randn((B, H, D, D), dtype=dtype, device=device)
+    dht = torch.randn_like(h0)
 
     ref, ref_ht = fused_recurrent_linear_attn(
         q.to(torch.float32),
         k.to(torch.float32),
         v.to(torch.float32),
-        initial_state=h0.to(torch.float32),
+        initial_state=h0,
         output_final_state=True,
         normalize=False
     )
@@ -153,6 +167,7 @@ def test_fused_chunk(
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
+    ref_dh0, h0.grad = h0.grad.clone(), None
 
     tri, tri_ht = fused_chunk_linear_attn(
         q=q,
@@ -166,9 +181,11 @@ def test_fused_chunk(
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
+    tri_dh0, h0.grad = h0.grad.clone(), None
 
     assert_close('o', ref, tri, 0.001)
     assert_close('ht', ref_ht, tri_ht, 0.001)
     assert_close('dq', ref_dq, tri_dq, 0.001)
     assert_close('dk', ref_dk, tri_dk, 0.001)
     assert_close('dv', ref_dv, tri_dv, 0.001)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.001)

@@ -18,7 +18,7 @@ def fused_chunk_linear_attn(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     normalize: bool = True,
-    head_first: bool = False
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -37,9 +37,9 @@ def fused_chunk_linear_attn(
             Whether to output the final state of shape `[B, H, K, V]`. Default: `False`.
         normalize (bool):
             Whether to normalize the output. Default: `True`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
 
     Returns:
         o (torch.Tensor):
@@ -47,26 +47,14 @@ def fused_chunk_linear_attn(
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`
     """
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-    if not head_first:
-        if q.shape[1] < q.shape[2]:
-            raise DeprecationWarning(
-                f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-                "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-                "when head_first=False was specified. "
-                "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-            )
     o, final_state = fused_chunk_simple_gla(
         q=q,
         k=k,
         v=v,
         scale=scale,
         initial_state=initial_state,
-        output_final_state=output_final_state
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens
     )
     if normalize:
         o = normalize_output(q * scale, k, o)

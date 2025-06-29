@@ -268,11 +268,7 @@ def fused_chunk_bwd_kernel(
             b_gq = exp(b_g)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
-        if USE_G_GAMMA:
-            b_g_last = b_gamma * min(BT, T - i_t * BT)
-            b_gk = exp(b_g_last - b_g)
-            b_gn = exp(b_g_last)
-        if USE_G or USE_G_GAMMA:
+
             p_dg = dg + ((i_k * NV + i_v) * all + (bos + o_t)).to(tl.int64) * H + i_h
             # [BT, BT]
             b_gs = tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)
@@ -285,11 +281,26 @@ def fused_chunk_bwd_kernel(
             tl.store(p_dg, b_dg_t.to(p_dg.dtype.element_ty), mask=m_t)
             # [BV, BK]
             b_h = b_h * b_gn + tl.dot(b_v, (b_k * b_gk[:, None]).to(b_k.dtype))
+
+        elif USE_G_GAMMA:
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_gk = exp(b_g_last - b_g)
+            b_gn = exp(b_g_last)
+
+            # [BT, BT]
+            b_gs = tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)
+            b_ds = b_ds * b_gs
+            # [BT, BK]
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_dq = tl.dot(b_ds.to(b_k.dtype), b_k) + tl.dot((b_do * b_gq[:, None] * scale).to(b_k.dtype), b_h.to(b_k.dtype))
+            # [BV, BK]
+            b_h = b_h * b_gn + tl.dot(b_v, (b_k * b_gk[:, None]).to(b_k.dtype))
+
         else:
             # [BT, BT]
             b_ds *= m_s & m_t
             # [BT, BK]
-            b_dq = tl.dot(b_ds, b_k) + tl.dot(b_do, b_h.to(b_k.dtype))
+            b_dq = tl.dot(b_ds.to(b_k.dtype), b_k) + tl.dot((b_do * scale).to(b_k.dtype), b_h.to(b_k.dtype))
             # [BV, BK]
             b_h += tl.dot(b_v, b_k)
 
@@ -364,7 +375,7 @@ def fused_chunk_bwd_kernel(
             b_g_last = b_gamma * min(BT, T - i_t * BT)
             b_gk = exp(b_g_last - b_g)
             b_gn = exp(b_g_last)
-            b_gs = tl.trans(tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)) * scale
+            b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp(b_g[:, None] - b_g[None, :]), 0)) * scale
 
             b_s = b_s * b_gs
             b_ds = b_ds * b_gs
@@ -376,12 +387,15 @@ def fused_chunk_bwd_kernel(
             b_dh = b_dh * b_gn + tl.dot(b_q, (b_do * b_gq[:, None] * scale).to(b_do.dtype))
 
         else:
-            b_q = (b_q * scale).to(b_q.dtype)
-            b_dk = tl.dot(b_ds.to(b_q.dtype), tl.trans(b_q)) + tl.dot(b_v, tl.trans(b_dh).to(b_v.dtype))
+            mask = tl.trans(m_s & (m_t[:, None] & m_t))
+            b_s = tl.where(mask, b_s * scale, 0).to(b_do.dtype)
+            b_ds = tl.where(mask, b_ds * scale, 0).to(b_q.dtype)
+
+            b_dk = tl.dot(b_ds, tl.trans(b_q)) + tl.dot(b_v, tl.trans(b_dh).to(b_v.dtype))
             # [BT, BV]
             b_dv = tl.dot(b_s.to(b_do.dtype), b_do) + tl.dot(b_k, b_dh.to(b_k.dtype))
             # [BK, BV]
-            b_dh += tl.dot(b_q, b_do)
+            b_dh += tl.dot(b_q, (b_do * scale).to(b_do.dtype))
 
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
