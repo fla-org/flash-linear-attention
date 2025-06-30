@@ -7,6 +7,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+from packaging.version import Version
 
 from fla.utils import check_pytorch_version, input_guard, is_amd, use_cuda_graph
 
@@ -20,7 +21,10 @@ def identity_decorator(fn):
     return fn
 
 
-if sys.version_info > (3, 10):
+current_python_version = Version(sys.version)
+min_torch_compile_version = Version("3.11")
+
+if current_python_version >= min_torch_compile_version:
     torch_compile = torch.compile(fullgraph=True)
 else:
     logger.warning('torch.compile is not available in Python 3.10, using identity decorator instead')
