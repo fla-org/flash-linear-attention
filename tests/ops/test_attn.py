@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
 
 from fla.ops.attn.parallel import parallel_attn
 from fla.ops.utils import prepare_lens
-from fla.utils import COMPILER_MODE, assert_close, check_shared_mem, device
+from fla.utils import assert_close, check_shared_mem, device
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -16,49 +17,37 @@ except Exception:
     HAS_FLASH = False
 
 
-if COMPILER_MODE:
-    test_b_list = [2]
-    test_t_list = [2048]
-    test_t_varlen_list = test_t_list
-    test_d_list = [64, 100, 128]
-else:
-    test_b_list = [2, 4]
-    test_t_list = [1, 15, 63, 286, 300, 1024, 2048]
-    test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [32, 64, 100]
-test_hq_list = [8, 16]
-test_h_list = [2]
-
-
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('HQ', test_hq_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [1, 0.1])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    not HAS_FLASH,
-    reason="Skipping test because flash-attn is not installed"
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'scale'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 1.0),
+            (3, 111, 2, 2, 100, 1.0),
+            (3, 1024, 2, 8, 60, 0.1),
+            (3, 1024, 2, 8, 128, 0.1),
+            (4, 2048, 2, 8, 64, 0.1)
+        ]
+    ]
 )
 def test_parallel(
     B: int,
+    T: int,
     H: int,
     HQ: int,
-    T: int,
     D: int,
-    dtype: torch.dtype,
     scale: float,
 ):
     if not check_shared_mem('hopper') and D > 128:
         pytest.skip(reason="Skip test, do not have enough shard mem")
+    if not HAS_FLASH:
+        pytest.skip(reason="Skipping test because flash-attn is not installed")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-
-    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device)
 
     ref = flash_attn_func(q=q, k=k, v=v, softmax_scale=scale, causal=True)
     ref.backward(do)
@@ -78,37 +67,29 @@ def test_parallel(
     assert_close("dv", ref_dv, tri_dv, 0.005)
 
 
-@pytest.mark.parametrize('N', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('HQ', test_hq_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    not HAS_FLASH,
-    reason="Skipping test because flash-attn is not installed"
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'cu_seqlens'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-cu_seqlens{}".format(*test))
+        for test in [
+            (2, 2, 64, [0, 15]),
+            (2, 8, 64, [0, 256, 500, 1000]),
+            (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
+        ]
+    ]
 )
 def test_parallel_varlen(
-    N: int,
-    T: int,
     H: int,
     HQ: int,
     D: int,
-    dtype: torch.dtype,
+    cu_seqlens: List[int],
 ):
-    if not check_shared_mem('hopper') and D > 128:
-        pytest.skip(reason="Skip test, do not have enough shard mem")
-    torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    if not HAS_FLASH:
+        pytest.skip(reason="Skipping test because flash-attn is not installed")
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    dtype = torch.float16
 
-    N = min(1, N) if T < 64 else N
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0].to(torch.int32)
-    # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
     k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()

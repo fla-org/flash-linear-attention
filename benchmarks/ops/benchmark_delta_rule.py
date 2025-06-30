@@ -5,7 +5,7 @@ import torch
 from benchmark import benchmark_backward, benchmark_combined, benchmark_forward
 from torch.nn import functional as F
 
-from fla.ops.delta_rule import chunk_delta_rule, fused_chunk_delta_rule
+from fla.ops.delta_rule import chunk_delta_rule
 from fla.utils import device
 
 
@@ -35,7 +35,7 @@ dim = 2048
 dropout_p = 0.0
 
 
-methods = (["chunk_delta_rule", "fused_chunk_delta_rule"])
+methods = (["chunk_delta_rule"])
 time_f = {}
 time_b = {}
 time_f_b = {}
@@ -47,10 +47,10 @@ for causal in causal_vals:
         for B, seqlen in bs_seqlen_vals:
             config = (causal, headdim, B, seqlen)
             H = dim // headdim
-            q = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            k = F.normalize(torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
-            v = torch.randn(B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
-            beta = torch.rand(B, H, seqlen, device=device, dtype=dtype).sigmoid().requires_grad_(True)
+            q = torch.randn(B, seqlen, H, headdim, device=device, requires_grad=True, dtype=dtype)
+            k = F.normalize(torch.randn(B, seqlen, H, headdim, device=device, dtype=dtype), p=2, dim=-1).requires_grad_(True)
+            v = torch.randn(B, seqlen, H, headdim, device=device, requires_grad=True, dtype=dtype)
+            beta = torch.rand(B, seqlen, H, device=device, dtype=dtype).sigmoid().requires_grad_(True)
             o1, _ = chunk_delta_rule(q, k, v, beta)
             o1.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
@@ -61,10 +61,10 @@ for causal in causal_vals:
             # q = torch.randn(B, seqlen, H, headdim, device=device, requires_grad=True, dtype=dtype)
             # k = torch.randn(B, seqlen, H, headdim, device=device, requires_grad=True, dtype=dtype)
             # v = torch.randn(B, seqlen, H, headdim, device=device, requires_grad=True, dtype=dtype)
-            f_b = time_fwd_bwd(
-                fused_chunk_delta_rule, q, k, v, beta, verbose=False
-            )
-            time_f_b[config, "fused_chunk_delta_rule"] = f_b
+#            f_b = time_fwd_bwd(
+#                fused_chunk_delta_rule, q, k, v, beta, verbose=False
+#            )
+#            time_f_b[config, "fused_chunk_delta_rule"] = f_b
 
             print(f"### causal={causal}, headdim={headdim}, B={B}, seqlen={seqlen} ###")
             for method in methods:

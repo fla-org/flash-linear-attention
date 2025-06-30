@@ -25,6 +25,11 @@ from fla.modules import GatedMLP as RodimusMLP
 from fla.modules import RMSNorm
 from fla.modules.l2warp import l2_warp
 
+try:
+    from torch.distributed.tensor import DTensor
+except (ImportError, AttributeError):
+    DTensor = None
+
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
@@ -279,7 +284,7 @@ class RodimusPreTrainedModel(PreTrainedModel):
         if hasattr(module, 'g_gate_proj'):
             nn.init.xavier_uniform_(module.g_gate_proj.weight, gain=2 ** -2.5)
             with torch.no_grad():
-                if not isinstance(module.g_gate_proj.bias, torch.distributed.tensor.DTensor):
+                if not isinstance(module.g_gate_proj.bias, DTensor):
                     module.g_gate_proj.bias.copy_(g_gate_bias)
                 else:
                     logger.warning_once("`g_gate_proj.bias` is a DTensor, skipping initialization")
@@ -287,7 +292,7 @@ class RodimusPreTrainedModel(PreTrainedModel):
         if hasattr(module, 'tau_gate_proj'):
             nn.init.xavier_uniform_(module.tau_gate_proj.weight, gain=2 ** -2.5)
             with torch.no_grad():
-                if not isinstance(module.tau_gate_proj.bias, torch.distributed.tensor.DTensor):
+                if not isinstance(module.tau_gate_proj.bias, DTensor):
                     module.tau_gate_proj.bias.copy_(tau_gate_bias)
                 else:
                     logger.warning_once("`tau_gate_proj.bias` is a DTensor, skipping initialization")

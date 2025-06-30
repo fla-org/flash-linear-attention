@@ -10,7 +10,7 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp, safe_exp
+from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem, input_guard
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -463,7 +463,7 @@ def chunk_gla_bwd_kernel_intra(
             # [BC, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_gq = tl.load(p_gq, boundary_check=(0, 1))
-            b_qg = b_q * safe_exp(b_gq - b_gn[None, :])
+            b_qg = b_q * exp(b_gq - b_gn[None, :])
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]

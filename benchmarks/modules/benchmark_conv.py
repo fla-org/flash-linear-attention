@@ -4,7 +4,7 @@ import torch
 import triton
 from einops import rearrange
 
-from fla.modules.canon import causal_conv1d
+from fla.modules.convolution import causal_conv1d
 from fla.ops.utils.index import prepare_sequence_ids
 
 try:

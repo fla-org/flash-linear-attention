@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import warnings
 from typing import Optional
 
 import torch
@@ -165,7 +164,7 @@ def chunk_global_cumsum_scalar_kernel(
     b_z = tl.zeros([], dtype=tl.float32)
     NT = tl.cdiv(T, BT)
     for i_c in range(NT):
-        i_t = NT-1-i_c if REVERSE else i_c
+        i_t = NT - 1 - i_c if REVERSE else i_c
         if HEAD_FIRST:
             p_s = tl.make_block_ptr(s + bos*H + i_h*T, (T,), (1,), (i_t * BT,), (BT,), (0,))
             p_o = tl.make_block_ptr(o + bos*H + i_h*T, (T,), (1,), (i_t * BT,), (BT,), (0,))
@@ -232,7 +231,7 @@ def chunk_global_cumsum_vector_kernel(
     b_z = tl.zeros([BS], dtype=tl.float32)
     NT = tl.cdiv(T, BT)
     for i_c in range(NT):
-        i_t = NT-1-i_c if REVERSE else i_c
+        i_t = NT - 1 - i_c if REVERSE else i_c
         if HEAD_FIRST:
             p_s = tl.make_block_ptr(s + (bos * H + i_h*T)*S, (T, S), (S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
             p_o = tl.make_block_ptr(o + (bos * H + i_h*T)*S, (T, S), (S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
@@ -245,8 +244,7 @@ def chunk_global_cumsum_vector_kernel(
         if HAS_SCALE:
             b_c *= scale
         tl.store(p_o, b_c.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-        if i_c >= 0:
-            b_z += tl.sum(b_s, 0)
+        b_z += tl.sum(b_s, 0)
 
 
 def chunk_local_cumsum_scalar(
@@ -437,13 +435,6 @@ def chunk_local_cumsum(
     output_dtype: Optional[torch.dtype] = torch.float,
     **kwargs
 ) -> torch.Tensor:
-    if not head_first and g.shape[1] < g.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({g.shape[1]}) < num_heads ({g.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when `head_first=False` was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
     if len(g.shape) == 3:

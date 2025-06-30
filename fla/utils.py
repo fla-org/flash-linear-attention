@@ -77,7 +77,7 @@ def get_err_ratio(x, y):
 
 def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
     abs_atol = get_abs_err(ref, tri)
-    msg = f"{prefix} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
+    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
     logger.info(msg)
     error_rate = get_err_ratio(ref, tri)
     if abs_atol <= err_atol:

@@ -9,6 +9,11 @@ import triton.language as tl
 from fla.ops.utils.op import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, get_multiprocessor_count, input_guard, is_amd
 
+try:
+    from torch.distributed.tensor import DTensor
+except (ImportError, AttributeError):
+    DTensor = None
+
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
 sigmoid_fwd_codestring = """
@@ -401,7 +406,7 @@ class SwiGLUFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, y):
         ctx.save_for_backward(x, y)
-        if torch.compiler.is_compiling() or isinstance(x, torch.distributed.tensor.DTensor):
+        if torch.compiler.is_compiling() or isinstance(x, DTensor):
             return swiglu_fwd_torch(x, y)
         else:
             return swiglu_fwd(x, y)
@@ -409,7 +414,7 @@ class SwiGLUFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dout):
         x, y = ctx.saved_tensors
-        if torch.compiler.is_compiling() or isinstance(x, torch.distributed.tensor.DTensor):
+        if torch.compiler.is_compiling() or isinstance(x, DTensor):
             return swiglu_bwd_torch(x, y, dout)
         else:
             return swiglu_bwd(x, y, dout)
@@ -429,7 +434,7 @@ class SwiGLULinearFunction(torch.autograd.Function):
     @autocast_custom_fwd
     def forward(ctx, x, y, weight, bias):
         with torch.no_grad():
-            if torch.compiler.is_compiling() or isinstance(x, torch.distributed.tensor.DTensor):
+            if torch.compiler.is_compiling() or isinstance(x, DTensor):
                 z = swiglu_fwd_torch(x, y)
             else:
                 z = swiglu_fwd(x, y)
@@ -446,7 +451,7 @@ class SwiGLULinearFunction(torch.autograd.Function):
         dout = dout.reshape(-1, dout.shape[-1])
         dz = F.linear(dout, weight.t()).view_as(x)
         with torch.no_grad():
-            if torch.compiler.is_compiling() or isinstance(x, torch.distributed.tensor.DTensor):
+            if torch.compiler.is_compiling() or isinstance(x, DTensor):
                 dx, dy, z = swiglu_fwdbwd_torch(x, y, dz)
             else:
                 dx, dy, z = swiglu_fwdbwd(x, y, dz)

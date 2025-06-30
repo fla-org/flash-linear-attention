@@ -1,26 +1,10 @@
-import json
-import os
-import re
-import warnings
-from shutil import copyfile
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 
-import numpy as np
-import torch
-from transformers.file_utils import to_py_obj
-from transformers.tokenization_utils_base import (
-    AddedToken,
-    BatchEncoding,
-    EncodedInput,
-    PreTokenizedInput,
-    TextInput,
-    TruncationStrategy,
-)
-from transformers.utils import PaddingStrategy, TensorType, logging
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
+from transformers.tokenization_utils_base import AddedToken
+from transformers.utils import TensorType, logging
 
 from fla.models.rodimus.chat_format import Chat
-
 
 logger = logging.get_logger(__name__)
 

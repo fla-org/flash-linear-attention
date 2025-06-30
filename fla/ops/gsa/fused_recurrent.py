@@ -247,7 +247,7 @@ def fused_recurrent_gsa_bwd(
     B, T, H, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
-    BK, BV, BM = min(K, 64), min(V, 64), min(M, 64)
+    BK, BV, BM = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64), min(triton.next_power_of_2(M), 64)
     NK, NV, NM = triton.cdiv(K, BK), triton.cdiv(V, BV), triton.cdiv(M, BM)
 
     dqv = q.new_empty(NV, B, T, H, M, dtype=torch.float)

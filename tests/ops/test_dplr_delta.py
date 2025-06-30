@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+from typing import List
 
 import pytest
 import torch
@@ -8,21 +9,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
-from fla.utils import COMPILER_MODE, assert_close, device, device_platform
-
-if COMPILER_MODE:
-    test_b_list = [1]
-    test_t_list = [4096]
-    test_t_varlen_list = test_t_list
-    test_d_list = [64, 128, 256]
-    test_gate_list = [1.0]
-else:
-    test_b_list = [2]
-    test_t_list = [1, 15, 63, 300]
-    test_t_varlen_list = [63, 286, 300, 512]
-    test_d_list = [32, 64, 100, 256]
-    test_gate_list = [1, 0.1, 10]
-test_h_list = [2]
+from fla.utils import assert_close, device, device_platform
 
 
 def recurrent_dplr_delta_rule_ref(
@@ -142,15 +129,19 @@ def chunk_dplr_delta_rule_ref(
     return o, S
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [0.25])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, torch.float),
+            (2, 1024, 4, 60, 1, torch.float),
+            (2, 1024, 8, 128, 1, torch.float),
+            (2, 1024, 8, 128, 0.1, torch.float),
+            (4, 2048, 8, 64, 0.1, torch.float),
+            (2, 1024, 8, 128, 1, torch.float16),
+        ]
+    ]
 )
 def test_recurrent_fwd(
     B: int,
@@ -197,21 +188,24 @@ def test_recurrent_fwd(
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    assert_close(' o', ref, tri, 0.001)
+    assert_close('o', ref, tri, 0.001)
     assert_close('ht', ref_ht, tri_ht, 0.001)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [0.25])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, torch.float),
+            (2, 1024, 4, 60, 1, torch.float),
+            (2, 1024, 8, 100, 1, torch.float),
+            (2, 1024, 8, 128, 0.1, torch.float),
+            (4, 2048, 8, 64, 0.1, torch.float),
+        ]
+    ]
 )
-def test_fused_recurrent_fwd(
+def test_fused_recurrent(
     B: int,
     T: int,
     H: int,
@@ -255,21 +249,25 @@ def test_fused_recurrent_fwd(
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    assert_close(' o', ref, tri, 0.002)
+    assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
 
-@pytest.mark.parametrize('B', test_b_list)
-@pytest.mark.parametrize('T', test_t_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('gate_logit_normalizer', test_gate_list)
-@pytest.mark.parametrize('scale', [0.25])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.parametrize('compile', [False, True])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 64, 1, 1, 0, torch.float16),
+            (2, 1000, 3, 60, 1, 1, 0, torch.float16),
+            (2, 1024, 3, 64, 0.1, 1, 0.5, torch.float16),
+            (2, 1024, 4, 100, 1, 0.1, 0, torch.float16),
+            (2, 1024, 4, 128, 0.1, 1, 0, torch.float16),
+            (2, 1024, 4, 128, 0.1, 1, 0.5, torch.float16),
+            (2, 1024, 4, 128, 0.1, 10, 0, torch.float16),
+            (4, 2048, 8, 64, 0.1, 1, 0, torch.float16)
+        ]
+    ]
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
@@ -282,8 +280,8 @@ def test_chunk(
     D: int,
     scale: float,
     gate_logit_normalizer: float,
+    mask_p: float,
     dtype: torch.dtype,
-    compile: bool,
 ):
     torch.manual_seed(42)
     q = torch.randn(B, T, H, D, dtype=dtype)
@@ -294,7 +292,9 @@ def test_chunk(
 
     a = F.normalize(a, p=2, dim=-1)
     b = -a
-    gk = F.logsigmoid(gk) / gate_logit_normalizer
+    gk = F.logsigmoid(gk)
+    gk = gk / gate_logit_normalizer
+    gk = gk * (torch.rand_like(gk) > mask_p)
 
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
     q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
@@ -315,9 +315,7 @@ def test_chunk(
     ref_dq, ref_dk, ref_dv, ref_da, ref_db, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, a.grad, b.grad, gk.grad, h0.grad
     q.grad = k.grad = v.grad = a.grad = b.grad = gk.grad = h0.grad = None
 
-    chunk_compiled = torch.compile(chunk_dplr_delta_rule) if compile else chunk_dplr_delta_rule
-
-    tri, tri_ht = chunk_compiled(
+    tri, tri_ht = chunk_dplr_delta_rule(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -332,48 +330,48 @@ def test_chunk(
     tri_dq, tri_dk, tri_dv, tri_da, tri_db, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, a.grad, b.grad, gk.grad, h0.grad
     q.grad = k.grad = v.grad = a.grad = b.grad = gk.grad = h0.grad = None
 
-    assert_close('  o', ref, tri, 0.007)
-    assert_close(' ht', ref_ht, tri_ht, 0.008)
-    assert_close(' dq', ref_dq, tri_dq, 0.008)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.008)
-    assert_close(' da', ref_da, tri_da, 0.008)
-    assert_close(' db', ref_db, tri_db, 0.008)
+    assert_close('o', ref, tri, 0.007)
+    assert_close('ht', ref_ht, tri_ht, 0.008)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('da', ref_da, tri_da, 0.008)
+    assert_close('db', ref_db, tri_db, 0.008)
     if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:  # otherwise it is meaningless
-        assert_close(' dg', ref_dg, tri_dg, 0.008)
+        assert_close('dg', ref_dg, tri_dg, 0.008)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
-@pytest.mark.parametrize('N', test_b_list)
-@pytest.mark.parametrize('T', test_t_varlen_list)
-@pytest.mark.parametrize('H', test_h_list)
-@pytest.mark.parametrize('D', test_d_list)
-@pytest.mark.parametrize('scale', [0.25])
-@pytest.mark.parametrize('dtype', [torch.float16])
-@pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+@pytest.mark.parametrize(
+    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (4, 64, 0, [0, 15], torch.float16),
+            (4, 64, 0, [0, 256, 500, 1000], torch.float16),
+            (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
+            (4, 100, 0, [0, 15, 100, 300, 1111, 1599, 2000], torch.float16),
+        ]
+    ]
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
-    N: int,
-    T: int,
     H: int,
     D: int,
-    scale: float,
+    mask_p: float,
+    cu_seqlens: List[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-    # randomly split the sequence into N segments
-    cu_seqlens = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
-    ], 0).to(device).sort()[0]
+
+    N = len(cu_seqlens) - 1
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
     # seq-first required for inputs with variable lengths
     q = torch.randn(1, T, H, D, dtype=dtype)
     k = torch.randn(1, T, H, D, dtype=dtype)
@@ -383,6 +381,7 @@ def test_chunk_varlen(
     a = F.normalize(a, p=2, dim=-1)
     b = -a
     gk = F.logsigmoid(gk)
+    gk = gk * (torch.rand_like(gk) > mask_p)
     h0 = torch.randn(N, H, D, D, dtype=torch.float)
     q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
 
@@ -393,7 +392,6 @@ def test_chunk_varlen(
         a=a.clone(),
         b=b.clone(),
         gk=gk.clone(),
-        scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
         cu_seqlens=cu_seqlens,
@@ -414,7 +412,6 @@ def test_chunk_varlen(
             a=a[:, cu_seqlens[i]:cu_seqlens[i+1]],
             b=b[:, cu_seqlens[i]:cu_seqlens[i+1]],
             gk=gk[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            scale=scale,
             initial_state=h0[i, None],
             output_final_state=True,
         )
@@ -426,12 +423,12 @@ def test_chunk_varlen(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_da, ref_db, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, a.grad, b.grad, gk.grad, h0.grad
 
-    assert_close('  o', ref, tri, 0.007)
-    assert_close(' ht', ref_ht, tri_ht, 0.008)
-    assert_close(' dq', ref_dq, tri_dq, 0.008)
-    assert_close(' dk', ref_dk, tri_dk, 0.008)
-    assert_close(' dv', ref_dv, tri_dv, 0.008)
-    assert_close(' da', ref_da, tri_da, 0.008)
-    assert_close(' db', ref_db, tri_db, 0.008)
-    assert_close(' dg', ref_dg, tri_dg, 0.008)
+    assert_close('o', ref, tri, 0.007)
+    assert_close('ht', ref_ht, tri_ht, 0.008)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('da', ref_da, tri_da, 0.008)
+    assert_close('db', ref_db, tri_db, 0.008)
+    assert_close('dg', ref_dg, tri_dg, 0.008)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)

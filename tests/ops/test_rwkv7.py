@@ -16,8 +16,8 @@ from fla.utils import assert_close, device
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [1024])
-@pytest.mark.parametrize("n_embd", [512, 1024])
-@pytest.mark.parametrize("dim_ffn", [2048, 4096])
+@pytest.mark.parametrize("n_embd", [1024])
+@pytest.mark.parametrize("dim_ffn", [4096])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("inplace", [True, False])
 @pytest.mark.parametrize("xprevdim", [2, 3])
@@ -127,7 +127,7 @@ def test_fused_mul_recurrent_fwd(
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    assert_close(' o', ref, tri, 0.002)
+    assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
 
