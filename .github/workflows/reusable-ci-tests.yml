@@ -103,6 +103,45 @@ jobs:
             exit 1
           fi
 
+      - name: Install/Update Dependencies
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
+          $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
+
+          echo "Installing PyTorch version: ${{ inputs.pytorch_version }} for GPU: ${{ inputs.gpu_type }}"
+
+          if [ "${{ inputs.gpu_type }}" = "nvidia" ]; then
+            $CONDA/bin/conda install -n $CONDA_ENV_NAME nvidia/label/cuda-${{ inputs.nvcc_toolkit_version }}::cuda-nvcc -y
+            if [ "${{ inputs.pytorch_version }}" = "nightly" ];
+            then
+              NIGHTLY_URL="https://download.pytorch.org/whl/nightly/${{ inputs.pytorch_cuda_version }}"
+              echo "Using nightly index URL: $NIGHTLY_URL"
+              $CONDA_BIN_PATH/pip install -U torch pytorch-triton --index-url $NIGHTLY_URL
+              $CONDA_BIN_PATH/pip install -U packaging psutil ninja einops datasets transformers
+              $CONDA_BIN_PATH/pip install --no-deps .
+            else
+              STABLE_URL="https://download.pytorch.org/whl/${{ inputs.pytorch_cuda_version }}"
+              echo "Using stable index URL: $STABLE_URL"
+              $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} triton --index-url $STABLE_URL
+              $CONDA_BIN_PATH/pip install .
+              if [[ "${{ inputs.runner }}" == nvidia-h100* ]]; then
+                echo "Installing causal-conv1d for H100"
+                $CONDA_BIN_PATH/pip install git+https://github.com/Dao-AILab/causal-conv1d.git@a4b40 --no-build-isolation
+                echo "Installing flash-attn for NVIDIA"
+                $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
+              fi
+            fi
+          elif [ "${{ inputs.gpu_type }}" = "intel" ]; then
+            XPU_URL="https://download.pytorch.org/whl/xpu"
+            echo "Using XPU index URL: $XPU_URL"
+            $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} pytorch-triton-xpu --index-url $XPU_URL
+            $CONDA_BIN_PATH/pip install .
+          else
+            echo "::error::Unsupported GPU type: ${{ inputs.gpu_type }}"
+            exit 1
+          fi
+
       - name: Verify Environment and GPU
         shell: bash
         run: |
@@ -147,48 +186,6 @@ jobs:
         id: changed-files
         uses: tj-actions/changed-files@v46.0.5
 
-      - name: Install/Update Dependencies
-        if: steps.check_skip.outputs.skip_tests == 'false'
-        shell: bash
-        run: |
-          $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
-          $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
-
-          echo "Installing PyTorch version: ${{ inputs.pytorch_version }} for GPU: ${{ inputs.gpu_type }}"
-
-          if [ "${{ inputs.gpu_type }}" = "nvidia" ]; then
-            $CONDA/bin/conda install -n ${{ inputs.conda_env_name }} nvidia/label/cuda-${{ inputs.nvcc_toolkit_version }}::cuda-nvcc -y
-            if [ "${{ inputs.pytorch_version }}" = "nightly" ];
-            then
-              NIGHTLY_URL="https://download.pytorch.org/whl/nightly/${{ inputs.pytorch_cuda_version }}"
-              echo "Using nightly index URL: $NIGHTLY_URL"
-              $CONDA_BIN_PATH/pip install -U torch --index-url $NIGHTLY_URL
-              $CONDA_BIN_PATH/pip install -U packaging psutil ninja einops datasets transformers
-              $CONDA_BIN_PATH/pip uninstall -y triton pytorch-triton triton-nightly -y
-              $CONDA_BIN_PATH/pip install -U triton-nightly --index-url https://pypi.fla-org.com/simple
-              $CONDA_BIN_PATH/pip install --no-deps .
-            else
-              STABLE_URL="https://download.pytorch.org/whl/${{ inputs.pytorch_cuda_version }}"
-              echo "Using stable index URL: $STABLE_URL"
-              $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} triton --index-url $STABLE_URL
-              $CONDA_BIN_PATH/pip install .
-              if [ "${{ inputs.runner }}" = "nvidia-h100" ]; then
-                echo "Installing causal-conv1d for H100"
-                $CONDA_BIN_PATH/pip install git+https://github.com/Dao-AILab/causal-conv1d.git@a4b40 --no-build-isolation
-                echo "Installing flash-attn for NVIDIA"
-                $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
-              fi
-            fi
-          elif [ "${{ inputs.gpu_type }}" = "intel" ]; then
-            XPU_URL="https://download.pytorch.org/whl/xpu"
-            echo "Using XPU index URL: $XPU_URL"
-            $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} pytorch-triton-xpu --index-url $XPU_URL
-            $CONDA_BIN_PATH/pip install .
-          else
-            echo "::error::Unsupported GPU type: ${{ inputs.gpu_type }}"
-            exit 1
-          fi
-
       # =================================================================
       # STAGE 2: OPS TESTS
       # =================================================================
@@ -207,11 +204,6 @@ jobs:
         shell: bash
         run: |
           $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }}
-
-      - name: Verify FLA import
-        shell: bash
-        run: |
-          $CONDA_BIN_PATH/python -c "import fla; print('FLA imported successfully')"
 
   test-models:
     runs-on: ${{ inputs.runner }}
