@@ -82,7 +82,7 @@ def causal_conv1d_fwd_kernel(
     m_w = o_w >= 0
 
     if HAS_WEIGHT:
-        # [BD, W]
+        # [BD, BW]
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0).to(tl.float32)
 
     b_y = tl.zeros((BT, BD), dtype=tl.float32)
@@ -169,7 +169,7 @@ def causal_conv1d_bwd_kernel(
     if HAS_WEIGHT:
         p_x = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
         b_x = tl.load(p_x, boundary_check=(0, 1))
-        # [BD, W]
+        # [BD, BW]
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
 
     b_dx = tl.zeros((BT, BD), dtype=tl.float32)
@@ -241,7 +241,7 @@ def causal_conv1d_update_kernel(
 
     # shift the cache by 1 with the last one being discarded
     p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW + 1), (BD, BW), (1, 0))
-    # [BD, W]
+    # [BD, BW]
     b_cache = tl.load(p_cache, boundary_check=(0, 1)).to(tl.float32)
     b_cache = tl.where(m_c[None, :], b_cache, b_x[:, None])
 
@@ -717,7 +717,7 @@ class ShortConvolution(nn.Conv1d):
                 x=x,
                 cache=cache,
                 residual=residual,
-                weight=self.weight,
+                weight=rearrange(self.weight, "d 1 w -> d w"),
                 bias=self.bias,
                 activation=self.activation,
             )
