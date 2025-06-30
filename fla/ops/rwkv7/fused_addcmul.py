@@ -21,7 +21,7 @@ def identity_decorator(fn):
     return fn
 
 
-current_python_version = Version(sys.version)
+current_python_version = Version(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
 min_torch_compile_version = Version("3.11")
 
 if current_python_version >= min_torch_compile_version:
