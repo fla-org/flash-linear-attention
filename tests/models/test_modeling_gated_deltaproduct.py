@@ -8,7 +8,7 @@ from fla.models import GatedDeltaProductConfig
 from fla.utils import device
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
-from .testing_utils import init_weights_recursively
+from .test_modeling_utils import init_weights_recursively
 
 
 # ===================================================================================
