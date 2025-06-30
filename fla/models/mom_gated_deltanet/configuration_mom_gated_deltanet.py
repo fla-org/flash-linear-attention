@@ -8,6 +8,7 @@ from transformers.configuration_utils import PretrainedConfig
 class MomGatedDeltaNetConfig(PretrainedConfig):
     model_type = 'mom_gated_deltanet'
     keys_to_ignore_at_inference = ['past_key_values']
+
     def __init__(
         self,
         attn_mode: str = "chunk",
@@ -37,8 +38,8 @@ class MomGatedDeltaNetConfig(PretrainedConfig):
         num_memories: int = 8,
         topk: int = 2,
         capacity: float = 1.0,
-        use_layer_wise_balance: bool=True,
-        aux_loss_scale: float=0.01,
+        use_layer_wise_balance: bool = True,
+        aux_loss_scale: float = 0.01,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
         **kwargs
