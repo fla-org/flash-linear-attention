@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-
 class GatedDeltaProduct(nn.Module):
     """
     Generalized version of GatedDoubleDeltaNet that supports arbitrary number of householder transformations.
