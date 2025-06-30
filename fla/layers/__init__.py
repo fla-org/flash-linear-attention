@@ -19,6 +19,7 @@ from .linear_attn import LinearAttention
 from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mesa_net import MesaNet
+from .mom import MomGatedDeltaNet
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
 from .path_attn import PaTHAttention
@@ -26,7 +27,6 @@ from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
-from .mom import MomGatedDeltaNet
 
 __all__ = [
     'ABCAttention',
@@ -46,7 +46,7 @@ __all__ = [
     'LinearAttention',
     'Mamba',
     'Mamba2',
-    'MomGatedDeltaNet'
+    'MomGatedDeltaNet',
     'MultiScaleRetention',
     'NativeSparseAttention',
     'ReBasedLinearAttention',
