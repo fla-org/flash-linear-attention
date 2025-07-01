@@ -10,8 +10,8 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 })
 @triton.jit(do_not_specialize=['T'])
 def chunk_cumprod_householder_bwd_kernel(
-    h, hc_suffix, dhc_whole, dh,
-    k, dk, dk_new,
+    hc_suffix, dhc_whole,
+    k, dk, w1, w2, dw1, dw2, dk_new,
     cu_seqlens, split_indices, chunk_offsets, split_offsets,
     BT: tl.constexpr,  # previous small chunk size
     K: tl.constexpr,
@@ -41,12 +41,15 @@ def chunk_cumprod_householder_bwd_kernel(
         boh_large = i_n * tl.cdiv(T, S)
 
     # offset calculations
-    h += ((boh + tl.cdiv(i_s * S, BT)) * H + i_h) * K * K
+    dhc_whole += ((boh_large + i_s) * HQ + i_hq) * K * K
     hc_suffix += ((boh + tl.cdiv(i_s * S, BT)) * H + i_h) * K * K
     k += (bos * H + i_h) * K
+    w1 += (bos * H + i_h) * K
+    w2 += (bos * H + i_h) * K
+    dw1 += (bos * HQ + i_hq) * K
+    dw2 += (bos * HQ + i_hq) * K
 
-    dh += ((boh + tl.cdiv(i_s * S, BT)) * HQ + i_hq) * K * K
-    dhc_whole += ((boh_large + i_s) * HQ + i_hq) * K * K
+    # dh += ((boh + tl.cdiv(i_s * S, BT)) * HQ + i_hq) * K * K
     dk += (bos * HQ + i_hq) * K
     dk_new += (bos * HQ + i_hq) * K
 
@@ -63,22 +66,40 @@ def chunk_cumprod_householder_bwd_kernel(
         p_dk = tl.make_block_ptr(dk, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
         p_dk_new = tl.make_block_ptr(dk_new, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
         p_hc = tl.make_block_ptr(hc_suffix + i_t_small * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-        p_h = tl.make_block_ptr(h + i_t_small * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-        p_dh = tl.make_block_ptr(dh + i_t_small * stride_hq, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+
+        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
         b_dk = tl.load(p_dk, boundary_check=(0, 1))
-        b_h = tl.load(p_h, boundary_check=(0, 1))
-        b_hc = tl.load(p_hc, boundary_check=(0, 1))
+
+
+        p_w1 = tl.make_block_ptr(w1, (T, K), (H*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
+        p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
+
+        b_w1 = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float16)
+        b_w2 = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float16)
+        b_hc = tl.load(p_hc, boundary_check=(0, 1)).to(tl.float16)
+
         b_dk_new = b_dk - tl.dot(b_dk.to(b_hc.dtype), b_hc)
-        tl.store(p_dk_new, b_dk_new.to(dk.dtype.element_ty), boundary_check=(0, 1))
+        p_dk_new = tl.make_block_ptr(dk_new, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
+        tl.store(p_dk_new, b_dk_new.to(dk_new.dtype.element_ty), boundary_check=(0, 1))
+
+        # strange
         b_dh = b_dhc - tl.dot(tl.trans(b_hc), b_dhc.to(b_hc.dtype))
-        tl.store(p_dh, b_dh.to(dh.dtype.element_ty), boundary_check=(0, 1))
-        b_dhc = b_dhc - tl.dot(b_dhc.to(b_h.dtype), tl.trans(b_h))
+        b_dw2 = tl.dot(b_w1, b_dh.to(b_w1.dtype))
+        b_dw1 = tl.dot(b_w2, tl.trans(b_dh.to(b_w2.dtype)))
+
+        p_dw1 = tl.make_block_ptr(dw1, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
+        p_dw2 = tl.make_block_ptr(dw2, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
+
+        tl.store(p_dw1, b_dw1.to(dw1.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dw2, b_dw2.to(dw2.dtype.element_ty), boundary_check=(0, 1))
+
+        b_dhc = b_dhc - tl.dot(tl.dot(b_dhc.to(b_w2.dtype), tl.trans(b_w2)).to(b_w1.dtype), b_w1)
         b_dhc -= tl.dot(tl.trans(b_dk).to(b_k.dtype), b_k)
 
 
 def chunk_cumprod_householder_bwd_fn(
-    h: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
     hc_suffix: torch.Tensor,
     dhc_whole: torch.Tensor,
     k: torch.Tensor,
@@ -103,15 +124,16 @@ def chunk_cumprod_householder_bwd_fn(
         NS = split_offsets[-1].item()
 
     grid = (NS, HQ)
-    dh = torch.empty(hc_suffix.shape[0], HQ, K, K, device=dk.device, dtype=torch.float32)
-    dk_new = torch.empty_like(dk)
+    dw1 = torch.empty_like(dk, dtype=torch.float32)
+    dw2 = torch.empty_like(dk, dtype=torch.float32)
+    dk_new = torch.empty_like(dk, dtype=torch.float32)
 
     chunk_cumprod_householder_bwd_kernel[grid](
-        h=h, hc_suffix=hc_suffix, dhc_whole=dhc_whole, dh=dh,
-        k=k, dk=dk, dk_new=dk_new,
+        hc_suffix=hc_suffix, dhc_whole=dhc_whole,
+        k=k, dk=dk, w1=w1, w2=w2, dw1=dw1, dw2=dw2, dk_new=dk_new,
         cu_seqlens=cu_seqlens,
         split_indices=split_indices, chunk_offsets=chunk_offsets, split_offsets=split_offsets,
         BT=BT, K=K, G=G, H=H, HQ=HQ, BK=K,
-        T=T, S=S
+        T=T, S=S, num_stages=2
     )
-    return dh, dk_new
+    return dw1, dw2, dk_new

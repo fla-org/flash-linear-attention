@@ -20,7 +20,7 @@ def parallel_path_bwd_dkv_kernel(
     K: tl.constexpr, V: tl.constexpr,
     BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr,
     BV: tl.constexpr, S: tl.constexpr,
-    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr, NUM_BLOCKS: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -37,7 +37,7 @@ def parallel_path_bwd_dkv_kernel(
         boh_large = i_n * tl.cdiv(T, S)
 
     # offset calculations
-    q += (bos * HQ + i_hq) * K
+    # q += (bos * HQ + i_hq) * K
     do += (bos * HQ + i_hq) * V
     dk += (bos * HQ + i_hq) * K
     dv += (bos * HQ + i_hq) * K
@@ -58,9 +58,9 @@ def parallel_path_bwd_dkv_kernel(
 
     # load query
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_k_origin = tl.load(p_k, boundary_check=(0, 1))
+    b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
     p_v = tl.make_block_ptr(v, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float16)
 
     if USE_GATE:
         b_g_cumsum_k = tl.zeros([BT,], dtype=tl.float32)
@@ -75,89 +75,49 @@ def parallel_path_bwd_dkv_kernel(
     b_dv = tl.zeros([BT, K], dtype=tl.float32)
     idx_i = (i_t * BT // S).to(tl.int32)
 
-    last_chunk_start = tl.floor(T/S).to(tl.int32) * S
+    last_chunk_start = tl.floor(i_t*BT / S).to(tl.int32) * S
+    idx_j = tl.floor(i_t * BT / S).to(tl.int32) + 1
 
-    if i_t * BT < last_chunk_start:
-        # handle right most hand
-        if T % S != 0:
-            idx_j = (last_chunk_start // S)
-            b_k_accum = tl.zeros([BT, BK], dtype=tl.float32)
-            b_k_accum += b_k_origin
-            for i in range(idx_i+1, idx_j):
-                p_h = tl.make_block_ptr(hc_whole + i * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-                b_h = tl.load(p_h, boundary_check=(0, 1))
-                b_k_accum = (b_k_accum - tl.dot(b_k_accum.to(b_h.dtype), tl.trans(b_h)))
-            b_k = b_k_accum.to(b_k_origin.dtype)
+    last_chunk_end = tl.ceil(T / BS).to(tl.int32) * BS - BS
 
-            for offset in range(tl.ceil(T/BS).to(tl.int32) * BS - BS, last_chunk_start-BS, -BS):
-                p_delta = tl.make_block_ptr(D, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
-                p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
-                b_delta = tl.load(p_delta, boundary_check=(0, ))
-                b_l = tl.load(p_l, boundary_check=(0, ))
-                p_q = tl.make_block_ptr(q, (T, K), (HQ*K, 1), (offset, 0), (BS, BK), (1, 0))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_A = tl.dot(b_q, tl.trans(b_k))
-                if USE_GATE:
-                    p_g_cumsum_q = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
-                    b_g_cumsum_q = tl.load(p_g_cumsum_q, boundary_check=(0, ))
-                    b_A = b_A + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
-                    b_A = tl.where((offset + tl.arange(0, BS) < T)[:, None], b_A, float("-inf"))  # avoid nan
-                b_A_softmax = tl.math.exp2(b_A * sm_scale - b_l[:, None])
-                p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (offset, 0), (BS, BV), (1, 0))
-                b_do = tl.load(p_do, boundary_check=(0, 1))
-                b_dv += tl.dot(tl.trans(b_A_softmax.to(b_do.dtype)), b_do)
-                b_dp = tl.dot(b_do, tl.trans(b_v))
-                b_dA = ((b_dp - b_delta[:, None]) * b_A_softmax * scale)
-                if USE_GATE:
-                    b_dg_cumsum_k -= tl.sum(b_dA, axis=0)
-                b_dA = b_dA.to(b_v.dtype)
-                b_dk += tl.dot(tl.trans(b_dA), b_q)
+    for offset in range(last_chunk_end, last_chunk_start+S-BS, -BS):
+        p_delta = tl.make_block_ptr(D, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
+        p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
+        b_delta = tl.load(p_delta, boundary_check=(0, ))
+        b_l = tl.load(p_l, boundary_check=(0, ))
 
-        for offset_outer in range(last_chunk_start, i_t * BT + S, -S):
-            idx_j = (offset_outer // S) - 1
-            b_k_accum = tl.zeros([BT, BK], dtype=tl.float32)
-            b_k_accum += b_k_origin
-            for i in range(idx_i+1, idx_j):
-                p_h = tl.make_block_ptr(hc_whole + i * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-                b_h = tl.load(p_h, boundary_check=(0, 1))
-                b_k_accum = (b_k_accum - tl.dot(b_k_accum.to(b_h.dtype), tl.trans(b_h)))
-            b_k = b_k_accum.to(b_k_origin.dtype)
+        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j) * HQ + i_hq) * K, (T, K), (HQ*K*NUM_BLOCKS, 1), (offset, 0), (BS, BK), (1, 0))
+        b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float16)
+        b_A = tl.dot(b_k, tl.trans(b_q))
+        if USE_GATE:
+            p_g_cumsum_q = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
+            b_g_cumsum_q = tl.load(p_g_cumsum_q, boundary_check=(0, ))
+            b_A = b_A + b_g_cumsum_q[None, :] - b_g_cumsum_k[:, None]
+            b_A = tl.where((offset + tl.arange(0, BS) < T)[None, :], b_A, float("-inf"))  # avoid nan
+        b_A_softmax = tl.math.exp2(b_A * sm_scale - b_l[None, :])
+        p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (offset, 0), (BS, BV), (1, 0))
+        b_do = tl.load(p_do, boundary_check=(0, 1)).to(tl.float16)
+        b_dv += tl.dot(b_A_softmax.to(b_do.dtype), b_do)
+        b_dp = tl.dot(b_v, tl.trans(b_do))
 
-            p_h = tl.make_block_ptr(hc_whole + (idx_j) * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-            b_h = tl.load(p_h, boundary_check=(0, 1))
-            b_dk = b_dk - tl.dot(b_dk.to(b_h.dtype), b_h)
-
-            for offset in range(offset_outer - BS, offset_outer-S-BS, -BS):
-                p_delta = tl.make_block_ptr(D, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
-                p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
-                b_delta = tl.load(p_delta, boundary_check=(0, ))
-                b_l = tl.load(p_l, boundary_check=(0, ))
-                p_q = tl.make_block_ptr(q, (T, K), (HQ*K, 1), (offset, 0), (BS, BK), (1, 0))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_A = tl.dot(b_q, tl.trans(b_k))
-                if USE_GATE:
-                    p_g_cumsum_q = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
-                    b_g_cumsum_q = tl.load(p_g_cumsum_q, boundary_check=(0, ))
-                    b_A = b_A + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
-                    b_A = tl.where((offset + tl.arange(0, BS) < T)[:, None], b_A, float("-inf"))  # avoid nan
-                b_A_softmax = tl.math.exp2(b_A * sm_scale - b_l[:, None])
-                p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (offset, 0), (BS, BV), (1, 0))
-                b_do = tl.load(p_do, boundary_check=(0, 1))
-                b_dv += tl.dot(tl.trans(b_A_softmax.to(b_do.dtype)), b_do)
-                b_dp = tl.dot(b_do, tl.trans(b_v))
-
-                b_dA = ((b_dp - b_delta[:, None]) * b_A_softmax * scale)
-                if USE_GATE:
-                    b_dg_cumsum_k -= tl.sum(b_dA, axis=0)
-                b_dA = b_dA.to(b_v.dtype)
-                b_dk += tl.dot(tl.trans(b_dA), b_q)
+        b_dA = ((b_dp - b_delta[None, :]) * b_A_softmax * scale)
+        if USE_GATE:
+            b_dg_cumsum_k -= tl.sum(b_dA, axis=1)
+        b_dA = b_dA.to(tl.float16)
+        b_dk += tl.dot(b_dA, b_q)
 
     p_dk = tl.make_block_ptr(dk, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     tl.store(p_dk, b_dk.to(dk.dtype.element_ty), boundary_check=(0, 1))
-    tl.atomic_add(dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ*K + tl.arange(0, K)[None, :], b_dv, sem='relaxed')
+    mask = i_t * BT + tl.arange(0, BT) < T
+    tl.atomic_add(
+        dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ * K + tl.arange(0, K)[None, :],
+        b_dv,
+        mask=mask[:, None],
+        sem='relaxed'
+    )
+
     if USE_GATE:
         tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_k, sem='relaxed')
-
 
 def parallel_path_bwd_dkv_fn(
     q, k, v, g_cumsum, do, dv, dg_cumsum,
@@ -165,7 +125,7 @@ def parallel_path_bwd_dkv_fn(
     cu_seqlens,
     S, BT, BS
 ):
-    B, T, HQ, K = q.shape
+    B, T, num_blocks, HQ, K = q.shape
     V = v.shape[-1]
     H = k.shape[-2]
     G = HQ // H
@@ -176,7 +136,7 @@ def parallel_path_bwd_dkv_fn(
     # should be NS
     if cu_seqlens is not None:
         assert split_offsets[-1] == hc_whole.shape[0]
-    dk = torch.empty_like(q, dtype=torch.float32)  # for later reduction use
+    dk = torch.empty(B, T, HQ, K, dtype=torch.float32, device=q.device)  # for later reduction use
 
     parallel_path_bwd_dkv_kernel[(NT, B*HQ)](
         q=q, k=k, v=v, g_cumsum=g_cumsum,
@@ -186,5 +146,8 @@ def parallel_path_bwd_dkv_fn(
         T=T, S=S, BT=BT, BS=BS,
         G=G, HQ=HQ, H=H, K=K, V=V,
         BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
+        num_warps=8 if K == 128 else 4,
+        NUM_BLOCKS=num_blocks,
     )
     return dk, dv, dg_cumsum
+

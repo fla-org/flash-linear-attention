@@ -116,7 +116,7 @@ class PaTHAttention(nn.Module):
             k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
             v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
             w = rearrange(w, '... (h d) -> ... h d', d=self.head_dim)
-            w = l2_norm(w)
+            w = l2_norm(w, output_dtype=torch.float16) # important for precision.
             o, _ = parallel_path_attention(q=q, k=k, v=v, w=w, beta=beta, g=g, cu_seqlens=cu_seqlens)
 
         # Prefilling or decoding
@@ -137,7 +137,7 @@ class PaTHAttention(nn.Module):
                 if self.use_w_shortconv:
                     w, w_conv_state = self.w_conv1d(w, cache=w_conv_state, output_final_state=use_cache, cu_seqlens=cu_seqlens)
                 w = rearrange(w, '... (h d) -> ... h d', d=self.head_dim)
-                w = l2_norm(w)
+                w = l2_norm(w, output_dtype=torch.float16)
 
                 def rank_one_update(k, w, beta):
                     original_dtype = k.dtype
