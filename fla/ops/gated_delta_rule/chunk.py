@@ -27,11 +27,10 @@ def chunk_gated_delta_rule_fwd(
     use_qk_l2norm: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None
 ):
+    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
     q_rstd, k_rstd = None, None
     if use_qk_l2norm:
         q, q_rstd = l2norm_fwd(q)
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
-    if use_qk_l2norm:
         A, k, k_rstd = chunk_scaled_dot_kkt_with_l2norm_fwd(
             k=k,
             beta=beta,
@@ -78,7 +77,7 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-    return q, q_rstd, k, k_rstd, g, o, A, final_state
+    return q, q_rstd, k, k_rstd, g, o, final_state, A
 
 
 def chunk_gated_delta_rule_bwd(
@@ -179,7 +178,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
     ):
-        q, q_rstd, k, k_rstd, g, o, A, final_state = chunk_gated_delta_rule_fwd(
+        q, q_rstd, k, k_rstd, g, o, final_state, A = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
             v=v,

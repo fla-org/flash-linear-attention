@@ -9,7 +9,9 @@ import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
-from fla.ops.delta_rule.wy_fast import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
+from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd, chunk_scaled_dot_kkt_with_l2norm_fwd
+from fla.ops.delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
+from fla.ops.utils import solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -21,13 +23,38 @@ def chunk_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
+    use_qk_l2norm: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
-    # obtain WY representation. u is actually the new v.
-    w, u, A = prepare_wy_repr_fwd(
+    q_rstd, k_rstd = None, None
+    if use_qk_l2norm:
+        q, q_rstd = l2norm_fwd(q)
+        A, k, k_rstd = chunk_scaled_dot_kkt_with_l2norm_fwd(
+            k=k,
+            beta=beta,
+            g_cumsum=None,
+            cu_seqlens=cu_seqlens,
+            output_dtype=torch.float32
+        )
+    else:
+        A = chunk_scaled_dot_kkt_fwd(
+            k=k,
+            beta=beta,
+            g_cumsum=None,
+            cu_seqlens=cu_seqlens,
+            chunk_size=64,
+            output_dtype=torch.float32,
+        )
+    A = solve_tril(
+        A=A,
+        cu_seqlens=cu_seqlens,
+        output_dtype=k.dtype
+    )
+    w, u = recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,
+        A=A,
         cu_seqlens=cu_seqlens,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -49,7 +76,7 @@ def chunk_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens
     )
-    return o, A, final_state
+    return q, q_rstd, k, k_rstd, A, o, final_state
 
 
 def chunk_delta_rule_bwd(
@@ -143,13 +170,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
     ):
-        if use_qk_l2norm_in_kernel:
-            q, q_rstd = l2norm_fwd(q)
-            k, k_rstd = l2norm_fwd(k)
-        else:
-            q_rstd, k_rstd = None, None
-
-        o, A, final_state = chunk_delta_rule_fwd(
+        q, q_rstd, k, k_rstd, A, o, final_state = chunk_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -157,6 +178,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            use_qk_l2norm=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A, initial_state)
