@@ -212,6 +212,7 @@ def test_chunk(
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
+    torch.manual_seed(42)
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
@@ -226,14 +227,14 @@ def test_chunk(
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
 
     tri, tri_ht = chunk_gated_delta_rule(
-        F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
-        F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
-        v.clone(),
-        g.clone(),
-        beta.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
         scale=scale,
-        output_final_state=True,
         initial_state=h0.clone(),
+        output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     do = torch.randn_like(v)
@@ -316,8 +317,8 @@ def test_chunk_varlen(
         v=v.clone(),
         beta=beta.clone(),
         g=g.clone(),
-        output_final_state=True,
         initial_state=h0.clone(),
+        output_final_state=True,
         cu_seqlens=cu_seqlens,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)

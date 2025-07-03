@@ -150,7 +150,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         q_new[:, :, -1] = q
         do_new = do.new_zeros(do.shape[0], do.shape[1], ctx.num_householder, do.shape[2], do.shape[3])
         do_new[:, :, -1] = do
-        q = rearrange(q_new, 'b t n h d -> b (t n) h d')
+        q_org, q = q, rearrange(q_new, 'b t n h d -> b (t n) h d')
         do = rearrange(do_new, 'b t n h d -> b (t n) h d')
         # call the gated deltanet kernel for now.
         # TODO: optimize the backward pass like the forward pass.
@@ -185,7 +185,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
             dg = None
         dq = rearrange(dq, 'b (l n) h d -> b l n h d', n=ctx.num_householder)[:, :, -1].contiguous()
         if ctx.use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q, q_rstd, dq)
+            dq = l2norm_bwd(q_org, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
         return dq.to(q), dk.to(k), dv.to(v), dg, db.to(beta), None, None, dh0, None, None, None
 
