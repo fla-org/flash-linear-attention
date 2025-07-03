@@ -36,9 +36,9 @@ def l2norm_fwd_kernel1(
     # Compute mean and variance
     cols = tl.arange(0, BD)
     mask = cols < D
-    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
-    b_rstd = 1 / tl.sqrt(tl.sum(b_x * b_x) + eps)
 
+    b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
+    b_rstd = 1 / (tl.sqrt(tl.sum(b_x * b_x)) + eps)
     b_y = b_x * b_rstd
     tl.store(y + cols, b_y, mask=mask)
     tl.store(rstd + i_t, b_rstd)
@@ -101,7 +101,7 @@ def l2norm_fwd_kernel(
     p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
 
     b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
-    b_rstd = 1 / tl.sqrt(tl.sum(b_x * b_x, 1) + eps)
+    b_rstd = 1 / (tl.sqrt(tl.sum(b_x * b_x, 1)) + eps)
     b_y = b_x * b_rstd[:, None]
 
     tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
