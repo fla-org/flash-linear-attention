@@ -30,7 +30,6 @@ def chunk_gated_delta_product_fwd(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     num_householder: int = 1,
-    use_qk_l2norm_in_kernel: bool = False,
 ):
     cu_seqlens_dp = cu_seqlens * num_householder if cu_seqlens is not None else None
     if g is not None:
