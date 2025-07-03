@@ -6,9 +6,9 @@ from typing import Optional
 
 import torch
 
-from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.modules.l2norm import l2norm_bwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
-from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o, chunk_fwd_o_with_l2norm
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd, chunk_scaled_dot_kkt_with_l2norm_fwd
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
@@ -30,7 +30,6 @@ def chunk_gated_delta_rule_fwd(
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
     q_rstd, k_rstd = None, None
     if use_qk_l2norm:
-        q, q_rstd = l2norm_fwd(q)
         A, k, k_rstd = chunk_scaled_dot_kkt_with_l2norm_fwd(
             k=k,
             beta=beta,
@@ -68,15 +67,26 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
     )
-    o = chunk_fwd_o(
-        q=q,
-        k=k,
-        v=v_new,
-        h=h,
-        g=g,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-    )
+    if use_qk_l2norm:
+        q, q_rstd, o = chunk_fwd_o_with_l2norm(
+            q=q,
+            k=k,
+            v=v_new,
+            h=h,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+        )
+    else:
+        o = chunk_fwd_o(
+            q=q,
+            k=k,
+            v=v_new,
+            h=h,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+        )
     return q, q_rstd, k, k_rstd, g, o, final_state, A
 
 
