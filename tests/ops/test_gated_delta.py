@@ -128,10 +128,10 @@ def chunk_gated_delta_rule_ref(
         pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
         for test in [
             (1, 63, 1, 1, 64, 1, 1, torch.float),
-            (2, 1024, 4, 4, 60, 1, 1, torch.float),
-            (2, 1024, 2, 8, 128, 1, 0.1, torch.float),
-            (2, 1024, 2, 2, 128, 0.1, 1, torch.float),
-            (2, 1024, 3, 3, 128, 1, 10, torch.float),
+            (2, 500, 4, 4, 60, 1, 1, torch.float),
+            (2, 1000, 2, 8, 128, 1, 0.1, torch.float),
+            (3, 1024, 2, 2, 128, 0.1, 1, torch.float),
+            (4, 1024, 3, 3, 128, 1, 10, torch.float),
             (4, 2048, 4, 4, 64, 0.1, 1, torch.float),
             (2, 1024, 4, 4, 128, 1, 0.1, torch.float16),
             (2, 1024, 4, 8, 128, 1, 10, torch.float16),
@@ -183,18 +183,21 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'dtype'),
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-{}".format(*test))
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test)
+        )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, torch.float16),
-            (2, 1000, 3, 60, 1, 1, 0, torch.float16),
-            (2, 1024, 3, 64, 0.1, 1, 0.5, torch.float16),
-            (2, 1024, 4, 100, 1, 0.1, 0, torch.float16),
-            (2, 1024, 4, 128, 0.1, 1, 0, torch.float16),
-            (2, 1024, 4, 128, 0.1, 1, 0.5, torch.float16),
-            (2, 1024, 4, 128, 0.1, 10, 0, torch.float16),
-            (4, 2048, 8, 64, 0.1, 1, 0, torch.float16)
+            (1, 63, 1, 64, 1, 1, 0, False, torch.float16),
+            (2, 500, 3, 60, 1, 1, 0, False, torch.float16),
+            (2, 1000, 3, 64, 0.1, 1, 0.5, False, torch.float16),
+            (3, 1024, 4, 100, 1, 0.1, 0, False, torch.float16),
+            (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16),
+            (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16),
+            (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16),
+            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16)
         ]
     ]
 )
@@ -206,30 +209,32 @@ def test_chunk(
     scale: float,
     gate_logit_normalizer: float,
     mask_p: float,
+    use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
-    q = torch.randn(B, T, H, D, dtype=dtype)
-    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn(B, T, H, D, dtype=dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid().fill_(1)
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
-    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     g = g / gate_logit_normalizer
     g = g * (torch.rand_like(g) > mask_p)
+    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
 
     tri, tri_ht = chunk_gated_delta_rule(
-        q.clone(),
-        k.clone(),
+        F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v.clone(),
         g.clone(),
         beta.clone(),
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
@@ -237,12 +242,12 @@ def test_chunk(
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
 
-    ref, ref_ht = chunk_gated_delta_rule_ref(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        g.clone(),
-        beta.clone(),
+    ref, ref_ht = recurrent_gated_delta_rule_ref(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        beta=beta.clone(),
+        g=g.clone(),
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
@@ -256,8 +261,7 @@ def test_chunk(
     assert_close('dk', ref_dk, tri_dk, 0.008)
     assert_close('dv', ref_dv, tri_dv, 0.008)
     assert_close('db', ref_dbeta, tri_dbeta, 0.02)
-    if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:
-        assert_close('dg', ref_dg, tri_dg, 0.02)
+    assert_close('dg', ref_dg, tri_dg, 0.02)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
@@ -346,5 +350,5 @@ def test_chunk_varlen(
     assert_close('dk', ref_dk, tri_dk, 0.008)
     assert_close('dv', ref_dv, tri_dv, 0.007)
     assert_close('db', ref_dbeta, tri_dbeta, 0.015)
-    assert_close('dh0', ref_dh0, tri_dh0, 0.007)
     assert_close('dg', ref_dg, tri_dg, 0.015)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.007)
