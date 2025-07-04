@@ -10,6 +10,7 @@ from .delta_net import DeltaNet
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
+from .gdn2 import GDN2
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
 from .hgrn import HGRNAttention
@@ -39,6 +40,7 @@ __all__ = [
     'GatedDeltaProduct',
     'GatedLinearAttention',
     'GatedSlotAttention',
+    'GDN2',
     'HGRNAttention',
     'HGRN2Attention',
     'LightNetAttention',
