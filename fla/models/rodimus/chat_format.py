@@ -24,7 +24,7 @@ class PromptStyle(IntEnum):
 @dataclasses.dataclass
 class Chat:
 
-    id: str = None
+    id: Optional[str] = None
     name: Optional[str] = None
     prompt_style: Optional[PromptStyle] = None
 
