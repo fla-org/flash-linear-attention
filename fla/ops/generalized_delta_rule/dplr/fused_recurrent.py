@@ -123,25 +123,22 @@ def fused_recurrent_dplr_delta_rule_fwd(
     BK = triton.next_power_of_2(K)
 
     h0 = initial_state
-    if output_final_state:
-        ht = q.new_empty(N, H, K, V, dtype=torch.float32)
-    else:
-        ht = None
+    ht = q.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
     o = torch.empty_like(v)
 
     def grid(meta): return (triton.cdiv(V, meta['BV']), N * H)
     fused_recurrent_dplr_delta_rule_fwd_kernel[grid](
-        q,
-        k,
-        v,
-        a,
-        b,
-        gk,
-        o,
-        h0,
-        ht,
-        cu_seqlens,
-        scale,
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        gk=gk,
+        o=o,
+        h0=h0,
+        ht=ht,
+        cu_seqlens=cu_seqlens,
+        scale=scale,
         T=T,
         B=B,
         H=H,
@@ -166,7 +163,7 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
         a: torch.Tensor,
         b: torch.Tensor,
         gk: torch.Tensor,
-        scale: Optional[float] = 1.0,
+        scale: Optional[float] = None,
         initial_state: Optional[torch.Tensor] = None,
         output_final_state: bool = False,
         reverse: bool = False,
@@ -212,7 +209,7 @@ def fused_recurrent_dplr_delta_rule(
     cu_seqlens: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
-    This function computes the recurrence S_t = S_t @ (I + a_t b_t^T) + v_t k_t^T in a recurrent manner.
+    This function computes the recurrence S_t = S_t @ (Diag(g_t) + a_t b_t^T) + v_t k_t^T in a recurrent manner.
 
     Args:
         q (torch.Tensor):
