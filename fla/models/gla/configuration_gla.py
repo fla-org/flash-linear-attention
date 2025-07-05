@@ -13,8 +13,8 @@ class GLAConfig(PretrainedConfig):
     def __init__(
         self,
         hidden_size: int = 2048,
-        expand_k: int = 0.5,
-        expand_v: int = 1,
+        expand_k: float = 0.5,
+        expand_v: float = 1.,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
         num_hidden_layers: int = 24,
