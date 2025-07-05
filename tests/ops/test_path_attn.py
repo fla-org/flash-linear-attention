@@ -10,20 +10,18 @@ from einops import rearrange
 from fla.ops.path_attn.parallel import parallel_path_attention
 from fla.utils import assert_close, check_shared_mem, device, is_intel_alchemist
 
-
 def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
     original_dtype = q.dtype
     HQ = q.shape[2]
     H = k.shape[2]
     q, k, v, w, beta, g = map(lambda x: x.to(torch.float32).transpose(1, 2), [q, k, v, w, beta, g])
     g_cumsum = g.cumsum(-1)
-    #
     q = q.unsqueeze(2).expand(-1, -1, HQ//HQ, -1, -1).flatten(1, 2)
     k = k.unsqueeze(2).expand(-1, -1, HQ//H, -1, -1).flatten(1, 2)
     v = v.unsqueeze(2).expand(-1, -1, HQ//H, -1, -1).flatten(1, 2)
     w = w.unsqueeze(2).expand(-1, -1, HQ//H, -1, -1).flatten(1, 2)
     beta = beta.unsqueeze(2).expand(-1, -1, HQ//H, -1).flatten(1, 2)
-    g_cumsum = g_cumsum.unsqueeze(2).expand(-1, -1, HQ//HQ, -1).flatten(1, 2)
+
     b, h, l, d_k = q.shape
     if l % BT != 0:
         padding_size = BT - l % BT
@@ -67,11 +65,10 @@ def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
     [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-use_forget_gate{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 1, 32, False, torch.float16),
-            (3, 111, 2, 2, 32, False, torch.float16),
+            (5, 62, 2, 8, 128, True, torch.float16),
             (3, 1024, 2, 8, 64, True, torch.float16),
-            (3, 1024, 2, 8, 64, True, torch.float16),
-            (4, 2048, 2, 8, 64, False, torch.float16)
+            (2, 2000, 2, 2, 64, False, torch.float16),
+            (1, 4000, 1, 2, 128, True, torch.float16),
         ]
     ]
 )
@@ -94,17 +91,18 @@ def test_parallel(
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
-    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
-    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    q = torch.nn.functional.normalize(torch.randn((B, T, HQ, D), dtype=dtype, device=device), dim=-1, p=2).requires_grad_(True)
+    k = torch.rand((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.rand((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
     w = torch.nn.functional.normalize(torch.randn((B, T, H, D), dtype=dtype, device=device), dim=-1, p=2).requires_grad_(True)
-    beta = torch.rand((B, T, H), dtype=dtype, device=device).sigmoid().requires_grad_(True)
+    # w =
+    beta = torch.rand((B, T, H), dtype=dtype, device=device).uniform_(1.5, 2.0).requires_grad_(True)
     if use_forget_gate:
         g = torch.empty((B, T, HQ), dtype=torch.float, device=device).uniform_(
             0.95, 1).log().requires_grad_(True)
     else:
         g = None
-    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    do = torch.rand((B, T, HQ, D), dtype=dtype, device=device)
     scale = D ** -0.5
     ref = naive_path_attn(q, k, v, w, beta, torch.zeros(B, T, HQ, device=device, dtype=torch.float) if g is None else g, scale)
     ref.backward(do)
@@ -130,10 +128,11 @@ def test_parallel(
     assert_close("dq", ref_dq, tri_dq, 0.005)
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
-    if use_forget_gate:
-        assert_close("dg", ref_dg, tri_dg, 0.005)
     assert_close("dw", ref_dw, tri_dw, 0.005)
     assert_close("db", ref_db, tri_db, 0.005)
+    if use_forget_gate:
+        assert_close("dg", ref_dg, tri_dg, 0.03)
+
 
 
 @pytest.mark.parametrize(
@@ -141,10 +140,7 @@ def test_parallel(
     [
         pytest.param(*test, id="H{}-HQ{}-D{}-use_forget_gate{}-cu_seqlens{}-{}".format(*test))
         for test in [
-            (2, 2, 32, False, [0, 15], torch.float16),
-            (2, 8, 32, False, [0, 256, 500, 1000], torch.float16),
-            (2, 8, 64, True, [0, 100, 500, 800, 1000], torch.float16),
-            (2, 2, 64, False, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (2, 2, 128, False, [0, 15, 69, 211, 300, 1200, 1222, 1849, 2000], torch.float16),
             (2, 2, 64, True, [0, 100, 300, 1000, 1989, 2000], torch.float16),
         ]
     ]

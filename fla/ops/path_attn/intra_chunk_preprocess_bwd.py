@@ -13,7 +13,7 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 def intra_chunk_preprocess_bwd_kernel(
     q, k, w, beta,
     AT,
-    dA_local, dq, dq_new, dk, dk_new, dw, dbeta, dh, T,
+    dA_local, dq, dq_new, dk, dk_new, dw, dbeta, dw1, dw2, T,
     offsets, indices, chunk_offsets,
     HQ: tl.constexpr, G: tl.constexpr, H: tl.constexpr,
     K: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr,
@@ -43,12 +43,12 @@ def intra_chunk_preprocess_bwd_kernel(
     p_w = tl.make_block_ptr(w + (bos * H + i_h) * K, (T, K), (K*H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_beta = tl.make_block_ptr(beta + (bos * H + i_h), (T, ), (H, ), (i_t * BT, ), (BT, ), (0, ))
     p_T = tl.make_block_ptr(AT + (bos * H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_w = tl.load(p_w, boundary_check=(0, 1))
+    b_w = tl.load(p_w, boundary_check=(0, 1)).to(tl.float16)
     b_beta = tl.load(p_beta, boundary_check=(0, ))
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_T = tl.load(p_T, boundary_check=(0, 1)).to(b_k.dtype)
-    b_w_beta = (b_w * b_beta[:, None]).to(b_w.dtype)
+    b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float16)
+    b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
+    b_T = tl.load(p_T, boundary_check=(0, 1)).to(tl.float16)
+    b_w_beta = (b_w * b_beta[:, None]).to(tl.float16)
 
     o_i = tl.arange(0, BT)
     b_qw = tl.where(o_i[:, None] >= o_i[None, :], tl.dot(b_q, tl.trans(b_w)), 0).to(b_q.dtype)
@@ -61,15 +61,16 @@ def intra_chunk_preprocess_bwd_kernel(
 
     # # Twb part qw part.
     p_dq = tl.make_block_ptr(dq + (bos * HQ + i_hq) * K, (T, K), (K*HQ, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_dq = tl.load(p_dq, boundary_check=(0, 1)).to(b_w.dtype)
+    b_dq = tl.load(p_dq, boundary_check=(0, 1)).to(tl.float16)
 
-    p_dh = tl.make_block_ptr(dh + ((boh + i_t) * HQ + i_hq)*K*K, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-    b_dh = tl.load(p_dh, boundary_check=(0, 1)).to(b_w.dtype)
-    b_dw += tl.dot(b_Twb, tl.trans(b_dh))
-    b_dqw = -tl.dot(b_dA_local, tl.trans(b_Twbk)) - tl.dot(b_dq.to(b_Twb.dtype), tl.trans(b_Twb))
-    b_dTwb = (-tl.dot(tl.trans(b_qw), b_dq) + tl.dot(b_w, b_dh)).to(b_w.dtype)
-    b_dT += tl.dot(b_dTwb, tl.trans(b_w_beta))
-    b_dw_beta += tl.dot(tl.trans(b_T), b_dTwb)
+    p_dw1 = tl.make_block_ptr(dw1 + (bos * HQ + i_hq) * K, (T, K), (K*HQ, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    b_dw += tl.load(p_dw1, boundary_check=(0, 1))
+
+    b_dqw = -tl.dot(b_dA_local, tl.trans(b_Twbk)) - tl.dot(b_dq.to(tl.float16), tl.trans(b_Twb))
+    p_dw2 = tl.make_block_ptr(dw2 + (bos * HQ + i_hq) * K, (T, K), (K*HQ, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    b_dTwb = -tl.dot(tl.trans(b_qw), b_dq) + tl.load(p_dw2, boundary_check=(0, 1))
+    b_dT += tl.dot(b_dTwb.to(b_w_beta.dtype), tl.trans(b_w_beta))
+    b_dw_beta += tl.dot(tl.trans(b_T), b_dTwb.to(b_T.dtype))
 
     b_dqw = tl.where(tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :], b_dqw, 0)
     b_dq += tl.dot(b_dA_local.to(b_k.dtype), b_k)
@@ -112,7 +113,8 @@ def intra_chunk_preprocess_bwd_kernel(
 
 
 def intra_chunk_preprocess_bwd_fn(q, k, w, beta,
-                                  dq, dk, dh, dA_local,
+                                  dq, dk, dA_local,
+                                  dw1, dw2,
                                   A, L, D, do, scale, cu_seqlens=None):
     BT = A.shape[-1]
     HQ = q.shape[-2]
@@ -132,9 +134,11 @@ def intra_chunk_preprocess_bwd_fn(q, k, w, beta,
     intra_chunk_preprocess_bwd_kernel[grid](
         q=q, k=k, w=w, beta=beta,
         AT=A,
-        dA_local=dA_local, dq=dq, dq_new=dq_new, dk=dk, dk_new=dk_new, dw=dw, dbeta=dbeta, dh=dh, T=T,
+        dA_local=dA_local, dq=dq, dq_new=dq_new, dk=dk, dk_new=dk_new, dw=dw, dbeta=dbeta, dw1=dw1, dw2=dw2, T=T,
         offsets=cu_seqlens, indices=indices, chunk_offsets=chunk_offsets,
         HQ=HQ, G=G, H=H,
         K=K, BT=BT, BK=triton.next_power_of_2(K),
     )
     return dq_new, dk_new, dbeta, dw
+
+
