@@ -61,7 +61,7 @@ class HGRN2Attention(nn.Module):
         self.input_dim = hidden_size
         self.layer_idx = layer_idx
 
-        assert mode in ['chunk', 'fused_recurrent', 'fused_chunk'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent', 'fused_chunk'], f"Not supported mode `{mode}`."
         assert self.forget_dim % num_heads == 0, f"forget dim must be divisible by num_heads of {num_heads}"
         assert self.input_dim % num_heads == 0, f"input dim must be divisible by num_heads of {num_heads}"
 
