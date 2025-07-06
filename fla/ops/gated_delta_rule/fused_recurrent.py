@@ -91,8 +91,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
-            b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
+            b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q + 1e-6)))
+            b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k + 1e-6)))
         b_q = b_q * scale
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta).to(tl.float32)

@@ -111,7 +111,7 @@ def layer_norm_fwd_kernel_quant(
     else:
         xbar = tl.where(cols < N, x, 0.0)
         var = tl.sum(xbar * xbar, axis=0) / N
-    rstd = 1 / (tl.sqrt(var) + eps)
+    rstd = 1 / tl.sqrt(var + eps)
     tl.store(Rstd + row, rstd)
     # Normalize and apply linear transformation
     mask = cols < N
