@@ -101,19 +101,20 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         # [BK, BV]
         if USE_G:
-            b_g = exp(tl.load(p_g).to(tl.float32))
-            b_h *= b_g
+            b_g = tl.load(p_g).to(tl.float32)
+            b_h *= exp(b_g)
             b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0))
-            b_h += b_k[:, None] * b_v
+
         if USE_GK:
-            b_gk = exp(tl.load(p_gk).to(tl.float32))
-            b_v = b_beta * b_v
-            b_h = b_gk[:, None] * (b_h - b_k[:, None] * (b_beta * tl.sum(b_h * b_k[:, None], 0))) + b_k[:, None] * b_v
+            b_gk = tl.load(p_gk).to(tl.float32)
+            b_h *= exp(b_gk[:, None])
+            b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0))
+
         if USE_GV:
-            b_gv = exp(tl.load(p_gv).to(tl.float32))
-            b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0) * b_gv)
-            b_h *= b_gv
-            b_h += b_k[:, None] * b_v
+            b_gv = tl.load(p_gv).to(tl.float32)
+            b_h *= exp(b_gv[None, :])
+            b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0))
+        b_h += b_k[:, None] * b_v
 
         # [BV]
         b_o = tl.sum(b_h * b_q[:, None], 0)

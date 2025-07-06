@@ -101,8 +101,8 @@ def chunk_gdn2(
     if use_qk_l2norm_in_kernel:
         q, k = l2norm(q), l2norm(k)
     kb = beta.unsqueeze(-1) * k
-    a = k
-    b = -kb * g.exp()
+    a = k * g.float().exp()
+    b = -kb
     k = kb.to(k.dtype)
 
     o, final_state = chunk_dplr_delta_rule(

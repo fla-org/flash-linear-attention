@@ -45,7 +45,7 @@ def test_chunk(
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=dtype))
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float))
     g = g / gate_logit_normalizer
     g = g * (torch.rand_like(g) > mask_p)
     beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
