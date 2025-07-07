@@ -18,7 +18,7 @@ from fla.layers.mla import MultiheadLatentAttention
 from fla.models.mla.configuration_mla import MLAConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules import GatedMLP as NSAMLP
+from fla.modules import GatedMLP as MLAMLP
 from fla.modules import RMSNorm
 from fla.modules.l2warp import l2_warp
 
@@ -52,7 +52,7 @@ class MLABlock(nn.Module):
             layer_idx=layer_idx
         )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.mlp = NSAMLP(
+        self.mlp = MLAMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -182,7 +182,7 @@ class MLAModel(MLAPreTrainedModel):
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
-            warnings.warn("`NSAModel` does not `output_attentions` now, setting it to `False`.")
+            warnings.warn("`MLAModel` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
