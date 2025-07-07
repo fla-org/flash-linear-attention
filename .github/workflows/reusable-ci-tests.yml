@@ -203,7 +203,7 @@ jobs:
         if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
-          $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-ops-tests.outputs.test_files }}
+          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
 
   test-models:
     runs-on: ${{ inputs.runner }}
@@ -314,4 +314,4 @@ jobs:
         if: steps.find-models-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
-          $CONDA_BIN_PATH/pytest -s -v ${{ steps.find-models-tests.outputs.test_files }}
+          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-models-tests.outputs.test_files }}

@@ -140,15 +140,14 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
-        use_qk_l2norm_in_kernel: bool = True
     ):
-        q_orig = q
-        k_orig = k
-
         if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
+        else:
+            q_rstd, k_rstd = None, None
 
         o, A, final_state = chunk_delta_rule_fwd(
             q=q,
@@ -160,7 +159,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
-        ctx.save_for_backward(q_orig, k_orig, v, beta, A, initial_state)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A, initial_state)
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -174,11 +173,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, k, v, beta, A, initial_state = ctx.saved_tensors
-        use_qk_l2norm_in_kernel = ctx.use_qk_l2norm_in_kernel
-        if use_qk_l2norm_in_kernel:
-            q, q_orig = l2norm_fwd(q), q
-            k, k_orig = l2norm_fwd(k), k
+        q, q_rstd, k, k_rstd, v, beta, A, initial_state = ctx.saved_tensors
 
         dq, dk, dv, db, dh0 = chunk_delta_rule_bwd(
             q=q,
@@ -192,9 +187,9 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             dht=dht,
             cu_seqlens=ctx.cu_seqlens
         )
-        if use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q_orig, dq)
-            dk = l2norm_bwd(k_orig, dk)
+        if ctx.use_qk_l2norm_in_kernel:
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
         return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None, None
 
 
@@ -207,9 +202,9 @@ def chunk_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
-    use_qk_l2norm_in_kernel: bool = False
 ):
     r"""
     Args:
@@ -230,15 +225,15 @@ def chunk_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+        use_qk_l2norm_in_kernel (Optional[bool]):
+            Whether to use qk l2norm within the kernel for saving GPU memory.
+            Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `False`.
             This argument has been deprecated.
-        use_qk_l2norm_in_kernel (Optional[bool]):
-            Whether to use qk l2norm within the kernel for saving GPU memory.
-            Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -267,7 +262,7 @@ def chunk_delta_rule(
         >>> q, k, v, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = chunk_delta_rule(
+        >>> o, ht = chunk_delta_rule(
             q, k, v, beta,
             initial_state=h0,
             output_final_state=True,
@@ -310,7 +305,7 @@ def chunk_delta_rule(
         scale,
         initial_state,
         output_final_state,
+        use_qk_l2norm_in_kernel,
         cu_seqlens,
-        use_qk_l2norm_in_kernel
     )
     return o, final_state

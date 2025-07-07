@@ -192,18 +192,21 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'dtype'),
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-{}".format(*test))
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test)
+        )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, torch.float16),
-            (2, 1000, 3, 60, 1, 1, 0, torch.float16),
-            (2, 1024, 3, 64, 0.1, 1, 0.5, torch.float16),
-            (2, 1024, 4, 100, 1, 0.1, 0, torch.float16),
-            (2, 1024, 4, 128, 0.1, 1, 0, torch.float16),
-            (2, 1024, 4, 128, 0.1, 1, 0.5, torch.float16),
-            (2, 1024, 4, 128, 0.1, 10, 0, torch.float16),
-            (4, 2048, 8, 64, 0.1, 1, 0, torch.float16)
+            (1, 63, 1, 64, 1, 1, 0, False, torch.float16),
+            (2, 1000, 3, 60, 1, 1, 0, False, torch.float16),
+            (2, 1024, 3, 64, 0.1, 1, 0.5, False, torch.float16),
+            (2, 1024, 4, 100, 1, 0.1, 0, False, torch.float16),
+            (2, 1024, 4, 128, 0.1, 1, 0, True, torch.float16),
+            (2, 1024, 4, 128, 0.1, 1, 0.5, False, torch.float16),
+            (2, 1024, 4, 128, 0.1, 10, 0, False, torch.float16),
+            (4, 2048, 8, 64, 0.1, 1, 0, True, torch.float16)
         ]
     ]
 )
@@ -215,15 +218,16 @@ def test_chunk(
     scale: float,
     gate_logit_normalizer: float,
     mask_p: float,
+    use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
     q = torch.randn(B, T, H, D, dtype=dtype)
-    k = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    k = torch.randn(B, T, H, D, dtype=dtype)
+    p = torch.randn(B, T, H, D, dtype=dtype)
     v = torch.randn(B, T, H, D, dtype=dtype)
-    p = F.normalize(torch.randn(B, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
     g = g / gate_logit_normalizer
@@ -232,15 +236,16 @@ def test_chunk(
     q, k, v, p, beta, g, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, p, beta, g, h0))
 
     tri, tri_ht = chunk_comba(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
+        p=F.normalize(p.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else p.clone(),
         v=v.clone(),
-        p=p.clone(),
         g=g.clone(),
         beta=beta.clone(),
         scale=scale,
-        output_final_state=True,
         initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
@@ -249,15 +254,15 @@ def test_chunk(
     q.grad = k.grad = v.grad = p.grad = beta.grad = g.grad = h0.grad = None
 
     ref, ref_ht = chunk_comba_ref(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        p=F.normalize(p.clone(), p=2, dim=-1),
         v=v.clone(),
-        p=p.clone(),
         g=g.clone(),
         beta=beta.clone(),
         scale=scale,
-        output_final_state=True,
         initial_state=h0.clone(),
+        output_final_state=True,
     )
 
     ((ref * do).sum() + (ref_ht * dht).sum()).backward()
@@ -269,8 +274,7 @@ def test_chunk(
     assert_close(" dk", ref_dk, tri_dk, 0.008)
     assert_close(" dv", ref_dv, tri_dv, 0.005)
     assert_close(" dp", ref_dp, tri_dp, 0.008)
-    if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:
-        assert_close(" dg", ref_dg, tri_dg, 0.02)
+    assert_close(" dg", ref_dg, tri_dg, 0.02)
     assert_close(" db", ref_dbeta, tri_dbeta, 0.005)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 

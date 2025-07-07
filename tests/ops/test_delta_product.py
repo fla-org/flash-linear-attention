@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import List
 
@@ -10,28 +9,27 @@ import torch.nn.functional as F
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_product.chunk_ref import chunk_gated_delta_product_ref
 from fla.ops.gated_delta_product.naive import naive_recurrent_gated_delta_product
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'num_householder', 'dtype'),
+    ('B', 'T', 'H', 'D', 'scale', 'num_householder', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-num_householder{}-{}".format(*test))
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-scale{}-num_householder{}-l2norm{}-{}".format(*test)
+        )
         for test in [
-            (1, 63, 1, 64, 1, 1, torch.float16),
-            (2, 1024, 4, 60, 1, 1, torch.float16),
-            (2, 1024, 8, 128, 1, 2, torch.float16),
-            (2, 1024, 8, 128, 0.1, 2, torch.float16),
-            (2, 1024, 8, 128, 1, 2, torch.float16),
-            (4, 2048, 8, 64, 0.1, 3, torch.float16),
-            (2, 1024, 8, 128, 1, 3, torch.float16),
-            (2, 1024, 8, 128, 1, 3, torch.float16),
+            (1, 63, 1, 64, 0.1, 1, False, torch.float16),
+            (2, 200, 3, 60, 0.1, 1, False, torch.float16),
+            (2, 1000, 4, 64, 0.1, 2, False, torch.float16),
+            (2, 1024, 4, 64, 1, 2, True, torch.float16),
+            (2, 1024, 6, 100, 1, 2, False, torch.float16),
+            (4, 1500, 8, 128, 0.1, 3, False, torch.float16),
+            (2, 2048, 8, 128, 1, 3, False, torch.float16),
+            (2, 2048, 8, 128, 1, 3, True, torch.float16),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_chunk(
     B: int,
@@ -40,19 +38,20 @@ def test_chunk(
     D: int,
     scale: float,
     num_householder: int,
+    use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     q = torch.randn(B, T, H, D, dtype=dtype)
-    k = F.normalize(torch.randn(B, T * num_householder, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    k = torch.randn(B, T * num_householder, H, D, dtype=dtype)
     v = torch.randn(B, T * num_householder, H, D, dtype=dtype)
     beta = torch.rand(B, T * num_householder, H, dtype=dtype).sigmoid()
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
     q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
 
     tri, tri_ht = chunk_gated_delta_product(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
         g=None,
         beta=beta.clone(),
@@ -60,6 +59,7 @@ def test_chunk(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     do = torch.randn_like(q)
     dht = torch.randn_like(h0)
@@ -68,15 +68,15 @@ def test_chunk(
     q.grad = k.grad = v.grad = beta.grad = h0.grad = None
 
     ref, ref_ht = chunk_gated_delta_product_ref(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
         g=None,
         beta=beta.clone(),
         num_householder=num_householder,
         scale=scale,
-        output_final_state=True,
         initial_state=h0.clone(),
+        output_final_state=True,
     )
 
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
@@ -98,10 +98,6 @@ def test_chunk(
         (2, 128, 2, [0, 100, 300, 800, 1500, 2000], torch.float16),
         (2, 256, 3, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
     H: int,

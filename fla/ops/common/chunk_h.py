@@ -63,14 +63,13 @@ def chunk_fwd_kernel_h(
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
-        NT = tl.cdiv(T, BT)
-        NS = tl.cdiv(T, BS)
+        NT, NS = tl.cdiv(T, BT), tl.cdiv(T, BS)
         boh = tl.load(split_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_n * T, i_n * T + T
-        NT = tl.cdiv(T, BT)
-        NS = tl.cdiv(T, BS)
+        NT, NS = tl.cdiv(T, BT), tl.cdiv(T, BS)
         boh = i_n * NS
+    NTS = BS // BT
 
     if USE_G_GAMMA:
         # decay rate given the head index
@@ -84,14 +83,14 @@ def chunk_fwd_kernel_h(
         b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
 
     for i_t in range(NT):
-        i_s = i_t // (BS // BT)
+        i_s = i_t // NTS
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
         o_h = ((boh + i_s) * H + i_h).to(tl.int64) * K*V
         p_h = tl.make_block_ptr(h + o_h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
 
-        if i_t % (BS // BT) == 0:
+        if i_t % NTS == 0:
             tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
         # [BK, BT]
         b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -270,11 +269,11 @@ def chunk_bwd_kernel_dh(
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor = None,
-    g_gamma: torch.Tensor = None,
-    gk: torch.Tensor = None,
-    gv: torch.Tensor = None,
-    h0: torch.Tensor = None,
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
+    gk: Optional[torch.Tensor] = None,
+    gv: Optional[torch.Tensor] = None,
+    h0: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
     chunk_size: int = 64,

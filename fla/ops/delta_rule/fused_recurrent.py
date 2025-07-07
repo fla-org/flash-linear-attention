@@ -386,15 +386,14 @@ class FusedRecurrentFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
-        use_qk_l2norm_in_kernel: bool = False
     ):
-        q_orig = q
-        k_orig = k
-
         if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
+        else:
+            q_rstd, k_rstd = None, None
 
         o, u, final_state = fused_recurrent_delta_rule_fwd(
             q=q,
@@ -407,7 +406,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
         )
 
-        ctx.save_for_backward(q_orig, k_orig, u, beta, initial_state)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, u, beta, initial_state)
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -416,10 +415,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, do, dht):
-        q, k, v, beta, initial_state = ctx.saved_tensors
-        if ctx.use_qk_l2norm_in_kernel:
-            q, q_orig = l2norm_fwd(q), q
-            k, k_orig = l2norm_fwd(k), k
+        q, q_rstd, k, k_rstd, v, beta, initial_state = ctx.saved_tensors
         dq, dk, dv, db, dh0 = fused_recurrent_delta_rule_bwd(
             q=q,
             k=k,
@@ -432,7 +428,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
             cu_seqlens=ctx.cu_seqlens,
         )
         if ctx.use_qk_l2norm_in_kernel:
-            dq, dk = l2norm_bwd(q_orig, dq), l2norm_bwd(k_orig, dk)
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
         return dq.to(q), dk.to(k), dv.to(v), db.to(beta), None, dh0, None, None, None
 
 
@@ -445,8 +442,8 @@ def fused_recurrent_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    use_qk_l2norm_in_kernel: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -467,6 +464,8 @@ def fused_recurrent_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+        use_qk_l2norm_in_kernel (Optional[bool]):
+            Whether to use L2 normalization in the kernel. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -498,14 +497,12 @@ def fused_recurrent_delta_rule(
         >>> q, k, v, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = fused_recurrent_delta_rule(
+        >>> o, ht = fused_recurrent_delta_rule(
             q, k, v, beta,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
         )
-        >>> assert o.allclose(o_var.view(o.shape))
-        >>> assert ht.allclose(ht_var)
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -532,7 +529,7 @@ def fused_recurrent_delta_rule(
         scale,
         initial_state,
         output_final_state,
+        use_qk_l2norm_in_kernel,
         cu_seqlens,
-        use_qk_l2norm_in_kernel
     )
     return o, final_state
