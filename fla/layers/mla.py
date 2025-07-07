@@ -11,17 +11,21 @@ from __future__ import annotations
 import math
 from einops import rearrange, repeat
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from flash_attn import flash_attn_varlen_func
+from flash_attn import flash_attn_varlen_func, flash_attn_func
 from transformers.utils import logging
 
-from fla.models.utils import Cache
+from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.utils.index import prepare_lens_from_mask
+
+# TODO: this will cause circular import as it triggers import from fla.models
+if TYPE_CHECKING:
+    from fla.models.utils import Cache
 
 logger = logging.get_logger(__name__)
 
@@ -122,7 +126,7 @@ class MultiheadLatentAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         # if attention_mask is not None, this is doing inference
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -182,21 +186,38 @@ class MultiheadLatentAttention(nn.Module):
             if cache_has_content:
                 k, v = k_cached, v_cached
 
-        # perform attention
+        # Head dim match to use flash-attn
         if self.qk_head_dim != self.v_head_dim:
             v = F.pad(v, [0, self.qk_head_dim - self.v_head_dim])
 
-        o = flash_attn_varlen_func(
-            q,
-            k,
-            v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
-            causal=True,
-            softmax_scale=self.scaling,
-        )
+        # Contains at least one padding token in the sequence
+        if attention_mask is not None:
+            q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)
+            cu_seqlens_q, cu_seqlens_k = cu_seqlens
+            max_seqlen_q, max_seqlen_k = max_seq_lens
+            o = flash_attn_varlen_func(
+                q, k, v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                causal=True
+            )
+            o = pad_input(o, indices_q, batch_size, q_len)
+        elif cu_seqlens is not None:
+            o = flash_attn_varlen_func(
+                q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=True
+            ).unsqueeze(0)
+        else:
+            o = flash_attn_func(
+                q, k, v,
+                causal=True
+            )
 
         if self.qk_head_dim != self.v_head_dim:
             o = o[:, :, :, : self.v_head_dim]
