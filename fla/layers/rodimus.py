@@ -85,7 +85,7 @@ class RodimusAttention(nn.Module):
         self.residual_in_fp32 = residual_in_fp32
         self.layer_idx = layer_idx
 
-        assert mode in ['chunk', 'fused_recurrent', 'fused_chunk'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent', 'fused_chunk'], f"Not supported mode `{mode}`."
 
         self.gate_proj = nn.Linear(self.hidden_size, self.d_inner, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.d_inner, bias=False)
