@@ -2,16 +2,36 @@
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM
 
 from fla.models import MLAConfig
-from fla.utils import device
 
-from .test_modeling_base import run_test_generation
-from .test_modeling_utils import init_weights_recursively
+from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
 
-# TODO: add forward backward test
+# ===================================================================================
+# Test for Modeling (Forward/Backward Pass)
+# ===================================================================================
+@pytest.mark.parametrize(
+    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype'],
+    [
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}".format(*test))
+        for test in [
+            (4, 4, 1024, 4, 64, True, torch.bfloat16),
+            (4, 4, 1024, 4, 64, False, torch.bfloat16),
+            (4, 4, 1024, 4, 128, False, torch.bfloat16),
+        ]
+    ]
+)
+def test_modeling(
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    use_l2warp: bool,
+    dtype: torch.dtype,
+):
+    run_test_model_forward_backward(L, B, T, H, D, MLAConfig, use_l2warp=use_l2warp, dtype=dtype)
 
 
 # ===================================================================================
@@ -34,21 +54,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    config = MLAConfig()
-    config.num_hidden_layers = L
-    config.num_heads = H
-    config.hidden_size = H * D
-
-    # MLA specific params
-    config.q_lora_rank = None
-    config.qk_rope_head_dim = D // 2  # partial rope, half of D
-    config.kv_lora_rank = 256
-    config.v_head_dim = D
-    config.qk_nope_head_dim = D
-    config.qk_head_dim = config.qk_rope_head_dim + config.qk_nope_head_dim
-    config.rope_scaling = None
-
-    model = AutoModelForCausalLM.from_config(config)
-    model.apply(init_weights_recursively)
-    model = model.to(dtype).to(device)
-    run_test_generation(L, B, T, H, D, MLAConfig, dtype, model=model, config=config, tol=7e-3)
+    run_test_generation(L, B, T, H, D, MLAConfig, dtype)
