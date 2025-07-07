@@ -15,14 +15,15 @@ class MLAConfig(PretrainedConfig):
         hidden_size: int = 2048,
         num_hidden_layers: int = 24,
         num_heads: int = 64,
-        rope_theta: Optional[float] = 10000.,
-        max_position_embeddings: int = 2048,
         q_lora_rank: Optional[int] = 64,
         qk_rope_head_dim: int = 64,
         kv_lora_rank: int = 512,  # following the original Deepseek paper
         v_head_dim: int = 128,
         qk_nope_head_dim: int = 128,
         qk_head_dim: Optional[int] = 192,  # qk_nope_head_dim + qk_rope_head_dim
+        window_size: Optional[int] = None,
+        rope_theta: Optional[float] = 10000.,
+        max_position_embeddings: int = 2048,
         rope_scaling: Optional[dict] = None,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
@@ -45,8 +46,6 @@ class MLAConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_heads = num_heads
-        self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
 
         # MLA specific args
         self.q_lora_rank = q_lora_rank
@@ -56,6 +55,10 @@ class MLAConfig(PretrainedConfig):
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_head_dim = qk_head_dim
         self.rope_scaling = rope_scaling
+
+        self.window_size = window_size
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
 
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size

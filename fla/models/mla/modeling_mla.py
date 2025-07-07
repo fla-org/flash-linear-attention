@@ -39,14 +39,15 @@ class MLABlock(nn.Module):
         self.attn = MultiheadLatentAttention(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
-            rope_theta=config.rope_theta,
-            max_position_embeddings=config.max_position_embeddings,
             q_lora_rank=config.q_lora_rank,
             qk_rope_head_dim=config.qk_rope_head_dim,
             kv_lora_rank=config.kv_lora_rank,
             v_head_dim=config.v_head_dim,
             qk_nope_head_dim=config.qk_nope_head_dim,
             qk_head_dim=config.qk_head_dim,
+            window_size=config.window_size,
+            rope_theta=config.rope_theta,
+            max_position_embeddings=config.max_position_embeddings,
             rope_scaling=config.rope_scaling,
             layer_idx=layer_idx
         )

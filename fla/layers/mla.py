@@ -9,23 +9,30 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/de
 from __future__ import annotations
 
 import math
-from einops import rearrange, repeat
-from functools import partial
-from typing import Optional, Tuple, TYPE_CHECKING
+import warnings
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from flash_attn import flash_attn_varlen_func, flash_attn_func
+from einops import rearrange, repeat
 from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.utils.index import prepare_lens_from_mask
 
-# TODO: this will cause circular import as it triggers import from fla.models
 if TYPE_CHECKING:
     from fla.models.utils import Cache
+
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+except ImportError:
+    warnings.warn(
+        "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
+        category=ImportWarning
+    )
+    flash_attn_func = None
 
 logger = logging.get_logger(__name__)
 
@@ -45,20 +52,19 @@ class MultiheadLatentAttention(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 32,
-        rope_theta: float = 10000.,
-        max_position_embeddings: Optional[int] = None,
         q_lora_rank: Optional[int] = 1536,  # q lora rank is optional, None indicates no q lora
         qk_rope_head_dim: int = 64,
         kv_lora_rank: int = 512,  # following the original Deepseek paper
         v_head_dim: int = 128,
         qk_nope_head_dim: int = 128,
         qk_head_dim: Optional[int] = 192,  # qk_nope_head_dim + qk_rope_head_dim
+        window_size: Optional[int] = None,
+        rope_theta: float = 10000.,
+        max_position_embeddings: Optional[int] = None,
         rope_scaling: Optional[dict] = None,
         layer_idx: int = None
     ) -> MultiheadLatentAttention:
         super().__init__()
-
-        # TODO: support window attn
 
         # sanity check
         if qk_head_dim is not None:
@@ -67,14 +73,9 @@ class MultiheadLatentAttention(nn.Module):
         else:
             qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
-        # module meta info
-        self.layer_idx = layer_idx
-
         # attention params info
         self.hidden_size = hidden_size
         self.num_heads = num_heads
-        self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
         self.q_lora_rank = q_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.kv_lora_rank = kv_lora_rank
@@ -82,31 +83,32 @@ class MultiheadLatentAttention(nn.Module):
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_head_dim = qk_head_dim
 
-        # setup params
-        # Deepseek MLA does not support bias
-        linear = partial(nn.Linear, bias=False)
+        self.window_size = window_size
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+        self.layer_idx = layer_idx
+
+        if flash_attn_func is None:
+            raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
         if q_lora_rank is not None:
-            self.q_a_proj = linear(hidden_size, q_lora_rank)
-            self.q_a_layernorm = RMSNorm(q_lora_rank)
-            self.q_b_proj = linear(q_lora_rank, self.num_heads * self.qk_head_dim)
+            self.q_proj = nn.Sequential(
+                nn.Linear(hidden_size, q_lora_rank, bias=False),
+                RMSNorm(q_lora_rank),
+                nn.Linear(q_lora_rank, self.num_heads * self.qk_head_dim, bias=False)
+            )
         else:
-            self.q_proj = linear(hidden_size, self.num_heads * self.qk_head_dim)
+            self.q_proj = nn.Linear(hidden_size, self.num_heads * self.qk_head_dim, bias=False)
 
-        self.kv_a_proj_with_mqa = linear(
-            hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-        )
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank)
-        self.kv_b_proj = linear(
+        self.kv_a_proj_with_mqa = nn.Linear(hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, bias=False)
+        self.kv_a_norm = RMSNorm(self.kv_lora_rank)
+        self.kv_b_proj = nn.Linear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False
         )
 
-        self.o_proj = linear(
-            self.num_heads * self.v_head_dim,
-            hidden_size,
-        )
+        self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, hidden_size, bias=False)
 
         self.scaling = self.qk_head_dim ** (-0.5)
         if rope_scaling is not None:
@@ -135,21 +137,18 @@ class MultiheadLatentAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        # prepare q k v projections
-        # Shape: hidden_states [B T D] -> q, k, v [B T H HD]
+        # prepare q, k, v
         batch_size, q_len, _ = hidden_states.shape
 
-        if self.q_lora_rank is not None:
-            q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states)))
-        else:
-            q_states = self.q_proj(hidden_states)
+        q_states = self.q_proj(hidden_states)
         q_states = rearrange(q_states, '... (h d) -> ... h d', d=self.qk_head_dim)
         q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
         k_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        k_rot = rearrange(k_rot, 'B T D -> B T 1 D')  # squeeze as 1 head for rotary embedding
-        k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass))
+        # squeeze as 1 head for rotary embedding
+        k_rot = rearrange(k_rot, 'b t d -> b t 1 d')
+        k_pass = self.kv_b_proj(self.kv_a_norm(k_pass))
         k_pass = rearrange(k_pass, '... (h d) -> ... h d', d=self.qk_nope_head_dim + self.v_head_dim)
         k_pass, v = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
@@ -170,7 +169,7 @@ class MultiheadLatentAttention(nn.Module):
             q_rot, k_rot, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
         )
 
-        k_rot = repeat(k_rot, 'B T 1 D -> B T H D', H=self.num_heads)
+        k_rot = repeat(k_rot, 'b t 1 d -> b t h d', h=self.num_heads)
         q = torch.cat((q_pass, q_rot), dim=-1)
         k = torch.cat((k_pass, k_rot), dim=-1)
 
@@ -192,6 +191,8 @@ class MultiheadLatentAttention(nn.Module):
 
         # Contains at least one padding token in the sequence
         if attention_mask is not None:
+            if q.shape[1] == 1 and self.window_size is not None:
+                attention_mask = attention_mask[:, -self.window_size:]
             q, (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, v), attention_mask, q_len)
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
@@ -201,7 +202,8 @@ class MultiheadLatentAttention(nn.Module):
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlen_k,
-                causal=True
+                causal=True,
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
             o = pad_input(o, indices_q, batch_size, q_len)
         elif cu_seqlens is not None:
@@ -211,17 +213,18 @@ class MultiheadLatentAttention(nn.Module):
                 cu_seqlens_k=cu_seqlens,
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
-                causal=True
+                causal=True,
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             ).unsqueeze(0)
         else:
             o = flash_attn_func(
                 q, k, v,
-                causal=True
+                causal=True,
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
             )
 
         if self.qk_head_dim != self.v_head_dim:
-            o = o[:, :, :, : self.v_head_dim]
-
-        o = o.reshape(batch_size, q_len, -1).contiguous()
+            o = o[:, :, :, :self.v_head_dim]
+        o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
         return o, None, past_key_values
