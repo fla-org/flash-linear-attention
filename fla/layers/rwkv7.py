@@ -61,26 +61,28 @@ class RWKV7Attention(nn.Module):
             self.num_heads = num_heads
         self.head_v_dim = int(self.value_dim // self.num_heads)
 
+        # Increase lora dimension for headdim>64
+        factor = self.head_dim / 64
         if decay_low_rank_dim is None:
-            decay_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
+            decay_low_rank_dim = max(32, int(round((2.5 * (hidden_size**0.5)) * factor / 32) * 32))
             self.decay_low_rank_dim = decay_low_rank_dim
         else:
             self.decay_low_rank_dim = decay_low_rank_dim
 
         if gate_low_rank_dim is None:
-            gate_low_rank_dim = max(32, int(round((0.6 * (hidden_size**0.8)) / 32) * 32))
+            gate_low_rank_dim = max(32, int(round((5 * (hidden_size**0.5)) / 32) * 32))
             self.gate_low_rank_dim = gate_low_rank_dim
         else:
             self.gate_low_rank_dim = gate_low_rank_dim
 
         if a_low_rank_dim is None:
-            a_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
+            a_low_rank_dim = max(32, int(round((2.5 * (hidden_size**0.5)) * factor / 32) * 32))
             self.a_low_rank_dim = a_low_rank_dim
         else:
             self.a_low_rank_dim = a_low_rank_dim
 
         if v_low_rank_dim is None:
-            v_low_rank_dim = max(32, int(round((1.3 * (hidden_size**0.5)) / 32) * 32))
+            v_low_rank_dim = max(32, int(round((1.7 * (hidden_size**0.5)) * factor / 32) * 32))
             self.v_low_rank_dim = v_low_rank_dim
         else:
             self.v_low_rank_dim = v_low_rank_dim
