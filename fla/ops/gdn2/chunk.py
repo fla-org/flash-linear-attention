@@ -5,8 +5,228 @@ from typing import Optional
 
 import torch
 
-from fla.modules.l2norm import l2norm
-from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
+from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local
+from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
+from fla.ops.gla.chunk import chunk_gla_fwd_intra_gk, chunk_gla_fwd_o_gk
+from fla.ops.utils import chunk_local_cumsum, solve_tril
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+
+def chunk_gdn2_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: Optional[torch.LongTensor] = None
+):
+    chunk_size = 64
+    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens)
+    A = chunk_scaled_dot_kkt_fwd(
+        k=k,
+        gk=g,
+        beta=beta,
+        cu_seqlens=cu_seqlens,
+        output_dtype=torch.float32
+    )
+    A = solve_tril(
+        A=A,
+        cu_seqlens=cu_seqlens,
+        output_dtype=k.dtype
+    )
+    w, u = recompute_w_u_fwd(
+        k=k,
+        v=v,
+        beta=beta,
+        A=A,
+        gk=g,
+        cu_seqlens=cu_seqlens,
+    )
+    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+        k=k,
+        w=w,
+        u=u,
+        gk=g,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+    )
+
+    # the intra Ak is kept in fp32
+    # the computation has very marginal effect on the entire throughput
+    Ak = chunk_gla_fwd_intra_gk(
+        q=q,
+        k=k,
+        g=g,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
+    )
+    o = chunk_gla_fwd_o_gk(
+        q=q,
+        v=v_new,
+        g=g,
+        A=Ak,
+        h=h,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
+    )
+    return g, o, A, final_state
+
+
+def chunk_gdn2_bwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    do: torch.Tensor,
+    dht: torch.Tensor,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+):
+    w, u = recompute_w_u_fwd(
+        k=k,
+        v=v,
+        beta=beta,
+        A=A,
+        gk=g,
+        cu_seqlens=cu_seqlens,
+    )
+    h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+        k=k,
+        w=w,
+        u=u,
+        gk=g,
+        initial_state=initial_state,
+        output_final_state=False,
+        cu_seqlens=cu_seqlens,
+    )
+    dv = chunk_bwd_dv_local(
+        q=q,
+        k=k,
+        g=g,
+        do=do,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+    )
+    dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
+        q=q,
+        k=k,
+        w=w,
+        g=g,
+        h0=initial_state,
+        dht=dht,
+        do=do,
+        dv=dv,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+    )
+    dq, dk, dw, dg = chunk_bwd_dqkwg(
+        q=q,
+        k=k,
+        v=v_new,
+        w=w,
+        g=g,
+        h=h,
+        dv=dv,
+        do=do,
+        dh=dh,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+    )
+    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
+        k=k,
+        v=v,
+        beta=beta,
+        g=g,
+        A=A,
+        dw=dw,
+        du=dv,
+        cu_seqlens=cu_seqlens,
+    )
+    dk.add_(dk2)
+    dg.add_(dg2)
+    assert dg.dtype == torch.float32, "dg should be fp32"
+    dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens)
+    return dq, dk, dv, db, dg, dh0
+
+
+class ChunkGDN2Function(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        scale: float,
+        initial_state: torch.Tensor,
+        output_final_state: bool = False,
+        use_qk_l2norm_in_kernel: bool = False,
+        cu_seqlens: Optional[torch.LongTensor] = None,
+    ):
+        if use_qk_l2norm_in_kernel:
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
+        else:
+            q_rstd, k_rstd = None, None
+
+        g, o, A, final_state = chunk_gdn2_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+        )
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens)
+        ctx.scale = scale
+        ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+        return o.to(q.dtype), final_state
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    def backward(
+        ctx,
+        do: torch.Tensor,
+        dht: torch.Tensor
+    ):
+        q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
+        dq, dk, dv, db, dg, dh0 = chunk_gdn2_bwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            A=A,
+            scale=ctx.scale,
+            initial_state=initial_state,
+            do=do,
+            dht=dht,
+            cu_seqlens=cu_seqlens,
+        )
+        if ctx.use_qk_l2norm_in_kernel:
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None
 
 
 @torch.compiler.disable
@@ -97,24 +317,16 @@ def chunk_gdn2(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-
-    if use_qk_l2norm_in_kernel:
-        q, k = l2norm(q), l2norm(k, output_dtype=torch.float)
-    kb = beta.unsqueeze(-1) * k
-    a = k * g.float().exp()
-    b = -kb
-    k = kb.to(q.dtype)
-
-    o, final_state = chunk_dplr_delta_rule(
-        q=q,
-        k=k,
-        v=v,
-        a=a,
-        b=b,
-        gk=g,
-        scale=scale,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
+    o, final_state = ChunkGDN2Function.apply(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale,
+        initial_state,
+        output_final_state,
+        use_qk_l2norm_in_kernel,
+        cu_seqlens,
     )
     return o, final_state
