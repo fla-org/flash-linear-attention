@@ -5,7 +5,131 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
+from fla.ops.gdn2.naive import naive_chunk_gdn2, naive_recurrent_gdn2
 from fla.utils import assert_close, device, is_intel_alchemist
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test)
+        )
+        for test in [
+            (1, 64, 1, 64, 1, 1, torch.float),
+            (2, 512, 3, 60, 1, 1, torch.float),
+            (4, 1024, 4, 128, 0.1, 1, torch.float),
+        ]
+    ]
+)
+def test_naive_chunk(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    if is_intel_alchemist and D > 128:
+        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
+    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
+
+    ref, ref_ht = naive_recurrent_gdn2(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+
+    tri, tri_ht = naive_chunk_gdn2(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'use_qk_l2norm_in_kernel', 'dtype'),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm_in_kernel{}-{}".format(*test)
+        )
+        for test in [
+            (1, 64, 1, 64, 1, 1, False, torch.float),
+            (2, 512, 3, 60, 1, 1, False, torch.float),
+            (3, 1000, 4, 100, 0.1, 1, True, torch.float),
+            (4, 1024, 4, 128, 0.1, 1, False, torch.float),
+        ]
+    ]
+)
+def test_fused_recurrent(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    use_qk_l2norm_in_kernel: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    if is_intel_alchemist and D > 128:
+        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
+    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
+
+    ref, ref_ht = naive_recurrent_gdn2(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+
+    tri, tri_ht = fused_recurrent_gdn2(
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+    )
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
 
 
 @pytest.mark.parametrize(
@@ -45,8 +169,7 @@ def test_chunk(
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float))
-    g = g / gate_logit_normalizer
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
     g = g * (torch.rand_like(g) > mask_p)
     beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
