@@ -44,8 +44,8 @@ def chunk_gated_delta_product_fwd(
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
+        g=g_interleaved,
         beta=beta,
-        g_cumsum=g_interleaved,
         cu_seqlens=cu_seqlens_dp,
         output_dtype=torch.float32
     )
@@ -60,7 +60,7 @@ def chunk_gated_delta_product_fwd(
             v=v,
             beta=beta,
             A=A,
-            g_cumsum=g_interleaved,
+            g=g_interleaved,
             cu_seqlens=cu_seqlens_dp,
         )
     else:

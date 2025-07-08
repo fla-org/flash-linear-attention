@@ -17,7 +17,7 @@ from fla.utils import assert_close, device, device_platform
         for test in [
             (1, 63, 1, 64, 1, False, torch.float16),
             (2, 100, 4, 60, 0.1, False, torch.float16),
-            (2, 1024, 3, 128, 0.1, False, torch.float16),
+            (2, 1000, 3, 128, 0.1, False, torch.float16),
             (2, 1024, 4, 128, 1, True, torch.float16),
             (3, 2000, 4, 128, 0.1, False, torch.float16),
             (4, 2048, 8, 64, 0.1, False, torch.float16),
@@ -41,17 +41,17 @@ def test_chunk(
     q = torch.randn(B, T, H, D, dtype=dtype)
     k = torch.randn(B, T, H, D, dtype=dtype)
     v = torch.randn(B, T, H, D, dtype=dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
+    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
 
     tri, tri_ht = chunk_delta_rule(
-        F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
-        F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
-        v.clone(),
-        beta.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
+        v=v.clone(),
+        beta=beta.clone(),
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
@@ -62,10 +62,10 @@ def test_chunk(
     q.grad = k.grad = v.grad = beta.grad = h0.grad = None
 
     ref, ref_ht = fused_recurrent_delta_rule(
-        F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
-        F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
-        v.clone(),
-        beta.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
+        v=v.clone(),
+        beta=beta.clone(),
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
@@ -114,17 +114,29 @@ def test_chunk_varlen(
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
-    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
+    beta = torch.randn(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(N, H, D, D, dtype=dtype)
     q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, h0))
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 
+    ref, ref_ht = fused_recurrent_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        beta=beta.clone(),
+        output_final_state=True,
+        initial_state=h0.clone(),
+        cu_seqlens=cu_seqlens,
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
+
     tri, tri_ht = chunk_delta_rule(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        beta.clone(),
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        beta=beta.clone(),
         output_final_state=True,
         initial_state=h0.clone(),
         cu_seqlens=cu_seqlens,
@@ -132,18 +144,6 @@ def test_chunk_varlen(
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = h0.grad = None
-
-    ref, ref_ht = fused_recurrent_delta_rule(
-        q.clone(),
-        k.clone(),
-        v.clone(),
-        beta.clone(),
-        output_final_state=True,
-        initial_state=h0.clone(),
-        cu_seqlens=cu_seqlens,
-    )
-    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
-    ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, h0.grad
 
     assert_close('o', ref, tri, 0.005)
     assert_close('ht', ref_ht, tri_ht, 0.005)
