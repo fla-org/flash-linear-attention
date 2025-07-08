@@ -18,6 +18,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_G_GAMMA': lambda args: args['g_gamma'] is not None,
+    'USE_L2NORM': lambda args: args['q_norm'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
@@ -31,6 +32,8 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_o(
     q,
+    q_norm,
+    q_rstd,
     k,
     v,
     h,
@@ -40,6 +43,7 @@ def chunk_fwd_kernel_o(
     cu_seqlens,
     chunk_indices,
     scale,
+    eps,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -49,6 +53,7 @@ def chunk_fwd_kernel_o(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
+    USE_L2NORM: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -71,9 +76,14 @@ def chunk_fwd_kernel_o(
     v += (bos * H + i_h) * V
     o += (bos * H + i_h) * V
     h += (i_tg * H + i_h).to(tl.int64) * K*V
+    if USE_L2NORM:
+        q_norm += (bos * H + i_h) * K
+        q_rstd += bos * H + i_h
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
+    if USE_L2NORM:
+        b_var = tl.zeros([BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -90,6 +100,22 @@ def chunk_fwd_kernel_o(
         b_o += tl.dot(b_q, b_h)
         # [BT, BK] @ [BK, BT] -> [BT, BT]
         b_A += tl.dot(b_q, b_k)
+
+        if USE_L2NORM:
+            b_var += tl.sum(b_q * b_q, 1)
+
+    if USE_L2NORM:
+        b_rstd = 1 / (tl.sqrt(b_var) + eps)
+        b_o *= b_rstd[:, None]
+        b_A *= b_rstd[:, None]
+
+        for i_k in range(tl.cdiv(K, BK)):
+            p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_q_norm = tl.make_block_ptr(q_norm, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            b_q = tl.load(p_q, boundary_check=(0, 1)) * b_rstd[:, None]
+            tl.store(p_q_norm, b_q.to(p_q_norm.dtype.element_ty), boundary_check=(0, 1))
+        p_q_rstd = tl.make_block_ptr(q_rstd, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        tl.store(p_q_rstd, b_rstd.to(p_q_rstd.dtype.element_ty), boundary_check=(0,))
 
     if USE_G:
         g += bos * H + i_h
@@ -500,6 +526,8 @@ def chunk_fwd_o(
     def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
     chunk_fwd_kernel_o[grid](
         q=q,
+        q_norm=None,
+        q_rstd=None,
         k=k,
         v=v,
         h=h,
@@ -509,6 +537,7 @@ def chunk_fwd_o(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
+        eps=None,
         T=T,
         H=H,
         K=K,
@@ -516,6 +545,52 @@ def chunk_fwd_o(
         BT=BT,
     )
     return o
+
+
+def chunk_fwd_o_with_l2norm(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    h: torch.Tensor,
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
+    scale: Optional[float] = None,
+    eps: float = 1e-6,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    chunk_size: int = 64
+) -> torch.Tensor:
+    B, T, H, K, V = *q.shape, v.shape[-1]
+    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+
+    q_norm = torch.empty_like(q)
+    q_rstd = torch.empty_like(q[..., 0], dtype=torch.float32)
+    o = torch.empty_like(v)
+    def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
+    chunk_fwd_kernel_o[grid](
+        q=q,
+        q_norm=q_norm,
+        q_rstd=q_rstd,
+        k=k,
+        v=v,
+        h=h,
+        g=g,
+        g_gamma=g_gamma,
+        o=o,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
+        eps=eps,
+        T=T,
+        H=H,
+        K=K,
+        V=V,
+        BT=BT,
+    )
+    return q_norm, q_rstd, o
 
 
 def chunk_bwd_dv(

@@ -7,7 +7,7 @@ import torch
 from einops import rearrange
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd, chunk_scaled_dot_kkt_with_l2norm_fwd
 from fla.ops.delta_rule.chunk import chunk_delta_rule_bwd
 from fla.ops.delta_rule.wy_fast import recompute_w_u_fwd as dn_recompute_w_u_fwd
 from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd
@@ -29,6 +29,7 @@ def chunk_gated_delta_product_fwd(
     cu_seqlens: Optional[torch.LongTensor] = None,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
+    use_qk_l2norm: bool = False,
     num_householder: int = 1,
 ):
     cu_seqlens_dp = cu_seqlens * num_householder if cu_seqlens is not None else None
@@ -41,14 +42,25 @@ def chunk_gated_delta_product_fwd(
     else:
         g_interleaved = None
         g = None
-    # obtain WY representation. u is actually the new v.
-    A = chunk_scaled_dot_kkt_fwd(
-        k=k,
-        beta=beta,
-        g_cumsum=g_interleaved,
-        cu_seqlens=cu_seqlens_dp,
-        output_dtype=torch.float32
-    )
+
+    q_rstd, k_rstd = None, None
+    if use_qk_l2norm:
+        q, q_rstd = l2norm_fwd(q)
+        A, k, k_rstd = chunk_scaled_dot_kkt_with_l2norm_fwd(
+            k=k,
+            beta=beta,
+            g_cumsum=g_interleaved,
+            cu_seqlens=cu_seqlens_dp,
+            output_dtype=torch.float32
+        )
+    else:
+        A = chunk_scaled_dot_kkt_fwd(
+            k=k,
+            beta=beta,
+            g_cumsum=g_interleaved,
+            cu_seqlens=cu_seqlens_dp,
+            output_dtype=torch.float32
+        )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens_dp,
@@ -91,7 +103,7 @@ def chunk_gated_delta_product_fwd(
         cu_seqlens=cu_seqlens,
         num_householder=num_householder,
     )
-    return g, g_interleaved, o, A, final_state
+    return q, q_rstd, k, k_rstd, g, g_interleaved, A, o, final_state
 
 
 class ChunkGatedDeltaProductFunction(torch.autograd.Function):
@@ -113,13 +125,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
     ):
-        if use_qk_l2norm_in_kernel:
-            q, q_rstd = l2norm_fwd(q)
-            k, k_rstd = l2norm_fwd(k)
-        else:
-            q_rstd, k_rstd = None, None
-
-        g, g_interleaved, o, A, final_state = chunk_gated_delta_product_fwd(
+        q, q_rstd, k, k_rstd, g, g_interleaved, A, o, final_state = chunk_gated_delta_product_fwd(
             q=q,
             k=k,
             v=v,
@@ -128,6 +134,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            use_qk_l2norm=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
             num_householder=num_householder,
         )
