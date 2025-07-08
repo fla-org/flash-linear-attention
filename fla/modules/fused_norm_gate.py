@@ -75,7 +75,7 @@ def layer_norm_gated_fwd_kernel(
     else:
         b_xbar = tl.where(m_d[None, :], b_x, 0.0)
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
-    b_rstd = 1 / (tl.sqrt(b_var + eps))
+    b_rstd = 1 / tl.sqrt(b_var + eps)
 
     p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
     tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
@@ -162,7 +162,7 @@ def layer_norm_gated_fwd_kernel1(
     else:
         b_xbar = tl.where(m_d, b_x, 0.0)
         b_var = tl.sum(b_xbar * b_xbar, axis=0) / D
-    b_rstd = 1 / (tl.sqrt(b_var + eps))
+    b_rstd = 1 / tl.sqrt(b_var + eps)
     tl.store(rstd + i_t, b_rstd)
 
     if HAS_WEIGHT:
