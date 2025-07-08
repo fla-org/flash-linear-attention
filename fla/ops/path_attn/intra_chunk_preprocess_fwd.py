@@ -22,11 +22,9 @@ def intra_chunk_preprocess_fwd_kernel(
     A,
     L,
     M,
-    h,
     w2,
     q_new,
     k_new,
-    # A_local,
     scale,
     indices,  # varlen helper
     offsets,  # varlen helper
@@ -42,7 +40,6 @@ def intra_chunk_preprocess_fwd_kernel(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
-    RETURN_H: tl.constexpr
 ):
     i_t, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
@@ -59,21 +56,17 @@ def intra_chunk_preprocess_fwd_kernel(
         boh = i_n * NT
 
     sm_scale = scale * 1.44269504
-
     # offset calculations
     A += (bos*H + i_h) * BT
     q += (bos*HQ + i_hq) * K
     q_new += (bos*HQ + i_hq) * K
     k += (bos*H + i_h) * K
     k_new += (bos*H + i_h) * K
+    w2 += (bos*H + i_h) * K
     w += (bos*H + i_h) * K
     v += (bos*H + i_h) * V
     o += (bos*HQ + i_hq) * V
     beta += (bos*H + i_h)
-    if RETURN_H:
-        h += ((boh + i_t) * H + i_h) * K * K
-    else:
-        w2 += (bos*H + i_h) * K
     if USE_G:
         g_cumsum += (bos*HQ + i_hq)
     L += (bos*HQ + i_hq)
@@ -83,22 +76,22 @@ def intra_chunk_preprocess_fwd_kernel(
     p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT), (BK, BT), (0, 1))
     p_w = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float16)
-    b_kt = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
-    b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float16)
-    b_w = tl.load(p_w, boundary_check=(0, 1)).to(tl.float16)
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_kt = tl.load(p_k, boundary_check=(0, 1))
+    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_w = tl.load(p_w, boundary_check=(0, 1))
     p_T = tl.make_block_ptr(A, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_T = tl.load(p_T, boundary_check=(0, 1)).to(tl.float16)
+    b_T = tl.load(p_T, boundary_check=(0, 1))
 
     o_i = tl.arange(0, BT)
     m_t = o_i[:, None] >= o_i[None, :]
     p_beta = tl.make_block_ptr(beta, (T, ), (H, ), (i_t * BT, ), (BT, ), (0, ))
     b_beta = tl.load(p_beta, boundary_check=(0, ))
-    b_w_beta = (b_w * b_beta[:, None]).to(tl.float16)
+    b_w_beta = (b_w * b_beta[:, None])
 
-    b_qw = tl.where(m_t, tl.dot(b_q, tl.trans(b_w)), 0).to(tl.float16)
-    b_qwT = tl.dot(b_qw, b_T.to(b_qw.dtype)).to(tl.float16)
-    b_wbk = tl.where(o_i[:, None] > o_i[None, :], tl.dot(b_w_beta, b_kt), 0).to(tl.float16)
+    b_qw = tl.where(m_t, tl.dot(b_q, tl.trans(b_w)), 0).to(b_q.dtype)
+    b_qwT = tl.dot(b_qw, b_T).to(b_q.dtype)
+    b_wbk = tl.where(o_i[:, None] > o_i[None, :], tl.dot(b_w_beta, b_kt), 0).to(b_q.dtype)
     b_A = tl.where(m_t, tl.dot(b_q, b_kt) - tl.dot(b_qwT, b_wbk), 0)
 
     b_q = b_q - tl.dot(b_qwT, b_w_beta)
@@ -106,15 +99,10 @@ def intra_chunk_preprocess_fwd_kernel(
     tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
 
     if i_hq % G == 0:
-        b_Twb = tl.dot(b_T, b_w_beta).to(tl.float16)
-        if RETURN_H:
-            b_h = tl.dot(tl.trans(b_w), b_Twb)
-            p_h = tl.make_block_ptr(h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-            tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
-        else:
-            p_w2 = tl.make_block_ptr(w2, (T, K), (K*H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-            tl.store(p_w2, b_Twb, boundary_check=(0, 1))
-        b_T_wbk = tl.dot(b_T, b_wbk).to(tl.float16)
+        b_Twb = tl.dot(b_T, b_w_beta).to(b_w.dtype)
+        p_w2 = tl.make_block_ptr(w2, (T, K), (K*H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+        tl.store(p_w2, b_Twb, boundary_check=(0, 1))
+        b_T_wbk = tl.dot(b_T, b_wbk).to(b_w.dtype)
         p_k_new = tl.make_block_ptr(k_new, (K, T), (1, K*H), (0, i_t * BT), (BK, BT), (0, 1))
         tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w), b_T_wbk)).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
 
@@ -128,7 +116,7 @@ def intra_chunk_preprocess_fwd_kernel(
     m_i = tl.max(b_qkT_softmax, 1)
     b_qkT_softmax = tl.math.exp2(b_qkT_softmax - m_i[:, None])
     l_i = tl.sum(b_qkT_softmax, 1)
-    b_o = tl.dot(b_qkT_softmax.to(tl.float16), b_v)
+    b_o = tl.dot(b_qkT_softmax.to(b_v.dtype), b_v)
     p_o = tl.make_block_ptr(o, (T, V), (V*HQ, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
     p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
@@ -137,13 +125,13 @@ def intra_chunk_preprocess_fwd_kernel(
     tl.store(p_l, l_i.to(p_l.dtype.element_ty), boundary_check=(0,))
 
 
-def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_seqlens, return_h=True):
+def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_seqlens):
     HQ = q.shape[-2]
     B, T, H, K = k.shape
     V = v.shape[-1]
-    q_new = torch.empty_like(q, dtype=torch.float16)
-    k_new = torch.empty_like(k, dtype=torch.float16)
-    o = torch.empty(B, T, HQ, V, device=q.device, dtype=torch.float16)
+    q_new = torch.empty_like(q)
+    k_new = torch.empty_like(k)
+    o = torch.empty(B, T, HQ, V, device=q.device)
 
     indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
@@ -151,11 +139,9 @@ def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_s
     grid = (NT, B*HQ)
     L = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)
     M = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)
-    if return_h:
-        h = torch.empty(B, NT, H, K, K, dtype=torch.float16, device=q.device)
-    else:
-        h = torch.empty_like(w, dtype=torch.float16)
+    w2 = torch.empty_like(w)
     G = HQ//H
+
     intra_chunk_preprocess_fwd_kernel[grid](
         q=q,
         k=k,
@@ -167,8 +153,7 @@ def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_s
         A=A,
         L=L,
         M=M,
-        h=h,
-        w2=h,
+        w2=w2,
         q_new=q_new,
         k_new=k_new,
         scale=scale,
@@ -184,6 +169,5 @@ def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_s
         BK=triton.next_power_of_2(K),
         BV=triton.next_power_of_2(V),
         BT=BT,
-        RETURN_H=return_h,
     )
-    return q_new, k_new, h, o, L, M
+    return q_new, k_new, w2, o, L, M

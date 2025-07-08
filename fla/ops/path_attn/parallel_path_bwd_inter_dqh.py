@@ -23,7 +23,7 @@ def parallel_path_bwd_dq_kernel(
     S: tl.constexpr,  # aka larger chunk size
     NUM_BLOCKS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_GATE: tl.constexpr,
+    USE_GATE: tl.constexpr
 ):
     i_t, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
@@ -58,7 +58,7 @@ def parallel_path_bwd_dq_kernel(
 
     # load query
     p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
-    b_do = tl.load(p_do, boundary_check=(0, 1)).to(tl.float16)
+    b_do = tl.load(p_do, boundary_check=(0, 1))
 
     p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
     p_d = tl.make_block_ptr(D, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
@@ -81,19 +81,19 @@ def parallel_path_bwd_dq_kernel(
     for offset_outer in range(0, curr_end, S):
         idx_j = (offset_outer // S)
         p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float16)
+        b_q = tl.load(p_q, boundary_check=(0, 1))
 
         b_dh = -tl.dot(tl.trans(b_q), b_dq.to(b_q.dtype))
         tl.atomic_add(dhc_whole + idx_j * stride_hq + tl.arange(0, K)
                       [:, None] * K + tl.arange(0, K)[None, :], b_dh, sem='relaxed')
         p_h = tl.make_block_ptr(hc_whole + idx_j * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-        b_h = tl.load(p_h, boundary_check=(0, 1)).to(tl.float16)
+        b_h = tl.load(p_h, boundary_check=(0, 1))
         b_dq = b_dq - tl.dot(b_dq.to(b_h.dtype), tl.trans(b_h))
 
         for offset in range(offset_outer, min(offset_outer+S, i_t*BT), BS):
             p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (offset, 0), (BS, BK), (1, 0))
-            b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
-            b_A = tl.dot(b_q, tl.trans(b_k))
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_A = tl.dot(b_q, tl.trans(b_k).to(b_q.dtype))
             if USE_GATE:
                 p_g_cumsum_k = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
                 b_g_cumsum_k = tl.load(p_g_cumsum_k, boundary_check=(0, ))
@@ -101,8 +101,8 @@ def parallel_path_bwd_dq_kernel(
                 b_A = tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], b_A, float("-inf"))  # avoid nan
             b_A_softmax = tl.math.exp2(b_A * sm_scale - b_l[:, None])
             p_v = tl.make_block_ptr(v, (V, T), (1, V*H), (0, offset), (BK, BS), (0, 1))
-            b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float16)
-            b_dp = tl.dot(b_do, b_v)
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_dp = tl.dot(b_do, b_v.to(b_do.dtype))
             b_dA = ((b_dp - b_delta[:, None]) * b_A_softmax * scale)
             b_dq += tl.dot(b_dA.to(b_k.dtype), b_k)
             if USE_GATE:
@@ -119,7 +119,7 @@ def parallel_path_bwd_dq_fn(
     k_new, w1, w2,
     hc_whole, scale, L, D,
     cu_seqlens,
-    S, BT, BS
+    S, BT, BS,
 ):
     B, T, num_blocks, HQ, K = q.shape
     V = v.shape[-1]
@@ -138,14 +138,9 @@ def parallel_path_bwd_dq_fn(
     # [NS, HQ, K, K] instead of [NS, H, K, K]
     # atomic add must be initialized to 0
     dhc_whole = torch.zeros(hc_whole.shape[0], HQ, K, K, dtype=torch.float32, device=q.device)
-    # dk = torch.zeros(B, T, HQ, K, dtype=torch.float32, device=q.device)
-    # dw1 = torch.zeros(B, T, HQ, K, dtype=torch.float32, device=q.device)
-    # dw2 = torch.zeros(B, T, HQ, K, dtype=torch.float32, device=q.device)
 
     parallel_path_bwd_dq_kernel[(NT, B*HQ)](
         q=q, k=k, v=v, g_cumsum=g_cumsum,
-        # k_new=k_new, w1=w1, w2=w2,
-        # dk=dk, dw1=dw1, dw2=dw2,
         hc_whole=hc_whole, scale=scale, L=L, D=D,
         dq=dq, do=do, dhc_whole=dhc_whole, dg_cumsum=dg_cumsum,
         cu_seqlens=cu_seqlens, indices=indices, split_offsets=split_offsets,
@@ -153,7 +148,6 @@ def parallel_path_bwd_dq_fn(
         G=G, HQ=HQ, H=H, K=K, V=V,
         BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
         num_warps=8 if K == 128 else 4,
-        NUM_BLOCKS=num_blocks,
+        NUM_BLOCKS=num_blocks
     )
-
     return dq, dhc_whole, dg_cumsum

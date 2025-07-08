@@ -41,8 +41,8 @@ def transform_q_fwd_kernel(
     for offset in range((i_t + 1) * BT - 2 * BS, S-BS, -BS):
         p_w1 = tl.make_block_ptr(w1 + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))
         p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BK), (1, 0))
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float16)
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float16)
+        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
+        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
         m_s = i_t * BT + tl.arange(0, BT) >= (offset + BS)
         b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
         b_s2 = tl.where(m_s[:, None], b_s2, 0)
@@ -50,14 +50,12 @@ def transform_q_fwd_kernel(
 
         if offset % S == 0:
             p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (offset // S)) * HQ + i_hq) * K, (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-            tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
-
-
+            tl.store(p_q_new, b_q.to(q_new.dtype.element_ty), boundary_check=(0, 1))
 
 
 def transform_q_fwd_fn(
     q, w1, w2,
-    cu_seqlens, BT, BS, S,
+    cu_seqlens, BT, BS, S
 ):
     B, T, HQ, K = q.shape
     H = w1.shape[-2]
@@ -67,8 +65,8 @@ def transform_q_fwd_fn(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices_BT)
     grid = (NT, B * HQ)
     num_blocks = triton.cdiv(T, S) if cu_seqlens is None else len(cu_seqlens) - 1
-    q_new = torch.empty(B, T, num_blocks, HQ, K, dtype=torch.float16, device=q.device)
-
+    q_new = torch.empty(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
+    # breakpoint()
     transform_q_fwd_kernel[grid](
         q=q,
         q_new=q_new,

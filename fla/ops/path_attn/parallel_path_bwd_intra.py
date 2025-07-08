@@ -19,7 +19,7 @@ def parallel_path_bwd_intra_chunk_kernel(
     G: tl.constexpr, HQ: tl.constexpr, H: tl.constexpr,
     K: tl.constexpr, V: tl.constexpr, BK: tl.constexpr,  BV: tl.constexpr,
     BT: tl.constexpr, S: tl.constexpr,
-    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -118,7 +118,7 @@ def parallel_path_bwd_intra_chunk_kernel(
             b_dgk = -tl.sum(b_dA, axis=0)
             tl.atomic_add(dg_cumsum + (offset + tl.arange(0, BT)) * HQ, b_dgk, mask=mask, sem='relaxed')
             b_dgq += tl.sum(b_dA, axis=1)
-        b_dA = b_dA.to(tl.float16)
+        b_dA = b_dA.to(b_v.dtype)
         b_dk = tl.dot(tl.trans(b_dA), b_q2)
         tl.atomic_add(dk + (offset + tl.arange(0, BT))[:, None] * HQ*K + tl.arange(0,
                       BK)[None, :], b_dk, mask=mask[:, None], sem='relaxed')
@@ -126,16 +126,16 @@ def parallel_path_bwd_intra_chunk_kernel(
         b_w1 = tl.load(p_w1, boundary_check=(0, 1))
         p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (offset, 0), (BT, BK), (1, 0))
         b_w2 = tl.load(p_w2, boundary_check=(0, 1))
-        b_dA2 = tl.dot(b_dq.to(b_w2.dtype), tl.trans(b_w2)).to(tl.float16)
-        b_A2 = tl.dot(b_q2.to(b_w1.dtype), tl.trans(b_w1)).to(tl.float16)
-        b_dw2 = -tl.dot(tl.trans(b_A2), b_dq.to(tl.float16))
+        b_dA2 = tl.dot(b_dq.to(b_w2.dtype), tl.trans(b_w2)).to(b_v.dtype)
+        b_A2 = tl.dot(b_q2.to(b_w1.dtype), tl.trans(b_w1)).to(b_v.dtype)
+        b_dw2 = -tl.dot(tl.trans(b_A2), b_dq.to(b_v.dtype))
         tl.atomic_add(dw2 + (offset + tl.arange(0, BT))[:, None] * HQ*K + tl.arange(0,
                       BK)[None, :], b_dw2, mask=mask[:, None], sem='relaxed')
-        b_dw1 = -tl.dot(tl.trans(b_dA2), b_q2.to(tl.float16))
+        b_dw1 = -tl.dot(tl.trans(b_dA2), b_q2.to(b_v.dtype))
         tl.atomic_add(dw1 + (offset + tl.arange(0, BT))[:, None] * HQ*K + tl.arange(0,
                       BK)[None, :], b_dw1, mask=mask[:, None], sem='relaxed')
-        b_dq -= tl.dot(b_dA2, b_w1.to(tl.float16))
-        b_dq += tl.dot(b_dA.to(tl.float16), b_k)
+        b_dq -= tl.dot(b_dA2, b_w1.to(b_v.dtype))
+        b_dq += tl.dot(b_dA.to(b_k.dtype), b_k)
 
     p_dq_new = tl.make_block_ptr(dq_new, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     tl.store(p_dq_new, b_dq.to(dq_new.dtype.element_ty), boundary_check=(0, 1))
@@ -148,7 +148,7 @@ def parallel_path_bwd_intra_chunk_fn(
     dq, dk, dv, dg_cumsum, dw1, dw2, do,
     scale, L, D,
     cu_seqlens,
-    S, BT
+    S, BT,
 ):
     assert dk.dtype == dv.dtype == dw1.dtype == dw2.dtype == torch.float32, 'atomic_add requires float32'
     B, T, HQ, K = q.shape
@@ -169,6 +169,6 @@ def parallel_path_bwd_intra_chunk_fn(
         offsets=cu_seqlens, indices=indices, chunk_offsets=chunk_offsets,
         T=T, S=S, BT=BT, scale=scale,
         G=G, HQ=HQ, H=H, K=K, V=V,
-        BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
+        BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V)
     )
     return dq_new, dk, dv, dw1, dw2, dg_cumsum

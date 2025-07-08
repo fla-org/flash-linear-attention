@@ -21,7 +21,7 @@ def parallel_path_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_GATE: tl.constexpr,
+    USE_GATE: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -60,12 +60,13 @@ def parallel_path_fwd_kernel(
         p_w1 = tl.make_block_ptr(w1 + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))
         p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BV), (1, 0))
         # [BK, BS]
-        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
+
+        b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float16)
+        b_v = tl.load(p_v, boundary_check=(0, 1))
         # [BK, BK]
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float16)
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float16)
+        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
+        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
         # [BT, BS]
         m_s = i_t * BT + tl.arange(0, BT) >= (offset + BS)
         b_s = tl.dot(b_q.to(b_k.dtype), b_k)
@@ -82,11 +83,10 @@ def parallel_path_fwd_kernel(
         b_l = b_l * alpha + tl.sum(b_s, 1)
         b_m = b_m_new
         b_o += tl.dot(b_s.to(b_v.dtype), b_v)
-        b_s = tl.dot(b_q.to(b_w1.dtype), b_w1)
-        b_s = tl.where(m_s[:, None], b_s, 0)
-        b_q -= tl.dot(b_s.to(b_w2.dtype), b_w2)
-
-    tl.debug_barrier()
+        b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
+        b_s2 = tl.where(m_s[:, None], b_s2, 0)
+        b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
+        tl.debug_barrier()
 
     for offset in range(i_t * BT - BS, -BS, -BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))  # GQA when H!=HQ
@@ -94,11 +94,11 @@ def parallel_path_fwd_kernel(
         p_w1 = tl.make_block_ptr(w1 + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))
         p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BV), (1, 0))
         # [BK, BS]
-        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
+        b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BS, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float16)
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float16)
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float16)
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
+        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
         # [BT, BS]
         b_s = tl.dot(b_q.to(b_k.dtype), b_k)
         if USE_GATE:
@@ -113,8 +113,9 @@ def parallel_path_fwd_kernel(
         b_l = b_l * alpha + tl.sum(b_s, 1)
         b_m = b_m_new
         b_o += tl.dot(b_s.to(b_v.dtype), b_v)
-        b_s = tl.dot(b_q.to(b_w2.dtype), b_w1)
-        b_q -= tl.dot(b_s.to(b_w1.dtype), b_w2)
+        b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
+        b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
+        tl.debug_barrier()
 
     b_o = b_o / b_l[:, None]
     p_o_new = tl.make_block_ptr(o_new + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
@@ -128,7 +129,6 @@ def parallel_path_fwd_fn(
     q, k, v, o, g_cumsum, w1, w2, scale, L, M,
     cu_seqlens, BT, BS,
 ):
-    BT = 128
     B, T, HQ, K = q.shape
     V = v.shape[-1]
     H = k.shape[-2]
@@ -165,8 +165,6 @@ def parallel_path_fwd_fn(
         HQ=HQ,
         H=H,
         BS=BS,
-        BT=BT,
-        num_warps=8,
-        num_stages=3,
+        BT=BT
     )
     return o_new, L_new

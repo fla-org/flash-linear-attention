@@ -20,7 +20,7 @@ def parallel_path_bwd_dkv_kernel(
     K: tl.constexpr, V: tl.constexpr,
     BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr,
     BV: tl.constexpr, S: tl.constexpr,
-    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr, NUM_BLOCKS: tl.constexpr,
+    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr, NUM_BLOCKS: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -58,9 +58,9 @@ def parallel_path_bwd_dkv_kernel(
 
     # load query
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
+    b_k = tl.load(p_k, boundary_check=(0, 1))
     p_v = tl.make_block_ptr(v, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_v = tl.load(p_v, boundary_check=(0, 1)).to(tl.float16)
+    b_v = tl.load(p_v, boundary_check=(0, 1))
 
     if USE_GATE:
         b_g_cumsum_k = tl.zeros([BT,], dtype=tl.float32)
@@ -87,8 +87,8 @@ def parallel_path_bwd_dkv_kernel(
         b_l = tl.load(p_l, boundary_check=(0, ))
 
         p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j) * HQ + i_hq) * K, (T, K), (HQ*K*NUM_BLOCKS, 1), (offset, 0), (BS, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float16)
-        b_A = tl.dot(b_k, tl.trans(b_q))
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_A = tl.dot(b_k, tl.trans(b_q).to(b_k.dtype))
         if USE_GATE:
             p_g_cumsum_q = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
             b_g_cumsum_q = tl.load(p_g_cumsum_q, boundary_check=(0, ))
@@ -96,15 +96,14 @@ def parallel_path_bwd_dkv_kernel(
             b_A = tl.where((offset + tl.arange(0, BS) < T)[None, :], b_A, float("-inf"))  # avoid nan
         b_A_softmax = tl.math.exp2(b_A * sm_scale - b_l[None, :])
         p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (offset, 0), (BS, BV), (1, 0))
-        b_do = tl.load(p_do, boundary_check=(0, 1)).to(tl.float16)
+        b_do = tl.load(p_do, boundary_check=(0, 1))
         b_dv += tl.dot(b_A_softmax.to(b_do.dtype), b_do)
         b_dp = tl.dot(b_v, tl.trans(b_do))
 
         b_dA = ((b_dp - b_delta[None, :]) * b_A_softmax * scale)
         if USE_GATE:
             b_dg_cumsum_k -= tl.sum(b_dA, axis=1)
-        b_dA = b_dA.to(tl.float16)
-        b_dk += tl.dot(b_dA, b_q)
+        b_dk += tl.dot(b_dA.to(b_q.dtype), b_q)
 
     p_dk = tl.make_block_ptr(dk, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     tl.store(p_dk, b_dk.to(dk.dtype.element_ty), boundary_check=(0, 1))
@@ -147,7 +146,7 @@ def parallel_path_bwd_dkv_fn(
         G=G, HQ=HQ, H=H, K=K, V=V,
         BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
         num_warps=8 if K == 128 else 4,
-        NUM_BLOCKS=num_blocks,
+        NUM_BLOCKS=num_blocks
     )
     return dk, dv, dg_cumsum
 

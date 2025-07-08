@@ -84,11 +84,11 @@ def chunk_transform_qk_bwd_kernel_prepare(
     p_q = tl.make_block_ptr(q, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT), (BK, BT), (0, 1))
     p_w = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-    b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float16)
-    b_kt = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
-    b_w = tl.load(p_w, boundary_check=(0, 1)).to(tl.float16)
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_kt = tl.load(p_k, boundary_check=(0, 1))
+    b_w = tl.load(p_w, boundary_check=(0, 1))
     p_T = tl.make_block_ptr(AT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_T = tl.load(p_T, boundary_check=(0, 1)).to(tl.float16)
+    b_T = tl.load(p_T, boundary_check=(0, 1))
 
     o_i = tl.arange(0, BT)
     m_t = o_i[:, None] >= o_i[None, :]
@@ -157,8 +157,8 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
     G = HQ//H
 
     V = v.shape[-1]
-    q_new = torch.empty_like(q, dtype=torch.float16)
-    k_new = torch.empty_like(k, dtype=torch.float16)
+    q_new = torch.empty_like(q)
+    k_new = torch.empty_like(k)
 
     indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
@@ -166,10 +166,10 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
     grid = (NT, B*HQ)
     # better precision because h would be of norm smaller than 1 anyways
     if return_h:
-        h = torch.empty(B, NT, H, K, K, dtype=torch.float16, device=q.device)
+        h = torch.empty(B, NT, H, K, K, dtype=w.dtype, device=q.device)
     else:
-        h = torch.empty_like(w, dtype=torch.float16)
-    dA_local = torch.empty(B, T, HQ, BT, dtype=torch.float16, device=q.device)
+        h = torch.empty_like(w)
+    dA_local = torch.empty(B, T, HQ, BT, dtype=w.dtype, device=q.device)
     dv = torch.empty(B, T, HQ, V, device=q.device, dtype=torch.float32)
     dg_cumsum = torch.empty_like(g_cumsum) if g_cumsum is not None else None
 
@@ -206,3 +206,4 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
         RETURN_H=return_h
     )
     return q_new, k_new, h, dA_local, dv, dg_cumsum
+
