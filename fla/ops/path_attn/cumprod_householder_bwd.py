@@ -67,22 +67,20 @@ def chunk_cumprod_householder_bwd_kernel(
         p_dk_new = tl.make_block_ptr(dk_new, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
         p_hc = tl.make_block_ptr(hc_suffix + i_t_small * stride_h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
 
-        b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float16)
+        b_k = tl.load(p_k, boundary_check=(0, 1))
         b_dk = tl.load(p_dk, boundary_check=(0, 1))
-
 
         p_w1 = tl.make_block_ptr(w1, (T, K), (H*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
         p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
 
-        b_w1 = tl.load(p_w1, boundary_check=(0, 1)).to(tl.float16)
-        b_w2 = tl.load(p_w2, boundary_check=(0, 1)).to(tl.float16)
-        b_hc = tl.load(p_hc, boundary_check=(0, 1)).to(tl.float16)
+        b_w1 = tl.load(p_w1, boundary_check=(0, 1))
+        b_w2 = tl.load(p_w2, boundary_check=(0, 1))
+        b_hc = tl.load(p_hc, boundary_check=(0, 1))
 
         b_dk_new = b_dk - tl.dot(b_dk.to(b_hc.dtype), b_hc)
         p_dk_new = tl.make_block_ptr(dk_new, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
         tl.store(p_dk_new, b_dk_new.to(dk_new.dtype.element_ty), boundary_check=(0, 1))
 
-        # strange
         b_dh = b_dhc - tl.dot(tl.trans(b_hc), b_dhc.to(b_hc.dtype))
         b_dw2 = tl.dot(b_w1, b_dh.to(b_w1.dtype))
         b_dw1 = tl.dot(b_w2, tl.trans(b_dh.to(b_w2.dtype)))
@@ -134,6 +132,7 @@ def chunk_cumprod_householder_bwd_fn(
         cu_seqlens=cu_seqlens,
         split_indices=split_indices, chunk_offsets=chunk_offsets, split_offsets=split_offsets,
         BT=BT, K=K, G=G, H=H, HQ=HQ, BK=K,
-        T=T, S=S, num_stages=2
+        T=T, S=S, num_stages=2,
+        num_warps=8 if K == 128 else 4 # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
     )
     return dw1, dw2, dk_new

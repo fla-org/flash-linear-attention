@@ -64,7 +64,7 @@ def chunk_cumprod_householder_fwd_kernel(
         tl.store(p_hc_suffix, b_h.to(hc_suffix.dtype.element_ty), boundary_check=(0, 1))
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_s * S + i_t_small * BT, 0), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_k = (b_k - tl.dot(b_k, tl.trans(b_h).to(b_k.dtype))).to(b_k.dtype)
+        b_k = (b_k - tl.dot(b_k, tl.trans(b_h.to(b_k.dtype))))
         p_w1 = tl.make_block_ptr(w1, (K, T), (1, H*K), (0, i_s * S + i_t_small * BT), (BK, BT), (0, 1))
         p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (i_s * S + i_t_small * BT, 0), (BT, BK), (1, 0))
         b_w1 = tl.load(p_w1, boundary_check=(0, 1))
@@ -79,13 +79,12 @@ def chunk_cumprod_householder_fwd_kernel(
 
 
 def chunk_cumprod_householder_fwd_fn(
-    # q: torch.Tensor,
     k: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     S: int,  # split size, aka large chunk size
     BT: int,  # small chunk size
-    cu_seqlens: torch.Tensor = None,
+    cu_seqlens: torch.Tensor = None
 ):
     B, T, H, K = k.shape
 
@@ -103,16 +102,15 @@ def chunk_cumprod_householder_fwd_fn(
         NT = chunk_offsets[-1]
 
     grid = (NS, H)
-    hc_whole = torch.empty((NS, H, K, K), device=k.device, dtype=torch.float16)
-    k_new = torch.empty_like(k)
-    hc_suffix = torch.empty((NT, H, K, K), device=k.device, dtype=torch.float16)
-
+    hc_whole = torch.empty((NS, H, K, K), device=k.device, dtype=w1.dtype)
+    k_new = torch.empty_like(k, dtype=k.dtype)
+    hc_suffix = torch.empty((NT, H, K, K), device=k.device, dtype=w2.dtype)
     chunk_cumprod_householder_fwd_kernel[grid](
         k=k, k_new=k_new, w1=w1, w2=w2, hc_whole=hc_whole, hc_suffix=hc_suffix,
         cu_seqlens=cu_seqlens,
         split_indices=split_indices, chunk_offsets=chunk_offsets, split_offsets=split_offsets,
         BT=BT, K=K, H=H, BK=K,
         T=T, S=S,
-        num_warps=8 if K == 128 else 4
+        num_warps=8 if K == 128 else 4,  # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
     )
     return k_new, hc_suffix, hc_whole
