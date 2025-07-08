@@ -96,7 +96,6 @@ def naive_chunk_gdn2(
         v_i = u_i - w_i @ S
         o[:, :, i] = (q_i * g_i.exp()) @ S + A @ v_i
         S = S * g_i[:, :, -1:].exp()
-        # print(i, S.max())
         S += ((g_i[:, :, -1:] - g_i).exp() * k_i).transpose(-1, -2) @ v_i
     if not output_final_state:
         S = None
