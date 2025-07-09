@@ -7,10 +7,16 @@ import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
-from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local
+from fla.ops.common.chunk_o import chunk_bwd_dv_local
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
-from fla.ops.gla.chunk import chunk_gla_fwd_intra_gk, chunk_gla_fwd_o_gk
+from fla.ops.gla.chunk import (
+    chunk_gla_bwd_dA,
+    chunk_gla_bwd_dqk_intra,
+    chunk_gla_bwd_dqkwg,
+    chunk_gla_fwd_intra_gk,
+    chunk_gla_fwd_o_gk
+)
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -142,7 +148,24 @@ def chunk_gdn2_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-    dq, dk, dw, dg = chunk_bwd_dqkwg(
+
+    # dq dk in fp32
+    dAk = chunk_gla_bwd_dA(
+        v=v_new,
+        do=do,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
+    )
+    dq, dk = chunk_gla_bwd_dqk_intra(
+        q=q,
+        k=k,
+        g=g,
+        dA=dAk,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
+    )
+    dq, dk, dw, dg = chunk_gla_bwd_dqkwg(
         q=q,
         k=k,
         v=v_new,
@@ -152,9 +175,13 @@ def chunk_gdn2_bwd(
         dv=dv,
         do=do,
         dh=dh,
+        dq=dq,
+        dk=dk,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
     )
+
     dk2, dv, db, dg2 = prepare_wy_repr_bwd(
         k=k,
         v=v,
@@ -167,8 +194,7 @@ def chunk_gdn2_bwd(
     )
     dk.add_(dk2)
     dg.add_(dg2)
-    assert dg.dtype == torch.float32, "dg should be fp32"
-    dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens)
+    dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens)
     return dq, dk, dv, db, dg, dh0
 
 

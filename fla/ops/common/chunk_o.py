@@ -120,9 +120,9 @@ def chunk_fwd_kernel_o(
 
 
 @triton.heuristics({
+    'USE_W': lambda args: args['dw'] is not None,
     'USE_G': lambda args: args['g'] is not None,
     'USE_G_GAMMA': lambda args: args['g_gamma'] is not None,
-    'USE_DW': lambda args: args['dw'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -131,24 +131,23 @@ def chunk_fwd_kernel_o(
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_DW'],
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_W', 'USE_G', 'USE_G_GAMMA'],
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dqkwg(
     q,
     k,
     v,
-    h,
     g,
     g_gamma,
+    h,
     do,
     dh,
     dq,
     dk,
-    dg,
-    w,
-    dv,
     dw,
+    dv,
+    dg,
     cu_seqlens,
     chunk_indices,
     scale,
@@ -160,25 +159,25 @@ def chunk_bwd_kernel_dqkwg(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    USE_W: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
-    USE_DW: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
+
+    all = B * T
     if IS_VARLEN:
         i_tg = i_t
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        all = T
         T = eos - bos
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
-        all = B * T
 
     # offset calculation
     v += (bos * H + i_h) * V
@@ -191,8 +190,7 @@ def chunk_bwd_kernel_dqkwg(
     dk += (bos * H + i_h) * K
 
     # for delta rule only
-    if USE_DW:
-        w += (bos * H + i_h) * K
+    if USE_W:
         dw += (bos * H + i_h) * K
         dv += (bos * H + i_h) * V
 
@@ -206,7 +204,7 @@ def chunk_bwd_kernel_dqkwg(
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_ds = tl.zeros([BT, BT], dtype=tl.float32)
-    b_dw = tl.zeros([BT, BK], dtype=tl.float32) if USE_DW else None
+    b_dw = tl.zeros([BT, BK], dtype=tl.float32) if USE_W else None
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -227,12 +225,12 @@ def chunk_bwd_kernel_dqkwg(
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         # [BT, BV] @ [BV, BK] -> [BT, BK]
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
-        if USE_DW:
+        if USE_W:
             p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
 
-    if USE_DW:
+    if USE_W:
         p_dw = tl.make_block_ptr(dw, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
 
@@ -633,13 +631,13 @@ def chunk_bwd_dqkwg(
     do: torch.Tensor,
     h: torch.Tensor,
     dh: torch.Tensor,
+    w: Optional[torch.Tensor] = None,
     g: Optional[torch.Tensor] = None,
     g_gamma: Optional[torch.Tensor] = None,
     dv: Optional[torch.Tensor] = None,
-    w: Optional[torch.Tensor] = None,
+    scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
-    scale: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -661,16 +659,15 @@ def chunk_bwd_dqkwg(
         q=q,
         k=k,
         v=v,
-        h=h,
         g=g,
         g_gamma=g_gamma,
+        h=h,
         do=do,
         dh=dh,
-        dv=dv,
-        w=w,
         dw=dw,
         dq=dq,
         dk=dk,
+        dv=dv,
         dg=dg,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
