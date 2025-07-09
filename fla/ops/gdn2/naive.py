@@ -30,8 +30,8 @@ def naive_recurrent_gdn2(
     o = torch.zeros_like(v)
     for i in range(0, T):
         q_i, k_i, v_i, g_i, b_i = q[:, i], k[:, i], v[:, i], g[:, i], beta[:, i]
-        S *= g_i[..., None].exp()
-        S += torch.einsum('b h k, b h v -> b h k v', b_i[..., None] * k_i, v_i - (k_i[..., None] * S).sum(-2))
+        S = S * g_i[..., None].exp()
+        S = S + torch.einsum('b h k, b h v -> b h k v', b_i[..., None] * k_i, v_i - (k_i[..., None] * S).sum(-2))
         o[:, i] = torch.einsum('b h k, b h k v -> b h v', q_i, S)
     if not output_final_state:
         S = None
