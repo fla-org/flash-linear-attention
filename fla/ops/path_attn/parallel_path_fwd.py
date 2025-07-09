@@ -4,6 +4,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 
+
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_GATE': lambda args: args['g_cumsum'] is not None,

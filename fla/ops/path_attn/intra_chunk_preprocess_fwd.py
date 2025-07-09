@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils import prepare_chunk_indices
 
 
 @triton.heuristics({
@@ -28,7 +28,6 @@ def intra_chunk_preprocess_fwd_kernel(
     scale,
     indices,  # varlen helper
     offsets,  # varlen helper
-    chunk_offsets,  # varlen helper
     T,
     H: tl.constexpr,
     G: tl.constexpr,
@@ -49,11 +48,8 @@ def intra_chunk_preprocess_fwd_kernel(
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_n * T, i_n * T + T
-        NT = tl.cdiv(T, BT)
-        boh = i_n * NT
 
     sm_scale = scale * 1.44269504
     # offset calculations
@@ -134,7 +130,6 @@ def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_s
     o = torch.empty(B, T, HQ, V, device=q.device)
 
     indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B*HQ)
     L = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)
@@ -159,7 +154,6 @@ def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_s
         scale=scale,
         offsets=cu_seqlens,
         indices=indices,
-        chunk_offsets=chunk_offsets,
         T=T,
         H=H,
         G=G,

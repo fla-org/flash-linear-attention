@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils import prepare_chunk_indices
 
 
 @triton.heuristics({
@@ -13,7 +13,7 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 @triton.jit(do_not_specialize=['T'])
 def transform_q_fwd_kernel(
     q, q_new, w1, w2,
-    offsets, indices, chunk_offsets,
+    offsets, indices,
     T,
     S: tl.constexpr,
     G: tl.constexpr, HQ: tl.constexpr, H: tl.constexpr,
@@ -38,18 +38,25 @@ def transform_q_fwd_kernel(
     b_q = tl.zeros([BT, BK], dtype=tl.float32)
     b_q += tl.load(p_q, boundary_check=(0, 1))
 
+    if BS == BT:
+        if i_t * BT % S == 0:
+            p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (i_t * BT // S)) * HQ + i_hq) * K,
+                                        (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+            tl.store(p_q_new, b_q.to(q_new.dtype.element_ty), boundary_check=(0, 1))
+
     for offset in range((i_t + 1) * BT - 2 * BS, S-BS, -BS):
         p_w1 = tl.make_block_ptr(w1 + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))
         p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BK), (1, 0))
         b_w1 = tl.load(p_w1, boundary_check=(0, 1))
         b_w2 = tl.load(p_w2, boundary_check=(0, 1))
-        m_s = i_t * BT + tl.arange(0, BT) >= (offset + BS)
+        # m_s = i_t * BT + tl.arange(0, BT) >= (offset + BS)
         b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
-        b_s2 = tl.where(m_s[:, None], b_s2, 0)
+        # b_s2 = tl.where(m_s[:, None], b_s2, 0)
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
 
         if offset % S == 0:
-            p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (offset // S)) * HQ + i_hq) * K, (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+            p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (offset // S)) * HQ + i_hq) * K,
+                                        (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
             tl.store(p_q_new, b_q.to(q_new.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -61,7 +68,6 @@ def transform_q_fwd_fn(
     H = w1.shape[-2]
     G = HQ // H
     indices_BT = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices_BT)
     grid = (NT, B * HQ)
     num_blocks = triton.cdiv(T, S) if cu_seqlens is None else len(cu_seqlens) - 1
@@ -71,7 +77,6 @@ def transform_q_fwd_fn(
         q_new=q_new,
         w1=w1,
         w2=w2,
-        chunk_offsets=chunk_offsets,
         offsets=cu_seqlens,
         indices=indices_BT,
         T=T,
@@ -84,6 +89,6 @@ def transform_q_fwd_fn(
         BT=BT,
         S=S,
         NUM_BLOCKS=num_blocks,
-        num_warps=8 if (BT == 128 and K == 128) else 4
+        num_warps=4
     )
     return q_new

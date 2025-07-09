@@ -53,7 +53,6 @@ def chunk_cumprod_householder_bwd_kernel(
     dk += (bos * HQ + i_hq) * K
     dk_new += (bos * HQ + i_hq) * K
 
-    stride_hq = HQ * K * K
     stride_h = H * K * K
     NT_small = tl.cdiv(min(S, T-i_s*S), BT)
     p_dhc_whole = tl.make_block_ptr(dhc_whole, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
@@ -133,6 +132,7 @@ def chunk_cumprod_householder_bwd_fn(
         split_indices=split_indices, chunk_offsets=chunk_offsets, split_offsets=split_offsets,
         BT=BT, K=K, G=G, H=H, HQ=HQ, BK=K,
         T=T, S=S, num_stages=2,
-        num_warps=8 if K == 128 else 4 # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
+        # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
+        num_warps=8 if K == 128 else 4
     )
     return dw1, dw2, dk_new

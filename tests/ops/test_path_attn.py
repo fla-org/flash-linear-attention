@@ -10,6 +10,7 @@ from einops import rearrange
 from fla.ops.path_attn.parallel import parallel_path_attention
 from fla.utils import assert_close, check_shared_mem, device, is_intel_alchemist
 
+
 def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
     original_dtype = q.dtype
     HQ = q.shape[2]
@@ -65,7 +66,8 @@ def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
     [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-use_forget_gate{}-{}".format(*test))
         for test in [
-            # (10, 62, 2, 8, 128, True, torch.bfloat16), # SY (2025/07/08): It somehow failed on Hopper with error msg: Aborted (core dumped)
+            # SY (2025/07/08): It somehow failed on Hopper with error msg: Aborted (core dumped)
+            # (10, 62, 2, 8, 128, True, torch.bfloat16),
             (5, 512, 2, 8, 128, True, torch.bfloat16),
             (3, 1024, 2, 8, 64, True, torch.bfloat16),
             (2, 2000, 1, 4, 64, False, torch.bfloat16),
@@ -86,13 +88,7 @@ def test_parallel(
     use_forget_gate: bool,
     dtype: torch.dtype
 ):
-    if not check_shared_mem('hopper') and D > 128:
-        # maybe we can enable this test on Triton 3.3.0
-        pytest.skip("Skipping test because global shared memory is not available")
-    torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-
-    if not check_shared_mem('hopper') and D > 128:
+    if not check_shared_mem('hopper') and D > 64:
         # maybe we can enable this test on Triton 3.3.0
         pytest.skip("Skipping test because global shared memory is not available")
     torch.manual_seed(42)
@@ -147,6 +143,7 @@ def test_parallel(
         for test in [
             (2, 4, 128, False, [0, 15, 69, 211, 300, 1200, 1222, 1849, 2000], torch.float16),
             (2, 4, 64, True, [0, 100, 300, 1000, 1989, 2000], torch.float16),
+            (2, 4, 64, False, [0, 15, 69, 211, 300, 1200, 1222, 1849, 2000], torch.float16),
         ]
     ]
 )
@@ -166,7 +163,7 @@ def test_parallel_varlen(
     cu_seqlens: List[int],
     dtype: torch.dtype
 ):
-    if not check_shared_mem('hopper') and D > 128:
+    if not check_shared_mem('hopper') and D > 64:
         # maybe we can enable this test on Triton 3.3.0
         pytest.skip("Skipping test because global shared memory is not available")
     torch.manual_seed(42)

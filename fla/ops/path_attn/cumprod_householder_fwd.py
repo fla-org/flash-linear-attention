@@ -111,6 +111,7 @@ def chunk_cumprod_householder_fwd_fn(
         split_indices=split_indices, chunk_offsets=chunk_offsets, split_offsets=split_offsets,
         BT=BT, K=K, H=H, BK=K,
         T=T, S=S,
-        num_warps=8 if K == 128 else 4,  # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
+        # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
+        num_warps=8 if K == 128 else 4,
     )
     return k_new, hc_suffix, hc_whole

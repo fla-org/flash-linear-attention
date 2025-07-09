@@ -2,7 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils import prepare_chunk_indices
+from fla.utils import check_shared_mem
 
 
 # episold
@@ -14,7 +15,7 @@ def intra_chunk_preprocess_bwd_kernel(
     q, k, w, beta,
     AT,
     dA_local, dq, dq_new, dk, dk_new, dw, dbeta, dw1, dw2, T,
-    offsets, indices, chunk_offsets,
+    offsets, indices,
     HQ: tl.constexpr, G: tl.constexpr, H: tl.constexpr,
     K: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr,
     IS_VARLEN: tl.constexpr
@@ -27,11 +28,8 @@ def intra_chunk_preprocess_bwd_kernel(
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_n * T, i_n * T + T
-        NT = tl.cdiv(T, BT)
-        boh = i_n * NT
 
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_dw_beta = tl.zeros([BT, BK], dtype=tl.float32)
@@ -121,7 +119,6 @@ def intra_chunk_preprocess_bwd_fn(q, k, w, beta,
     B, T, H, K = k.shape
     G = HQ//H
     indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B*HQ)
     # better precision because h would be of norm smaller than 1 anyways
@@ -135,10 +132,9 @@ def intra_chunk_preprocess_bwd_fn(q, k, w, beta,
         q=q, k=k, w=w, beta=beta,
         AT=A,
         dA_local=dA_local, dq=dq, dq_new=dq_new, dk=dk, dk_new=dk_new, dw=dw, dbeta=dbeta, dw1=dw1, dw2=dw2, T=T,
-        offsets=cu_seqlens, indices=indices, chunk_offsets=chunk_offsets,
+        offsets=cu_seqlens, indices=indices,
         HQ=HQ, G=G, H=H,
-        K=K, BT=BT, BK=triton.next_power_of_2(K)
+        K=K, BT=BT, BK=triton.next_power_of_2(K),
+        num_stages=3 if check_shared_mem('hopper') else 1
     )
     return dq_new, dk_new, dbeta, dw
-
-

@@ -74,13 +74,13 @@ def parallel_path_bwd_dq_kernel(
         b_g_cumsum_q = None
         b_dg_cumsum_q = None
 
-    idx_i = i_t * BT // S
     curr_end = (tl.floor(i_t * BT / S).to(tl.int32) * S).to(tl.int32)
     b_dq = tl.zeros([BT, K], dtype=tl.float32)
 
     for offset_outer in range(0, curr_end, S):
         idx_j = (offset_outer // S)
-        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K),
+                                (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
 
         b_dh = -tl.dot(tl.trans(b_q), b_dq.to(b_q.dtype))

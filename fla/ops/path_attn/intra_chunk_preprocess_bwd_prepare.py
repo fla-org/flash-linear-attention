@@ -206,4 +206,3 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
         RETURN_H=return_h
     )
     return q_new, k_new, h, dA_local, dv, dg_cumsum
-

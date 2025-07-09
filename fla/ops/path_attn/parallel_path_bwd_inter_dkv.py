@@ -53,7 +53,6 @@ def parallel_path_bwd_dkv_kernel(
         dg_cumsum += (bos * HQ + i_hq)
 
     # constants
-    stride_h = H * K * K
     sm_scale = scale * 1.44269504
 
     # load query
@@ -73,10 +72,9 @@ def parallel_path_bwd_dkv_kernel(
 
     b_dk = tl.zeros([BT, K], dtype=tl.float32)
     b_dv = tl.zeros([BT, K], dtype=tl.float32)
-    idx_i = (i_t * BT // S).to(tl.int32)
 
     last_chunk_start = tl.floor(i_t*BT / S).to(tl.int32) * S
-    idx_j = tl.floor(i_t * BT / S).to(tl.int32) + 1
+    idx_j = (tl.floor(i_t * BT / S).to(tl.int32) + 1).to(tl.int32)
 
     last_chunk_end = tl.ceil(T / BS).to(tl.int32) * BS - BS
 
@@ -86,7 +84,8 @@ def parallel_path_bwd_dkv_kernel(
         b_delta = tl.load(p_delta, boundary_check=(0, ))
         b_l = tl.load(p_l, boundary_check=(0, ))
 
-        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j) * HQ + i_hq) * K, (T, K), (HQ*K*NUM_BLOCKS, 1), (offset, 0), (BS, BK), (1, 0))
+        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j) * HQ + i_hq) * K, (T, K),
+                                (HQ*K*NUM_BLOCKS, 1), (offset, 0), (BS, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_A = tl.dot(b_k, tl.trans(b_q).to(b_k.dtype))
         if USE_GATE:
@@ -117,6 +116,7 @@ def parallel_path_bwd_dkv_kernel(
 
     if USE_GATE:
         tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_k, sem='relaxed')
+
 
 def parallel_path_bwd_dkv_fn(
     q, k, v, g_cumsum, do, dv, dg_cumsum,
