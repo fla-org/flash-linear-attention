@@ -11,7 +11,7 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 @triton.jit(do_not_specialize=['T'])
 def parallel_path_fwd_kernel_prepare_k_cache(
     k, k_new, w1, w2,
-    offsets, indices, chunk_offsets,
+    offsets, indices,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -23,20 +23,17 @@ def parallel_path_fwd_kernel_prepare_k_cache(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
         bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         i_n = i_b
         bos, eos = i_n * T, i_n * T + T
         NT = triton.cdiv(T, BT)
-        boh = i_n * NT
 
-    # offset calculations
-    k += (bos * H + i_h) * K  # GQA when H!=HQ
-    k_new += (bos * H + i_h) * K  # GQA when H!=HQ
-    w1 += (boh * H + i_h) * K
-    w2 += (boh * H + i_h) * K
+    k += (bos * H + i_h) * K
+    k_new += (bos * H + i_h) * K
+    w1 += (bos * H + i_h) * K
+    w2 += (bos * H + i_h) * K
     # constants
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     b_k = tl.zeros([BT, BK], dtype=tl.float32)
@@ -46,13 +43,11 @@ def parallel_path_fwd_kernel_prepare_k_cache(
         p_w2 = tl.make_block_ptr(w2, (T, K), (H*K, 1), (k_block_idx * BT, 0), (BT, BK), (1, 0))
         b_w1 = tl.load(p_w1, boundary_check=(0, 1))
         b_w2 = tl.load(p_w2, boundary_check=(0, 1))
-        b_A = tl.dot(b_k.to(b_w2.dtype), tl.trans(b_w1))
-        b_k = b_k - tl.dot(b_A.to(b_w1.dtype), b_w2)
+        b_A = tl.dot(b_k.to(b_w2.dtype), tl.trans(b_w2))
+        b_k = b_k - tl.dot(b_A.to(b_w1.dtype), b_w1)
 
     p_k_new = tl.make_block_ptr(k_new, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     tl.store(p_k_new, b_k.to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
-
-
 
 
 def prepare_k_cache_fn(k, w1, w2, cu_seqlens, BS, use_cache=False):
@@ -62,7 +57,6 @@ def prepare_k_cache_fn(k, w1, w2, cu_seqlens, BS, use_cache=False):
         B, T, H, K = k.shape
         k_new = torch.empty_like(k)
         indices = prepare_chunk_indices(cu_seqlens, BS) if cu_seqlens is not None else None
-        chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
         NT = triton.cdiv(T, BS) if cu_seqlens is None else len(indices)
         grid = (NT, B * H)
         parallel_path_fwd_kernel_prepare_k_cache[grid](
@@ -72,7 +66,6 @@ def prepare_k_cache_fn(k, w1, w2, cu_seqlens, BS, use_cache=False):
             w2=w2,
             offsets=cu_seqlens,
             indices=indices,
-            chunk_offsets=chunk_offsets,
             H=H,
             T=T,
             K=K,
