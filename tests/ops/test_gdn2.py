@@ -174,18 +174,22 @@ def test_chunk(
     beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
 
-    ref, ref_ht = fused_recurrent_gdn2(
-        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
-        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
+    ref, ref_ht = naive_recurrent_gdn2(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_db, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
 
     tri, tri_ht = chunk_gdn2(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
@@ -198,5 +202,15 @@ def test_chunk(
         output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_db, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
+
     assert_close('o', ref, tri, 0.005)
     assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('db', ref_db, tri_db, 0.02)
+    assert_close('dg', ref_dg, tri_dg, 0.02)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.008)
