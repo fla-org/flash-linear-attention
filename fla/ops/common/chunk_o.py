@@ -399,6 +399,7 @@ def chunk_bwd_kernel_dv(
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_G_GAMMA': lambda args: args['g_gamma'] is not None,
+    'USE_A': lambda args: args['A'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -415,6 +416,7 @@ def chunk_bwd_kernel_dv_local(
     k,
     g,
     g_gamma,
+    A,
     do,
     dv,
     cu_seqlens,
@@ -429,6 +431,7 @@ def chunk_bwd_kernel_dv_local(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
+    USE_A: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -446,29 +449,33 @@ def chunk_bwd_kernel_dv_local(
     do += (bos * H + i_h) * V
     dv += (bos * H + i_h) * V
 
-    b_A = tl.zeros([BT, BT], dtype=tl.float32)
-    for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_A += tl.dot(b_k, b_q)
+    if USE_A:
+        p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
+        b_A = tl.load(p_A, boundary_check=(0, 1))
+    else:
+        if USE_G:
+            g += bos * H + i_h
+            p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
+            b_g = tl.load(p_g, boundary_check=(0,))
+        if USE_G_GAMMA:
+            b_gamma = tl.load(g_gamma + i_h)
+            b_g = b_gamma * (tl.arange(0, BT) + 1)
 
-    if USE_G:
-        g += bos * H + i_h
-        p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        b_g = tl.load(p_g, boundary_check=(0,))
-    if USE_G_GAMMA:
-        b_gamma = tl.load(g_gamma + i_h)
-        b_g = b_gamma * (tl.arange(0, BT) + 1)
+        b_A = tl.zeros([BT, BT], dtype=tl.float32)
+        for i_k in range(tl.cdiv(K, BK)):
+            p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_A += tl.dot(b_k, b_q)
+        if USE_G or USE_G_GAMMA:
+            b_A *= exp(b_g[None, :] - b_g[:, None]) * scale
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
-    if USE_G:
-        b_A = tl.where(m_A, b_A * exp(b_g[None, :] - b_g[:, None]) * scale, 0).to(do.dtype.element_ty)
-    else:
-        b_A = tl.where(m_A, b_A * scale, 0).to(do.dtype.element_ty)
+    b_A = tl.where(m_A, b_A, 0).to(do.dtype.element_ty)
 
     for i_v in range(tl.cdiv(V, BV)):
         p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -576,6 +583,7 @@ def chunk_bwd_dv_local(
     do: torch.Tensor,
     g: Optional[torch.Tensor] = None,
     g_gamma: Optional[torch.Tensor] = None,
+    A: Optional[torch.Tensor] = None,
     scale: float = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
@@ -601,6 +609,7 @@ def chunk_bwd_dv_local(
         k=k,
         g=g,
         g_gamma=g_gamma,
+        A=A,
         do=do,
         dv=dv,
         cu_seqlens=cu_seqlens,

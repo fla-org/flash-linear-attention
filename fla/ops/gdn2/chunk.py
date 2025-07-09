@@ -94,6 +94,7 @@ def chunk_gdn2_bwd(
     dht: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
+    chunk_size = 64
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -111,19 +112,29 @@ def chunk_gdn2_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
     )
-    dv = chunk_bwd_dv_local(
+    Ak = chunk_gla_fwd_intra_gk(
         q=q,
         k=k,
         g=g,
-        do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
     )
+    dv = chunk_bwd_dv_local(
+        q=q,
+        k=k,
+        do=do,
+        A=Ak,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
+    )
+
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
         k=k,
         w=w,
-        g=g,
+        gk=g,
         h0=initial_state,
         dht=dht,
         do=do,
