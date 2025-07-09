@@ -14,7 +14,7 @@ class MLAConfig(PretrainedConfig):
         self,
         hidden_size: int = 2048,
         num_hidden_layers: int = 24,
-        num_heads: int = 64,
+        num_heads: int = 16,
         q_lora_rank: Optional[int] = 64,
         qk_rope_head_dim: int = 64,
         kv_lora_rank: int = 512,  # following the original Deepseek paper
