@@ -567,7 +567,7 @@ class MomGatedDeltaNet(nn.Module):
 
         q,k,v,g,beta,mask2 = (rearrange(x, 'e b l ... ->  (e b) l ...') for x in (q,k,v,g,beta,mask2))
         cu_q, cu_k, cu_v, cu_g, cu_beta, indices_q, cu_seqlen_all, max_seq_lens = _upad_input(q, k, v, g, beta, mask2, q_len)
-        cu_seqlen = cu_seqlen_all[0].to(torch.long)
+        cu_seqlen = cu_seqlen_all[0].to(torch.long).unique()
         cu_q,cu_k,cu_v,cu_g,cu_beta= (x.unsqueeze(0).contiguous() for x in (cu_q,cu_k,cu_v,cu_g,cu_beta))
 
         # dealing with padding

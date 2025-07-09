@@ -437,6 +437,7 @@ class MomGatedDeltaNetForCausalLM(MomGatedDeltaNetPreTrainedModel, GenerationMix
         logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -num_logits_to_keep:])
 
         loss = None
+        aux_loss = None
         if labels is not None:
             if self.config.fuse_cross_entropy:
                 if fuse_linear_and_cross_entropy:
@@ -455,21 +456,21 @@ class MomGatedDeltaNetForCausalLM(MomGatedDeltaNetPreTrainedModel, GenerationMix
                                 self.lm_head.bias)
             else:
                 loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
-        if loss==0:
-            breakpoint()
 
-        valid_router_logits = tuple(
-            logits
-            for logits in (outputs.router_logits if return_dict else outputs[-1])
-            if logits is not None
-        )
-        aux_loss = load_balancing_loss_func(
-            valid_router_logits,
-            self.num_memories,
-            self.topk,
-            use_layer_wise_balance=self.config.use_layer_wise_balance,  # ✨
-        )
-        aux_loss *= self.aux_loss_scale
+            valid_router_logits = tuple(
+                logits
+                for logits in (outputs.router_logits if return_dict else outputs[-1])
+                if logits is not None
+            )
+            aux_loss = load_balancing_loss_func(
+                valid_router_logits,
+                self.num_memories,
+                self.topk,
+                use_layer_wise_balance=self.config.use_layer_wise_balance,  # ✨
+            )
+            aux_loss *= self.aux_loss_scale
+
+            loss += aux_loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]
