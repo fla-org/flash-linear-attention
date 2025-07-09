@@ -4,8 +4,6 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 
-
-
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_GATE': lambda args: args['g_cumsum'] is not None,
@@ -58,7 +56,7 @@ def parallel_path_fwd_kernel(
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))  # GQA when H!=HQ
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (V*H, 1), (offset, 0), (BS, BV), (1, 0))  # GQA when H!=HQ
         p_w1 = tl.make_block_ptr(w1 + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))
-        p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BV), (1, 0))
+        p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BK), (1, 0))
         # [BK, BS]
 
         b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -86,13 +84,14 @@ def parallel_path_fwd_kernel(
         b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
         b_s2 = tl.where(m_s[:, None], b_s2, 0)
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
-        tl.debug_barrier()
+
+    tl.debug_barrier()
 
     for offset in range(i_t * BT - BS, -BS, -BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))  # GQA when H!=HQ
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (V*H, 1), (offset, 0), (BS, BV), (1, 0))  # GQA when H!=HQ
         p_w1 = tl.make_block_ptr(w1 + (bos * H + i_h) * K, (K, T), (1, K*H), (0, offset), (BK, BS), (0, 1))
-        p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BV), (1, 0))
+        p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BK), (1, 0))
         # [BK, BS]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BS, BV]
@@ -115,7 +114,6 @@ def parallel_path_fwd_kernel(
         b_o += tl.dot(b_s.to(b_v.dtype), b_v)
         b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
-        tl.debug_barrier()
 
     b_o = b_o / b_l[:, None]
     p_o_new = tl.make_block_ptr(o_new + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT, 0), (BT, BV), (1, 0))
@@ -165,6 +163,7 @@ def parallel_path_fwd_fn(
         HQ=HQ,
         H=H,
         BS=BS,
-        BT=BT
+        BT=BT,
+        num_warps=8 if (BT == 128 and K == 128) else 4
     )
     return o_new, L_new

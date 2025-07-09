@@ -147,7 +147,7 @@ def parallel_path_bwd_dq_fn(
         T=T, S=S,  BT=BT, BS=BS,
         G=G, HQ=HQ, H=H, K=K, V=V,
         BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
-        num_warps=8 if K == 128 else 4,
+        num_warps=8 if (BT == 128 and K == 128) else 4,
         NUM_BLOCKS=num_blocks
     )
     return dq, dhc_whole, dg_cumsum

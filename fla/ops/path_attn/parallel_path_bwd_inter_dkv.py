@@ -132,10 +132,11 @@ def parallel_path_bwd_dkv_fn(
     indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
-    # should be NS
+
     if cu_seqlens is not None:
         assert split_offsets[-1] == hc_whole.shape[0]
-    dk = torch.empty(B, T, HQ, K, dtype=torch.float32, device=q.device)  # for later reduction use
+
+    dk = torch.empty(B, T, HQ, K, dtype=torch.float32, device=q.device)
 
     parallel_path_bwd_dkv_kernel[(NT, B*HQ)](
         q=q, k=k, v=v, g_cumsum=g_cumsum,
@@ -145,8 +146,7 @@ def parallel_path_bwd_dkv_fn(
         T=T, S=S, BT=BT, BS=BS,
         G=G, HQ=HQ, H=H, K=K, V=V,
         BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
-        num_warps=8 if K == 128 else 4,
+        num_warps=8 if (BT == 128 and K == 128) else 4,
         NUM_BLOCKS=num_blocks
     )
     return dk, dv, dg_cumsum
-

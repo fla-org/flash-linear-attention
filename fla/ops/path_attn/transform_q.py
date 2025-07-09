@@ -66,7 +66,6 @@ def transform_q_fwd_fn(
     grid = (NT, B * HQ)
     num_blocks = triton.cdiv(T, S) if cu_seqlens is None else len(cu_seqlens) - 1
     q_new = torch.empty(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
-    # breakpoint()
     transform_q_fwd_kernel[grid](
         q=q,
         q_new=q_new,
@@ -85,7 +84,6 @@ def transform_q_fwd_fn(
         BT=BT,
         S=S,
         NUM_BLOCKS=num_blocks,
-        num_warps=8 if K == 128 else 4,
-        num_stages=5,
+        num_warps=8 if (BT == 128 and K == 128) else 4
     )
     return q_new
