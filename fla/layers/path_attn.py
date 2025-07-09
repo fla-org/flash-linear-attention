@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 logger = logging.get_logger(__name__)
 
+
 class PaTHAttention(nn.Module):
     def __init__(
         self,
