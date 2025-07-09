@@ -39,7 +39,7 @@ def transform_q_fwd_kernel(
     b_q += tl.load(p_q, boundary_check=(0, 1))
 
     if BS == BT:
-        if i_t * BT % S == 0:
+        if (i_t * BT) % S == 0:
             p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (i_t * BT // S)) * HQ + i_hq) * K,
                                         (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
             tl.store(p_q_new, b_q.to(q_new.dtype.element_ty), boundary_check=(0, 1))
@@ -49,9 +49,9 @@ def transform_q_fwd_kernel(
         p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (offset, 0), (BS, BK), (1, 0))
         b_w1 = tl.load(p_w1, boundary_check=(0, 1))
         b_w2 = tl.load(p_w2, boundary_check=(0, 1))
-        # m_s = i_t * BT + tl.arange(0, BT) >= (offset + BS)
+        m_s = i_t * BT + tl.arange(0, BT) >= (offset + BS)
         b_s2 = tl.dot(b_q.to(b_w1.dtype), b_w1)
-        # b_s2 = tl.where(m_s[:, None], b_s2, 0)
+        b_s2 = tl.where(m_s[:, None], b_s2, 0)
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
 
         if offset % S == 0:
@@ -89,6 +89,6 @@ def transform_q_fwd_fn(
         BT=BT,
         S=S,
         NUM_BLOCKS=num_blocks,
-        num_warps=4
+        num_warps=8 if (BT == 128 and K == 128) else 4
     )
     return q_new
