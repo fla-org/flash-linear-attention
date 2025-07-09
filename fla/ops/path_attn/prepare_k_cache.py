@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils import prepare_chunk_indices
 
 
 @triton.heuristics({
@@ -28,7 +28,6 @@ def parallel_path_fwd_kernel_prepare_k_cache(
     else:
         i_n = i_b
         bos, eos = i_n * T, i_n * T + T
-        NT = triton.cdiv(T, BT)
 
     k += (bos * H + i_h) * K
     k_new += (bos * H + i_h) * K
