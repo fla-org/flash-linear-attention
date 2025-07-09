@@ -202,6 +202,7 @@ class MomGatedDeltaNetPreTrainedModel(PreTrainedModel):
                     with torch.no_grad():
                         p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
+
 @dataclass
 class MomGatedDeltaNetOutputWithPast(BaseModelOutputWithPast):
     router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
@@ -311,6 +312,7 @@ class MomGatedDeltaNetModel(MomGatedDeltaNetPreTrainedModel):
             attentions=all_attns,
             router_logits=all_router_logits
         )
+
 
 @dataclass
 class MomGatedDeltaNetCausalLMOutputWithPast(CausalLMOutputWithPast):
@@ -531,7 +533,6 @@ def load_balancing_loss_func(
         routing_weights, selected_experts = torch.topk(logits, top_k, dim=-1)
         routing_weights = routing_weights.softmax(dim=-1)
         routing_weights_full = torch.zeros_like(logits).scatter(-1, selected_experts, routing_weights)
-
 
         # cast the expert indices to int64, otherwise one-hot encoding will fail
         if selected_experts.dtype != torch.int64:

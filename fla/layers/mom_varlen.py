@@ -17,7 +17,6 @@ from fla.ops.gated_delta_rule import (chunk_gated_delta_rule,
                                       fused_recurrent_gated_delta_rule)
 
 
-
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
@@ -30,8 +29,10 @@ if is_flash_attn_2_available():
 else:
     print("flash_attn_2 is not available")
 
+
 def elu_p1(x):
     return (F.elu(x, 1., False) + 1.).to(x)
+
 
 def _get_unpad_data(attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, int]:
     """
@@ -58,7 +59,6 @@ def _get_unpad_data(attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.T
         cu_seqlens,
         max_seqlen_in_batch,
     )
-
 
 
 def _upad_input(
@@ -239,7 +239,7 @@ def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, se
     mask_2 = torch.cat((pad_mask.bool(), mask), dim=1).reshape((b, num_memories, capacity_len)).transpose(0, 1)
     # truncation_indices += capacity_len-max_len
 
-    return transformed_x, truncation_indices, sorted_indices, max_len, mask,mask_2
+    return transformed_x, truncation_indices, sorted_indices, max_len, mask, mask_2
     # (num_memories, batch, seq, hidden)
 
 # @torch.jit.script
@@ -540,7 +540,7 @@ class MomGatedDeltaNet(nn.Module):
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             conv_mask = attention_mask[:, -hidden_states.shape[2]:].repeat_interleave(self.num_memories, 0) if attention_mask is not None else None
-            seq_idx=kwargs.get('seq_idx', None)
+            seq_idx = kwargs.get('seq_idx', None)
             q, k, v = map(lambda x: rearrange(x, 'e b t d -> (e b) t d'), (q, k, v))
             q, conv_state_q[0] = self.q_conv1d(x=q,
                                             mask=conv_mask,
@@ -565,10 +565,10 @@ class MomGatedDeltaNet(nn.Module):
         q = l2_norm(q)
         k = l2_norm(k)
 
-        q,k,v,g,beta,mask2 = (rearrange(x, 'e b l ... ->  (e b) l ...') for x in (q,k,v,g,beta,mask2))
+        q, k, v, g, beta, mask2 = (rearrange(x, 'e b l ... ->  (e b) l ...') for x in (q, k, v, g, beta, mask2))
         cu_q, cu_k, cu_v, cu_g, cu_beta, indices_q, cu_seqlen_all, max_seq_lens = _upad_input(q, k, v, g, beta, mask2, q_len)
         cu_seqlen = cu_seqlen_all[0].to(torch.long).unique()
-        cu_q,cu_k,cu_v,cu_g,cu_beta= (x.unsqueeze(0).contiguous() for x in (cu_q,cu_k,cu_v,cu_g,cu_beta))
+        cu_q, cu_k, cu_v, cu_g, cu_beta= (x.unsqueeze(0).contiguous() for x in (cu_q, cu_k, cu_v, cu_g, cu_beta))
 
         # dealing with padding
         if attention_mask is not None:
@@ -667,15 +667,18 @@ class MomGatedDeltaNet(nn.Module):
             q, conv_state_q[1] = self.q_conv1d(x=self.q_proj(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_q[1],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=seq_idx)
             k, conv_state_k[1] = self.k_conv1d(x=self.shared_k(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_k[1],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=seq_idx)
             v, conv_state_v[1] = self.v_conv1d(x=self.shared_v(hidden_states),
                                             mask=conv_mask,
                                             cache=conv_state_v[1],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                            output_final_state=use_cache,
+                                            seq_idx=seq_idx)
         else:
             q = self.silu(self.q_proj(hidden_states))
             k = self.silu(self.shared_k(hidden_states))
