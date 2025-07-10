@@ -182,11 +182,11 @@ def chunk_gdn2_bwd(
         chunk_size=chunk_size,
     )
 
-    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
+    dk2, dv, db, _, dg2 = prepare_wy_repr_bwd(
         k=k,
         v=v,
         beta=beta,
-        g=g,
+        gk=g,
         A=A,
         dw=dw,
         du=dv,
@@ -194,7 +194,6 @@ def chunk_gdn2_bwd(
     )
     dk.add_(dk2)
     dg.add_(dg2)
-    dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens)
     return dq, dk, dv, db, dg, dh0
 
 
