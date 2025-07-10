@@ -65,9 +65,9 @@ def chunk_gdn2_fwd(
         cu_seqlens=cu_seqlens,
     )
 
-    # the intra Ak is kept in fp32
+    # the intra Aqk is kept in fp32
     # the computation has very marginal effect on the entire throughput
-    Ak = chunk_gla_fwd_intra_gk(
+    Aqk = chunk_gla_fwd_intra_gk(
         q=q,
         k=k,
         g=g,
@@ -79,13 +79,13 @@ def chunk_gdn2_fwd(
         q=q,
         v=v_new,
         g=g,
-        A=Ak,
+        A=Aqk,
         h=h,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
-    return g, o, A, final_state
+    return g, o, Aqk, A, final_state
 
 
 def chunk_gdn2_bwd(
@@ -94,6 +94,7 @@ def chunk_gdn2_bwd(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
+    Aqk: torch.Tensor,
     A: torch.Tensor,
     scale: float,
     initial_state: torch.Tensor,
@@ -120,19 +121,11 @@ def chunk_gdn2_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
     )
-    Ak = chunk_gla_fwd_intra_gk(
-        q=q,
-        k=k,
-        g=g,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
-    )
     dv = chunk_bwd_dv_local(
         q=q,
         k=k,
         do=do,
-        A=Ak,
+        A=Aqk,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
@@ -152,7 +145,7 @@ def chunk_gdn2_bwd(
     )
 
     # dq dk in fp32
-    dAk = chunk_gla_bwd_dA(
+    dAqk = chunk_gla_bwd_dA(
         v=v_new,
         do=do,
         scale=scale,
@@ -163,7 +156,7 @@ def chunk_gdn2_bwd(
         q=q,
         k=k,
         g=g,
-        dA=dAk,
+        dA=dAqk,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
@@ -223,7 +216,7 @@ class ChunkGDN2Function(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
 
-        g, o, A, final_state = chunk_gdn2_fwd(
+        g, o, Aqk, A, final_state = chunk_gdn2_fwd(
             q=q,
             k=k,
             v=v,
@@ -234,7 +227,7 @@ class ChunkGDN2Function(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, Aqk, A, initial_state, cu_seqlens)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
@@ -247,13 +240,14 @@ class ChunkGDN2Function(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, g, beta, Aqk, A, initial_state, cu_seqlens = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0 = chunk_gdn2_bwd(
             q=q,
             k=k,
             v=v,
             g=g,
             beta=beta,
+            Aqk=Aqk,
             A=A,
             scale=ctx.scale,
             initial_state=initial_state,
