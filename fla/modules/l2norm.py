@@ -91,9 +91,9 @@ def l2norm_fwd_kernel(
     eps,
     T: tl.constexpr,
     D: tl.constexpr,
-    BT: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
+    BT: tl.constexpr,
 ):
     i_t = tl.program_id(0)
     p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
@@ -125,9 +125,9 @@ def l2norm_bwd_kernel(
     eps,
     T: tl.constexpr,
     D: tl.constexpr,
-    BT: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
+    BT: tl.constexpr,
 ):
     i_t = tl.program_id(0)
     p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))

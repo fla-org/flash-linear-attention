@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 

@@ -34,6 +34,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_models_tests:
+        description: 'Whether to skip the models tests stage (default: false)'
+        required: false
+        type: boolean
+        default: false
 
 
 jobs:
@@ -208,7 +213,7 @@ jobs:
   test-models:
     runs-on: ${{ inputs.runner }}
     needs: test-ops
-    if: success() || failure()
+    if: (success() || failure()) && inputs.skip_models_tests == false
     env:
       FLA_CI_ENV: 1
 
