@@ -78,7 +78,7 @@ def test_solve_tril_varlen(
     # Construct the input. otherwise inverse's condition number might be too large to measure the error
     k = F.normalize(torch.randn((1, T, H, D), dtype=torch.bfloat16, device=device), dim=-1)
     beta = torch.randn((1, T, H), dtype=torch.bfloat16, device=device).sigmoid()
-    A = chunk_scaled_dot_kkt_fwd(k, beta, cu_seqlens=cu_seqlens, chunk_size=chunk_size)
+    A = chunk_scaled_dot_kkt_fwd(k=k, beta=beta, cu_seqlens=cu_seqlens, chunk_size=chunk_size)
 
     ref = torch.zeros_like(A)
     for i in range(len(cu_seqlens) - 1):

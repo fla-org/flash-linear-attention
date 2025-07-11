@@ -31,8 +31,11 @@ class PaTHAttention(nn.Module):
         num_kv_heads: Optional[int] = None,
         use_forget_gate: bool = False,
         use_qk_norm: bool = False,
-        use_w_shortconv: bool = True,
         layer_idx: int = None,
+        use_low_rank_w: bool = True,
+        use_w_shortconv: bool = True,
+        conv_size: int = 3,
+        conv_bias: bool = False,
     ):
         super().__init__()
 
@@ -52,7 +55,7 @@ class PaTHAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=False)
 
         # We use low-rank parameterization for the w_proj to reduce parameters in MHA settings.
-        if self.num_heads == self.num_kv_heads:
+        if use_low_rank_w:
             self.w_proj = nn.Sequential(
                 nn.Linear(self.hidden_size, 32, bias=False),
                 nn.Linear(32, self.kv_dim, bias=False)
@@ -62,6 +65,7 @@ class PaTHAttention(nn.Module):
         else:
             self.w_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=False)
 
+        # TODO: per head norm?
         if use_qk_norm:
             self.maybe_q_norm = RMSNorm(self.hidden_size)
             self.maybe_k_norm = RMSNorm(self.kv_dim)
@@ -70,7 +74,7 @@ class PaTHAttention(nn.Module):
             self.maybe_k_norm = nn.Identity()
 
         if use_w_shortconv:
-            self.w_conv1d = ShortConvolution(self.kv_dim, 3)
+            self.w_conv1d = ShortConvolution(hidden_size=self.kv_dim, kernel_size=conv_size, bias=conv_bias, activation='silu')
         self.use_w_shortconv = use_w_shortconv
         self.bt_proj = nn.Linear(self.hidden_size, self.num_kv_heads, bias=True)
         self.use_forget_gate = use_forget_gate
@@ -139,6 +143,7 @@ class PaTHAttention(nn.Module):
                 w = rearrange(w, '... (h d) -> ... h d', d=self.head_dim)
                 w = l2_norm(w)
 
+                @torch.compile
                 def rank_one_update(k, w, beta):
                     original_dtype = k.dtype
                     k = k.float()
@@ -187,6 +192,8 @@ class PaTHAttention(nn.Module):
                 _, cu_seqlens = cu_seqlens
                 if self.use_w_shortconv:
                     w, w_conv_state = self.w_conv1d(w, cache=None, output_final_state=use_cache, cu_seqlens=cu_seqlens)
+                else:
+                    w_conv_state = None
                 q = rearrange(q, '... (h d) -> ... h d', d=self.head_dim)
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)

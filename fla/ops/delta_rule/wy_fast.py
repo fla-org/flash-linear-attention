@@ -186,7 +186,6 @@ def prepare_wy_repr_fwd(
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
-        g_cumsum=None,
         cu_seqlens=cu_seqlens,
         chunk_size=64,
         output_dtype=torch.float32,

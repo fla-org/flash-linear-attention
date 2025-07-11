@@ -10,13 +10,12 @@ from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.delta_rule.chunk import chunk_delta_rule_bwd
 from fla.ops.delta_rule.wy_fast import recompute_w_u_fwd as dn_recompute_w_u_fwd
+from fla.ops.gated_delta_product.chunk_deltaproduct_h import chunk_gated_delta_product_fwd_h
+from fla.ops.gated_delta_product.chunk_deltaproduct_o import chunk_gated_delta_product_fwd_o
 from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd as gdn_recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
-
-from .chunk_deltaproduct_h import chunk_gated_delta_product_fwd_h
-from .chunk_deltaproduct_o import chunk_delta_product_fwd_o
 
 
 def chunk_gated_delta_product_fwd(
@@ -44,8 +43,8 @@ def chunk_gated_delta_product_fwd(
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
+        g=g_interleaved,
         beta=beta,
-        g_cumsum=g_interleaved,
         cu_seqlens=cu_seqlens_dp,
         output_dtype=torch.float32
     )
@@ -60,7 +59,7 @@ def chunk_gated_delta_product_fwd(
             v=v,
             beta=beta,
             A=A,
-            g_cumsum=g_interleaved,
+            g=g_interleaved,
             cu_seqlens=cu_seqlens_dp,
         )
     else:
@@ -81,7 +80,7 @@ def chunk_gated_delta_product_fwd(
         cu_seqlens=cu_seqlens_dp,
         num_householder=num_householder,
     )
-    o = chunk_delta_product_fwd_o(
+    o = chunk_gated_delta_product_fwd_o(
         q=q,
         k=k,
         v=v_new,
@@ -244,7 +243,7 @@ def chunk_gated_delta_product(
         >>> import torch
         >>> import torch.nn.functional as F
         >>> from einops import rearrange
-        >>> from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+        >>> from fla.ops.gated_delta_rule import chunk_gated_delta_product
         # inputs with equal lengths
         >>> B, T, H, K, V = 4, 2048, 4, 512, 512
         >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
@@ -253,7 +252,7 @@ def chunk_gated_delta_product(
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
-        >>> o, ht = chunk_gated_delta_rule(
+        >>> o, ht = chunk_gated_delta_product(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True
@@ -262,7 +261,7 @@ def chunk_gated_delta_product(
         >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o, ht = chunk_gated_delta_rule(
+        >>> o, ht = chunk_gated_delta_product(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True,
