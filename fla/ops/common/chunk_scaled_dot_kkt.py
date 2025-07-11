@@ -338,12 +338,15 @@ def chunk_scaled_dot_kkt_bwd_kernel_gk(
             p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k*BK), (BC, BK), (1, 0))
             p_dA = tl.make_block_ptr(dA, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
             p_b = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT + i_j * BC,), (BC,), (0,))
+
+            o_j = i_t * BT + i_j * BC + o_i
+            m_j = o_j < T
             # [BC]
             b_b = tl.load(p_b, boundary_check=(0,))
             # [BC, BK]
             b_kb = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32) * b_b[:, None]
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kbg = b_kb * exp(b_gk - b_gn[None, :])
+            b_kbg = b_kb * tl.where(m_j[:, None], exp(b_gk - b_gn[None, :]), 0)
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]
