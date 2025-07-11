@@ -63,7 +63,7 @@ class CombaBlock(nn.Module):
                 head_dim=config.head_dim,
                 num_heads=config.num_heads,
                 num_v_heads=config.num_v_heads,
-                use_gate=config.use_gate,
+                use_output_gate=config.use_output_gate,
                 use_short_conv=config.use_short_conv,
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,

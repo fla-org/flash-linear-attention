@@ -13,7 +13,7 @@ class GatedDeltaNetConfig(PretrainedConfig):
         self,
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
-        expand_v: int = 2,
+        expand_v: float = 2.0,
         use_gate: bool = True,
         use_short_conv: bool = True,
         allow_neg_eigval: bool = False,

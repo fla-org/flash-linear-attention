@@ -15,7 +15,7 @@ class RWKV6Config(PretrainedConfig):
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
         expand_k: float = 0.5,
-        expand_v: int = 1,
+        expand_v: float = 1.0,
         hidden_ratio: Optional[float] = 3.5,
         intermediate_size: Optional[int] = None,
         num_hidden_layers: int = 24,

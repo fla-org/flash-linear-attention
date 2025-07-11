@@ -20,7 +20,7 @@ class LinearAttention(nn.Module):
         mode: str = 'chunk',
         hidden_size: str = 1024,
         expand_k: float = 1.0,
-        expand_v: int = 1,
+        expand_v: float = 1.0,
         num_heads: int = 8,
         num_kv_heads: Optional[int] = None,
         feature_map: str = 'elementwise_product',

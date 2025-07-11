@@ -13,16 +13,16 @@ class CombaConfig(PretrainedConfig):
         self,
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
-        expand_v: int = 2,
-        use_gate: bool = True,
-        use_short_conv: bool = True,
-        use_output_correction: bool = True,
-        use_inner_decay: bool = True,
-        correction_factor: float = 1.,
         conv_size: int = 4,
         head_dim: int = 256,
         num_heads: int = 6,
         num_v_heads: Optional[int] = None,
+        expand_v: float = 2.0,
+        use_output_gate: bool = True,
+        use_short_conv: bool = True,
+        use_output_correction: bool = True,
+        use_inner_decay: bool = True,
+        correction_factor: float = 1.,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
@@ -45,16 +45,16 @@ class CombaConfig(PretrainedConfig):
     ):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
-        self.expand_v = expand_v
-        self.use_gate = use_gate
-        self.use_short_conv = use_short_conv
-        self.use_output_correction = use_output_correction
-        self.correction_factor = correction_factor
-        self.use_inner_decay = use_inner_decay
         self.conv_size = conv_size
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_v_heads = num_v_heads
+        self.expand_v = expand_v
+        self.use_output_gate = use_output_gate
+        self.use_short_conv = use_short_conv
+        self.use_output_correction = use_output_correction
+        self.correction_factor = correction_factor
+        self.use_inner_decay = use_inner_decay
         self.max_position_embeddings = max_position_embeddings
 
         self.hidden_ratio = hidden_ratio

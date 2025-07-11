@@ -36,7 +36,7 @@ class MesaNet(nn.Module):
             Which MesaNet kernel to use.
             Currently available: `chunk`.
             Default: `chunk`.
-        use_gate (bool, Optional):
+        use_output_gate (bool, Optional):
             Whether to use output gate. Default: `False`.
         conv_size (int):
             The kernel size of the short convolution. Default: 4.
@@ -58,7 +58,7 @@ class MesaNet(nn.Module):
         num_heads: int = 16,
         head_dim: int = 128,
         mode: str = 'chunk',
-        use_gate: bool = False,
+        use_output_gate: bool = False,
         use_short_conv: bool = True,
         conv_size: int = 4,
         conv_bias: bool = False,
@@ -73,7 +73,7 @@ class MesaNet(nn.Module):
 
         self.mode = mode
         self.hidden_size = hidden_size
-        self.use_gate = use_gate
+        self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
@@ -114,7 +114,7 @@ class MesaNet(nn.Module):
             bias=self.conv_bias,
             activation='silu',
         )
-        if use_gate:
+        if use_output_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
         else:
@@ -209,7 +209,7 @@ class MesaNet(nn.Module):
                 layer_idx=self.layer_idx,
                 offset=q_len
             )
-        if self.use_gate:
+        if self.use_output_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
         else:

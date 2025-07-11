@@ -57,7 +57,7 @@ class GatedDeltaProductBlock(nn.Module):
                 expand_v=config.expand_v,
                 head_dim=config.head_dim,
                 num_heads=config.num_heads,
-                use_gate=config.use_gate,
+                use_output_gate=config.use_output_gate,
                 use_forget_gate=config.use_forget_gate,
                 use_short_conv=config.use_short_conv,
                 conv_size=config.conv_size,

@@ -12,13 +12,13 @@ class GatedDeltaProductConfig(PretrainedConfig):
     def __init__(
         self,
         attn_mode: str = "chunk",
-        hidden_size: int = 2048,
-        expand_v: int = 2,
-        use_gate: bool = True,
-        use_short_conv: bool = True,
         conv_size: int = 4,
         head_dim: int = 256,
         num_heads: int = 6,
+        hidden_size: int = 2048,
+        expand_v: float = 2.0,
+        use_output_gate: bool = True,
+        use_short_conv: bool = True,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
@@ -43,13 +43,13 @@ class GatedDeltaProductConfig(PretrainedConfig):
         **kwargs,
     ):
         self.attn_mode = attn_mode
-        self.hidden_size = hidden_size
-        self.expand_v = expand_v
-        self.use_gate = use_gate
-        self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.head_dim = head_dim
         self.num_heads = num_heads
+        self.hidden_size = hidden_size
+        self.expand_v = expand_v
+        self.use_output_gate = use_output_gate
+        self.use_short_conv = use_short_conv
         self.max_position_embeddings = max_position_embeddings
 
         self.hidden_ratio = hidden_ratio

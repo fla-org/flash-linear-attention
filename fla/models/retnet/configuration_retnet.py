@@ -17,7 +17,7 @@ class RetNetConfig(PretrainedConfig):
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
         expand_k: float = 1.0,
-        expand_v: int = 2,
+        expand_v: float = 2.0,
         hidden_ratio: Optional[int] = 2,
         intermediate_size: Optional[int] = None,
         num_hidden_layers: int = 24,

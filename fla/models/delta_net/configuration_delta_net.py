@@ -15,7 +15,7 @@ class DeltaNetConfig(PretrainedConfig):
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
         expand_k: float = 1.0,
-        expand_v: int = 1,
+        expand_v: float = 1.0,
         use_gate: bool = False,
         use_short_conv: bool = True,
         conv_size: int = 4,

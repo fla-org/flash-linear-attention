@@ -13,7 +13,7 @@ class MesaNetConfig(PretrainedConfig):
         self,
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
-        use_gate: bool = False,
+        use_output_gate: bool = False,
         use_short_conv: bool = True,
         conv_size: int = 4,
         num_heads: int = 16,
@@ -43,7 +43,7 @@ class MesaNetConfig(PretrainedConfig):
     ):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
-        self.use_gate = use_gate
+        self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.num_heads = num_heads
