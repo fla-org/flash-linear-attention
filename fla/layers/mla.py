@@ -100,12 +100,11 @@ class MultiheadLatentAttention(nn.Module):
         else:
             self.q_proj = nn.Linear(hidden_size, self.num_heads * self.qk_head_dim, bias=False)
 
-        self.kv_a_proj_with_mqa = nn.Linear(hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, bias=False)
-        self.kv_a_norm = RMSNorm(self.kv_lora_rank)
-        self.kv_b_proj = nn.Linear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False
+        self.k_rope = nn.Linear(hidden_size, self.qk_rope_head_dim, bias=False)
+        self.kv_proj = nn.Sequential(
+            nn.Linear(hidden_size, self.kv_lora_rank, bias=False),
+            RMSNorm(self.kv_lora_rank),
+            nn.Linear(self.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim), bias=False)
         )
 
         self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, hidden_size, bias=False)
@@ -143,12 +142,9 @@ class MultiheadLatentAttention(nn.Module):
         q_states = self.q_proj(hidden_states)
         q_states = rearrange(q_states, '... (h d) -> ... h d', d=self.qk_head_dim)
         q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        k_pass, k_rot = self.kv_proj(hidden_states), self.k_rope(hidden_states)
 
-        compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
-        k_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        # squeeze as 1 head for rotary embedding
         k_rot = rearrange(k_rot, 'b t d -> b t 1 d')
-        k_pass = self.kv_b_proj(self.kv_a_norm(k_pass))
         k_pass = rearrange(k_pass, '... (h d) -> ... h d', d=self.qk_nope_head_dim + self.v_head_dim)
         k_pass, v = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
