@@ -183,6 +183,7 @@ class MesaNet(nn.Module):
                 g=g,
                 beta=beta,
                 lamb=lamb,
+                output_final_state=use_cache,
                 max_CG_iteration=self.max_cg_step_training,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
