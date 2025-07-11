@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp, safe_exp
+from fla.ops.utils.op import exp
 
 
 @triton.heuristics({
@@ -54,6 +54,9 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+
     # offset calculation
     q_star += (bos * H + i_h) * V
     dq += (bos * H + i_h) * V
@@ -77,7 +80,7 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_g = tl.load(p_g, boundary_check=(0,))
     b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * H)
-    b_gk = safe_exp(b_g_last - b_g)
+    b_gk = tl.where(m_t, exp(b_g_last - b_g), 0)
 
     p_q_star = tl.make_block_ptr(q_star, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     b_q_star = tl.load(p_q_star, boundary_check=(0, 1))
@@ -95,8 +98,7 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     b_v = tl.load(p_k, boundary_check=(0, 1))
     b_k = (b_v * b_beta[:, None]).to(b_v.dtype)
 
-    o_t = tl.arange(0, BT)
-    b_m = tl.where(o_t[:, None] >= o_t[None, :], safe_exp(b_g[:, None] - b_g[None, :]), 0.)
+    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp(b_g[:, None] - b_g[None, :]), 0)
     b_s = tl.dot(b_q_star, tl.trans(b_k)) * b_m
     b_ds = tl.dot(b_dq, tl.trans(b_v))
     b_dv += tl.dot(tl.trans(b_s.to(b_dq.dtype)), b_dq)
@@ -124,7 +126,7 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
     b_dk = b_dk * b_beta[:, None] + b_dv
     b_dk = -b_dk
 
-    b_dg = tl.where(o_t < min(BT, T-i_t*BT) - 1, b_dg, b_dg + b_dg_last)
+    b_dg = tl.where(o_t < min(i_t * BT + BT, T) - 1, b_dg, b_dg + b_dg_last)
     p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     p_dg = tl.make_block_ptr(dg, (T,), (H,), (i_t * BT,), (BT,), (0,))

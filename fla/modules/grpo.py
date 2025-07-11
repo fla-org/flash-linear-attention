@@ -55,14 +55,16 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import input_guard
+from fla.utils import input_guard, is_amd
+
+NUM_WARPS_AUTOTUNE = [4, 8, 16] if is_amd else [4, 8, 16, 32]
 
 
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE': BLOCK_SIZE},  num_warps=NUM_WARPS, num_stages=NUM_STAGES)
         for BLOCK_SIZE in [1024, 2048, 4096, 8192]
-        for NUM_WARPS in [8, 16, 32]
+        for NUM_WARPS in NUM_WARPS_AUTOTUNE
         for NUM_STAGES in [1, 2, 4]
     ],
     key=['B', 'N']

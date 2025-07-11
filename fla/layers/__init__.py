@@ -20,6 +20,7 @@ from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mesa_net import MesaNet
 from .mom_varlen import MomGatedDeltaNet
+from .mla import MultiheadLatentAttention
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
 from .path_attn import PaTHAttention
@@ -47,13 +48,14 @@ __all__ = [
     'Mamba',
     'Mamba2',
     'MomGatedDeltaNet',
+    'MesaNet',
+    'MultiheadLatentAttention',
     'MultiScaleRetention',
     'NativeSparseAttention',
+    'PaTHAttention',
     'ReBasedLinearAttention',
+    'RodimusAttention',
     'RWKV6Attention',
     'RWKV7Attention',
-    'RodimusAttention',
     'SlidingWindowSharedKeyAttention',
-    'PaTHAttention',
-    'MesaNet',
 ]

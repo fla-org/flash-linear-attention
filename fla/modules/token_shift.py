@@ -6,7 +6,9 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import input_guard, tensor_cache
+from fla.utils import input_guard, is_amd, tensor_cache
+
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
 
 def token_shift_ref(
@@ -51,8 +53,8 @@ def token_shift_ref(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
-        for num_stages in [1, 2, 3, 4]
+        for num_warps in NUM_WARPS_AUTOTUNE
+        for num_stages in [1, 2, 3]
     ],
     key=['BD'],
 )
@@ -112,10 +114,10 @@ def token_shift_fwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
-        for num_stages in [1, 2, 3, 4]
+        for num_warps in NUM_WARPS_AUTOTUNE
+        for num_stages in [1, 2, 3]
     ],
-    key=['D'],
+    key=['BD'],
 )
 @triton.jit
 def token_shift_bwd_kernel(

@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import sys
 from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
+from packaging.version import Version
 
-from fla.utils import check_pytorch_version, input_guard, use_cuda_graph
+from fla.utils import check_pytorch_version, input_guard, is_amd, use_cuda_graph
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +17,26 @@ if not check_pytorch_version('2.4'):
     logger.warning('PyTorch < 2.4 detected - computations may be slower due to lack of optimizations')
 
 
+def identity_decorator(fn):
+    return fn
+
+
+current_python_version = Version(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+min_torch_compile_version = Version("3.11")
+
+if current_python_version >= min_torch_compile_version:
+    torch_compile = torch.compile(fullgraph=True)
+else:
+    logger.warning('torch.compile is not available in Python 3.10, using identity decorator instead')
+    torch_compile = identity_decorator
+
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
+
+
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
     use_cuda_graph=use_cuda_graph,
@@ -77,7 +95,7 @@ def fused_addcmul_fwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
     use_cuda_graph=use_cuda_graph,
@@ -162,7 +180,7 @@ def addcmul_bwd1(d_xr, d_xw, d_xk, d_xv, d_xa, d_xg,
     return g_hiddn, g_delta
 
 
-@torch.compile(fullgraph=True)
+@torch_compile
 def addcmul_bwd2(d_oxr, d_xw, d_xk, d_xv, d_xa, d_xg, delta, use_xg: bool):
     g_xr = (d_oxr * delta).sum(dim=(0, 1), keepdim=True)
     g_xw = (d_xw * delta).sum(dim=(0, 1), keepdim=True)

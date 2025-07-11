@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from fla import __version__
 
-COMPILER_MODE = os.getenv("FLA_COMPILER_MODE") == "1"
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 
 
@@ -77,7 +76,7 @@ def get_err_ratio(x, y):
 
 def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
     abs_atol = get_abs_err(ref, tri)
-    msg = f"{prefix} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
+    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
     logger.info(msg)
     error_rate = get_err_ratio(ref, tri)
     if abs_atol <= err_atol:
@@ -357,8 +356,11 @@ def get_multiprocessor_count(tensor_idx: int = 0) -> int:
     try:
         return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
     except BaseException:
-        _cpu_device_warning()
-        return -1
+        # Maybe we use a NPU device.
+        if triton.runtime.driver.active.get_current_target().backend == 'npu':
+            return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['num_vectorcore']
+        else:
+            return 1
 
 
 @lru_cache(maxsize=None)
@@ -371,7 +373,7 @@ def get_available_device() -> str:
 
 
 @lru_cache(maxsize=None)
-def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa']:
+def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa', 'npu']:
     device = get_available_device()
     if device == 'cuda':
         return 'nvidia'

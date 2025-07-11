@@ -73,6 +73,9 @@ class GatedDeltaNet(nn.Module):
             Whether to use output gate. Default: `True`.
         use_short_conv (bool, Optional):
             Whether to use short convolutions. Default: `True`.
+        allow_neg_eigval (bool, Optional):
+            Allow negative eigenvalues. Default: `False`. If set to `True`, the beta will be multiplied by 2.
+            See reference: [Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues](https://arxiv.org/abs/2411.12537)
         conv_size (int, Optional):
             The kernel size of the short convolution, only used when `use_short_conv` is `True`. Default: 4.
         conv_bias (bool, Optional):
@@ -93,6 +96,7 @@ class GatedDeltaNet(nn.Module):
         mode: str = 'chunk',
         use_gate: bool = True,
         use_short_conv: bool = True,
+        allow_neg_eigval: bool = False,
         conv_size: int = 4,
         conv_bias: bool = False,
         layer_idx: int = None,
@@ -102,7 +106,7 @@ class GatedDeltaNet(nn.Module):
         super().__init__()
 
         self.mode = mode
-
+        self.allow_neg_eigval = allow_neg_eigval
         self.hidden_size = hidden_size
         self.expand_v = expand_v
 
@@ -137,7 +141,7 @@ class GatedDeltaNet(nn.Module):
                 f"expand_v={expand_v} does not produce an integer value when multiplied by head_dim={head_dim}. "
                 f"Resulting head_v_dim would be {head_dim * expand_v}, which is invalid for FusedRMSNormGated."
             )
-        assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
@@ -261,6 +265,9 @@ class GatedDeltaNet(nn.Module):
             q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
 
         beta = self.b_proj(hidden_states).sigmoid()
+        if self.allow_neg_eigval:
+            beta = beta * 2.
+
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None

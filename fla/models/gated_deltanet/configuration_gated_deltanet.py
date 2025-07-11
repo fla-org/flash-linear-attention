@@ -13,9 +13,10 @@ class GatedDeltaNetConfig(PretrainedConfig):
         self,
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
-        expand_v: int = 2,
+        expand_v: float = 2.0,
         use_gate: bool = True,
         use_short_conv: bool = True,
+        allow_neg_eigval: bool = False,
         conv_size: int = 4,
         head_dim: int = 256,
         num_heads: int = 6,
@@ -28,7 +29,7 @@ class GatedDeltaNetConfig(PretrainedConfig):
         norm_eps: float = 1e-6,
         attn: Optional[Dict] = None,
         use_cache: bool = True,
-        pad_token_id: int = None,
+        pad_token_id: Optional[int] = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
@@ -65,6 +66,7 @@ class GatedDeltaNetConfig(PretrainedConfig):
         self.fuse_cross_entropy = fuse_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.allow_neg_eigval = allow_neg_eigval
 
         if attn is not None:
             if not isinstance(attn, Dict):

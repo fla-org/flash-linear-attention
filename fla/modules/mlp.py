@@ -9,10 +9,15 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 import torch.nn as nn
 from torch.distributed import DeviceMesh
-from torch.distributed.tensor import DTensor, Placement, Replicate, Shard, distribute_module
+from torch.distributed.tensor import Placement, Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.modules.activations import swiglu, swiglu_linear
+
+try:
+    from torch.distributed.tensor import DTensor
+except (ImportError, AttributeError):
+    DTensor = None
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack

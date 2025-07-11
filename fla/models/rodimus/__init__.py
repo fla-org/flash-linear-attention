@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
 from fla.models.rodimus.configuration_rodimus import RodimusConfig
 from fla.models.rodimus.modeling_rodimus import RodimusForCausalLM, RodimusModel
-from fla.models.rodimus.tokenization_rodimus_fast import RodimusTokenizer
 
-AutoConfig.register(RodimusConfig.model_type, RodimusConfig)
-AutoModel.register(RodimusConfig, RodimusModel)
-AutoModelForCausalLM.register(RodimusConfig, RodimusForCausalLM)
-AutoTokenizer.register(RodimusConfig, slow_tokenizer_class=None, fast_tokenizer_class=RodimusTokenizer)
+AutoConfig.register(RodimusConfig.model_type, RodimusConfig, exist_ok=True)
+AutoModel.register(RodimusConfig, RodimusModel, exist_ok=True)
+AutoModelForCausalLM.register(RodimusConfig, RodimusForCausalLM, exist_ok=True)
 
 
-__all__ = ['RodimusConfig', 'RodimusForCausalLM', 'RodimusModel', 'RodimusTokenizer']
+__all__ = ['RodimusConfig', 'RodimusForCausalLM', 'RodimusModel']

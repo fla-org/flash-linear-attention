@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 import triton
@@ -43,8 +45,36 @@ def prepare_lens_from_mask(mask: torch.BoolTensor) -> torch.LongTensor:
 
 
 @tensor_cache
-def prepare_cu_seqlens_from_mask(mask: torch.BoolTensor, out_dtype: torch.dtype = torch.int32) -> torch.LongTensor:
-    return F.pad(prepare_lens_from_mask(mask).cumsum(dim=0, dtype=out_dtype), (1, 0))
+def prepare_cu_seqlens_from_mask(
+    mask: torch.BoolTensor,
+    dtype: Optional[torch.dtype] = torch.int32
+) -> torch.LongTensor:
+    return F.pad(prepare_lens_from_mask(mask).cumsum(dim=0, dtype=dtype), (1, 0))
+
+
+@tensor_cache
+def prepare_split_cu_seqlens(
+    batch_size: int,
+    seq_len: int,
+    split_size: int,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    dtype: Optional[torch.dtype] = torch.int32,
+    device: Optional[torch.device] = torch.device('cpu')
+) -> torch.LongTensor:
+    if cu_seqlens is None:
+        total_tokens = batch_size * seq_len
+        cu_seqlens = list(range(0, total_tokens, seq_len)) + [total_tokens]
+    else:
+        cu_seqlens = cu_seqlens.tolist()
+    return torch.tensor(
+        [
+            i
+            for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:])
+            for i in range(bos, eos, split_size)
+        ] + [cu_seqlens[-1]],
+        dtype=dtype,
+        device=device
+    )
 
 
 @tensor_cache

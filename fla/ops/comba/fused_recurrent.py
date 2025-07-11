@@ -20,8 +20,8 @@ from fla.utils import input_guard
 def fused_recurrent_comba_fwd_kernel(
     q,
     k,
-    v,
     p,
+    v,
     g,
     beta,
     o,
@@ -84,8 +84,9 @@ def fused_recurrent_comba_fwd_kernel(
         b_g = tl.load(p_g).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
-            b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
+            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+            b_p = b_p / tl.sqrt(tl.sum(b_p * b_p) + 1e-6)
         b_q = b_q * scale
         # [BV]
         b_v -= tl.sum(b_h * b_p[:, None], 0)
@@ -147,8 +148,8 @@ def fused_recurrent_comba_fwd(
     fused_recurrent_comba_fwd_kernel[grid](
         q=q,
         k=k,
-        v=v,
         p=p,
+        v=v,
         g=g,
         beta=beta,
         o=o,
@@ -173,7 +174,7 @@ def fused_recurrent_comba_fwd(
     return o, final_state
 
 
-class FusedRecurrentFunction(torch.autograd.Function):
+class FusedRecurrentCombaFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
@@ -181,21 +182,21 @@ class FusedRecurrentFunction(torch.autograd.Function):
         ctx,
         q: torch.Tensor,
         k: torch.Tensor,
-        v: torch.Tensor,
         p: torch.Tensor,
+        v: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
-        use_qk_l2norm_in_kernel: bool = False
     ):
         o, final_state = fused_recurrent_comba_fwd(
             q=q,
             k=k,
-            v=v,
             p=p,
+            v=v,
             g=g,
             beta=beta,
             scale=scale,
@@ -220,15 +221,15 @@ class FusedRecurrentFunction(torch.autograd.Function):
 def fused_recurrent_comba(
     q: torch.Tensor,
     k: torch.Tensor,
+    p: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor = None,
-    p: torch.Tensor = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -236,11 +237,11 @@ def fused_recurrent_comba(
             queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
+        p (torch.Tensor):
+            auxiliary keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, HV, V]`.
             GVA is applied if `HV > H`.
-        p (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
         g (torch.Tensor):
             g (decays) of shape `[B, T, HV]`.
         beta (torch.Tensor):
@@ -254,6 +255,9 @@ def fused_recurrent_comba(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
+        use_qk_l2norm_in_kernel (Optional[bool]):
+            Whether to use qk l2norm within the kernel for saving GPU memory.
+            Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -268,7 +272,7 @@ def fused_recurrent_comba(
         >>> import torch
         >>> import torch.nn.functional as F
         >>> from einops import rearrange
-        >>> from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
+        >>> from fla.ops.comba import fused_recurrent_comba
         # inputs with equal lengths
         >>> B, T, H, HV, K, V = 4, 2048, 4, 8, 512, 512
         >>> q = torch.randn(B, T, H, K, device='cuda')
@@ -279,17 +283,17 @@ def fused_recurrent_comba(
         >>> g = F.logsigmoid(torch.rand(B, T, HV, device='cuda'))
         >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
         >>> h0 = torch.randn(B, HV, K, V, device='cuda')
-        >>> o, ht = fused_gated_recurrent_delta_rule(
+        >>> o, ht = fused_recurrent_comba(
             q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True
         )
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
-        >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))
+        >>> q, k, v, p, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, p, g, beta))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = fused_gated_recurrent_delta_rule(
-            q, k, v, g, beta,
+        >>> o_var, ht_var = fused_recurrent_comba(
+            q, k, p, v, g, beta,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
@@ -308,23 +312,21 @@ def fused_recurrent_comba(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
     if beta is None:
         beta = torch.ones_like(q[..., 0])
     if p is None:
         p = k
-    o, final_state = FusedRecurrentFunction.apply(
+    o, final_state = FusedRecurrentCombaFunction.apply(
         q,
         k,
-        v,
         p,
+        v,
         g,
         beta,
         scale,
         initial_state,
         output_final_state,
+        use_qk_l2norm_in_kernel,
         cu_seqlens,
-        use_qk_l2norm_in_kernel
     )
     return o, final_state

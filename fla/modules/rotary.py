@@ -10,7 +10,9 @@ import triton.language as tl
 from einops import rearrange, repeat
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils import get_multiprocessor_count, input_guard, is_amd
+
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
 
 def rotate_half(x, interleaved=False):
@@ -33,7 +35,7 @@ def rotary_embedding_ref(x, cos, sin, interleaved=False):
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3, 4]
     ],
     key=['B', 'H', 'D', 'INTERLEAVED'],
@@ -161,7 +163,7 @@ def rotary_embedding_fwdbwd(
     R2 = R * 2
 
     assert D <= 256, "Only support D <= 256"
-    assert TR >= T, "TR must be >= T"
+    assert TR >= T, f"TR must be >= T, got {TR} and {T}"
 
     assert cos.dtype == sin.dtype, f"cos and sin must have the same dtype, got {cos.dtype} and {sin.dtype}"
     assert x.dtype == cos.dtype, f"Input and cos/sin must have the same dtype, got {x.dtype} and {cos.dtype}"

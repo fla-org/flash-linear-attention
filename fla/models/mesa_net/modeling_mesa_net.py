@@ -55,7 +55,7 @@ class MesaNetBlock(nn.Module):
                 hidden_size=config.hidden_size,
                 num_heads=config.num_heads,
                 head_dim=config.head_dim,
-                use_gate=config.use_gate,
+                use_output_gate=config.use_output_gate,
                 use_short_conv=config.use_short_conv,
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,
@@ -120,7 +120,7 @@ class MesaNetPreTrainedModel(PreTrainedModel):
     def _init_weights(
         self,
         module: nn.Module,
-        prenorm_residual_strategy: Optional[str] = 'rescale',
+        prenorm_residual_strategy: Optional[str] = None,
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, (nn.Linear, nn.Conv1d)):

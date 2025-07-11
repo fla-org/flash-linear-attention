@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Yu Zhang, Songlin Yang
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from typing import Optional, Tuple
 
@@ -45,7 +45,7 @@ def chunk_linear_attn(
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`
+            Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`.
     """
 
     if head_first:
@@ -68,7 +68,6 @@ def chunk_linear_attn(
         k=k,
         v=v,
         scale=scale,
-        g=None,
         initial_state=initial_state,
         output_final_state=output_final_state
     )

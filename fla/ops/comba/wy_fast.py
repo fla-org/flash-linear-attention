@@ -7,8 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.comba.utils import safe_exp_comba
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem
 
 
@@ -51,7 +51,8 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-    o_t = tl.arange(0, BT)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
 
     p_beta = tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_beta = tl.load(p_beta, boundary_check=(0,))
@@ -63,17 +64,17 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_p = tl.load(p_p, boundary_check=(0, 1))
         b_pb = b_p * b_beta[:, None]
-        b_A += tl.dot(b_pb.to(b_p.dtype), tl.trans(b_k))
+        b_A += tl.dot(b_pb.to(b_k.dtype), tl.trans(b_k))
 
     if USE_G:
         p_g0 = tl.make_block_ptr(g0 + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         p_g = tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g0 = tl.load(p_g0, boundary_check=(0,))
         b_g = tl.load(p_g, boundary_check=(0,))
-        b_g_diff = b_g0[:, None] - b_g[None, :]
-        b_A = b_A * safe_exp_comba(b_g_diff)
+        b_A = b_A * exp(b_g0[:, None] - b_g[None, :])
 
-    b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
+    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+    b_A = tl.where(m_A, b_A, 0)
     p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
@@ -94,6 +95,8 @@ def chunk_scaled_dot_comba_pkt_fwd(
     Args:
         k (torch.Tensor):
             The key tensor of shape `[B, T, H, K]`.
+        p (torch.Tensor):
+            The auxiliary key tensor of shape `[B, T, H, K]`.
         beta (torch.Tensor):
             The beta tensor of shape `[B, T, H]`.
         g0 (torch.Tensor):
@@ -225,12 +228,13 @@ def prepare_wy_repr_bwd_kernel(
         b_dbeta += tl.sum(b_dv_beta * b_v, 1)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
-    b_dA = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], b_dA, 0)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+    b_dA = tl.where(m_A, b_dA, 0)
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
-    b_dA = tl.where(tl.arange(0, BT)[:, None] > tl.arange(0, BT)[None, :], -b_dA, 0).to(k.dtype.element_ty)
-
-    b_dA *= safe_exp_comba(b_g0[:, None] - b_g[None, :])
+    b_dA = tl.where(m_A, -b_dA * exp(b_g0[:, None] - b_g[None, :]), 0).to(k.dtype.element_ty)
     b_dA = b_dA.to(k.dtype.element_ty)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
@@ -417,8 +421,3 @@ def prepare_wy_repr_bwd(
         BV=BV,
     )
     return dk, dv, dp, dbeta, dg0, dg
-
-
-bwd_prepare_wy_repr = prepare_wy_repr_bwd
-
-fwd_recompute_w_u = recompute_w_u_fwd

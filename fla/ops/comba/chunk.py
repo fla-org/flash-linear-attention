@@ -173,17 +173,15 @@ class ChunkCombaFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
-        use_qk_l2norm_in_kernel: bool = False
     ):
-        q_orig = q
-        k_orig = k
-        p_orig = p
-
         if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
-            p = l2norm_fwd(p)
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
+            p, p_rstd = l2norm_fwd(p)
+        else:
+            q_rstd, k_rstd, p_rstd = None, None, None
 
         g0, g, o, A, final_state = chunk_comba_fwd(
             q=q,
@@ -197,7 +195,7 @@ class ChunkCombaFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
-        ctx.save_for_backward(q_orig, k_orig, v, p_orig, g0, g, beta, A, initial_state, cu_seqlens)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, p, p_rstd, v, g0, g, beta, A, initial_state, cu_seqlens)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
@@ -210,11 +208,7 @@ class ChunkCombaFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, k, v, p, g0, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
-        if ctx.use_qk_l2norm_in_kernel:
-            q, q_orig = l2norm_fwd(q), q
-            k, k_orig = l2norm_fwd(k), k
-            p, p_orig = l2norm_fwd(p), p
+        q, q_rstd, k, k_rstd, p, p_rstd, v, g0, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
         dq, dk, dv, dp, db, dg, dh0 = chunk_comba_bwd(
             q=q,
             k=k,
@@ -231,9 +225,9 @@ class ChunkCombaFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
         )
         if ctx.use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q_orig, dq)
-            dk = l2norm_bwd(k_orig, dk)
-            dp = l2norm_bwd(p_orig, dp)
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
+            dp = l2norm_bwd(p, p_rstd, dp)
         return dq.to(q), dk.to(k), dv.to(v), dp.to(p), dg.to(g), db.to(beta), None, dh0, None, None, None
 
 
@@ -248,8 +242,8 @@ def chunk_comba(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    use_qk_l2norm_in_kernel: bool = False
 ):
     r"""
     Args:
@@ -260,7 +254,7 @@ def chunk_comba(
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         p (torch.Tensor):
-            values of shape `[B, T, H, K]`.
+            auxiliary keys of shape `[B, T, H, K]`.
         g (torch.Tensor):
             (forget) gating tensor (in log space!) of shape `[B, T, H]`.
         beta (torch.Tensor):
@@ -274,6 +268,8 @@ def chunk_comba(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+        use_qk_l2norm_in_kernel (bool):
+            Whether to apply L2norm to the q/k tensor internally. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -299,7 +295,7 @@ def chunk_comba(
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
-        >>> o, ht = chunk_gated_delta_rule(
+        >>> o, ht = chunk_comba(
             q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True
@@ -308,8 +304,8 @@ def chunk_comba(
         >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = chunk_gated_delta_rule(
-            q, k, v, g, beta,
+        >>> o_var, ht_var = chunk_comba(
+            q, k, v, p, g, beta,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
@@ -340,7 +336,7 @@ def chunk_comba(
         scale,
         initial_state,
         output_final_state,
+        use_qk_l2norm_in_kernel,
         cu_seqlens,
-        use_qk_l2norm_in_kernel
     )
     return o, final_state

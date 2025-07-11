@@ -43,23 +43,19 @@ def benchmark(T, provider):
     requires_grad = True
     B, H, D = 16, 8, 128
 
-    if provider == 'flash':
+    if "based" in provider:
+        q = torch.randn(B, T, H, 16, device=device, requires_grad=requires_grad, dtype=dtype)
+        k = torch.randn(B, T, H, 16, device=device, requires_grad=requires_grad, dtype=dtype)
+        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    elif "gla" in provider:
         q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
         k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
         v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
-    elif "based" in provider:
-        q = torch.randn(B, H, T, 16, device=device, requires_grad=requires_grad, dtype=dtype)
-        k = torch.randn(B, H, T, 16, device=device, requires_grad=requires_grad, dtype=dtype)
-        v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-    elif "gla" in provider:
-        q = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        k = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        g = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        g = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
     else:
-        q = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        k = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-        v = torch.randn(B, H, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        q = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        k = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
+        v = torch.randn(B, T, H, D, device=device, requires_grad=requires_grad, dtype=dtype)
 
     do = torch.rand_like(v, dtype=dtype)
 
@@ -68,13 +64,13 @@ def benchmark(T, provider):
     if provider == 'flash':
         results = triton.testing.do_bench(lambda: flash_attn_func(q, k, v).backward(do), quantiles=quantiles)
     elif provider == 'retention_parallel':
-        results = triton.testing.do_bench(lambda: parallel_retention(q, k, v).backward(do), quantiles=quantiles)
+        results = triton.testing.do_bench(lambda: parallel_retention(q, k, v)[0].backward(do), quantiles=quantiles)
     elif provider == 'retention_fused_chunk':
-        results = triton.testing.do_bench(lambda: fused_chunk_retention(q, k, v).backward(do), quantiles=quantiles)
+        results = triton.testing.do_bench(lambda: fused_chunk_retention(q, k, v)[0].backward(do), quantiles=quantiles)
     elif provider == 'based_parallel':
         results = triton.testing.do_bench(lambda: parallel_based(q, k, v).backward(do), quantiles=quantiles)
     elif provider == 'gla_fused_chunk':
-        results = triton.testing.do_bench(lambda: fused_chunk_gla(q, k, v, g).backward(do), quantiles=quantiles)
+        results = triton.testing.do_bench(lambda: fused_chunk_gla(q, k, v, g)[0].backward(do), quantiles=quantiles)
 
     return results
 

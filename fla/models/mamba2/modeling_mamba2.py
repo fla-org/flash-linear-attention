@@ -29,6 +29,11 @@ from fla.models.mamba2.configuration_mamba2 import Mamba2Config
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
 
+try:
+    from torch.distributed.tensor import DTensor
+except (ImportError, AttributeError):
+    DTensor = None
+
 logger = logging.get_logger(__name__)
 
 
@@ -169,7 +174,7 @@ class Mamba2Block(nn.Module):
         return hidden_states
 
 
-class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
+class Mamba2PreTrainedModel(PreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
@@ -192,7 +197,7 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
             # --- A_log ---
             A = torch.arange(1, module.num_heads + 1)
             with torch.no_grad():
-                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                if not isinstance(module.A_log, DTensor):
                     module.A_log.copy_(torch.log(A))
                 else:
                     logger.warning_once("`A_log` is a DTensor, skipping initialization")
@@ -212,7 +217,7 @@ class Mamba2PreTrainedModel(PreTrainedModel, GenerationMixin):
             # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
-                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                if not isinstance(module.dt_bias, DTensor):
                     module.dt_bias.copy_(inv_dt)
                 else:
                     logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
@@ -422,7 +427,7 @@ class Mamba2Model(Mamba2PreTrainedModel):
         )
 
 
-class Mamba2ForCausalLM(Mamba2PreTrainedModel):
+class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = []
 
     def __init__(self, config):

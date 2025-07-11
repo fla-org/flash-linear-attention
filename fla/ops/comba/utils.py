@@ -5,7 +5,6 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.ops.utils.op import exp
 
 
 @triton.heuristics({
@@ -16,7 +15,7 @@ from fla.ops.utils.op import exp
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['B', 'H', 'BT', 'IS_VARLEN', 'REVERSE']
+    key=['B', 'H', 'BT', 'IS_VARLEN']
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_comba_cumsum_scalar_fwd_kernel(
@@ -26,6 +25,7 @@ def chunk_comba_cumsum_scalar_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
+    B: tl.constexpr,
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -80,6 +80,7 @@ def chunk_comba_cumsum_scalar_fwd(
         cu_seqlens,
         chunk_indices,
         T=T,
+        B=B,
         H=H,
         BT=BT,
         HEAD_FIRST=head_first
@@ -95,7 +96,7 @@ def chunk_comba_cumsum_scalar_fwd(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['B', 'H', 'BT', 'IS_VARLEN', 'REVERSE']
+    key=['B', 'H', 'BT', 'IS_VARLEN']
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_comba_cumsum_scalar_bwd_kernel(
@@ -104,6 +105,7 @@ def chunk_comba_cumsum_scalar_bwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
+    B: tl.constexpr,
     H: tl.constexpr,
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -126,11 +128,11 @@ def chunk_comba_cumsum_scalar_bwd_kernel(
         p_dgr = tl.make_block_ptr(dgr + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     # [BT]
     """
-    b_dg: 1,2,3,4
-    b_dg0: 0,1,2,3
+    b_dg:   1,2,3,4
+    b_dg0:  0,1,2,3
     b_temp: 0,1,3,6
-    b_dz: 6
-    b_dgr: 6,5,3,0
+    b_dz:   6
+    b_dgr:  6,5,3,0
     """
     b_dg0 = tl.load(p_dg0, boundary_check=(0,)).to(tl.float32)
     b_temp = tl.cumsum(b_dg0, axis=0)
@@ -162,13 +164,9 @@ def chunk_comba_cumsum_scalar_bwd(
         cu_seqlens,
         chunk_indices,
         T=T,
+        B=B,
         H=H,
         BT=BT,
         HEAD_FIRST=head_first,
     )
     return dg
-
-
-@triton.jit
-def safe_exp_comba(x):
-    return exp(tl.where(x <= 1e-5, x, float('-inf')))

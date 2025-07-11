@@ -9,7 +9,9 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, gather
-from fla.utils import is_gather_supported, use_cuda_graph
+from fla.utils import is_amd, is_gather_supported, use_cuda_graph
+
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
 
 @triton.heuristics({
@@ -18,7 +20,7 @@ from fla.utils import is_gather_supported, use_cuda_graph
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3, 4]
     ],
     key=['BK', 'BT'],

@@ -35,6 +35,7 @@ def chunk_fwd_kernel_h(
     v,
     h,
     g,
+    g_gamma,
     gk,
     gv,
     h0,
@@ -50,6 +51,7 @@ def chunk_fwd_kernel_h(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
@@ -61,14 +63,18 @@ def chunk_fwd_kernel_h(
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
-        NT = tl.cdiv(T, BT)
-        NS = tl.cdiv(T, BS)
+        NT, NS = tl.cdiv(T, BT), tl.cdiv(T, BS)
         boh = tl.load(split_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_n * T, i_n * T + T
-        NT = tl.cdiv(T, BT)
-        NS = tl.cdiv(T, BS)
+        NT, NS = tl.cdiv(T, BT), tl.cdiv(T, BS)
         boh = i_n * NS
+    NTS = BS // BT
+
+    if USE_G_GAMMA:
+        # decay rate given the head index
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (tl.arange(0, BT) + 1)
 
     # [BK, BV]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -77,14 +83,14 @@ def chunk_fwd_kernel_h(
         b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
 
     for i_t in range(NT):
-        i_s = i_t // (BS // BT)
+        i_s = i_t // NTS
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
         o_h = ((boh + i_s) * H + i_h).to(tl.int64) * K*V
         p_h = tl.make_block_ptr(h + o_h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
 
-        if i_t % (BS // BT) == 0:
+        if i_t % NTS == 0:
             tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
         # [BK, BT]
         b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -96,8 +102,13 @@ def chunk_fwd_kernel_h(
         if USE_G:
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = g + bos*H + (i_t * BT + tl.arange(0, BT)) * H + i_h
-            b_h *= exp(b_g_last)
             b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
+            b_h *= exp(b_g_last)
+            b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
+
+        if USE_G_GAMMA:
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_h *= exp(b_g_last)
             b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         # vector decay, h = Diag(gk) @ h
@@ -148,6 +159,7 @@ def chunk_fwd_kernel_h(
 def chunk_bwd_kernel_dh(
     q,
     g,
+    g_gamma,
     gk,
     gv,
     do,
@@ -168,6 +180,7 @@ def chunk_bwd_kernel_dh(
     BV: tl.constexpr,
     NG: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_G_GAMMA: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
@@ -188,6 +201,10 @@ def chunk_bwd_kernel_dh(
         NT = tl.cdiv(T, BT)
         NS = tl.cdiv(T, BS)
         boh = i_n * NS
+
+    if USE_G_GAMMA:
+        b_gamma = tl.load(g_gamma + i_h)
+        b_g = b_gamma * (tl.arange(0, BT) + 1)
 
     # [BK, BV]
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
@@ -216,7 +233,11 @@ def chunk_bwd_kernel_dh(
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
             b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
             b_q = (b_q * exp(b_g)[None, :]).to(b_q.dtype)
+            b_dh *= exp(b_g_last)
 
+        if USE_G_GAMMA:
+            b_g_last = b_gamma * min(BT, T - i_t * BT)
+            b_q = (b_q * exp(b_g)[None, :]).to(b_q.dtype)
             b_dh *= exp(b_g_last)
 
         if USE_GK:
@@ -233,12 +254,12 @@ def chunk_bwd_kernel_dh(
             p_gv_last = gv + (bos + last_idx) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
 
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
-            b_do = (b_do * exp(b_gv)).to(b_do.dtype)
+            b_do = (b_do * exp(b_gv))
 
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
             b_dh *= exp(b_gv_last)[None, :]
 
-        b_dh += tl.dot(b_q, b_do)
+        b_dh += tl.dot(b_q, b_do.to(b_q.dtype))
 
     if STORE_INITIAL_STATE_GRADIENT:
         p_dh0 = tl.make_block_ptr(dh0 + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
@@ -248,11 +269,12 @@ def chunk_bwd_kernel_dh(
 def chunk_fwd_h(
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
-    gk: torch.Tensor,
-    gv: torch.Tensor,
-    h0: torch.Tensor,
-    output_final_state: bool,
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
+    gk: Optional[torch.Tensor] = None,
+    gv: Optional[torch.Tensor] = None,
+    h0: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
     cu_seqlens: Optional[torch.Tensor] = None,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
@@ -277,6 +299,7 @@ def chunk_fwd_h(
         v=v,
         h=h,
         g=g,
+        g_gamma=g_gamma,
         gk=gk,
         gv=gv,
         h0=h0,
@@ -290,6 +313,7 @@ def chunk_fwd_h(
         BT=BT,
         BS=BS,
         USE_G=g is not None,
+        USE_G_GAMMA=g_gamma is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
     )
@@ -300,13 +324,14 @@ def chunk_bwd_dh(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
-    gk: torch.Tensor,
-    gv: torch.Tensor,
     do: torch.Tensor,
     h0: torch.Tensor,
     dht: torch.Tensor,
     scale: float,
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
+    gk: Optional[torch.Tensor] = None,
+    gv: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
     chunk_size: int = 64,
     split_size: Optional[int] = None,
@@ -333,6 +358,7 @@ def chunk_bwd_dh(
     chunk_bwd_kernel_dh[grid](
         q=q,
         g=g,
+        g_gamma=g_gamma,
         gk=gk,
         gv=gv,
         do=do,
@@ -351,6 +377,7 @@ def chunk_bwd_dh(
         BS=BS,
         NG=NG,
         USE_G=g is not None,
+        USE_G_GAMMA=g_gamma is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
     )

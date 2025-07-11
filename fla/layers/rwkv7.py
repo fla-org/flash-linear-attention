@@ -61,26 +61,28 @@ class RWKV7Attention(nn.Module):
             self.num_heads = num_heads
         self.head_v_dim = int(self.value_dim // self.num_heads)
 
+        # Increase lora dimension for headdim>64
+        factor = self.head_dim / 64
         if decay_low_rank_dim is None:
-            decay_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
+            decay_low_rank_dim = max(32, int(round((2.5 * (hidden_size**0.5)) * factor / 32) * 32))
             self.decay_low_rank_dim = decay_low_rank_dim
         else:
             self.decay_low_rank_dim = decay_low_rank_dim
 
         if gate_low_rank_dim is None:
-            gate_low_rank_dim = max(32, int(round((0.6 * (hidden_size**0.8)) / 32) * 32))
+            gate_low_rank_dim = max(32, int(round((5 * (hidden_size**0.5)) / 32) * 32))
             self.gate_low_rank_dim = gate_low_rank_dim
         else:
             self.gate_low_rank_dim = gate_low_rank_dim
 
         if a_low_rank_dim is None:
-            a_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
+            a_low_rank_dim = max(32, int(round((2.5 * (hidden_size**0.5)) * factor / 32) * 32))
             self.a_low_rank_dim = a_low_rank_dim
         else:
             self.a_low_rank_dim = a_low_rank_dim
 
         if v_low_rank_dim is None:
-            v_low_rank_dim = max(32, int(round((1.3 * (hidden_size**0.5)) / 32) * 32))
+            v_low_rank_dim = max(32, int(round((1.7 * (hidden_size**0.5)) * factor / 32) * 32))
             self.v_low_rank_dim = v_low_rank_dim
         else:
             self.v_low_rank_dim = v_low_rank_dim
@@ -190,9 +192,13 @@ class RWKV7Attention(nn.Module):
                 self.v_lora._initialize_weights(self.v_lora)
                 self.v_lora.set_bias_value(0.73 - linear*0.4)
 
-            self.r_proj.weight.data.uniform_(-0.5/(self.hidden_size**0.5), 0.5/(self.hidden_size**0.5))
-            self.k_proj.weight.data.uniform_(-0.05/(self.hidden_size**0.5), 0.05/(self.hidden_size**0.5))
-            self.v_proj.weight.data.uniform_(-0.5/(self.hidden_size**0.5), 0.5/(self.hidden_size**0.5))
+            # Initialize GroupNorm
+            self.g_norm.weight.data[:] = ((self.layer_idx + 1) / self.num_hidden_layers) ** 0.7
+
+            # Initialize Linear projections
+            nn.init.orthogonal_(self.r_proj.weight)
+            nn.init.orthogonal_(self.k_proj.weight, gain=0.1)
+            nn.init.orthogonal_(self.v_proj.weight)
             self.o_proj.weight.data.zero_()
 
             # Clean up temporary tensors to free memory

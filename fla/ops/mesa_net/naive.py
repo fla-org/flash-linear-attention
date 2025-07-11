@@ -64,7 +64,7 @@ def naive_mesa_net_exact(q, k, v, g, lamb, beta, h_kk_init=None, h_kv_init=None)
     return o_gold, h_kk, h_kv
 
 
-def naive_mesa_net_CG(q, k, v, g, lamb, beta, chunk_size, max_CG_iteration=30):
+def naive_mesa_net_CG(q, k, v, g, lamb, beta, chunk_size, max_CG_iteration=30, h_kk_init=None, h_kv_init=None):
     B, L, h, d = q.shape
     C = chunk_size
 
@@ -84,6 +84,11 @@ def naive_mesa_net_CG(q, k, v, g, lamb, beta, chunk_size, max_CG_iteration=30):
     h_kv = torch.zeros(B, h, d, d, device=q.device)
     h_kk = torch.zeros(B, h, d, d, device=q.device)
 
+    if h_kk_init is not None:
+        h_kk += h_kk_init
+    if h_kv_init is not None:
+        h_kv += h_kv_init
+
     chunk_decay_k = (g_chunk[..., -1, None] - g_chunk).exp()
     chunk_decay_q = g_chunk.exp()
 
@@ -101,17 +106,18 @@ def naive_mesa_net_CG(q, k, v, g, lamb, beta, chunk_size, max_CG_iteration=30):
         h_kv = h_kv * g_chunk[:, :, i, -1, None, None].exp() + (k_chunk_i_processed).transpose(-2, -1) @ v_chunk_i
 
     # CG solver to approximate the matrix inverse solution.
-    diag_H = torch.diagonal(h_kk_all, dim1=-2, dim2=-1)
-    x = q_chunk / (diag_H.unsqueeze(-2) + lamb[None, None, ...])
+    # diag_H = torch.diagonal(h_kk_all, dim1=-2, dim2=-1)
+    lamb = lamb[None, :, None, None, :]
+    x = torch.zeros_like(q_chunk)
     r = q_chunk - (x * chunk_decay_q[..., None]) @ h_kk_all - ((x @ k_chunk.transpose(-2, -1))
-                                                               * pairwise_decay) @ k_chunk - (lamb[None, None, ...] * x)
+                                                               * pairwise_decay) @ k_chunk - (lamb * x)
     p = r.clone()
     delta_old = (r * r).sum(-1)
 
     # CG iteration
     for i in range(max_CG_iteration):
         q = (p * chunk_decay_q[..., None]) @ h_kk_all + ((p @ k_chunk.transpose(-1, -2))
-                                                         * pairwise_decay) @ k_chunk + (lamb[None, None, ...] * p)
+                                                         * pairwise_decay) @ k_chunk + (lamb * p)
         alpha = (delta_old / ((p * q).sum(-1) + 1e-5))
         x = x + (alpha[..., None] * p)
         r = r - (alpha[..., None] * q)

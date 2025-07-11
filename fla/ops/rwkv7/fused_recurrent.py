@@ -22,7 +22,7 @@ from fla.utils import input_guard, use_cuda_graph
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BV in [16, 32, 64]
-        for num_warps in [2, 4, 8, 16, 32]
+        for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=['BK'],
@@ -224,7 +224,7 @@ def fused_recurrent_rwkv7(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-    if not head_first and r.shape[1] < r.shape[2]:
+    elif r.shape[1] < r.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
@@ -298,8 +298,8 @@ def fused_mul_recurrent_rwkv7(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-    if not head_first and r.shape[1] < r.shape[2]:
-        raise ValueError(
+    elif r.shape[1] < r.shape[2]:
+        warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "

@@ -23,10 +23,9 @@ from fla.utils import get_multiprocessor_count, input_guard
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
-        for BT in [8, 16, 32, 64]
-        for num_warps in [2, 4, 8, 16, 32]
-        for num_stages in [2, 3, 4]
+        triton.Config({'BT': BT}, num_warps=num_warps)
+        for BT in [16, 32, 64]
+        for num_warps in [4, 8, 16]
     ],
     key=['D', 'NB', 'IS_RMS_NORM', 'STORE_RESIDUAL_OUT', 'HAS_RESIDUAL', 'HAS_WEIGHT'],
 )
@@ -113,9 +112,8 @@ def layer_norm_gated_fwd_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
-        for num_stages in [2, 3, 4]
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [2, 4, 8, 16]
     ],
     key=['D', 'IS_RMS_NORM', 'STORE_RESIDUAL_OUT', 'HAS_RESIDUAL', 'HAS_WEIGHT'],
 )
@@ -197,10 +195,9 @@ def layer_norm_gated_fwd_kernel1(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
-        for BT in [8, 16, 32, 64]
-        for num_warps in [2, 4, 8, 16, 32]
-        for num_stages in [2, 3, 4]
+        triton.Config({'BT': BT}, num_warps=num_warps)
+        for BT in [16, 32, 64]
+        for num_warps in [4, 8, 16]
     ],
     key=['D', 'NB', 'IS_RMS_NORM', 'HAS_DRESIDUAL', 'HAS_WEIGHT'],
 )
@@ -324,9 +321,8 @@ def layer_norm_gated_bwd_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4, 8, 16, 32]
-        for num_stages in [2, 3, 4]
+        triton.Config({}, num_warps=num_warps)
+        for num_warps in [2, 4, 8, 16]
     ],
     key=['D', 'IS_RMS_NORM', 'STORE_DRESIDUAL', 'HAS_DRESIDUAL', 'HAS_WEIGHT'],
 )

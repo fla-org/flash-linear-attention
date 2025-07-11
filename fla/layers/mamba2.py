@@ -24,11 +24,7 @@ with warnings.catch_warnings():
         from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
     except ImportError:
         causal_conv1d_update, causal_conv1d_fn = None, None
-    is_fast_path_available = all((
-        selective_state_update,
-        causal_conv1d_fn,
-        causal_conv1d_update
-    ))
+    is_fast_path_available = selective_state_update is not None
 
 if TYPE_CHECKING:
     from fla.models.mamba2.modeling_mamba2 import Mamba2Cache
@@ -127,6 +123,7 @@ class Mamba2(nn.Module):
         use_bias: bool = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
+        backend: str = "cuda",
     ) -> Mamba2:
         super().__init__()
 
@@ -195,11 +192,29 @@ class Mamba2(nn.Module):
         if not is_fast_path_available:
             logger.warning_once(
                 "The fast path is not available because one of "
-                "`(selective_state_update, causal_conv1d_fn, causal_conv1d_update)` is None. "
+                "`(selective_state_update)` is None. "
                 "Falling back to the naive implementation. "
-                "To install follow https://github.com/state-spaces/mamba/#installation and"
-                "https://github.com/Dao-AILab/causal-conv1d"
+                "To install follow https://github.com/state-spaces/mamba/#installation"
             )
+        import os
+        backend = os.environ.get('FLA_CONV_BACKEND', backend)
+        assert backend in ['cuda', 'triton'], f"Unsupported backend: {backend}"
+        if backend == 'cuda' and causal_conv1d_fn is None:
+            logger.warning_once(
+                "The CUDA backend is not available because `causal_conv1d` is None. "
+                "Falling back to the Triton backend. "
+                "To install follow https://github.com/Dao-AILab/causal-conv1d"
+            )
+            backend = 'triton'
+        if backend == 'triton':
+            from fla.modules.convolution import causal_conv1d as causal_conv1d_triton
+            from fla.modules.convolution import causal_conv1d_update as causal_conv1d_update_triton
+            self.causal_conv1d_fn = causal_conv1d_triton
+            self.causal_conv1d_update = causal_conv1d_update_triton
+        else:
+            self.causal_conv1d_fn = causal_conv1d_fn
+            self.causal_conv1d_update = causal_conv1d_update
+        self.backend = backend
 
     def cuda_kernels_forward(
         self,
@@ -229,8 +244,8 @@ class Mamba2(nn.Module):
             )
 
             # 2. Convolution sequence transformation
-            hidden_states_B_C = causal_conv1d_update(
-                hidden_states_B_C,
+            hidden_states_B_C = self.causal_conv1d_update(
+                hidden_states_B_C.contiguous(),
                 cache_params.conv_states[self.layer_idx],
                 self.conv1d.weight.squeeze(1),
                 self.conv1d.bias,
@@ -325,8 +340,8 @@ class Mamba2(nn.Module):
                         self.conv1d(hidden_states_B_C.transpose(1, 2))[..., :seq_len].transpose(1, 2)
                     )
                 else:
-                    hidden_states_B_C = causal_conv1d_fn(
-                        x=hidden_states_B_C.transpose(1, 2),
+                    hidden_states_B_C = self.causal_conv1d_fn(
+                        x=hidden_states_B_C.transpose(1, 2).contiguous(),
                         weight=self.conv1d.weight.squeeze(1),
                         bias=self.conv1d.bias,
                         activation=self.activation,
