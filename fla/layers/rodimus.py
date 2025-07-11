@@ -306,7 +306,7 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens', None)
 
-        seqlen_offset, max_seqlen = 0, q_len
+        seqlen_offset, max_seqlen = 0, q.shape[1]
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
