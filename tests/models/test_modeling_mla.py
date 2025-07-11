@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from fla.models import TransformerConfig
+from fla.models import MLAConfig
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
@@ -31,7 +31,7 @@ def test_modeling(
     use_l2warp: bool,
     dtype: torch.dtype,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, TransformerConfig, use_l2warp=use_l2warp, dtype=dtype)
+    run_test_model_forward_backward(L, B, T, H, D, MLAConfig, use_l2warp=use_l2warp, dtype=dtype)
 
 
 # ===================================================================================
@@ -54,4 +54,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, TransformerConfig, dtype)
+    run_test_generation(L, B, T, H, D, MLAConfig, dtype)

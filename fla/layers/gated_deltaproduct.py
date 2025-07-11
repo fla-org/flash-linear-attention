@@ -14,7 +14,6 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.ops.delta_rule import fused_recurrent_delta_rule
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
 
@@ -218,8 +217,8 @@ class GatedDeltaProduct(nn.Module):
             v = F.silu(self.v_proj(hidden_states))
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_k_dim)
-        k = rearrange(k, '... l (n h d) -> ... (l n) h d', n=self.num_householder, d=self.head_k_dim)
-        v = rearrange(v, '... l (n h d) -> ... (l n) h d', n=self.num_householder, d=self.head_v_dim)
+        k = rearrange(k, '... t (n h d) -> ... (t n) h d', n=self.num_householder, d=self.head_k_dim)
+        v = rearrange(v, '... t (n h d) -> ... (t n) h d', n=self.num_householder, d=self.head_v_dim)
 
         if self.num_v_heads > self.num_heads:
             q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
@@ -228,7 +227,7 @@ class GatedDeltaProduct(nn.Module):
         if self.allow_neg_eigval:
             beta = beta * 2.
 
-        beta = rearrange(beta, '... l (n h) -> ... (l n) h', n=self.num_householder)
+        beta = rearrange(beta, '... t (n h) -> ... (t n) h', n=self.num_householder)
         if self.use_forget_gate:
             g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
         else:
@@ -251,38 +250,25 @@ class GatedDeltaProduct(nn.Module):
 
         elif mode == 'fused_recurrent':
             if self.use_forget_gate:
-                g_new = torch.zeros(g.shape[0], g.shape[1], self.num_householder,
-                                    g.shape[2], device=g.device, dtype=torch.float32)
+                g_new = g.new_zeros(g.shape[0], g.shape[1], self.num_householder, g.shape[2])
                 g_new[:, :, 0] = g
-                g = rearrange(g_new, '... l n h -> ... (l n) h')
+                g = rearrange(g_new, '... t n h -> ... (t n) h')
 
             q_new = q.new_zeros(q.shape[0], q.shape[1], self.num_householder, q.shape[2], q.shape[3])
             q_new[:, :, -1] = q
-            q = rearrange(q_new, '... l n h d-> ... (l n) h d')
-            if self.use_forget_gate:
-                o, recurrent_state = fused_recurrent_gated_delta_rule(
-                    q=q,
-                    k=k,
-                    v=v,
-                    g=g,
-                    beta=beta,
-                    initial_state=recurrent_state,
-                    output_final_state=use_cache,
-                    cu_seqlens=cu_seqlens * self.num_householder if cu_seqlens is not None else None,
-                    use_qk_l2norm_in_kernel=True
-                )
-            else:
-                o, recurrent_state = fused_recurrent_delta_rule(
-                    q=q,
-                    k=k,
-                    v=v,
-                    beta=beta,
-                    initial_state=recurrent_state,
-                    output_final_state=use_cache,
-                    cu_seqlens=cu_seqlens * self.num_householder if cu_seqlens is not None else None,
-                    use_qk_l2norm_in_kernel=True
-                )
-            o = rearrange(o, '... (l n) h d -> ... l n h d', n=self.num_householder)[..., -1, :, :].contiguous()
+            q = rearrange(q_new, '... t n h d-> ... (t n) h d')
+            o, recurrent_state = fused_recurrent_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens * self.num_householder if cu_seqlens is not None else None,
+                use_qk_l2norm_in_kernel=True
+            )
+            o = rearrange(o, '... (t n) h d -> ... t n h d', n=self.num_householder)[..., -1, :, :].contiguous()
 
         if past_key_values is not None:
             past_key_values.update(
