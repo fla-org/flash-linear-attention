@@ -320,7 +320,7 @@ class Mamba2CausalLMOutput(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
 
 
-class Mamba2Model(Mamba2PreTrainedModel):
+class Mamba2Model(Mamba2PreTrainedModel, GenerationMixin):
     def __init__(self, config):
         super().__init__(config)
 
