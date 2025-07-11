@@ -184,7 +184,8 @@ class MesaNet(nn.Module):
                 beta=beta,
                 lamb=lamb,
                 max_CG_iteration=self.max_cg_step_training,
-                use_qk_l2norm_in_kernel=True
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
             )
         # decoding
         else:
@@ -199,7 +200,8 @@ class MesaNet(nn.Module):
                 lamb=lamb,
                 prev_h_kk=last_h_kk,
                 prev_h_kv=last_h_kv,
-                max_CG_iteration=self.max_cg_step_decoding)
+                max_CG_iteration=self.max_cg_step_decoding
+            )
             o = o.unsqueeze(0).to(q)
 
         if past_key_values is not None:
