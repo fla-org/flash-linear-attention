@@ -36,7 +36,7 @@ class GatedDeltaProduct(nn.Module):
         num_heads: int = 6,
         num_v_heads: int = None,
         mode: str = 'chunk',
-        use_gate: bool = True,
+        use_output_gate: bool = True,
         use_short_conv: bool = True,
         conv_size: int = 4,
         conv_bias: bool = False,
@@ -57,7 +57,7 @@ class GatedDeltaProduct(nn.Module):
         self.use_forget_gate = use_forget_gate
         self.allow_neg_eigval = allow_neg_eigval
         self.num_householder = num_householder
-        self.use_gate = use_gate
+        self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
@@ -141,7 +141,7 @@ class GatedDeltaProduct(nn.Module):
                 "ShortConvolution is crucial to the performance. "
                 "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing."
             )
-        if use_gate:
+        if use_output_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
         else:
@@ -278,7 +278,7 @@ class GatedDeltaProduct(nn.Module):
                 offset=q_len
             )
 
-        if self.use_gate:
+        if self.use_output_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
         else:

@@ -51,7 +51,7 @@ class MultiheadLatentAttention(nn.Module):
     def __init__(
         self,
         hidden_size: int = 2048,
-        num_heads: int = 32,
+        num_heads: int = 16,
         q_lora_rank: Optional[int] = 1536,  # q lora rank is optional, None indicates no q lora
         qk_rope_head_dim: int = 64,
         kv_lora_rank: int = 512,  # following the original Deepseek paper

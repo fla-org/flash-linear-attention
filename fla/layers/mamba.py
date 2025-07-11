@@ -27,8 +27,6 @@ with warnings.catch_warnings():
     is_fast_path_available = all((
         selective_state_update,
         selective_scan_fn,
-        causal_conv1d_fn,
-        causal_conv1d_update,
         mamba_inner_fn
     ))
 if TYPE_CHECKING:
@@ -58,6 +56,7 @@ class Mamba(nn.Module):
         use_bias: bool = True,
         hidden_act: str = "silu",
         layer_idx: int = None,
+        backend: str = "cuda",
     ):
         super().__init__()
 
@@ -107,6 +106,25 @@ class Mamba(nn.Module):
                 "To install follow https://github.com/state-spaces/mamba/#installation and"
                 " https://github.com/Dao-AILab/causal-conv1d"
             )
+        import os
+        backend = os.environ.get('FLA_CONV_BACKEND', backend)
+        assert backend in ['cuda', 'triton'], f"Unsupported backend: {backend}"
+        if backend == 'cuda' and causal_conv1d_fn is None:
+            logger.warning_once(
+                "The CUDA backend is not available because `causal_conv1d` is None. "
+                "Falling back to the Triton backend. "
+                "To install follow https://github.com/Dao-AILab/causal-conv1d"
+            )
+            backend = 'triton'
+        if backend == 'triton':
+            from fla.modules.convolution import causal_conv1d as causal_conv1d_triton
+            from fla.modules.convolution import causal_conv1d_update as causal_conv1d_update_triton
+            self.causal_conv1d_fn = causal_conv1d_triton
+            self.causal_conv1d_update = causal_conv1d_update_triton
+        else:
+            self.causal_conv1d_fn = causal_conv1d_fn
+            self.causal_conv1d_update = causal_conv1d_update
+        self.backend = backend
 
     def cuda_kernels_forward(
         self,
@@ -145,7 +163,7 @@ class Mamba(nn.Module):
             # 2. Convolution sequence transformation
             conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
             if cache_params is not None and cache_position[0] > 0:
-                hidden_states = causal_conv1d_update(
+                hidden_states = self.causal_conv1d_update(
                     hidden_states.squeeze(-1),
                     cache_params.conv_states[self.layer_idx],
                     conv_weights,
@@ -159,7 +177,7 @@ class Mamba(nn.Module):
                         hidden_states, (self.conv_kernel_size - hidden_states.shape[-1], 0)
                     )
                     cache_params.update_conv_state(self.layer_idx, conv_states, cache_position)
-                hidden_states = causal_conv1d_fn(
+                hidden_states = self.causal_conv1d_fn(
                     hidden_states, conv_weights, self.conv1d.bias, activation=self.activation
                 )
 

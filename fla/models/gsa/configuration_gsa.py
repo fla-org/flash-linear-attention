@@ -35,7 +35,7 @@ class GSAConfig(PretrainedConfig):
         norm_eps: float = 1e-6,
         attn: Optional[Dict] = None,
         use_cache: bool = True,
-        pad_token_id: int = None,
+        pad_token_id: Optional[int] = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         initializer_range: float = 0.02,

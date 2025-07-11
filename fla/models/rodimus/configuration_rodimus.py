@@ -31,7 +31,7 @@ class RodimusConfig(PretrainedConfig):
         attn: Optional[Dict] = None,
         ska_attn: Optional[Dict] = None,
         use_cache: bool = True,
-        pad_token_id: int = None,
+        pad_token_id: Optional[int] = None,
         bos_token_id: int = 126080,
         eos_token_id: int = 126081,
         tie_word_embeddings: bool = True,

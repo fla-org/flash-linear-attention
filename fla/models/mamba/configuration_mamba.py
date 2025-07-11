@@ -115,7 +115,7 @@ class MambaConfig(PretrainedConfig):
         use_bias: bool = False,
         use_conv_bias: bool = True,
         hidden_act: str = "silu",
-        initializer_range: str = 0.02,
+        initializer_range: float = 0.02,
         residual_in_fp32: bool = False,
         time_step_rank: str = "auto",
         time_step_scale: float = 1.0,

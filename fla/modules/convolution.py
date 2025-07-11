@@ -584,8 +584,8 @@ class ShortConvolution(nn.Conv1d):
                 "The `use_fast_conv1d` parameter is deprecated and will be ignored. "
                 "Please use the `backend` parameter instead."
             )
-
-        self.backend = backend
+        import os
+        self.backend = os.environ.get('FLA_CONV_BACKEND', backend)
         if backend not in ['cuda', 'triton']:
             raise ValueError(f"Invalid backend: {backend}, must be one of ['cuda', 'triton']")
         if backend == 'cuda':
