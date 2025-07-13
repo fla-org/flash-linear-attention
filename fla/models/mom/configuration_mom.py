@@ -5,8 +5,8 @@ from typing import Dict, Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class MomGatedDeltaNetConfig(PretrainedConfig):
-    model_type = 'mom_gated_deltanet'
+class MomConfig(PretrainedConfig):
+    model_type = 'mom'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(
@@ -42,6 +42,7 @@ class MomGatedDeltaNetConfig(PretrainedConfig):
         aux_loss_scale: float = 0.01,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
+        mom_backend: str = 'GDN',
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -72,6 +73,10 @@ class MomGatedDeltaNetConfig(PretrainedConfig):
         self.aux_loss_scale = aux_loss_scale
         self.shared_mem = shared_mem
         self.single_kv_proj = single_kv_proj
+        self.mom_backend = mom_backend
+
+        if not self.mom_backend in ['GDN']:
+            raise NotImplementedError("The MoM backend is not currently implemented.")
 
         if attn is not None:
             if not isinstance(attn, Dict):

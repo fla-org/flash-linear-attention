@@ -447,16 +447,19 @@ class MomGatedDeltaNet(nn.Module):
             self.q_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
         else:
@@ -534,26 +537,30 @@ class MomGatedDeltaNet(nn.Module):
             v = torch.stack([v_expert(hidden_states[i]) for i, v_expert in enumerate(self.v_proj)], dim=0)
             beta = torch.stack([b_expert(hidden_states[i]).sigmoid() for i, b_expert in enumerate(self.b_proj)], dim=0)
             g = torch.stack([-self.A_log.float().exp() * F.softplus(a_expert(hidden_states[i]).float() + self.dt_bias) for i, a_expert in enumerate(self.a_proj)], dim=0)
-
+        
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            conv_mask = attention_mask[:, -hidden_states.shape[2]:].repeat_interleave(self.num_memories, 0) if attention_mask is not None else None
-            seq_idx = kwargs.get('seq_idx', None)
             q, k, v = map(lambda x: rearrange(x, 'e b t d -> (e b) t d'), (q, k, v))
-            q, conv_state_q[0] = self.q_conv1d(x=q,
-                                            mask=conv_mask,
-                                            cache=conv_state_q[0],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
-            k, conv_state_k[0] = self.k_conv1d(x=k,
-                                            mask=conv_mask,
-                                            cache=conv_state_k[0],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
-            v, conv_state_v[0] = self.v_conv1d(x=v,
-                                            mask=conv_mask,
-                                            cache=conv_state_v[0],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+            q, conv_state_q[0] = self.q_conv1d(
+                x=q,
+                cache=conv_state_q[0],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
+            k, conv_state_k[0] = self.k_conv1d(
+                x=k,
+                cache=conv_state_k[0],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
+            v, conv_state_v[0] = self.v_conv1d(
+                x=v,
+                cache=conv_state_v[0],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
 
             q, k, v = map(lambda x: rearrange(x, '(e b) t d -> e b t d', b=batch_size), (q, k, v))
 
@@ -662,23 +669,24 @@ class MomGatedDeltaNet(nn.Module):
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
         if self.use_short_conv:
-            conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            seq_idx=kwargs.get('seq_idx', None)
-            q, conv_state_q[1] = self.q_conv1d(x=self.q_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_q[1],
-                                            output_final_state=use_cache,
-                                            seq_idx=seq_idx)
-            k, conv_state_k[1] = self.k_conv1d(x=self.shared_k(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_k[1],
-                                            output_final_state=use_cache,
-                                            seq_idx=seq_idx)
-            v, conv_state_v[1] = self.v_conv1d(x=self.shared_v(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_v[1],
-                                            output_final_state=use_cache,
-                                            seq_idx=seq_idx)
+            q, conv_state_q[1] = self.q_conv1d(
+                x=self.q_proj(hidden_states),
+                cache=conv_state_q[1],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
+            k, conv_state_k[1] = self.k_conv1d(
+                x=self.shared_k(hidden_states),
+                cache=conv_state_k[1],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
+            v, conv_state_v[1] = self.v_conv1d(
+                x=self.shared_v(hidden_states),
+                cache=conv_state_v[1],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
         else:
             q = self.silu(self.q_proj(hidden_states))
             k = self.silu(self.shared_k(hidden_states))

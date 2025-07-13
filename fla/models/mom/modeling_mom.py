@@ -19,8 +19,8 @@ from transformers.utils import logging
 
 from fla.layers.attn import Attention
 from fla.layers import MomGatedDeltaNet
-from fla.models.mom_gated_deltanet.configuration_mom_gated_deltanet import \
-    MomGatedDeltaNetConfig
+from fla.models.mom.configuration_mom import \
+    MomConfig
 from fla.models.utils import Cache
 from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
                          RMSNorm)
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-class MomGatedDeltaNetMLP(nn.Module):
+class MomMLP(nn.Module):
 
     def __init__(
         self,
@@ -44,7 +44,7 @@ class MomGatedDeltaNetMLP(nn.Module):
         hidden_act: str = 'swish',
         norm_first: bool = True,
         norm_eps: float = 1e-5
-    ) -> MomGatedDeltaNetMLP:
+    ) -> MomMLP:
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -79,8 +79,8 @@ class MomGatedDeltaNetMLP(nn.Module):
         return swiglu_linear(gate, y, self.down_proj.weight, self.down_proj.bias)
 
 
-class MomGatedDeltaNetBlock(nn.Module):
-    def __init__(self, config: MomGatedDeltaNetConfig, layer_idx: int):
+class MomBlock(nn.Module):
+    def __init__(self, config: MomConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
@@ -96,27 +96,30 @@ class MomGatedDeltaNetBlock(nn.Module):
                 layer_idx=layer_idx
             )
         else:
-            self.attn = MomGatedDeltaNet(
-                mode=config.attn_mode,
-                hidden_size=config.hidden_size,
-                expand_v=config.expand_v,
-                head_dim=config.head_dim,
-                num_heads=config.num_heads,
-                use_gate=config.use_gate,
-                use_short_conv=config.use_short_conv,
-                conv_size=config.conv_size,
-                norm_first=config.norm_first,
-                norm_eps=config.norm_eps,
-                layer_idx=layer_idx,
-                num_memories=config.num_memories,
-                topk=config.topk,
-                capacity=config.capacity,
-                shared_mem=config.shared_mem,
-                single_kv_proj=config.single_kv_proj
-            )
+            if config.mom_backend == 'GDN':
+                self.attn = MomGatedDeltaNet(
+                    mode=config.attn_mode,
+                    hidden_size=config.hidden_size,
+                    expand_v=config.expand_v,
+                    head_dim=config.head_dim,
+                    num_heads=config.num_heads,
+                    use_gate=config.use_gate,
+                    use_short_conv=config.use_short_conv,
+                    conv_size=config.conv_size,
+                    norm_first=config.norm_first,
+                    norm_eps=config.norm_eps,
+                    layer_idx=layer_idx,
+                    num_memories=config.num_memories,
+                    topk=config.topk,
+                    capacity=config.capacity,
+                    shared_mem=config.shared_mem,
+                    single_kv_proj=config.single_kv_proj
+                )
+            else:
+                raise NotImplementedError("The MoM backend is not currently implemented.")
         if not config.norm_first:
             self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
-        self.mlp = MomGatedDeltaNetMLP(
+        self.mlp = MomMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -158,9 +161,9 @@ class MomGatedDeltaNetBlock(nn.Module):
         return outputs
 
 
-class MomGatedDeltaNetPreTrainedModel(PreTrainedModel):
+class MomPreTrainedModel(PreTrainedModel):
 
-    config_class = MomGatedDeltaNetConfig
+    config_class = MomConfig
     supports_gradient_checkpointing = True
     _no_split_modules = ['GatedDeltaNetBlock']
 
@@ -204,18 +207,18 @@ class MomGatedDeltaNetPreTrainedModel(PreTrainedModel):
 
 
 @dataclass
-class MomGatedDeltaNetOutputWithPast(BaseModelOutputWithPast):
+class MomOutputWithPast(BaseModelOutputWithPast):
     router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
 
-class MomGatedDeltaNetModel(MomGatedDeltaNetPreTrainedModel):
+class MomModel(MomPreTrainedModel):
 
-    def __init__(self, config: MomGatedDeltaNetConfig):
+    def __init__(self, config: MomConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([MomGatedDeltaNetBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([MomBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -305,7 +308,7 @@ class MomGatedDeltaNetModel(MomGatedDeltaNetPreTrainedModel):
 
         if not return_dict:
             return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
-        return MomGatedDeltaNetOutputWithPast(
+        return MomOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
@@ -315,17 +318,17 @@ class MomGatedDeltaNetModel(MomGatedDeltaNetPreTrainedModel):
 
 
 @dataclass
-class MomGatedDeltaNetCausalLMOutputWithPast(CausalLMOutputWithPast):
+class MomCausalLMOutputWithPast(CausalLMOutputWithPast):
     aux_loss: Optional[torch.FloatTensor] = None
     router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
 
-class MomGatedDeltaNetForCausalLM(MomGatedDeltaNetPreTrainedModel, GenerationMixin):
+class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = MomGatedDeltaNetModel(config)
+        self.model = MomModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.num_memories = config.num_memories
@@ -478,7 +481,7 @@ class MomGatedDeltaNetForCausalLM(MomGatedDeltaNetPreTrainedModel, GenerationMix
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return MomGatedDeltaNetCausalLMOutputWithPast(
+        return MomCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
