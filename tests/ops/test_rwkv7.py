@@ -11,7 +11,7 @@ from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rw
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
 from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
-from fla.ops.rwkv7.gate_output_correction import gate_output_correction_ref, gate_output_corretion
+from fla.ops.rwkv7.gate_output_correction import gate_output_correction, gate_output_correction_ref
 from fla.utils import assert_close, device
 
 
@@ -281,7 +281,7 @@ def test_gate_output_correction(
     output_ref = gate_output_correction_ref(o_ref, r_ref, k_ref, r_k_ref, v_ref, g_ref)
     output_ref.sum().backward()
 
-    output_cus = gate_output_corretion(o_cus, r_cus, k_cus, r_k_cus, v_cus, g_cus)
+    output_cus = gate_output_correction(o_cus, r_cus, k_cus, r_k_cus, v_cus, g_cus)
     output_cus.sum().backward()
 
     assert_close(" o", output_ref, output_cus, 0.002)

@@ -216,4 +216,4 @@ class GateOutputCorrection(torch.autograd.Function):
         return gate_output_correction_backward_triton(grad_output, o, r, k, r_k, v, g)
 
 
-gate_output_corretion = GateOutputCorrection.apply
+gate_output_correction = GateOutputCorrection.apply
