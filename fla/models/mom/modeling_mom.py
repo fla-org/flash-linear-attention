@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -19,9 +18,9 @@ from fla.layers import MomAttention
 from fla.layers.attn import Attention
 from fla.models.mom.configuration_mom import MomConfig
 from fla.models.utils import Cache
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
-from fla.modules.activations import swiglu_linear
-from fla.modules.layernorm import rms_norm_linear
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.modules import GatedMLP as MomMLP
+from fla.modules import RMSNorm
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -30,58 +29,12 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-class MomMLP(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        hidden_ratio: Optional[int] = None,
-        intermediate_size: Optional[int] = None,
-        hidden_act: str = 'swish',
-        norm_first: bool = True,
-        norm_eps: float = 1e-5
-    ) -> MomMLP:
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        # the final number of params is `hidden_ratio * hidden_size^2`
-        # `intermediate_size` is chosen to be a multiple of 256 closest to `2/3 * hidden_size * hidden_ratio`
-        if hidden_ratio is None:
-            hidden_ratio = 4
-        if intermediate_size is None:
-            intermediate_size = int(hidden_size * hidden_ratio * 2 / 3)
-            intermediate_size = 256 * ((intermediate_size + 256 - 1) // 256)
-        self.hidden_ratio = hidden_ratio
-        self.intermediate_size = intermediate_size
-        self.norm_first = norm_first
-
-        if norm_first:
-            self.norm = RMSNorm(hidden_size=hidden_size, eps=norm_eps)
-
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=False)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
-        self.act_fn = ACT2FN[hidden_act]
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        **kwargs: Unpack[Dict],
-    ) -> torch.Tensor:
-        if self.norm_first:
-            x = rms_norm_linear(x, self.norm.weight, self.norm.bias, self.gate_proj.weight, self.gate_proj.bias)
-        else:
-            x = self.gate_proj(x)
-        gate, y = x.chunk(2, -1)
-        return swiglu_linear(gate, y, self.down_proj.weight, self.down_proj.bias)
-
-
 class MomBlock(nn.Module):
     def __init__(self, config: MomConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        if not config.norm_first:
-            self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
+        self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
         if config.attn is not None and layer_idx in config.attn['layers']:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
@@ -99,10 +52,9 @@ class MomBlock(nn.Module):
                     expand_v=config.expand_v,
                     head_dim=config.head_dim,
                     num_heads=config.num_heads,
-                    use_gate=config.use_gate,
+                    use_output_gate=config.use_output_gate,
                     use_short_conv=config.use_short_conv,
                     conv_size=config.conv_size,
-                    norm_first=config.norm_first,
                     norm_eps=config.norm_eps,
                     layer_idx=layer_idx,
                     num_memories=config.num_memories,
@@ -113,15 +65,13 @@ class MomBlock(nn.Module):
                 )
             else:
                 raise NotImplementedError(f"The MoM backend {config.mom_backend} is not currently supported.")
-        if not config.norm_first:
-            self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
+        self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
         self.mlp = MomMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            norm_first=config.norm_first,
-            norm_eps=config.norm_eps
+            fuse_swiglu=config.fuse_swiglu
         )
 
     def forward(
@@ -161,7 +111,7 @@ class MomPreTrainedModel(PreTrainedModel):
 
     config_class = MomConfig
     supports_gradient_checkpointing = True
-    _no_split_modules = ['GatedDeltaNetBlock']
+    _no_split_modules = ['MomBlock']
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
@@ -241,7 +191,7 @@ class MomModel(MomPreTrainedModel):
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
-            warnings.warn("`GatedDeltaNetModel` does not `output_attentions` now, setting it to `False`.")
+            warnings.warn("`MomModel` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states

@@ -11,7 +11,6 @@ from einops import rearrange
 from torch.nn import functional as F
 
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.modules.l2norm import l2_norm
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
 if TYPE_CHECKING:
@@ -137,7 +136,13 @@ def _upad_input(
     )
 
 
-def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, selected_memories: torch.Tensor, capacity: float):
+def transform(
+    x: torch.Tensor,
+    routing_mask: torch.Tensor,
+    num_memories: int,
+    selected_memories: torch.Tensor,
+    capacity: float
+):
     '''
     Transform input sequences into memory-organized chunks with capacity constraints.
 
@@ -233,12 +238,18 @@ def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, se
     # truncation_indices += capacity_len-max_len
 
     return transformed_x, truncation_indices, sorted_indices, max_len, mask, mask_2
-    # (num_memories, batch, seq, hidden)
-
-# @torch.jit.script
 
 
-def reconstruct(transformed_x, indices: torch.Tensor, sorted_indices: torch.Tensor, batch_size: int, seq_len: int, topk: int, routing_weights: torch.Tensor, mask: torch.Tensor):
+def reconstruct(
+    transformed_x,
+    indices: torch.Tensor,
+    sorted_indices: torch.Tensor,
+    batch_size: int,
+    seq_len: int,
+    topk: int,
+    routing_weights: torch.Tensor,
+    mask: torch.Tensor
+):
     '''
     Reconstruct and mix transformed outputs back into the original input sequence shape.
 
@@ -311,9 +322,9 @@ class MomAttention(nn.Module):
     def __init__(
         self,
         hidden_size: int = 2048,
-        expand_v: float = 2,
         head_dim: int = 256,
-        num_heads: int = 6,
+        num_heads: int = 4,
+        expand_v: float = 2,
         mode: str = 'chunk',
         use_output_gate: bool = True,
         use_short_conv: bool = True,
@@ -348,10 +359,10 @@ class MomAttention(nn.Module):
         self.head_dim = head_dim
         self.num_heads = num_heads
 
-        self.key_dim = self.num_heads * self.head_dim
-        self.value_dim = self.key_dim * self.expand_v
+        self.key_dim = int(self.num_heads * self.head_dim)
+        self.value_dim = int(self.key_dim * self.expand_v)
         self.head_qk_dim = head_dim
-        self.head_v_dim = head_dim * self.expand_v
+        self.head_v_dim = int(head_dim * self.expand_v)
         self.layer_idx = layer_idx
         self.silu = nn.SiLU()
 
@@ -365,14 +376,22 @@ class MomAttention(nn.Module):
             self.shared_b = nn.Linear(hidden_size, self.num_heads, bias=False)
             self.shared_a = nn.Linear(hidden_size, self.num_heads, bias=False)
         else:
-            self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.key_dim, bias=False)
-                                        for _ in range(self.num_memories)])
-            self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.value_dim, bias=False)
-                                        for _ in range(self.num_memories)])
-            self.b_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_heads, bias=False)
-                                        for _ in range(self.num_memories)])
-            self.a_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_heads, bias=False)
-                                        for _ in range(self.num_memories)])
+            self.k_proj = nn.ModuleList([
+                nn.Linear(self.hidden_size, self.key_dim, bias=False)
+                for _ in range(self.num_memories)
+            ])
+            self.v_proj = nn.ModuleList([
+                nn.Linear(self.hidden_size, self.value_dim, bias=False)
+                for _ in range(self.num_memories)
+            ])
+            self.b_proj = nn.ModuleList([
+                nn.Linear(self.hidden_size, self.num_heads, bias=False)
+                for _ in range(self.num_memories)
+            ])
+            self.a_proj = nn.ModuleList([
+                nn.Linear(self.hidden_size, self.num_heads, bias=False)
+                for _ in range(self.num_memories)
+            ])
             if self.shared_mem:
                 self.shared_k = nn.Linear(hidden_size, self.key_dim, bias=False)
                 self.shared_v = nn.Linear(hidden_size, self.value_dim, bias=False)
@@ -474,8 +493,13 @@ class MomAttention(nn.Module):
         routing_weights, selected_memories = torch.topk(scores, self.topk, dim=-1)  # (bsz, seq, topk)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(hidden_states.dtype)  # we cast back to the input dtype
-        routing_weights_full = torch.zeros((routing_weights.shape[0], routing_weights.shape[1], self.num_memories),
-                                           dtype=routing_weights.dtype, device=routing_weights.device).scatter(-1, selected_memories, routing_weights)
+        routing_weights_full = torch.zeros(
+            routing_weights.shape[0],
+            routing_weights.shape[1],
+            self.num_memories,
+            dtype=routing_weights.dtype,
+            device=routing_weights.device
+        ).scatter(-1, selected_memories, routing_weights)
         routing_mask = routing_weights_full.bool().int()
 
         if self.use_output_gate:
@@ -531,9 +555,6 @@ class MomAttention(nn.Module):
 
         q, k, v = map(lambda x: rearrange(x, 'e b t (h d) -> e b t h d', h=self.num_heads), (q, k, v))
 
-        q = l2_norm(q)
-        k = l2_norm(k)
-
         q, k, v, g, beta, mask2 = (rearrange(x, 'e b l ... ->  (e b) l ...') for x in (q, k, v, g, beta, mask2))
         cu_q, cu_k, cu_v, cu_g, cu_beta, indices_q, cu_seqlen_all, max_seq_lens = _upad_input(q, k, v, g, beta, mask2, q_len)
         cu_seqlens = cu_seqlen_all[0].to(torch.long).unique()
@@ -556,6 +577,7 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = recurrent_state_
@@ -576,6 +598,7 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = recurrent_state_
@@ -655,8 +678,6 @@ class MomAttention(nn.Module):
             v = self.silu(self.shared_v(hidden_states))
 
         q, k, v = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=self.num_heads), (q, k, v))
-        q = l2_norm(q)
-        k = l2_norm(k)
         beta = self.shared_b(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.shared_a(hidden_states).float() + self.dt_bias)
 
@@ -675,6 +696,7 @@ class MomAttention(nn.Module):
                 beta=beta.to(dtype=torch.bfloat16),
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
             o = o.to(dtype=q.dtype)
@@ -687,6 +709,7 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
         else:

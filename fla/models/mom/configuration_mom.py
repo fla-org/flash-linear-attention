@@ -12,29 +12,26 @@ class MomConfig(PretrainedConfig):
     def __init__(
         self,
         attn_mode: str = "chunk",
-        hidden_size: int = 1024,
-        expand_v: int = 1,
-        use_gate: bool = True,
-        use_short_conv: bool = True,
+        hidden_size: int = 2048,
         conv_size: int = 4,
-        head_dim: int = 256,
         num_heads: int = 4,
+        head_dim: int = 256,
+        expand_v: float = 1.,
+        use_output_gate: bool = True,
+        use_short_conv: bool = True,
         max_position_embeddings: int = 2048,
         hidden_ratio: Optional[int] = 4,
         intermediate_size: Optional[int] = None,
         hidden_act: str = "swish",
         num_hidden_layers: int = 24,
-        norm_first: bool = False,
         norm_eps: float = 1e-6,
         attn: Optional[Dict] = None,
         use_cache: bool = True,
-        pad_token_id: int = None,
+        pad_token_id: Optional[int] = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
         initializer_range: float = 0.02,
-        fuse_cross_entropy: bool = True,
-        vocab_size: int = 32000,
         num_memories: int = 4,
         topk: int = 2,
         capacity: float = 1.0,
@@ -43,29 +40,31 @@ class MomConfig(PretrainedConfig):
         shared_mem: bool = False,
         single_kv_proj: bool = False,
         mom_backend: str = 'gated_deltanet',
+        fuse_norm: bool = True,
+        fuse_swiglu: bool = True,
+        fuse_cross_entropy: bool = True,
+        vocab_size: int = 32000,
         **kwargs
     ):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
-        self.expand_v = expand_v
-        self.use_gate = use_gate
-        self.use_short_conv = use_short_conv
-        self.conv_size = conv_size
-        self.head_dim = head_dim
         self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.expand_v = expand_v
+        self.conv_size = conv_size
+        self.use_output_gate = use_output_gate
+        self.use_short_conv = use_short_conv
         self.max_position_embeddings = max_position_embeddings
 
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
         self.hidden_act = hidden_act
         self.num_hidden_layers = num_hidden_layers
-        self.norm_first = norm_first
         self.norm_eps = norm_eps
         self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range
-        self.fuse_cross_entropy = fuse_cross_entropy
-        self.vocab_size = vocab_size
+
         self.num_memories = num_memories
         self.topk = topk
         self.capacity = capacity
@@ -74,6 +73,11 @@ class MomConfig(PretrainedConfig):
         self.shared_mem = shared_mem
         self.single_kv_proj = single_kv_proj
         self.mom_backend = mom_backend
+
+        self.fuse_norm = fuse_norm
+        self.fuse_swiglu = fuse_swiglu
+        self.fuse_cross_entropy = fuse_cross_entropy
+        self.vocab_size = vocab_size
 
         if self.mom_backend not in ['gated_deltanet']:
             raise NotImplementedError(f"The MoM backend {mom_backend} is not currently supported.")
