@@ -22,15 +22,6 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
-def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
-
-# https://github.com/IDSIA/recurrent-fwp/blob/master/algorithmic/layers.py#L86C1-L146C1
-
 def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, selected_memories: torch.Tensor, capacity: float):
     '''
     Transform input sequences into memory-organized chunks with capacity constraints.
@@ -453,7 +444,7 @@ class MomGatedDeltaNet(nn.Module):
             g = g.mul(attention_mask[None, :, -g.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else [None for _ in range(self.num_memories + self.shared_mem)]
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         # Note: In the updated version of FLA, "offset" has been renamed to "cu_seqlens".
         if mode == 'chunk':
             o_list = [None for _ in range(self.num_memories)]
@@ -466,10 +457,9 @@ class MomGatedDeltaNet(nn.Module):
                     beta=beta[e].to(dtype=torch.bfloat16),
                     initial_state=recurrent_state[e],
                     output_final_state=use_cache,
-                    cu_seqlens=offsets,
-                    head_first=False
+                    cu_seqlens=cu_seqlens,
                 )
-                # chunk_gated_delta_rule(q=q[e].to(dtype=torch.bfloat16),k=k[e].to(dtype=torch.bfloat16),v=v[e].to(dtype=torch.bfloat16),g=g[e].to(dtype=torch.bfloat16),beta=beta[e].to(dtype=torch.bfloat16),initial_state=recurrent_state[e],output_final_state=use_cache,cu_seqlens=offsets,head_first=False)
+                # chunk_gated_delta_rule(q=q[e].to(dtype=torch.bfloat16),k=k[e].to(dtype=torch.bfloat16),v=v[e].to(dtype=torch.bfloat16),g=g[e].to(dtype=torch.bfloat16),beta=beta[e].to(dtype=torch.bfloat16),initial_state=recurrent_state[e],output_final_state=use_cache,cu_seqlens=cu_seqlens)
                 o_e = o_e[:,-max_len:,:,:].to(dtype=q[e].dtype)
                 o_list[e] = o_e
                 recurrent_state[e] = state_e
@@ -491,8 +481,7 @@ class MomGatedDeltaNet(nn.Module):
                     beta=beta[e],
                     initial_state=recurrent_state[e],
                     output_final_state=use_cache,
-                    cu_seqlens=offsets,
-                    head_first=False
+                    cu_seqlens=cu_seqlens,
                 )
                 o_e = o_e[:,-max_len:,:,:]
                 o_list[e] = o_e
@@ -581,7 +570,7 @@ class MomGatedDeltaNet(nn.Module):
             beta = beta.mul(attention_mask[:, -beta.shape[-2]:, None])
             g = g.mul(attention_mask[:, -g.shape[-2]:, None])
 
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'chunk':
             o, recurrent_state[-1] = chunk_gated_delta_rule(
                 q=q.to(dtype=torch.bfloat16),
@@ -591,8 +580,7 @@ class MomGatedDeltaNet(nn.Module):
                 beta=beta.to(dtype=torch.bfloat16),
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                cu_seqlens=offsets,
-                head_first=False
+                cu_seqlens=cu_seqlens,
             )
             o = o.to(dtype=q.dtype)
         elif mode == 'fused_recurrent':
@@ -604,8 +592,7 @@ class MomGatedDeltaNet(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                cu_seqlens=offsets,
-                head_first=False
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
