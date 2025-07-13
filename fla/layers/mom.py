@@ -19,6 +19,123 @@ if TYPE_CHECKING:
 
     from fla.models.utils import Cache
 
+from transformers.utils import is_flash_attn_2_available
+
+if is_flash_attn_2_available():
+    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input
+else:
+    print("flash_attn_2 is not available")
+
+
+def elu_p1(x):
+    return (F.elu(x, 1., False) + 1.).to(x)
+
+
+def _get_unpad_data(attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """
+    Retrieves indexing data required to repad unpadded (ragged) tensors.
+
+    Arguments:
+        attention_mask (`torch.Tensor`):
+            Boolean or int tensor of shape (batch_size, sequence_length), 1 means valid and 0 means not valid.
+
+    Return:
+        indices (`torch.Tensor`):
+            The indices of non-masked tokens from the flattened input sequence.
+        cu_seqlens (`torch.Tensor`):
+            The cumulative sequence lengths, used to index into ragged (unpadded) tensors. `cu_seqlens` shape is (batch_size + 1,).
+        max_seqlen_in_batch (`int`):
+            Maximum sequence length in batch.
+    """
+    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+    max_seqlen_in_batch = seqlens_in_batch.max().item()
+    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    return (
+        indices,
+        cu_seqlens,
+        max_seqlen_in_batch,
+    )
+
+
+def _upad_input(
+    query_layer: torch.Tensor,
+    key_layer: torch.Tensor,
+    value_layer: torch.Tensor,
+    gate_layer: torch.Tensor,
+    beta_layer: torch.Tensor,
+    attention_mask: torch.Tensor,
+    query_length: int,
+):
+    """
+    Unpads query, key, and values tensors, using a single dimension for all tokens even though they belong to different batches.
+
+    This function is used instead of `flash_attn.bert_padding.unpad_input` in order to avoid the recomputation of the same intermediary
+    tensors for query, key, value tensors.
+
+    Arguments:
+        query_layer (`torch.Tensor`):
+            Query state with padding. Shape: (batch_size, query_length, num_heads, head_dim).
+        key_layer (`torch.Tensor`):
+            Key state with padding. Shape: (batch_size, kv_seq_len, num_key_value_heads, head_dim).
+        value_layer (`torch.Tensor`):
+            Value state with padding. Shape: (batch_size, kv_seq_len, num_key_value_heads, head_dim).
+        attention_mask (`torch.Tensor`):
+            Boolean or int tensor of shape (batch_size, sequence_length), 1 means valid and 0 means not valid.
+        query_length (`int`):
+            Target length.
+
+    Return:
+        query_layer (`torch.Tensor`):
+            Query state without padding. Shape: (total_target_length, num_heads, head_dim).
+        key_layer (`torch.Tensor`):
+            Key state with padding. Shape: (total_source_length, num_key_value_heads, head_dim).
+        value_layer (`torch.Tensor`):
+            Value state with padding. Shape: (total_source_length, num_key_value_heads, head_dim).
+        indices_q (`torch.Tensor`):
+            The indices of non-masked tokens from the flattened input target sequence.
+        (cu_seqlens_q, cu_seqlens_k) (`Tuple[int]`):
+            The cumulative sequence lengths for the target (query) and source (key, value), used to index into ragged (unpadded) tensors. `cu_seqlens` shape is (batch_size + 1,).
+        (max_seqlen_in_batch_q, max_seqlen_in_batch_k) (`Tuple[int]`):
+            Maximum sequence length in batch (`max_seqlen_in_batch_q` for the target sequence i.e. query, `max_seqlen_in_batch_k` for the source sequence i.e. key/value).
+    """
+    indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
+    batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
+
+    key_layer = index_first_axis(key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k)
+    value_layer = index_first_axis(
+        value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+    )
+    gate_layer = index_first_axis(gate_layer.reshape(batch_size * kv_seq_len, num_key_value_heads), indices_k)
+    beta_layer = index_first_axis(beta_layer.reshape(batch_size * kv_seq_len, num_key_value_heads), indices_k)
+    if query_length == kv_seq_len:
+        query_layer = index_first_axis(query_layer.reshape(batch_size * kv_seq_len, -1, head_dim), indices_k)
+        cu_seqlens_q = cu_seqlens_k
+        max_seqlen_in_batch_q = max_seqlen_in_batch_k
+        indices_q = indices_k
+    elif query_length == 1:
+        max_seqlen_in_batch_q = 1
+        cu_seqlens_q = torch.arange(
+            batch_size + 1, dtype=torch.int32, device=query_layer.device
+        )  # There is a memcpy here, that is very bad.
+        indices_q = cu_seqlens_q[:-1]
+        query_layer = query_layer.squeeze(1)
+    else:
+        # The -q_len: slice assumes left padding.
+        attention_mask = attention_mask[:, -query_length:]
+        query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+
+    return (
+        query_layer,
+        key_layer,
+        value_layer,
+        gate_layer,
+        beta_layer,
+        indices_q,
+        (cu_seqlens_q, cu_seqlens_k),
+        (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
+    )
+
 
 def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, selected_memories: torch.Tensor, capacity: float):
     '''
@@ -109,11 +226,13 @@ def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, se
     transformed_x = gathered_x.reshape(b * num_memories, -1, d)
     transformed_x = transformed_x * mask.unsqueeze(-1).expand_as(transformed_x)
     pad_x = torch.zeros((b * num_memories, capacity_len-max_len, d), dtype=transformed_x.dtype, device=transformed_x.device)
+    pad_mask = torch.zeros((b * num_memories, capacity_len-max_len), dtype=transformed_x.dtype, device=transformed_x.device)
     # left pad
     transformed_x = torch.cat((pad_x, transformed_x), dim=1).reshape((b, num_memories, capacity_len, d)).transpose(0, 1)
+    mask_2 = torch.cat((pad_mask.bool(), mask), dim=1).reshape((b, num_memories, capacity_len)).transpose(0, 1)
     # truncation_indices += capacity_len-max_len
 
-    return transformed_x, truncation_indices, sorted_indices, max_len, mask
+    return transformed_x, truncation_indices, sorted_indices, max_len, mask, mask_2
     # (num_memories, batch, seq, hidden)
 
 # @torch.jit.script
@@ -186,49 +305,7 @@ def reconstruct(transformed_x, indices: torch.Tensor, sorted_indices: torch.Tens
 
 class MomAttention(nn.Module):
     """
-    The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
-
-    Similar to Mamba2, each layer contains around 6*hidden_size*hidden_size parameters.
-    Parameter alloation when use_output_gate=True:
-        - 0.75 * hidden_size * hidden_size for the q_proj and k_proj each
-        - 1.5 * hidden_size * hidden_size for the v_proj, g_proj and o_proj each
-        - Others are ignorably small.
-        - In total = 0.75 * 2 + 1.5 * 3 = 6 * hidden_size * hidden_size
-    NOTE: num_heads * head_dim = 0.75 * hidden_size, please make sure to set the correct num_heads and head_dim.
-
-    Parameter allocation when use_output_gate=False:
-        - 1 * hidden_size * hidden_size for the q_proj and k_proj each
-        - 2 * hidden_size * hidden_size for the v_proj and o_proj each
-        - Others are ignorably small.
-        - In total = 1 * 2 + 2 * 2 = 6 * hidden_size * hidden_size
-
-    Args:
-        hidden_size (int, Optional):
-            The hidden size of the input. Default: 2048.
-        expand_v (float, Optional):
-            The expansion ratio for the value dim. Default: 2.0.
-        head_dim (int, Optional):
-            The dimension of each head. Default: 256.
-        num_heads (int, Optional):
-            The number of heads. Default: 4.
-        mode (str, Optional):
-            Which Gated DeltaNet kernel to use.
-            Currently available: `chunk` and `fused_recurrent`.
-            Default: `chunk`.
-        use_beta (bool, Optional):
-            Whether to use beta. Default: `True`.
-        use_output_gate (bool, Optional):
-            Whether to use output gate. Default: `True`.
-        use_short_conv (bool, Optional):
-            Whether to use short convolutions. Default: `True`.
-        conv_size (int, Optional):
-            The kernel size of the short convolution, only used when `use_short_conv` is `True`. Default: 4.
-        conv_bias (bool, Optional):
-            Whether to use bias in the short convolution, only used when `use_short_conv` is `True`. Default: `False`.
-        layer_idx (int, Optional):
-            The index of the layer. Default: None.
-        norm_eps (float, Optional):
-            The epsilon value for the normalization layer. Default: 1e-5.
+    The layer implementaion for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
     """
 
     def __init__(
@@ -329,16 +406,19 @@ class MomAttention(nn.Module):
             self.q_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
                 kernel_size=conv_size,
+                bias=conv_bias,
                 activation='silu'
             )
         else:
@@ -384,6 +464,7 @@ class MomAttention(nn.Module):
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
         last_state = None
+        _, q_len = hidden_states.shape[0], hidden_states.shape[1]
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
@@ -403,7 +484,7 @@ class MomAttention(nn.Module):
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
 
         shared_hidden_states = hidden_states
-        hidden_states, indices, sorted_indices, max_len, mask = transform(
+        hidden_states, indices, sorted_indices, max_len, mask, mask2 = transform(
             hidden_states, routing_mask, self.num_memories, selected_memories, self.capacity)
 
         q = self.q_proj(hidden_states)
@@ -423,22 +504,25 @@ class MomAttention(nn.Module):
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            conv_mask = attention_mask[:, -hidden_states.shape[2]
-                :].repeat_interleave(self.num_memories, 0) if attention_mask is not None else None
-            seq_idx = kwargs.get('seq_idx', None)
             q, k, v = map(lambda x: rearrange(x, 'e b t d -> (e b) t d'), (q, k, v))
-            q, conv_state_q[0] = self.q_conv1d(x=q,
-                                               mask=conv_mask,
-                                               cache=conv_state_q[0],
-                                               output_final_state=use_cache, seq_idx=seq_idx)
-            k, conv_state_k[0] = self.k_conv1d(x=k,
-                                               mask=conv_mask,
-                                               cache=conv_state_k[0],
-                                               output_final_state=use_cache, seq_idx=seq_idx)
-            v, conv_state_v[0] = self.v_conv1d(x=v,
-                                               mask=conv_mask,
-                                               cache=conv_state_v[0],
-                                               output_final_state=use_cache, seq_idx=seq_idx)
+            q, conv_state_q[0] = self.q_conv1d(
+                x=q,
+                cache=conv_state_q[0],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
+            k, conv_state_k[0] = self.k_conv1d(
+                x=k,
+                cache=conv_state_k[0],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
+            v, conv_state_v[0] = self.v_conv1d(
+                x=v,
+                cache=conv_state_v[0],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
 
             q, k, v = map(lambda x: rearrange(x, '(e b) t d -> e b t d', b=batch_size), (q, k, v))
 
@@ -450,64 +534,56 @@ class MomAttention(nn.Module):
         q = l2_norm(q)
         k = l2_norm(k)
 
+        q, k, v, g, beta, mask2 = (rearrange(x, 'e b l ... ->  (e b) l ...') for x in (q, k, v, g, beta, mask2))
+        cu_q, cu_k, cu_v, cu_g, cu_beta, indices_q, cu_seqlen_all, max_seq_lens = _upad_input(q, k, v, g, beta, mask2, q_len)
+        cu_seqlens = cu_seqlen_all[0].to(torch.long).unique()
+        cu_q, cu_k, cu_v, cu_g, cu_beta = (x.unsqueeze(0).contiguous() for x in (cu_q, cu_k, cu_v, cu_g, cu_beta))
+
         # dealing with padding
         if attention_mask is not None:
             beta = beta.mul(attention_mask[None, :, -beta.shape[-2]:, None])
             g = g.mul(attention_mask[None, :, -g.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else [
-            None for _ in range(self.num_memories + self.shared_mem)]
+            None for _ in range(1 + self.shared_mem)]
         cu_seqlens = kwargs.get('cu_seqlens', None)
-        # Note: In the updated version of FLA, "offset" has been renamed to "cu_seqlens".
         if mode == 'chunk':
-            o_list = [None for _ in range(self.num_memories)]
-            for e in range(self.num_memories):
-                o_e, state_e = chunk_gated_delta_rule(
-                    q=q[e].to(dtype=torch.bfloat16),
-                    k=k[e].to(dtype=torch.bfloat16),
-                    v=v[e].to(dtype=torch.bfloat16),
-                    g=g[e].to(dtype=torch.bfloat16),
-                    beta=beta[e].to(dtype=torch.bfloat16),
-                    initial_state=recurrent_state[e],
-                    output_final_state=use_cache,
-                    cu_seqlens=cu_seqlens,
-                )
-                # chunk_gated_delta_rule(q=q[e].to(dtype=torch.bfloat16),k=k[e].to(dtype=torch.bfloat16),v=v[e].to(dtype=torch.bfloat16),g=g[e].to(dtype=torch.bfloat16),beta=beta[e].to(dtype=torch.bfloat16),initial_state=recurrent_state[e],output_final_state=use_cache,cu_seqlens=cu_seqlens)
-                o_e = o_e[:, -max_len:, :, :].to(dtype=q[e].dtype)
-                o_list[e] = o_e
-                recurrent_state[e] = state_e
-            o_list = torch.stack(o_list, dim=0)
-            o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices,
-                            batch_size=q.shape[1], seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
+            o_, recurrent_state_ = chunk_gated_delta_rule(
+                q=cu_q,
+                k=cu_k,
+                v=cu_v,
+                g=cu_g,
+                beta=cu_beta,
+                initial_state=recurrent_state[0],
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
+            )
+            recurrent_state[0] = recurrent_state_
+            o_ = o_.squeeze(0).contiguous()
+            o_list = pad_input(o_, indices_q, batch_size*self.num_memories, q_len)
+            o_list = rearrange(o_list, '(e b) l h d -> e b l h d', b=batch_size)
+            o_list = o_list[:, :, -max_len:]
+
+            o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
+                            seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
         elif mode == 'fused_recurrent':
-            o_list = [None for _ in range(self.num_memories)]
-            for e in range(self.num_memories):
-                # only activated memory updates
-                if not hidden_states[e, 0].any() and hidden_states.shape[1] == 1:
-                    o_list[e] = torch.zeros_like(v[e, :, -max_len:, :, :])
-                    continue
-                o_e, state_e = fused_recurrent_gated_delta_rule(
-                    q=q[e],
-                    k=k[e],
-                    v=v[e],
-                    g=g[e],
-                    beta=beta[e],
-                    initial_state=recurrent_state[e],
-                    output_final_state=use_cache,
-                    cu_seqlens=cu_seqlens,
-                )
-                o_e = o_e[:, -max_len:, :, :]
-                o_list[e] = o_e
-                # recurrent_state[e] = state_e
-                for batch in range(state_e.shape[0]):
-                    if recurrent_state[e] is None:
-                        recurrent_state[e] = state_e
-                    elif hidden_states[e, batch].any():
-                        recurrent_state[e][batch] = state_e[batch]
-            o_list = torch.stack(o_list, dim=0)
-            o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices,
-                            batch_size=q.shape[1], seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
+            o_, recurrent_state_ = fused_recurrent_gated_delta_rule(
+                q=cu_q,
+                k=cu_k,
+                v=cu_v,
+                g=cu_g,
+                beta=cu_beta,
+                initial_state=recurrent_state[0],
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
+            )
+            recurrent_state[0] = recurrent_state_
+            o_ = o_.squeeze(0).contiguous()
+            o_list = pad_input(o_, indices_q, batch_size*self.num_memories, max_len)
+            o_list = rearrange(o_list, '(e b) l h d -> e b l h d', b=batch_size)
+            o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
+                            seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
         if self.shared_mem:
             shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state,
@@ -555,20 +631,24 @@ class MomAttention(nn.Module):
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
         if self.use_short_conv:
-            conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            seq_idx = kwargs.get('seq_idx', None)
-            q, conv_state_q[1] = self.q_conv1d(x=self.q_proj(hidden_states),
-                                               mask=conv_mask,
-                                               cache=conv_state_q[1],
-                                               output_final_state=use_cache, seq_idx=seq_idx)
-            k, conv_state_k[1] = self.k_conv1d(x=self.shared_k(hidden_states),
-                                               mask=conv_mask,
-                                               cache=conv_state_k[1],
-                                               output_final_state=use_cache, seq_idx=seq_idx)
-            v, conv_state_v[1] = self.v_conv1d(x=self.shared_v(hidden_states),
-                                               mask=conv_mask,
-                                               cache=conv_state_v[1],
-                                               output_final_state=use_cache, seq_idx=seq_idx)
+            q, conv_state_q[1] = self.q_conv1d(
+                x=self.q_proj(hidden_states),
+                cache=conv_state_q[1],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
+            k, conv_state_k[1] = self.k_conv1d(
+                x=self.shared_k(hidden_states),
+                cache=conv_state_k[1],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
+            v, conv_state_v[1] = self.v_conv1d(
+                x=self.shared_v(hidden_states),
+                cache=conv_state_v[1],
+                output_final_state=use_cache,
+                cu_seqlens=None
+            )
         else:
             q = self.silu(self.q_proj(hidden_states))
             k = self.silu(self.shared_k(hidden_states))
