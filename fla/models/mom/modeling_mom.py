@@ -92,7 +92,7 @@ class MomBlock(nn.Module):
                 layer_idx=layer_idx
             )
         else:
-            if config.mom_backend == 'GDN':
+            if config.mom_backend == 'gated_deltanet':
                 self.attn = MomAttention(
                     mode=config.attn_mode,
                     hidden_size=config.hidden_size,
@@ -112,7 +112,7 @@ class MomBlock(nn.Module):
                     single_kv_proj=config.single_kv_proj
                 )
             else:
-                raise NotImplementedError("The MoM backend is not currently implemented.")
+                raise NotImplementedError(f"The MoM backend {config.mom_backend} is not currently supported.")
         if not config.norm_first:
             self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
         self.mlp = MomMLP(
@@ -469,7 +469,7 @@ class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
                 valid_router_logits,
                 self.num_memories,
                 self.topk,
-                use_layer_wise_balance=self.config.use_layer_wise_balance,  # ✨
+                use_layer_wise_balance=self.config.use_layer_wise_balance,
             )
             aux_loss *= self.aux_loss_scale
 
@@ -532,7 +532,7 @@ def load_balancing_loss_func(
 
     for logits in gate_logits:
         routing_weights, selected_experts = torch.topk(logits, top_k, dim=-1)
-        routing_weights = routing_weights.softmax(dim=-1)
+        routing_weights = routing_weights.softmax(dim=-1).to(logits.dtype)
         routing_weights_full = torch.zeros_like(logits).scatter(-1, selected_experts, routing_weights)
 
         # cast the expert indices to int64, otherwise one-hot encoding will fail

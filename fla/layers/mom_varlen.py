@@ -305,49 +305,7 @@ def reconstruct(transformed_x, indices: torch.Tensor, sorted_indices: torch.Tens
 
 class MomAttention(nn.Module):
     """
-    The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
-
-    Similar to Mamba2, each layer contains around 6*hidden_size*hidden_size parameters.
-    Parameter alloation when use_output_gate=True:
-        - 0.75 * hidden_size * hidden_size for the q_proj and k_proj each
-        - 1.5 * hidden_size * hidden_size for the v_proj, g_proj and o_proj each
-        - Others are ignorably small.
-        - In total = 0.75 * 2 + 1.5 * 3 = 6 * hidden_size * hidden_size
-    NOTE: num_heads * head_dim = 0.75 * hidden_size, please make sure to set the correct num_heads and head_dim.
-
-    Parameter allocation when use_output_gate=False:
-        - 1 * hidden_size * hidden_size for the q_proj and k_proj each
-        - 2 * hidden_size * hidden_size for the v_proj and o_proj each
-        - Others are ignorably small.
-        - In total = 1 * 2 + 2 * 2 = 6 * hidden_size * hidden_size
-
-    Args:
-        hidden_size (int, Optional):
-            The hidden size of the input. Default: 2048.
-        expand_v (float, Optional):
-            The expansion ratio for the value dim. Default: 2.0.
-        head_dim (int, Optional):
-            The dimension of each head. Default: 256.
-        num_heads (int, Optional):
-            The number of heads. Default: 4.
-        mode (str, Optional):
-            Which Gated DeltaNet kernel to use.
-            Currently available: `chunk` and `fused_recurrent`.
-            Default: `chunk`.
-        use_beta (bool, Optional):
-            Whether to use beta. Default: `True`.
-        use_output_gate (bool, Optional):
-            Whether to use output gate. Default: `True`.
-        use_short_conv (bool, Optional):
-            Whether to use short convolutions. Default: `True`.
-        conv_size (int, Optional):
-            The kernel size of the short convolution, only used when `use_short_conv` is `True`. Default: 4.
-        conv_bias (bool, Optional):
-            Whether to use bias in the short convolution, only used when `use_short_conv` is `True`. Default: `False`.
-        layer_idx (int, Optional):
-            The index of the layer. Default: None.
-        norm_eps (float, Optional):
-            The epsilon value for the normalization layer. Default: 1e-5.
+    The layer implementaion for [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685).
     """
 
     def __init__(
