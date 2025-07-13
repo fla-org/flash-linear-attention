@@ -13,8 +13,7 @@ from torch.nn import functional as F
 
 from fla.modules import FusedRMSNormSwishGate, RMSNorm, ShortConvolution
 from fla.modules.l2norm import l2_norm
-from fla.ops.gated_delta_rule import (chunk_gated_delta_rule,
-                                      fused_recurrent_gated_delta_rule)
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
 def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, selected_memories: torch.Tensor, capacity: float):
     '''
     Transform input sequences into memory-organized chunks with capacity constraints.
-    
+
     Processes input sequences by routing tokens to designated memory states according to routing_mask,
     sorts tokens by memory assignments, handles token truncation/padding based on memory capacity,
     and returns memory-aligned tensors for parallel processing.
@@ -88,7 +87,7 @@ def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, se
         batch_memory_tokens = routing_mask.sum(dim=1)
         # (b, num_memories)
         offset = batch_memory_tokens.cumsum(dim=1)
-        memory_batch_offset = offset.transpose(0,1)
+        memory_batch_offset = offset.transpose(0, 1)
         batch_offset = torch.arange(0, b*s, s, device=offset.device)
         memory_batch_offset += batch_offset
         flatten_offset = memory_batch_offset.transpose(0, 1).reshape(-1)
@@ -97,12 +96,14 @@ def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, se
         capacity_len = math.ceil(s / topk * capacity)
         max_len = min(max_len, capacity_len)
 
-        indices = torch.arange(max_len, device=flatten_offset.device).unsqueeze(0).expand(b*num_memories, -1) + torch.cat([torch.tensor([0], device=flatten_offset.device), flatten_offset[:-1]], dim=0).unsqueeze(1)
+        indices = torch.arange(max_len, device=flatten_offset.device).unsqueeze(0).expand(
+            b*num_memories, -1) + torch.cat([torch.tensor([0], device=flatten_offset.device), flatten_offset[:-1]], dim=0).unsqueeze(1)
         # discard tokens exceed capacity and is far from now
         # left pad
         truncation_indices = indices + batch_memory_tokens.reshape((-1,)).unsqueeze(-1) - max_len
         mask = torch.bitwise_and(truncation_indices < flatten_offset.unsqueeze(-1), truncation_indices >= 0)
-        mask = torch.bitwise_and(mask, truncation_indices >= torch.cat((torch.zeros((1,), dtype=flatten_offset.dtype, device=flatten_offset.device), flatten_offset[:-1])).unsqueeze(-1))
+        mask = torch.bitwise_and(mask, truncation_indices >= torch.cat(
+            (torch.zeros((1,), dtype=flatten_offset.dtype, device=flatten_offset.device), flatten_offset[:-1])).unsqueeze(-1))
         truncation_indices = torch.where(mask, truncation_indices, torch.zeros_like(truncation_indices))
 
     gathered_x = torch.gather(x_sorted, 0, truncation_indices.reshape(-1).unsqueeze(-1).expand(-1, d))
@@ -117,6 +118,8 @@ def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, se
     # (num_memories, batch, seq, hidden)
 
 # @torch.jit.script
+
+
 def reconstruct(transformed_x, indices: torch.Tensor, sorted_indices: torch.Tensor, batch_size: int, seq_len: int, topk: int, routing_weights: torch.Tensor, mask: torch.Tensor):
     '''
     Reconstruct and mix transformed outputs back into the original input sequence shape.
@@ -157,15 +160,17 @@ def reconstruct(transformed_x, indices: torch.Tensor, sorted_indices: torch.Tens
             The reconstructed output tensor in the original input sequence shape.
             Shape: (batch_size, seq_len, hidden_size)
     '''
-    transformed_x = transformed_x.transpose(0, 1).reshape((-1, transformed_x.shape[2], transformed_x.shape[3], transformed_x.shape[4]))
+    transformed_x = transformed_x.transpose(0, 1).reshape(
+        (-1, transformed_x.shape[2], transformed_x.shape[3], transformed_x.shape[4]))
     b, s, k, h, d = batch_size, seq_len, topk, transformed_x.shape[2], transformed_x.shape[3]
-    gathered_x = transformed_x.reshape((transformed_x.shape[0] * transformed_x.shape[1], transformed_x.shape[2], transformed_x.shape[3]))
+    gathered_x = transformed_x.reshape(
+        (transformed_x.shape[0] * transformed_x.shape[1], transformed_x.shape[2], transformed_x.shape[3]))
     mask_expanded = mask.reshape(-1).unsqueeze(-1).unsqueeze(-1).expand_as(gathered_x)
     gathered_x = gathered_x * mask_expanded
 
     assert (indices >= 0).all(), "Indices should be non-negative"
 
-    resortd_x = torch.zeros((b * s * k, h, d) ,device=gathered_x.device, dtype=gathered_x.dtype).scatter_add_(
+    resortd_x = torch.zeros((b * s * k, h, d), device=gathered_x.device, dtype=gathered_x.dtype).scatter_add_(
         0,
         indices.reshape(-1).unsqueeze(-1).unsqueeze(-1).expand(-1, h, d),
         gathered_x,
@@ -180,7 +185,7 @@ def reconstruct(transformed_x, indices: torch.Tensor, sorted_indices: torch.Tens
     return restored_x
 
 
-class MomGatedDeltaNet(nn.Module):
+class MomAttention(nn.Module):
     """
     The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
 
@@ -246,7 +251,7 @@ class MomGatedDeltaNet(nn.Module):
         shared_mem: bool = False,
         single_kv_proj: bool = False,
         **kwargs
-    ) -> MomGatedDeltaNet:
+    ) -> MomAttention:
         super().__init__()
         self.num_memories = num_memories
         self.topk = topk
@@ -284,10 +289,14 @@ class MomGatedDeltaNet(nn.Module):
             self.shared_b = nn.Linear(hidden_size, self.num_heads, bias=False)
             self.shared_a = nn.Linear(hidden_size, self.num_heads, bias=False)
         else:
-            self.k_proj =  nn.ModuleList([nn.Linear(self.hidden_size, self.key_dim, bias=False) for _ in range(self.num_memories)])
-            self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.value_dim, bias=False) for _ in range(self.num_memories)])
-            self.b_proj =  nn.ModuleList([nn.Linear(self.hidden_size, self.num_heads, bias=False) for _ in range(self.num_memories)])
-            self.a_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_heads, bias=False) for _ in range(self.num_memories)])
+            self.k_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.key_dim, bias=False)
+                                        for _ in range(self.num_memories)])
+            self.v_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.value_dim, bias=False)
+                                        for _ in range(self.num_memories)])
+            self.b_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_heads, bias=False)
+                                        for _ in range(self.num_memories)])
+            self.a_proj = nn.ModuleList([nn.Linear(self.hidden_size, self.num_heads, bias=False)
+                                        for _ in range(self.num_memories)])
             if self.shared_mem:
                 self.shared_k = nn.Linear(hidden_size, self.key_dim, bias=False)
                 self.shared_v = nn.Linear(hidden_size, self.value_dim, bias=False)
@@ -385,16 +394,18 @@ class MomGatedDeltaNet(nn.Module):
         routing_weights, selected_memories = torch.topk(scores, self.topk, dim=-1)  # (bsz, seq, topk)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(hidden_states.dtype)  # we cast back to the input dtype
-        routing_weights_full = torch.zeros((routing_weights.shape[0], routing_weights.shape[1], self.num_memories), dtype=routing_weights.dtype, device=routing_weights.device).scatter(-1, selected_memories, routing_weights)
+        routing_weights_full = torch.zeros((routing_weights.shape[0], routing_weights.shape[1], self.num_memories),
+                                           dtype=routing_weights.dtype, device=routing_weights.device).scatter(-1, selected_memories, routing_weights)
         routing_mask = routing_weights_full.bool().int()
 
         if self.use_gate:
             o_g = self.g_proj(hidden_states)
-        
+
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
 
         shared_hidden_states = hidden_states
-        hidden_states, indices, sorted_indices, max_len, mask = transform(hidden_states, routing_mask, self.num_memories, selected_memories, self.capacity)
+        hidden_states, indices, sorted_indices, max_len, mask = transform(
+            hidden_states, routing_mask, self.num_memories, selected_memories, self.capacity)
 
         q = self.q_proj(hidden_states)
         if self.single_kv_proj:
@@ -406,27 +417,29 @@ class MomGatedDeltaNet(nn.Module):
             k = torch.stack([k_expert(hidden_states[i]) for i, k_expert in enumerate(self.k_proj)], dim=0)
             v = torch.stack([v_expert(hidden_states[i]) for i, v_expert in enumerate(self.v_proj)], dim=0)
             beta = torch.stack([b_expert(hidden_states[i]).sigmoid() for i, b_expert in enumerate(self.b_proj)], dim=0)
-            g = torch.stack([-self.A_log.float().exp() * F.softplus(a_expert(hidden_states[i]).float() + self.dt_bias) for i, a_expert in enumerate(self.a_proj)], dim=0)
+            g = torch.stack([-self.A_log.float().exp() * F.softplus(a_expert(hidden_states[i]).float() + self.dt_bias)
+                            for i, a_expert in enumerate(self.a_proj)], dim=0)
 
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            conv_mask = attention_mask[:, -hidden_states.shape[2]:].repeat_interleave(self.num_memories, 0) if attention_mask is not None else None
-            seq_idx=kwargs.get('seq_idx', None)
+            conv_mask = attention_mask[:, -hidden_states.shape[2]
+                :].repeat_interleave(self.num_memories, 0) if attention_mask is not None else None
+            seq_idx = kwargs.get('seq_idx', None)
             q, k, v = map(lambda x: rearrange(x, 'e b t d -> (e b) t d'), (q, k, v))
             q, conv_state_q[0] = self.q_conv1d(x=q,
-                                            mask=conv_mask,
-                                            cache=conv_state_q[0],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                               mask=conv_mask,
+                                               cache=conv_state_q[0],
+                                               output_final_state=use_cache, seq_idx=seq_idx)
             k, conv_state_k[0] = self.k_conv1d(x=k,
-                                            mask=conv_mask,
-                                            cache=conv_state_k[0],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                               mask=conv_mask,
+                                               cache=conv_state_k[0],
+                                               output_final_state=use_cache, seq_idx=seq_idx)
             v, conv_state_v[0] = self.v_conv1d(x=v,
-                                            mask=conv_mask,
-                                            cache=conv_state_v[0],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                               mask=conv_mask,
+                                               cache=conv_state_v[0],
+                                               output_final_state=use_cache, seq_idx=seq_idx)
 
             q, k, v = map(lambda x: rearrange(x, '(e b) t d -> e b t d', b=batch_size), (q, k, v))
 
@@ -434,7 +447,7 @@ class MomGatedDeltaNet(nn.Module):
             q, k, v = self.silu(q), self.silu(k), self.silu(v),
 
         q, k, v = map(lambda x: rearrange(x, 'e b t (h d) -> e b t h d', h=self.num_heads), (q, k, v))
-        
+
         q = l2_norm(q)
         k = l2_norm(k)
 
@@ -443,7 +456,8 @@ class MomGatedDeltaNet(nn.Module):
             beta = beta.mul(attention_mask[None, :, -beta.shape[-2]:, None])
             g = g.mul(attention_mask[None, :, -g.shape[-2]:, None])
 
-        recurrent_state = last_state['recurrent_state'] if last_state is not None else [None for _ in range(self.num_memories + self.shared_mem)]
+        recurrent_state = last_state['recurrent_state'] if last_state is not None else [
+            None for _ in range(self.num_memories + self.shared_mem)]
         cu_seqlens = kwargs.get('cu_seqlens', None)
         # Note: In the updated version of FLA, "offset" has been renamed to "cu_seqlens".
         if mode == 'chunk':
@@ -460,18 +474,19 @@ class MomGatedDeltaNet(nn.Module):
                     cu_seqlens=cu_seqlens,
                 )
                 # chunk_gated_delta_rule(q=q[e].to(dtype=torch.bfloat16),k=k[e].to(dtype=torch.bfloat16),v=v[e].to(dtype=torch.bfloat16),g=g[e].to(dtype=torch.bfloat16),beta=beta[e].to(dtype=torch.bfloat16),initial_state=recurrent_state[e],output_final_state=use_cache,cu_seqlens=cu_seqlens)
-                o_e = o_e[:,-max_len:,:,:].to(dtype=q[e].dtype)
+                o_e = o_e[:, -max_len:, :, :].to(dtype=q[e].dtype)
                 o_list[e] = o_e
                 recurrent_state[e] = state_e
             o_list = torch.stack(o_list, dim=0)
-            o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices, batch_size=q.shape[1], seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
+            o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices,
+                            batch_size=q.shape[1], seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
         elif mode == 'fused_recurrent':
             o_list = [None for _ in range(self.num_memories)]
             for e in range(self.num_memories):
                 # only activated memory updates
                 if not hidden_states[e, 0].any() and hidden_states.shape[1] == 1:
-                    o_list[e] = torch.zeros_like(v[e,:,-max_len:,:,:])
+                    o_list[e] = torch.zeros_like(v[e, :, -max_len:, :, :])
                     continue
                 o_e, state_e = fused_recurrent_gated_delta_rule(
                     q=q[e],
@@ -483,7 +498,7 @@ class MomGatedDeltaNet(nn.Module):
                     output_final_state=use_cache,
                     cu_seqlens=cu_seqlens,
                 )
-                o_e = o_e[:,-max_len:,:,:]
+                o_e = o_e[:, -max_len:, :, :]
                 o_list[e] = o_e
                 # recurrent_state[e] = state_e
                 for batch in range(state_e.shape[0]):
@@ -492,10 +507,12 @@ class MomGatedDeltaNet(nn.Module):
                     elif hidden_states[e, batch].any():
                         recurrent_state[e][batch] = state_e[batch]
             o_list = torch.stack(o_list, dim=0)
-            o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices, batch_size=q.shape[1], seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
+            o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices,
+                            batch_size=q.shape[1], seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
         if self.shared_mem:
-            shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state, use_cache, conv_state_q, conv_state_k, conv_state_v)
+            shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state,
+                                     use_cache, conv_state_q, conv_state_k, conv_state_v)
             o += shared_o
 
         if past_key_values is not None:
@@ -516,16 +533,15 @@ class MomGatedDeltaNet(nn.Module):
 
         return o, None, past_key_values, router_logits
 
-
     def shared_o(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        recurrent_state = None,
+        recurrent_state=None,
         use_cache: Optional[bool] = False,
-        conv_state_q = [None, None],
-        conv_state_k = [None, None],
-        conv_state_v = [None, None],
+        conv_state_q=[None, None],
+        conv_state_k=[None, None],
+        conv_state_v=[None, None],
         **kwargs
     ) -> torch.Tensor:
         if attention_mask is not None:
@@ -541,19 +557,19 @@ class MomGatedDeltaNet(nn.Module):
 
         if self.use_short_conv:
             conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
-            seq_idx=kwargs.get('seq_idx', None)
+            seq_idx = kwargs.get('seq_idx', None)
             q, conv_state_q[1] = self.q_conv1d(x=self.q_proj(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_q[1],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                               mask=conv_mask,
+                                               cache=conv_state_q[1],
+                                               output_final_state=use_cache, seq_idx=seq_idx)
             k, conv_state_k[1] = self.k_conv1d(x=self.shared_k(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_k[1],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                               mask=conv_mask,
+                                               cache=conv_state_k[1],
+                                               output_final_state=use_cache, seq_idx=seq_idx)
             v, conv_state_v[1] = self.v_conv1d(x=self.shared_v(hidden_states),
-                                            mask=conv_mask,
-                                            cache=conv_state_v[1],
-                                            output_final_state=use_cache,seq_idx=seq_idx)
+                                               mask=conv_mask,
+                                               cache=conv_state_v[1],
+                                               output_final_state=use_cache, seq_idx=seq_idx)
         else:
             q = self.silu(self.q_proj(hidden_states))
             k = self.silu(self.shared_k(hidden_states))

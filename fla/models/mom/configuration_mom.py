@@ -42,7 +42,7 @@ class MomConfig(PretrainedConfig):
         aux_loss_scale: float = 0.01,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
-        mom_backend: str = 'GDN',
+        mom_backend: str = 'gated_deltanet',
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -75,8 +75,8 @@ class MomConfig(PretrainedConfig):
         self.single_kv_proj = single_kv_proj
         self.mom_backend = mom_backend
 
-        if not self.mom_backend in ['GDN']:
-            raise NotImplementedError("The MoM backend is not currently implemented.")
+        if self.mom_backend not in ['gated_deltanet']:
+            raise NotImplementedError(f"The MoM backend {mom_backend} is not currently supported.")
 
         if attn is not None:
             if not isinstance(attn, Dict):

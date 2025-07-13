@@ -19,8 +19,8 @@ from .linear_attn import LinearAttention
 from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mesa_net import MesaNet
-from .mom_varlen import MomGatedDeltaNet
 from .mla import MultiheadLatentAttention
+from .mom_varlen import MomAttention
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
 from .path_attn import PaTHAttention
@@ -47,8 +47,8 @@ __all__ = [
     'LinearAttention',
     'Mamba',
     'Mamba2',
-    'MomGatedDeltaNet',
     'MesaNet',
+    'MomAttention',
     'MultiheadLatentAttention',
     'MultiScaleRetention',
     'NativeSparseAttention',

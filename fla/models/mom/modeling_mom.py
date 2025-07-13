@@ -2,28 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import warnings
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers.activations import ACT2FN
 from transformers.generation import GenerationMixin
-from transformers.modeling_outputs import (BaseModelOutputWithPast,
-                                           CausalLMOutputWithPast)
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
+from fla.layers import MomAttention
 from fla.layers.attn import Attention
-from fla.layers import MomGatedDeltaNet
-from fla.models.mom.configuration_mom import \
-    MomConfig
+from fla.models.mom.configuration_mom import MomConfig
 from fla.models.utils import Cache
-from fla.modules import (FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss,
-                         RMSNorm)
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.activations import swiglu_linear
 from fla.modules.layernorm import rms_norm_linear
 
@@ -97,7 +93,7 @@ class MomBlock(nn.Module):
             )
         else:
             if config.mom_backend == 'GDN':
-                self.attn = MomGatedDeltaNet(
+                self.attn = MomAttention(
                     mode=config.attn_mode,
                     hidden_size=config.hidden_size,
                     expand_v=config.expand_v,
@@ -210,6 +206,7 @@ class MomPreTrainedModel(PreTrainedModel):
 class MomOutputWithPast(BaseModelOutputWithPast):
     router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
 
+
 class MomModel(MomPreTrainedModel):
 
     def __init__(self, config: MomConfig):
@@ -321,6 +318,7 @@ class MomModel(MomPreTrainedModel):
 class MomCausalLMOutputWithPast(CausalLMOutputWithPast):
     aux_loss: Optional[torch.FloatTensor] = None
     router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
+
 
 class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
 
