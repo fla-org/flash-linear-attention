@@ -11,6 +11,7 @@ from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rw
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
 from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
+from fla.ops.rwkv7.gate_output_correction import gate_output_correction, gate_output_correction_ref
 from fla.utils import assert_close, device
 
 
@@ -250,3 +251,43 @@ def test_fused_k_update(
     assert_close(" dk", ref_dk, k.grad, ratio=5e-5)
     assert_close(" da", ref_da, a.grad, ratio=5e-5)
     assert_close("dka", ref_dka, ka.grad, ratio=5e-5)
+
+
+@pytest.mark.parametrize("B", [4])
+@pytest.mark.parametrize("T", [4096])
+@pytest.mark.parametrize("H", [64])
+@pytest.mark.parametrize("D", [64])
+@pytest.mark.parametrize("dtype", [torch.float32])
+def test_gate_output_correction(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    value_dim = H * D
+    torch.manual_seed(0)
+
+    o_ref = torch.randn(B, T, value_dim, device=device, dtype=dtype, requires_grad=True)
+    r_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
+    k_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
+    r_k_ref = torch.randn(H, D, device=device, dtype=dtype, requires_grad=True)
+    v_ref = torch.randn(B, T, H, D, device=device, dtype=dtype, requires_grad=True)
+    g_ref = torch.randn(B, T, value_dim, device=device, dtype=dtype, requires_grad=True)
+
+    tensors_cus = [t.clone().detach().requires_grad_(True) for t in [o_ref, r_ref, k_ref, r_k_ref, v_ref, g_ref]]
+    o_cus, r_cus, k_cus, r_k_cus, v_cus, g_cus = tensors_cus
+
+    output_ref = gate_output_correction_ref(o_ref, r_ref, k_ref, r_k_ref, v_ref, g_ref)
+    output_ref.sum().backward()
+
+    output_cus = gate_output_correction(o_cus, r_cus, k_cus, r_k_cus, v_cus, g_cus)
+    output_cus.sum().backward()
+
+    assert_close(" o", output_ref, output_cus, 0.002)
+    assert_close("do", o_ref.grad, o_cus.grad, 0.002)
+    assert_close("dr", r_ref.grad, r_cus.grad, 0.002)
+    assert_close("dk", k_ref.grad, k_cus.grad, 0.002)
+    assert_close("drk", r_k_ref.grad, r_k_cus.grad, 0.002)
+    assert_close("dv", v_ref.grad, v_cus.grad, 0.002)
+    assert_close("dg", g_ref.grad, g_cus.grad, 0.002)
