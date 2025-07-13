@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-
 from __future__ import annotations
 
 import math
@@ -11,7 +10,7 @@ import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 
-from fla.modules import FusedRMSNormSwishGate, RMSNorm, ShortConvolution
+from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.l2norm import l2_norm
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
@@ -136,12 +135,6 @@ def _upad_input(
         (cu_seqlens_q, cu_seqlens_k),
         (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
     )
-
-
-def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
-
-# https://github.com/IDSIA/recurrent-fwp/blob/master/algorithmic/layers.py#L86C1-L146C1
 
 
 def transform(x: torch.Tensor, routing_mask: torch.Tensor, num_memories: int, selected_memories: torch.Tensor, capacity: float):
@@ -315,14 +308,14 @@ class MomAttention(nn.Module):
     The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
 
     Similar to Mamba2, each layer contains around 6*hidden_size*hidden_size parameters.
-    Parameter alloation when use_gate=True:
+    Parameter alloation when use_output_gate=True:
         - 0.75 * hidden_size * hidden_size for the q_proj and k_proj each
         - 1.5 * hidden_size * hidden_size for the v_proj, g_proj and o_proj each
         - Others are ignorably small.
         - In total = 0.75 * 2 + 1.5 * 3 = 6 * hidden_size * hidden_size
     NOTE: num_heads * head_dim = 0.75 * hidden_size, please make sure to set the correct num_heads and head_dim.
 
-    Parameter allocation when use_gate=False:
+    Parameter allocation when use_output_gate=False:
         - 1 * hidden_size * hidden_size for the q_proj and k_proj each
         - 2 * hidden_size * hidden_size for the v_proj and o_proj each
         - Others are ignorably small.
@@ -343,7 +336,7 @@ class MomAttention(nn.Module):
             Default: `chunk`.
         use_beta (bool, Optional):
             Whether to use beta. Default: `True`.
-        use_gate (bool, Optional):
+        use_output_gate (bool, Optional):
             Whether to use output gate. Default: `True`.
         use_short_conv (bool, Optional):
             Whether to use short convolutions. Default: `True`.
@@ -364,7 +357,7 @@ class MomAttention(nn.Module):
         head_dim: int = 256,
         num_heads: int = 6,
         mode: str = 'chunk',
-        use_gate: bool = True,
+        use_output_gate: bool = True,
         use_short_conv: bool = True,
         conv_size: int = 4,
         conv_bias: bool = False,
@@ -389,7 +382,7 @@ class MomAttention(nn.Module):
         self.hidden_size = hidden_size
         self.expand_v = expand_v
 
-        self.use_gate = use_gate
+        self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
@@ -475,9 +468,9 @@ class MomAttention(nn.Module):
                 "ShortConvolution is crucial to the performance. "
                 "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing."
             )
-        if use_gate:
+        if use_output_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-            self.o_norm = FusedRMSNormSwishGate(self.head_v_dim, eps=norm_eps)
+            self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
         else:
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
@@ -513,7 +506,7 @@ class MomAttention(nn.Module):
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
         last_state = None
-        batchsize, q_len = hidden_states.shape[0], hidden_states.shape[1]
+        _, q_len = hidden_states.shape[0], hidden_states.shape[1]
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
@@ -527,7 +520,7 @@ class MomAttention(nn.Module):
                                            dtype=routing_weights.dtype, device=routing_weights.device).scatter(-1, selected_memories, routing_weights)
         routing_mask = routing_weights_full.bool().int()
 
-        if self.use_gate:
+        if self.use_output_gate:
             o_g = self.g_proj(hidden_states)
 
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
@@ -585,7 +578,7 @@ class MomAttention(nn.Module):
 
         q, k, v, g, beta, mask2 = (rearrange(x, 'e b l ... ->  (e b) l ...') for x in (q, k, v, g, beta, mask2))
         cu_q, cu_k, cu_v, cu_g, cu_beta, indices_q, cu_seqlen_all, max_seq_lens = _upad_input(q, k, v, g, beta, mask2, q_len)
-        cu_seqlen = cu_seqlen_all[0].to(torch.long).unique()
+        cu_seqlens = cu_seqlen_all[0].to(torch.long).unique()
         cu_q, cu_k, cu_v, cu_g, cu_beta = (x.unsqueeze(0).contiguous() for x in (cu_q, cu_k, cu_v, cu_g, cu_beta))
 
         # dealing with padding
@@ -595,8 +588,7 @@ class MomAttention(nn.Module):
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else [
             None for _ in range(1 + self.shared_mem)]
-        offsets = kwargs.get('offsets', None)
-        # Note: In the updated version of FLA, "offset" has been renamed to "cu_seqlens".
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'chunk':
             o_, recurrent_state_ = chunk_gated_delta_rule(
                 q=cu_q,
@@ -606,8 +598,7 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlen,
-                head_first=False
+                cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = recurrent_state_
             o_ = o_.squeeze(0).contiguous()
@@ -627,8 +618,7 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlen,
-                head_first=False
+                cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = recurrent_state_
             o_ = o_.squeeze(0).contiguous()
@@ -650,7 +640,7 @@ class MomAttention(nn.Module):
                 offset=q.shape[2]
             )
 
-        if self.use_gate:
+        if self.use_output_gate:
             o_g = rearrange(o_g, '... (h d) -> ... h d', h=self.num_heads)
             o = self.o_norm(o, o_g)
         else:
@@ -717,7 +707,7 @@ class MomAttention(nn.Module):
             beta = beta.mul(attention_mask[:, -beta.shape[-2]:, None])
             g = g.mul(attention_mask[:, -g.shape[-2]:, None])
 
-        offsets = kwargs.get('offsets', None)
+        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'chunk':
             o, recurrent_state[-1] = chunk_gated_delta_rule(
                 q=q.to(dtype=torch.bfloat16),
@@ -727,8 +717,7 @@ class MomAttention(nn.Module):
                 beta=beta.to(dtype=torch.bfloat16),
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                cu_seqlens=offsets,
-                head_first=False
+                cu_seqlens=cu_seqlens,
             )
             o = o.to(dtype=q.dtype)
         elif mode == 'fused_recurrent':
@@ -740,8 +729,7 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                cu_seqlens=offsets,
-                head_first=False
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
