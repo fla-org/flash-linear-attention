@@ -18,6 +18,7 @@ from fla.modules.token_shift import token_shift
 from fla.ops.rwkv7 import chunk_rwkv7, fused_mul_recurrent_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
+from fla.ops.rwkv7.gate_output_correction import gate_output_correction
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -335,7 +336,7 @@ class RWKV7Attention(nn.Module):
         else:
             o = self.g_norm(rearrange(o, 'b t h d -> (b t) (h d)')).view(batch_size, seq_len, -1)
 
-        o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
-        o = self.o_proj(o * g)
+        o = gate_output_correction(o, r, k, self.r_k, v, g)
+        o = self.o_proj(o)
 
         return o, None, past_key_values, v_first
