@@ -122,7 +122,7 @@ def addcmul_bwd_kernel1(
     gx,
     use_xg: tl.constexpr,
     T,
-    T_OFFSET: tl.constexpr,
+    T_OFFSET,
     BT: tl.constexpr,
     D: tl.constexpr,
     BD: tl.constexpr,
