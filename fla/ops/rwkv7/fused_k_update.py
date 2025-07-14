@@ -107,9 +107,10 @@ def k_update_fwd_kernel_long(
 @triton.heuristics({'IS_VARLEN': lambda args: args['cu_seqlens'] is not None})
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=w, num_stages=s)
+        triton.Config({'BT': BT}, num_warps=w, num_stages=s)
         for w in NUM_WARPS_AUTOTUNE
         for s in [1, 2, 3]
+        for BT in [2, 4, 8]
     ],
     key=['BD']
 )
@@ -273,14 +274,12 @@ def k_update_bwd(
 
     if use_short:
         BD = triton.next_power_of_2(D)
-        BT = 4
-        grid = (N, triton.cdiv(T, BT))
+        def grid(meta): return (N, triton.cdiv(T, meta['BT']))
         k_update_bwd_kernel_short[grid](
             grad_out, k, a, ka,
             dk, da, dka_tmp,
             cu_seqlens,
             T, D,
-            BT=BT,
             BD=BD,
         )
     else:

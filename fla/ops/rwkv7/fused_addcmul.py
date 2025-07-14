@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 from packaging.version import Version
 
-from fla.utils import check_pytorch_version, input_guard, is_amd, use_cuda_graph
+from fla.utils import get_multiprocessor_count, check_pytorch_version, input_guard, is_amd, use_cuda_graph
 
 logger = logging.getLogger(__name__)
 
@@ -34,63 +34,64 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps)
+   configs=[
+        triton.Config({'BT': BT},  num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS_AUTOTUNE
+        for num_stages in [2, 4]
+        for BT in [2, 4, 8]
     ],
-    key=['D'],
+    key=['BD'],
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit
 def fused_addcmul_fwd_kernel(
     hidden,
     delta,
-    ixr,
-    ixw,
-    ixk,
-    ixv,
-    ixa,
-    ixg,
-    oxr,
-    oxw,
-    oxk,
-    oxv,
-    oxa,
-    oxg,
+    ixr, ixw, ixk, ixv, ixa, ixg,
+    oxr, oxw, oxk, oxv, oxa, oxg,
     use_xg: tl.constexpr,
     T,
+    T_OFFSET,
+    BT: tl.constexpr,
     D: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_b, i_t = tl.program_id(0), tl.program_id(1)
-    xoffset = i_b * T * D + i_t * D
-    indices = tl.arange(0, BD)
-    xindex = xoffset + indices
-    xmask = indices < D
-    b_hiddn = tl.load(hidden + xindex, xmask)
-    b_x = tl.load(delta + xindex, xmask)
-    b_ixr = tl.load(ixr + indices, xmask)
-    b_ixw = tl.load(ixw + indices, xmask)
-    b_ixk = tl.load(ixk + indices, xmask)
-    b_ixv = tl.load(ixv + indices, xmask)
-    b_ixa = tl.load(ixa + indices, xmask)
-    b_oxr = tl.fma(b_x, b_ixr, b_hiddn)
-    b_oxw = tl.fma(b_x, b_ixw, b_hiddn)
-    b_oxk = tl.fma(b_x, b_ixk, b_hiddn)
-    b_oxv = tl.fma(b_x, b_ixv, b_hiddn)
-    b_oxa = tl.fma(b_x, b_ixa, b_hiddn)
+    i_b, i_t = tl.program_id(0), tl.program_id(1) * BT
 
-    tl.store(oxr + xindex, b_oxr.to(oxr.dtype.element_ty), xmask)
-    tl.store(oxw + xindex, b_oxw.to(oxw.dtype.element_ty), xmask)
-    tl.store(oxk + xindex, b_oxk.to(oxk.dtype.element_ty), xmask)
-    tl.store(oxv + xindex, b_oxv.to(oxv.dtype.element_ty), xmask)
-    tl.store(oxa + xindex, b_oxa.to(oxa.dtype.element_ty), xmask)
+    bos = i_b * (T + T_OFFSET)
+    t_vec = i_t + T_OFFSET + tl.arange(0, BT)
+    mask_t = t_vec < (T + T_OFFSET)
+    o_d = tl.arange(0, BD)[None, :]
+    off_vec = (bos + t_vec)[:, None] * D + o_d
+    m_d = o_d < D
+    mask = mask_t[:, None] & m_d
+    
+
+    b_h = tl.load(hidden + off_vec, mask=mask, other=0.).to(tl.float32)
+    b_x = tl.load(delta + off_vec, mask=mask, other=0.).to(tl.float32)
+    b_r = tl.load(ixr + o_d, mask=m_d).to(tl.float32)
+    b_w = tl.load(ixw + o_d, mask=m_d).to(tl.float32)
+    b_k = tl.load(ixk + o_d, mask=m_d).to(tl.float32)
+    b_v = tl.load(ixv + o_d, mask=m_d).to(tl.float32)
+    b_a = tl.load(ixa + o_d, mask=m_d).to(tl.float32)
+
+    o_r = b_h + b_x * b_r
+    o_w = b_h + b_x * b_w
+    o_k = b_h + b_x * b_k
+    o_v = b_h + b_x * b_v
+    o_a = b_h + b_x * b_a
+
+    tl.store(oxr + off_vec, o_r.to(oxr.dtype.element_ty), mask=mask)
+    tl.store(oxw + off_vec, o_w.to(oxw.dtype.element_ty), mask=mask)
+    tl.store(oxk + off_vec, o_k.to(oxk.dtype.element_ty), mask=mask)
+    tl.store(oxv + off_vec, o_v.to(oxv.dtype.element_ty), mask=mask)
+    tl.store(oxa + off_vec, o_a.to(oxa.dtype.element_ty), mask=mask)
 
     if use_xg:
-        b_ixg = tl.load(ixg + indices)
-        b_oxg = tl.fma(b_x, b_ixg, b_hiddn)
-        tl.store(oxg + xindex, b_oxg.to(oxg.dtype.element_ty), xmask)
-
+        b_g = tl.load(ixg + o_d, mask=m_d)
+        o_g = b_h + b_x * b_g
+        tl.store(oxg + off_vec, o_g.to(oxg.dtype.element_ty), mask=mask)
+        
 
 @triton.autotune(
     configs=[
@@ -211,26 +212,34 @@ class Rwkv7FusedAddcmul(torch.autograd.Function):
             use_xg = False
             oxg = None
 
-        fused_addcmul_fwd_kernel[(B, T)](
-            hidden_states,
-            delta,
-            x_r,
-            x_w,
-            x_k,
-            x_v,
-            x_a,
-            x_g,
-            oxr,
-            oxw,
-            oxk,
-            oxv,
-            oxa,
-            oxg,
-            use_xg,
-            T=T,
-            D=D,
-            BD=triton.next_power_of_2(D),
-        )
+        if T <= 65536:
+            def grid(meta): return (B, triton.cdiv(T, meta['BT']))
+            fused_addcmul_fwd_kernel[grid](
+                hidden_states, delta,
+                x_r, x_w, x_k, x_v, x_a, x_g,
+                oxr, oxw, oxk, oxv, oxa, oxg,
+                use_xg,
+                T=T,
+                T_OFFSET=0,
+                D=D,
+                BD=triton.next_power_of_2(D),
+            )
+        else:
+            for t in range(0, T, 65536):
+                T_OFFSET = t
+                T_SIZE = min(65536, T - t)
+                def grid(meta): return (B, triton.cdiv(T_SIZE, meta['BT']))
+                fused_addcmul_fwd_kernel[grid](
+                    hidden_states, delta,
+                    x_r, x_w, x_k, x_v, x_a, x_g,
+                    oxr, oxw, oxk, oxv, oxa, oxg,
+                    use_xg,
+                    T=T_SIZE,
+                    T_OFFSET=T_OFFSET,
+                    D=D,
+                    BD=triton.next_power_of_2(D),
+                )
+
         ctx.save_for_backward(hidden_states, delta,
                               x_r, x_w, x_k, x_v, x_a, x_g)
         ctx.use_xg = use_xg
@@ -260,11 +269,10 @@ def fused_addcmul_rwkv7(
     xa: torch.Tensor,
     xg: Optional[torch.Tensor] = None
 ):
-    num_elements = hidden_states.numel()
-    if num_elements < 16777216:
+    if hidden_states.shape[1] == 1:
+        # Special case for decode
         return torch_addcmul_rwkv7(hidden_states, delta, xr, xw, xk, xv, xa, xg)
-    else:
-        return Rwkv7FusedAddcmul.apply(hidden_states, delta, xr, xw, xk, xv, xa, xg)
+    return Rwkv7FusedAddcmul.apply(hidden_states, delta, xr, xw, xk, xv, xa, xg)
 
 
 def torch_addcmul_rwkv7(hidden_states, delta, xr, xw, xk, xv, xa, xg=None):

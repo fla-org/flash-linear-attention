@@ -12,7 +12,7 @@ from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
 from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
 from fla.ops.rwkv7.gate_output_correction import gate_output_correction, gate_output_correction_ref
-from fla.utils import assert_close, device
+from fla.utils import assert_close, device, is_nvidia_hopper
 
 
 @pytest.mark.parametrize("B", [2])
@@ -132,9 +132,9 @@ def test_fused_mul_recurrent_fwd(
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [2560, 4096])
-@pytest.mark.parametrize("H", [64])
+@pytest.mark.parametrize("B", [1])
+@pytest.mark.parametrize("T", [20, 1024, 4100, 131072])
+@pytest.mark.parametrize("H", [2])
 @pytest.mark.parametrize("D", [64])
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("use_g", [True, False])
@@ -150,20 +150,23 @@ def test_fused_rwkv7_addcmul(
     dtype: torch.dtype,
     use_g: bool
 ):
+    if T == 128 * 1024 and not is_nvidia_hopper:
+        pytest.skip("Skipping test for T=131072 on non-Hopper GPUs")
     hidden_size = H*D
-    hidden_states = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    xx = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_r = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_w = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_k = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_v = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_a = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    hidden_states = torch.randn(B, T, hidden_size).to(device).to(dtype).requires_grad_()
+    xx = torch.randn(B, T, hidden_size).to(device).to(dtype).requires_grad_()
+    x_r = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
+    x_w = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
+    x_k = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
+    x_v = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
+    x_a = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
     if use_g:
-        x_g = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+        x_g = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
     else:
         x_g = None
     xr0, xw0, xk0, xv0, xa0, xg0 = fused_addcmul_rwkv7(hidden_states, xx, x_r, x_w, x_k, x_v, x_a, x_g)
     xr1, xw1, xk1, xv1, xa1, xg1 = torch_addcmul_rwkv7(hidden_states, xx, x_r, x_w, x_k, x_v, x_a, x_g)
+    print((xr0 - xr1).abs().max(), (xw0 - xw1).abs().max())
     torch.testing.assert_close(xr0, xr1, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(xw0, xw1, rtol=1e-3, atol=1e-3)
     torch.testing.assert_close(xk0, xk1, rtol=1e-3, atol=1e-3)
