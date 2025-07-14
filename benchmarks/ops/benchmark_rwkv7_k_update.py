@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import triton
 
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
