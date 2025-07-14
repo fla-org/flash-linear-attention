@@ -3,6 +3,7 @@ import triton
 
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
 
+
 @torch.jit.script
 def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Tensor:
     return k.addcmul(k * (a - 1), ka)

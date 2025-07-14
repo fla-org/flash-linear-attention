@@ -165,10 +165,10 @@ def test_fused_rwkv7_addcmul(
     else:
         x_g = None
     xr0, xw0, xk0, xv0, xa0, xg0 = fused_addcmul_rwkv7(hidden_states, xx, x_r, x_w, x_k, x_v, x_a, x_g)
-    xr1, xw1, xk1, xv1, xa1, xg1 = torch_addcmul_rwkv7(hidden_states.float(), 
-                                                       xx.float(), x_r.float(), 
-                                                       x_w.float(), x_k.float(), 
-                                                       x_v.float(), x_a.float(), 
+    xr1, xw1, xk1, xv1, xa1, xg1 = torch_addcmul_rwkv7(hidden_states.float(),
+                                                       xx.float(), x_r.float(),
+                                                       x_w.float(), x_k.float(),
+                                                       x_v.float(), x_a.float(),
                                                        x_g.float() if use_g else None)
     ratio = 1e-5 if dtype == torch.float32 else 0.002
     assert_close("xr0", xr0, xr1, ratio=ratio)
