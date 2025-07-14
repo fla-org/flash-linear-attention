@@ -219,10 +219,10 @@ def test_fused_rwkv7_addcmul(
 
 
 @pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [4096])
+@pytest.mark.parametrize("T", [13, 4096, 8000])
 @pytest.mark.parametrize("H", [64])
 @pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("ka_shape", [1, 3])
 def test_fused_k_update(
     B: int,
@@ -239,18 +239,18 @@ def test_fused_k_update(
     else:
         ka = torch.randn(1, 1, H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
 
-    ref = k_update_ref(k, a, ka)
+    ref = k_update_ref(k.float(), a.float(), ka.float())
     ref.sum().backward()
     ref_dk, k.grad = k.grad.clone(), None
     ref_da, a.grad = a.grad.clone(), None
     ref_dka, ka.grad = ka.grad.clone(), None
     tri = fused_k_rwkv7(k, a, ka)
     tri.sum().backward()
-
-    assert_close("  o", tri, ref, ratio=5e-5)
-    assert_close(" dk", ref_dk, k.grad, ratio=5e-5)
-    assert_close(" da", ref_da, a.grad, ratio=5e-5)
-    assert_close("dka", ref_dka, ka.grad, ratio=5e-5)
+    ratio = 5e-5 if dtype == torch.float32 else 0.002
+    assert_close("  o", tri, ref, ratio=ratio)
+    assert_close(" dk", ref_dk, k.grad, ratio=ratio)
+    assert_close(" da", ref_da, a.grad, ratio=ratio)
+    assert_close("dka", ref_dka, ka.grad, ratio=ratio)
 
 
 @pytest.mark.parametrize("B", [4])

@@ -5,7 +5,7 @@ from fla.modules.token_shift import token_shift, token_shift_ref
 from fla.utils import assert_close, device
 
 test_b_list = [4]
-test_t_list = [512, 4096]
+test_t_list = [512, 4100, 8192]
 test_h_list = [2560, 4096]
 test_cu_seqlens_list = [
     None,

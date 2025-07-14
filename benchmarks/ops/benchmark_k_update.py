@@ -2,13 +2,11 @@ import torch
 import torch.nn as nn
 import triton
 
-from fla.modules.token_shift import token_shift
+from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
 
-
-def token_shift_ref(x):
-    shifted = nn.functional.pad(x, (0, 0, 1, -1))
-    delta = shifted - x
-    return delta
+@torch.jit.script
+def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Tensor:
+    return k.addcmul(k * (a - 1), ka)
 
 
 @triton.testing.perf_report(
@@ -20,9 +18,9 @@ def token_shift_ref(x):
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``
-        line_vals=['naive_token_shift',  'fused_token_shift', 'naive_token_shift_bwd',  'fused_token_shift_bwd'],
+        line_vals=['naive_k_update',  'fused_k_update', 'naive_k_update_bwd',  'fused_k_update_bwd'],
         # label name for the lines
-        line_names=['naive_token_shift',  'fused_token_shift', 'naive_token_shift_bwd',  'fused_token_shift_bwd'],
+        line_names=['naive_k_update',  'fused_k_update', 'naive_k_update_bwd',  'fused_k_update_bwd'],
         # line styles
         styles=[('green', '-'), ('blue', '--'), ('red', '-.'),
                 ('cyan', ':')],
@@ -39,19 +37,20 @@ def benchmark(T, provider):
     B, D = 8, 4096
 
     x = torch.randn(B, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
-
+    a = torch.randn(B, T, D, device=device, requires_grad=requires_grad, dtype=dtype)
+    ka = torch.randn(1, 1, D, device=device, requires_grad=requires_grad, dtype=dtype)
     quantiles = [0.5, 0.2, 0.8]
     results = 0, 0, 0
-    if provider.startswith('naive_token_shift'):
-        results = triton.testing.do_bench(lambda: token_shift_ref(x), quantiles=quantiles)
-    if provider.startswith('fused_token_shift'):
-        results = triton.testing.do_bench(lambda: token_shift(x), quantiles=quantiles)
-    if provider.startswith('naive_token_shift_bwd'):
+    if provider.startswith('naive_k_update'):
+        results = triton.testing.do_bench(lambda: k_update_ref(x, a, ka), quantiles=quantiles)
+    if provider.startswith('fused_k_update'):
+        results = triton.testing.do_bench(lambda: fused_k_rwkv7(x, a, ka), quantiles=quantiles)
+    if provider.startswith('naive_k_update_bwd'):
         grad_output = torch.randn_like(x)
-        results = triton.testing.do_bench(lambda: token_shift_ref(x).backward(grad_output), quantiles=quantiles)
-    if provider.startswith('fused_token_shift_bwd'):
+        results = triton.testing.do_bench(lambda: k_update_ref(x, a, ka).backward(grad_output), quantiles=quantiles)
+    if provider.startswith('fused_k_update_bwd'):
         grad_output = torch.randn_like(x)
-        results = triton.testing.do_bench(lambda: token_shift(x).backward(grad_output), quantiles=quantiles)
+        results = triton.testing.do_bench(lambda: fused_k_rwkv7(x, a, ka).backward(grad_output), quantiles=quantiles)
     return results
 
 
