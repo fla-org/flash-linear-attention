@@ -17,8 +17,10 @@ def fused_recurrent_gdn2(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = False,
+    use_q_l2norm: bool = False,
+    use_k_l2norm: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    **kwargs
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -42,7 +44,9 @@ def fused_recurrent_gdn2(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
-        use_qk_l2norm_in_kernel (Optional[bool]):
+        use_q_l2norm (Optional[bool]):
+            Whether to use L2 normalization in the kernel. Default: `False`.
+        use_k_l2norm (Optional[bool]):
             Whether to use L2 normalization in the kernel. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
@@ -83,6 +87,10 @@ def fused_recurrent_gdn2(
             cu_seqlens=cu_seqlens
         )
     """
+    if 'use_qk_l2norm_in_kernel' in kwargs and (not use_q_l2norm and not use_k_l2norm):
+        use_q_l2norm = True
+        use_k_l2norm = True
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -106,7 +114,8 @@ def fused_recurrent_gdn2(
         scale=scale,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_q_l2norm=use_q_l2norm,
+        use_k_l2norm=use_k_l2norm,
         cu_seqlens=cu_seqlens,
     )
     return o, final_state

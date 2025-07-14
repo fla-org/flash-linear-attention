@@ -259,7 +259,8 @@ class GDN2(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
+                use_q_l2norm=True,
+                use_k_l2norm=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
@@ -271,7 +272,8 @@ class GDN2(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
+                use_q_l2norm=True,
+                use_k_l2norm=True,
                 cu_seqlens=cu_seqlens,
             )
         else:

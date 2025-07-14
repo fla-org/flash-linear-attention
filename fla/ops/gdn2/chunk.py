@@ -207,14 +207,15 @@ class ChunkGDN2Function(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool = False,
-        use_qk_l2norm_in_kernel: bool = False,
+        use_q_l2norm: bool = False,
+        use_k_l2norm: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
     ):
-        if use_qk_l2norm_in_kernel:
+        q_rstd, k_rstd = None, None
+        if use_q_l2norm:
             q, q_rstd = l2norm_fwd(q)
+        if use_k_l2norm:
             k, k_rstd = l2norm_fwd(k)
-        else:
-            q_rstd, k_rstd = None, None
 
         g, o, Aqk, A, final_state = chunk_gdn2_fwd(
             q=q,
@@ -229,7 +230,8 @@ class ChunkGDN2Function(torch.autograd.Function):
         )
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, Aqk, A, initial_state, cu_seqlens)
         ctx.scale = scale
-        ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+        ctx.use_q_l2norm = use_q_l2norm
+        ctx.use_k_l2norm = use_k_l2norm
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -255,10 +257,11 @@ class ChunkGDN2Function(torch.autograd.Function):
             dht=dht,
             cu_seqlens=cu_seqlens,
         )
-        if ctx.use_qk_l2norm_in_kernel:
+        if ctx.use_q_l2norm:
             dq = l2norm_bwd(q, q_rstd, dq)
+        if ctx.use_k_l2norm:
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
 
 
 @torch.compiler.disable
@@ -271,8 +274,10 @@ def chunk_gdn2(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    use_qk_l2norm_in_kernel: bool = False,
+    use_q_l2norm: bool = False,
+    use_k_l2norm: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    **kwargs
 ):
     r"""
     Args:
@@ -295,8 +300,10 @@ def chunk_gdn2(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
-        use_qk_l2norm_in_kernel (bool):
-            Whether to apply L2norm to the q/k tensor internally. Default: `False`.
+        use_q_l2norm (bool):
+            Whether to apply L2norm to the q tensor internally. Default: `False`.
+        use_k_l2norm (bool):
+            Whether to apply L2norm to the k tensor internally. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -336,6 +343,10 @@ def chunk_gdn2(
             cu_seqlens=cu_seqlens
         )
     """
+    if 'use_qk_l2norm_in_kernel' in kwargs and (not use_q_l2norm and not use_k_l2norm):
+        use_q_l2norm = True
+        use_k_l2norm = True
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -358,7 +369,8 @@ def chunk_gdn2(
         scale,
         initial_state,
         output_final_state,
-        use_qk_l2norm_in_kernel,
+        use_q_l2norm,
+        use_k_l2norm,
         cu_seqlens,
     )
     return o, final_state
