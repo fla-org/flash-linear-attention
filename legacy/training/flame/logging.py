@@ -6,8 +6,7 @@ import os
 import sys
 import time
 
-from transformers.trainer_callback import (ExportableState, TrainerCallback,
-                                           TrainerControl, TrainerState)
+from transformers.trainer_callback import ExportableState, TrainerCallback, TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 
 
