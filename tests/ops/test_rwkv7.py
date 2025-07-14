@@ -136,7 +136,7 @@ def test_fused_mul_recurrent_fwd(
 @pytest.mark.parametrize("T", [20, 1024, 4100, 131072])
 @pytest.mark.parametrize("H", [2])
 @pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_g", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -165,15 +165,19 @@ def test_fused_rwkv7_addcmul(
     else:
         x_g = None
     xr0, xw0, xk0, xv0, xa0, xg0 = fused_addcmul_rwkv7(hidden_states, xx, x_r, x_w, x_k, x_v, x_a, x_g)
-    xr1, xw1, xk1, xv1, xa1, xg1 = torch_addcmul_rwkv7(hidden_states, xx, x_r, x_w, x_k, x_v, x_a, x_g)
-    print((xr0 - xr1).abs().max(), (xw0 - xw1).abs().max())
-    torch.testing.assert_close(xr0, xr1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(xw0, xw1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(xk0, xk1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(xv0, xv1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(xa0, xa1, rtol=1e-3, atol=1e-3)
+    xr1, xw1, xk1, xv1, xa1, xg1 = torch_addcmul_rwkv7(hidden_states.float(), 
+                                                       xx.float(), x_r.float(), 
+                                                       x_w.float(), x_k.float(), 
+                                                       x_v.float(), x_a.float(), 
+                                                       x_g.float() if use_g else None)
+    ratio = 1e-5 if dtype == torch.float32 else 0.002
+    assert_close("xr0", xr0, xr1, ratio=ratio)
+    assert_close("xw0", xw0, xw1, ratio=ratio)
+    assert_close("xk0", xk0, xk1, ratio=ratio)
+    assert_close("xv0", xv0, xv1, ratio=ratio)
+    assert_close("xa0", xa0, xa1, ratio=ratio)
     if use_g:
-        torch.testing.assert_close(xg0, xg1, rtol=1e-3, atol=1e-3)
+        assert_close("xg0", xg0, xg1, ratio=ratio)
         (xr0 + xw0 + xk0 + xv0 + xa0 + xg0).sum().backward()
     else:
         (xr0 + xw0 + xk0 + xv0 + xa0).sum().backward()
@@ -210,15 +214,15 @@ def test_fused_rwkv7_addcmul(
     d_hidden1 = hidden_states.grad.clone()
     d_xx1 = xx.grad.clone()
 
-    torch.testing.assert_close(d_ixr, d_ixr1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_ixw, d_ixw1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_ixk, d_ixk1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_ixv, d_ixv1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_ixa, d_ixa1, rtol=1e-3, atol=1.5e-3)
+    assert_close("d_ixr", d_ixr, d_ixr1, ratio=ratio)
+    assert_close("d_ixw", d_ixw, d_ixw1, ratio=ratio)
+    assert_close("d_ixk", d_ixk, d_ixk1, ratio=ratio)
+    assert_close("d_ixv", d_ixv, d_ixv1, ratio=ratio)
+    assert_close("d_ixa", d_ixa, d_ixa1, ratio=ratio)
     if use_g:
-        torch.testing.assert_close(d_ixg, d_ixg1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_hidden, d_hidden1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_xx, d_xx1, rtol=1e-3, atol=1.5e-3)
+        assert_close("d_ixg", d_ixg, d_ixg1, ratio=ratio)
+    assert_close("d_hidden", d_hidden, d_hidden1, ratio=ratio)
+    assert_close("d_xx", d_xx, d_xx1, ratio=ratio)
 
 
 @pytest.mark.parametrize("B", [4])
