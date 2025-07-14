@@ -167,21 +167,22 @@ def gate_output_correction_backward_triton(grad_output, o, r, k, r_k, v, g):
     grad_k = torch.empty_like(k)
     grad_v = torch.empty_like(v)
     grad_g = torch.empty_like(g)
-    grad_r_k_intermediate = torch.empty_like(r)
+    # Keep intermediate in float32 for precision
+    grad_r_k = torch.empty_like(r, dtype=torch.float32)
 
     grid = (batch_size, seq_len, num_heads)
     BLOCK_SIZE_D = triton.next_power_of_2(head_dim)
 
     gate_output_correction_bwd_kernel[grid](
         grad_output, o, r, k, r_k, v, g,
-        grad_o, grad_r, grad_k, grad_r_k_intermediate, grad_v, grad_g,
+        grad_o, grad_r, grad_k, grad_r_k, grad_v, grad_g,
         r.stride(0), r.stride(1), r.stride(2),
         o.stride(0), o.stride(1),
         r_k.stride(0),
         num_heads=num_heads, head_dim=head_dim, BLOCK_SIZE_D=BLOCK_SIZE_D,
     )
     # Sum over batch and time to get the final gradient for r_k
-    grad_r_k = grad_r_k_intermediate.sum(dim=(0, 1))
+    grad_r_k = grad_r_k.sum(dim=(0, 1)).type_as(r_k)
     return grad_o, grad_r, grad_k, grad_r_k, grad_v, grad_g
 
 

@@ -257,7 +257,7 @@ def test_fused_k_update(
 @pytest.mark.parametrize("T", [4096])
 @pytest.mark.parametrize("H", [64])
 @pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_gate_output_correction(
     B: int,
     T: int,
@@ -278,7 +278,8 @@ def test_gate_output_correction(
     tensors_cus = [t.clone().detach().requires_grad_(True) for t in [o_ref, r_ref, k_ref, r_k_ref, v_ref, g_ref]]
     o_cus, r_cus, k_cus, r_k_cus, v_cus, g_cus = tensors_cus
 
-    output_ref = gate_output_correction_ref(o_ref, r_ref, k_ref, r_k_ref, v_ref, g_ref)
+    output_ref = gate_output_correction_ref(o_ref.float(), r_ref.float(), k_ref.float(),
+                                            r_k_ref.float(), v_ref.float(), g_ref.float())
     output_ref.sum().backward()
 
     output_cus = gate_output_correction(o_cus, r_cus, k_cus, r_k_cus, v_cus, g_cus)
