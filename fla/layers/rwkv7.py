@@ -235,19 +235,17 @@ class RWKV7Attention(nn.Module):
             hidden_states = hidden_states.mul(am)
 
         # delta [batch_size, seq_len, hidden_size]
+        # conv_cache [N, D]
         if last_state is None:
-            delta = token_shift(hidden_states, cu_seqlens)
+            conv_cache = None
             recurrent_state = None
-        elif hidden_states.shape[1] == 1:
-            shifted = last_state['conv_state']
-            delta = shifted - hidden_states
-            recurrent_state = last_state['recurrent_state']
         else:
-            shifted = self.time_shift(hidden_states)
-            shifted.narrow(1, 0, 1).copy_(last_state['conv_state'])
-            delta = shifted - hidden_states
+            conv_cache = last_state['conv_state']
             recurrent_state = last_state['recurrent_state']
 
+        delta, conv_state = token_shift(
+                hidden_states, cu_seqlens, output_cache=True, cache=conv_cache
+            )
         xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
                                                      self.x_k, self.x_v, self.x_a, self.x_g)
 
@@ -326,7 +324,7 @@ class RWKV7Attention(nn.Module):
         if past_key_values is not None:
             past_key_values.update(
                 recurrent_state=recurrent_state,
-                conv_state=hidden_states.narrow(1, seq_len - 1, 1),
+                conv_state=conv_state,
                 layer_idx=self.layer_idx,
                 offset=r.shape[1]
             )
