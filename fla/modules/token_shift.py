@@ -73,6 +73,7 @@ def token_shift_fwd_kernel_short(
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    IS_DECODE: tl.constexpr,
 ):
     i_b, i_t = tl.program_id(0), tl.program_id(1)
 
@@ -100,15 +101,23 @@ def token_shift_fwd_kernel_short(
         base_offset = i_b * T*D + g_t * D + o_d
 
     b_x = tl.load(x + base_offset, mask=m_d)
+    if IS_VARLEN:
+        cache_offset = i_n * D + o_d  # i_n is seq index
+    else:
+        cache_offset = i_b * D + o_d  # i_b is batch index
+
+    if IS_DECODE:
+        b_cache = tl.load(cache + cache_offset, mask=m_d)
+        delta = b_cache - b_x
+        tl.store(y + base_offset, delta, mask=m_d)
+        if STORE_FINAL_STATE:
+            tl.store(cache_out + cache_offset, b_x, mask=m_d)
+        return
 
     if is_first_pos:
         # First position in sequence: delta = -hidden_states
         if USE_INITIAL_STATE:
             # cache shape: [N, D]
-            if IS_VARLEN:
-                cache_offset = i_n * D + o_d  # i_n is seq index
-            else:
-                cache_offset = i_b * D + o_d  # i_b is batch index
             b_cache = tl.load(cache + cache_offset, mask=m_d)
             delta = b_cache - b_x
             tl.store(y + base_offset, delta, mask=m_d)
@@ -127,9 +136,7 @@ def token_shift_fwd_kernel_short(
     tl.store(y + base_offset, delta, mask=m_d)
     if STORE_FINAL_STATE:
         if is_last_pos:
-            # This should not be used for varlen
-            cache_out_offset = i_n * D + o_d if IS_VARLEN else i_b * D + o_d
-            tl.store(cache_out + cache_out_offset, b_x, mask=m_d)
+            tl.store(cache_out + cache_offset, b_x, mask=m_d)
 
 
 @triton.heuristics({
@@ -186,7 +193,6 @@ def token_shift_fwd_kernel_long(
         if is_first:
             if USE_INITIAL_STATE:
                 # cache shape: [N, D]
-                # This should not be used for varlen
                 cache_off = i_n * D + o_d if IS_VARLEN else i_b * D + o_d
                 b_cache = tl.load(cache + cache_off, mask=m_d)
                 delta = b_cache - b_x
@@ -384,6 +390,7 @@ def token_shift_fwd(
             N = B
         BD = triton.next_power_of_2(D)
         grid = (N, T)
+        IS_DECODE = T == 1 or (B == 1 and T == N)
         token_shift_fwd_kernel_short[grid](
             x=x,
             y=y,
@@ -394,6 +401,7 @@ def token_shift_fwd(
             D=D,
             BD=BD,
             STORE_FINAL_STATE=output_cache,
+            IS_DECODE=IS_DECODE
         )
     else:
         BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
