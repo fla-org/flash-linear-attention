@@ -50,7 +50,7 @@ def token_shift_ref(
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'HAS_CACHE': lambda args: args['cache'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['cache'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -71,8 +71,8 @@ def token_shift_fwd_kernel_short(
     D: tl.constexpr,
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HAS_CACHE: tl.constexpr,
-    OUTPUT_CACHE: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
 ):
     i_b, i_t = tl.program_id(0), tl.program_id(1)
 
@@ -103,7 +103,7 @@ def token_shift_fwd_kernel_short(
 
     if is_first_pos:
         # First position in sequence: delta = -hidden_states
-        if HAS_CACHE:
+        if USE_INITIAL_STATE:
             # cache shape: [1, B, D] in varlen, [B, 1, D] in non-varlen
             if IS_VARLEN:
                 cache_offset = i_n * D + o_d  # i_n is seq index
@@ -125,7 +125,7 @@ def token_shift_fwd_kernel_short(
     prev_values = tl.load(x + prev_offset, mask=m_d)
     delta = prev_values - b_x
     tl.store(y + base_offset, delta, mask=m_d)
-    if OUTPUT_CACHE:
+    if STORE_FINAL_STATE:
         if is_last_pos:
             # This should not be used for varlen
             cache_out_offset = i_n * D + o_d if IS_VARLEN else i_b * D + o_d
@@ -134,7 +134,7 @@ def token_shift_fwd_kernel_short(
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'HAS_CACHE': lambda args: args['cache'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['cache'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -158,8 +158,8 @@ def token_shift_fwd_kernel_long(
     BT: tl.constexpr,
     NB: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HAS_CACHE: tl.constexpr,
-    OUTPUT_CACHE: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
 ):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
@@ -184,7 +184,7 @@ def token_shift_fwd_kernel_long(
         b_x = tl.load(x + offset, mask=m_d)
         is_first = (global_t == bos)
         if is_first:
-            if HAS_CACHE:
+            if USE_INITIAL_STATE:
                 # cache shape: [1,B,D] in varlen, [B,1,D] else
                 # This should not be used for varlen
                 cache_off = i_n * D + o_d if IS_VARLEN else i_b * D + o_d
@@ -199,7 +199,7 @@ def token_shift_fwd_kernel_long(
 
         tl.store(y + offset, delta, mask=m_d)
 
-        if OUTPUT_CACHE:
+        if STORE_FINAL_STATE:
             if global_t == eos - 1:
                 cache_out_off = i_n * D + o_d if IS_VARLEN else i_b * D + o_d
                 tl.store(cache_out + cache_out_off, b_x, mask=m_d)
@@ -207,7 +207,7 @@ def token_shift_fwd_kernel_long(
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'HAS_CACHE': lambda args: args['grad_cache_out'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['grad_cache_out'] is not None,
     'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None
 })
 @triton.autotune(
@@ -229,7 +229,7 @@ def token_shift_bwd_kernel_short(
     D: tl.constexpr,
     BD: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HAS_CACHE: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
     HAS_DCACHE: tl.constexpr,
 ):
     i_b, i_t = tl.program_id(0), tl.program_id(1)
@@ -277,14 +277,14 @@ def token_shift_bwd_kernel_short(
 
     tl.store(dx + base_offset, b_dx, mask=m_d)
 
-    if HAS_CACHE:
+    if USE_INITIAL_STATE:
         if is_first_pos:
             tl.store(grad_cache_out + cache_off, b_dy, mask=m_d)
 
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'HAS_CACHE': lambda args: args['grad_cache_out'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['grad_cache_out'] is not None,
     'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None
 })
 @triton.autotune(
@@ -309,7 +309,7 @@ def token_shift_bwd_kernel_long(
     BT: tl.constexpr,
     NB: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HAS_CACHE: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
     HAS_DCACHE: tl.constexpr,
 ):
     i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -346,7 +346,7 @@ def token_shift_bwd_kernel_long(
 
         tl.store(dx + offset, b_dx, mask=m_d)
 
-        if HAS_CACHE:
+        if USE_INITIAL_STATE:
             if global_t == bos:
                 tl.store(grad_cache_out + cache_off, b_dy, mask=m_d)
 
@@ -374,7 +374,7 @@ def token_shift_fwd(
 
     if output_cache:
         if cu_seqlens is not None:
-            cache_out = torch.empty((N, 1, D), device=x.device, dtype=x.dtype)
+            raise NotImplementedError("output_cache is not supported for cu_seqlens")
         else:
             cache_out = torch.empty((1, N, D), device=x.device, dtype=x.dtype)
     else:
@@ -396,7 +396,7 @@ def token_shift_fwd(
             T=T,
             D=D,
             BD=BD,
-            OUTPUT_CACHE=output_cache,
+            STORE_FINAL_STATE=output_cache,
         )
     else:
         BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
@@ -419,7 +419,7 @@ def token_shift_fwd(
             BD=BD,
             BT=BT,
             NB=NB,
-            OUTPUT_CACHE=output_cache,
+            STORE_FINAL_STATE=output_cache,
         )
 
     return y, N, T, use_short_kernel, cache_out
