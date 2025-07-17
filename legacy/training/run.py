@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 
 from datasets import load_from_disk
-from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          Trainer)
-
-import fla  # noqa
 from flame.data import DataCollatorForLanguageModeling
 from flame.logging import LogCallback, get_logger
 from flame.parser import get_train_args
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, Trainer
+
+import fla  # noqa
 
 logger = get_logger(__name__)
 
