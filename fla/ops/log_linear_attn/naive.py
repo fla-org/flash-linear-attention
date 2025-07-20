@@ -1,5 +1,5 @@
-import torch
 import numpy as np
+import torch
 
 
 def segsum(x):
@@ -38,7 +38,7 @@ def construct_H_matrix(a, L):
     T = a.size(-1)
     A = torch.exp(segsum(a))
     H = torch.zeros_like(A)
-    for level in range(int(np.log2(T)) + 1):
+    for level in range(int(np.ceil(np.log2(T))) + 1):
         mask = construct_level_mask(level, L)
         H += A * mask
     return H

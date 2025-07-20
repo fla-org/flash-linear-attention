@@ -1,5 +1,5 @@
-from typing import Optional, Tuple
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import math
 import torch
@@ -977,6 +977,14 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         if G != 1:
             raise ValueError("Group dimension must be 1.")
+
+        if not math.log2(V).is_integer():
+            raise ValueError(
+                "Head dimension must be a power of two. Please pad the head dimension to the next power of two."
+            )
+
+        if K % BLOCK_K != 0:
+            raise ValueError(f"State dimension must be divisible by {BLOCK_K}.")
 
         BT = 64  # chunk size
 
