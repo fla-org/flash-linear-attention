@@ -716,6 +716,15 @@ class ShortConvolution(nn.Conv1d):
                     return cache
             return cache
 
+        # Check if cu_seqlens and cache are both provided
+        if self.backend == 'cuda' and cu_seqlens is not None and cache is not None:
+            warnings.warn(
+                "Both `cu_seqlens` and `cache` are provided. "
+                "However, the CUDA backend does not support varlen sequences with cache. "
+                "Switching to the Triton backend instead."
+            )
+            self.backend = 'triton'
+
         if self.backend == 'triton':
             y = causal_conv1d(
                 x=x,
