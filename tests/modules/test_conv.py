@@ -349,7 +349,7 @@ def test_short_conv_with_cache_prefill_fwd(
 
 
 @pytest.mark.parametrize('B', [2])
-@pytest.mark.parametrize('D', [8])
+@pytest.mark.parametrize('D', [128])
 @pytest.mark.parametrize('W', [3, 4])
 @pytest.mark.parametrize('activation', [None, 'swish'])
 @pytest.mark.parametrize('has_bias', [False, True])

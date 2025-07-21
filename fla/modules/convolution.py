@@ -748,9 +748,8 @@ class ShortConvolution(nn.Conv1d):
                 B, _, T = cache.shape
                 # To make causal-conv1d happy
                 initial_states = (
-                    cache
-                    .transpose(1, 2)                     # (B, T, C)
-                    .narrow(1, T-(W-1), W-1)             # (B, W-1, C)
+                    cache[:, :, -(W-1):]
+                    .transpose(1, 2)                     # (B, C, W-1)
                     .contiguous()                        # (B, W-1, C) and stride(2)==1
                     .transpose(1, 2)                     # (B, C, W-1) and stride(1)==1
                 )
