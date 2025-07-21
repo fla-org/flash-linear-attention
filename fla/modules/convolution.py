@@ -727,35 +727,55 @@ class ShortConvolution(nn.Conv1d):
                 cache=cache,
             )
             return y, _update_cache(x, cache, cu_seqlens, W)
+        else:
+            x = rearrange(x, 'b t d -> b d t')
+            # Sequence index for each token. Used for varlen.
+            # Suppose a batch consists of two sequences with lengths 3 and 4,
+            # seq_idx=[0, 0, 0, 1, 1, 1, 1] for this batch.
+            # NOTE: No need to provide this arg if `cu_seqlens` is passed.
+            # This arg is just for BC, and will be removed in the future.
+            # [B, T]
+            seq_idx = kwargs.get('seq_idx', None)
+            if cu_seqlens is not None and seq_idx is None:
+                seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
 
-        cache = _update_cache(x, cache, cu_seqlens, W)
+            # equivalent to:
+            # y = self._conv_forward(x, self.weight, self.bias)[..., :x.shape[-1]]
+            # if self.activation is not None:
+            #     y = ACT2FN[self.activation](x)
 
-        x = rearrange(x, 'b t d -> b d t')
-        # Sequence index for each token. Used for varlen.
-        # Suppose a batch consists of two sequences with lengths 3 and 4,
-        # seq_idx=[0, 0, 0, 1, 1, 1, 1] for this batch.
-        # NOTE: No need to provide this arg if `cu_seqlens` is passed.
-        # This arg is just for BC, and will be removed in the future.
-        # [B, T]
-        seq_idx = kwargs.get('seq_idx', None)
-        if cu_seqlens is not None and seq_idx is None:
-            seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
+            if cache is not None:
+                B, _, T = cache.shape
+                # To make causal-conv1d happy
+                initial_states = (
+                    cache
+                    .transpose(1, 2)                     # (B, T, C)
+                    .narrow(1, T-(W-1), W-1)             # (B, W-1, C)
+                    .contiguous()                        # (B, W-1, C) and stride(2)==1
+                    .transpose(1, 2)                     # (B, C, W-1) and stride(1)==1
+                )
+            else:
+                initial_states = None
 
-        # equivalent to:
-        # y = self._conv_forward(x, self.weight, self.bias)[..., :x.shape[-1]]
-        # if self.activation is not None:
-        #     y = ACT2FN[self.activation](x)
-        y = causal_conv1d_fn(
-            x=x,
-            weight=rearrange(self.weight, "d 1 w -> d w"),
-            bias=self.bias,
-            activation=self.activation,
-            seq_idx=seq_idx,
-        )
-        y = rearrange(y, 'b d t -> b t d')
-        if residual is not None:
-            y = y + residual
-        return y, cache
+            result = causal_conv1d_fn(
+                x=x,
+                weight=rearrange(self.weight, "d 1 w -> d w"),
+                bias=self.bias,
+                activation=self.activation,
+                seq_idx=seq_idx,
+                initial_states=initial_states,
+                return_final_states=cache is not None,
+            )
+            y, cache_out = result if cache is not None else (result, None)
+            y = rearrange(y, 'b d t -> b t d')
+            if cache_out is not None:
+                cache[:, :, -min(W-1, T):].copy_(cache_out[:, :, -min(W-1, T):])
+            else:
+                cache = None
+            if residual is not None:
+                y = y + residual
+
+            return y, cache
 
     def step(
         self,
