@@ -324,7 +324,7 @@ def test_short_conv_with_cache_prefill_fwd(
         kernel_size=W,
         bias=has_bias,
         activation=activation,
-        backend='triton',
+        backend=backend,
         device=device,
         dtype=dtype
     )
@@ -351,9 +351,9 @@ def test_short_conv_with_cache_prefill_fwd(
 @pytest.mark.parametrize('B', [2])
 @pytest.mark.parametrize('D', [8])
 @pytest.mark.parametrize('W', [3, 4])
-@pytest.mark.parametrize('activation', [None])
-@pytest.mark.parametrize('has_bias', [False])
-@pytest.mark.parametrize('has_residual', [False])
+@pytest.mark.parametrize('activation', [None, 'swish'])
+@pytest.mark.parametrize('has_bias', [False, True])
+@pytest.mark.parametrize('has_residual', [False, True])
 @pytest.mark.parametrize('dtype', [torch.float32])
 @pytest.mark.parametrize('backend', ['triton', 'cuda'])
 def test_short_conv_decoding_with_cache(

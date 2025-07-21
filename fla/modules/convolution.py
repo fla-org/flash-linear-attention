@@ -105,32 +105,31 @@ def causal_conv1d_fwd_kernel(
             t_src = t_out + i_w  # [-W+1, T-1]
 
             from_cache = (t_src >= -W) & (t_src < 0)
-
             from_x = (t_src >= 0) & (t_src < T)
 
-            val = tl.zeros((BT, BD), dtype=tl.float32)
+            b_yi = tl.zeros((BT, BD), dtype=tl.float32)
             cache_col = t_src + W
 
-            val_cache = tl.load(
+            b_cache = tl.load(
                 cache + i_n * D * W + o_d[None, :] * W + cache_col[:, None],
                 mask=from_cache[:, None] & m_d[None, :],
                 other=0
             ).to(tl.float32)
-            val += val_cache
+            b_yi += b_cache
 
             x_idx = t_src  # [0, T-1]
-            val_x = tl.load(
+            b_x = tl.load(
                 x + bos * D + x_idx[:, None] * D + o_d[None, :],
                 mask=from_x[:, None] & m_d[None, :],
                 other=0
             )
-            val += val_x
+            b_yi += b_x
 
             if HAS_WEIGHT:
                 w_scale = tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
-                val *= w_scale
+                b_yi *= w_scale
 
-            b_y += val
+            b_y += b_yi
 
     if HAS_BIAS:
         b_y += tl.load(bias + o_d, mask=m_d).to(tl.float32)
