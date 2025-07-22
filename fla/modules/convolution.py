@@ -132,9 +132,7 @@ def causal_conv1d_fwd_kernel(
             b_yi += b_x
 
             if HAS_WEIGHT:
-                w_scale = tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
-                b_yi *= w_scale
-
+                b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
 
     if HAS_BIAS:
@@ -352,7 +350,7 @@ def causal_conv1d_fwd(
     if cache is None:
         return y.view(shape)
     else:
-        return y.view(shape), _update_cache(x, cache, cu_seqlens, W, T)
+        return y.view(shape), causal_conv1d_states_update(x, cache, cu_seqlens, W)
 
 
 def causal_conv1d_bwd(
@@ -474,9 +472,13 @@ class CausalConv1dFunction(torch.autograd.Function):
         cu_seqlens: Optional[torch.Tensor] = None,
         cache: Optional[torch.Tensor] = None
     ):
+        if torch.is_grad_enabled() and cache is not None:
+            initial_cache = cache.clone()
+        else:
+            initial_cache = None
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
-        ctx.save_for_backward(x, weight, bias, residual, cache)
+        ctx.save_for_backward(x, weight, bias, residual, initial_cache)
         return causal_conv1d_fwd(x, weight, bias, residual, activation, cu_seqlens, cache)
 
     @staticmethod
@@ -497,6 +499,7 @@ class CausalConv1dFunction(torch.autograd.Function):
         return dx, dw, db, dr, None, None, None
 
 
+@input_guard
 def causal_conv1d(
     x: torch.Tensor,
     weight: Optional[torch.Tensor] = None,
@@ -558,19 +561,29 @@ def fft_conv(u, k, dropout_mask, gelu=True, k_rev=None):
         return out.to(dtype=u.dtype)
 
 
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
+})
 @triton.jit
-def causal_conv1d_varlen_states_fwd_kernel(
+def causal_conv1d_states_update_kernel(
     x,
     cache,
     offsets,
     D,
     W,
+    T,
     BD: tl.constexpr,
-    BW: tl.constexpr
+    BW: tl.constexpr,
+    IS_VARLEN: tl.constexpr
 ):
     i_d, i_w, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    eos = tl.load(offsets + i_n + 1)
-    bos = tl.maximum(tl.load(offsets + i_n), eos - W)
+    if IS_VARLEN:
+        eos = tl.load(offsets + i_n + 1)
+        bos = tl.maximum(tl.load(offsets + i_n), eos - W)
+    else:
+        eos = (i_n + 1) * T
+        bos = eos - W
+
     o_t = eos - (i_w + 1) * BW + tl.arange(0, BW)
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = W - (i_w + 1) * BW + tl.arange(0, BW)
@@ -579,38 +592,29 @@ def causal_conv1d_varlen_states_fwd_kernel(
     tl.store(cache + i_n * D*W + o_d[:, None] * W + o_w, b_x, mask=(o_d[:, None] < D) & (o_w >= 0))
 
 
-@input_guard
-def causal_conv1d_varlen_states_fwd(
+def causal_conv1d_states_update(
     x: torch.Tensor,
     cache: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    state_len: int
+    W: int,
 ) -> torch.Tensor:
-    N, D, W = len(cu_seqlens) - 1, x.shape[-1], state_len
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else x.shape[0]
+    D = x.shape[-1]
     cache = torch.empty(N, D, W, dtype=x.dtype, device=x.device) if cache is None else cache
     BD = min(triton.next_power_of_2(D), 256)
-    BW = min(triton.next_power_of_2(state_len), 16)
+    BW = min(triton.next_power_of_2(W), 16)
     grid = (triton.cdiv(D, BD), triton.cdiv(W, BW), N)
-    causal_conv1d_varlen_states_fwd_kernel[grid](
+
+    causal_conv1d_states_update_kernel[grid](
         x=x,
         cache=cache,
         offsets=cu_seqlens,
         D=D,
         W=W,
+        T=x.shape[1],
         BW=BW,
         BD=BD
     )
-    return cache
-
-
-def _update_cache(x, cache, cu_seqlens, W, T):
-    if cache is not None:
-        if cu_seqlens is not None:
-            return causal_conv1d_varlen_states_fwd(x, cache, cu_seqlens, W)
-        else:
-            # history keep at rightmost W tokens
-            cache[:, :, -min(W, T):].copy_(rearrange(x[..., -min(W, T):, :], 'n w d -> n d w'))
-            return cache
     return cache
 
 
