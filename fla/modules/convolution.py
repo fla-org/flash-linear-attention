@@ -778,10 +778,21 @@ class ShortConvolution(nn.Conv1d):
             return y, cache
 
         # check if cu_seqlens and cache are both provided
-        if self.backend == 'cuda' and cu_seqlens is not None and cache is not None:
+        # Sequence index for each token. Used for varlen.
+        # Suppose a batch consists of two sequences with lengths 3 and 4,
+        # seq_idx=[0, 0, 0, 1, 1, 1, 1] for this batch.
+        # NOTE: No need to provide this arg if `cu_seqlens` is passed.
+        # This arg is just for BC, and will be removed in the future.
+        # [B, T]
+        seq_idx = kwargs.get('seq_idx', None)
+        # cuda backend do not support:
+        # 1. both `cu_seqlens` and `cache` being provided
+        # 2. both `cu_seqlens` and `routput_final_state` being provided
+        if self.backend == 'cuda' and \
+            (cu_seqlens is not None and seq_idx is not None) or \
+                (cu_seqlens is not None and output_final_state):
             warnings.warn(
-                "Both `cu_seqlens` and `cache` are provided. "
-                "However, the CUDA backend does not support varlen sequences with cache. "
+                "The CUDA backend does not support varlen sequences with cache or output final state. "
                 "Switching to the Triton backend instead."
             )
             self.backend = 'triton'
@@ -800,13 +811,7 @@ class ShortConvolution(nn.Conv1d):
             return y, cache
         else:
             x = rearrange(x, 'b t d -> b d t')
-            # Sequence index for each token. Used for varlen.
-            # Suppose a batch consists of two sequences with lengths 3 and 4,
-            # seq_idx=[0, 0, 0, 1, 1, 1, 1] for this batch.
-            # NOTE: No need to provide this arg if `cu_seqlens` is passed.
-            # This arg is just for BC, and will be removed in the future.
-            # [B, T]
-            seq_idx = kwargs.get('seq_idx', None)
+
             if cu_seqlens is not None and seq_idx is None:
                 seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
 
