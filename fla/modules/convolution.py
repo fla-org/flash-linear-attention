@@ -729,16 +729,6 @@ class ShortConvolution(nn.Conv1d):
         if cache is not None and B * T == N:
             return self.step(x, residual, cache, cu_seqlens)
 
-        def _update_cache(x, cache, cu_seqlens, W):
-            if cache is not None:
-                if cu_seqlens is not None:
-                    return causal_conv1d_varlen_states_fwd(x, cache, cu_seqlens, W)
-                else:
-                    # history keep at rightmost W tokens
-                    cache[:, :, -min(W, T):].copy_(rearrange(x[..., -min(W, T):, :], 'n w d -> n d w'))
-                    return cache
-            return cache
-
         # Check if cu_seqlens and cache are both provided
         if self.backend == 'cuda' and cu_seqlens is not None and cache is not None:
             warnings.warn(
