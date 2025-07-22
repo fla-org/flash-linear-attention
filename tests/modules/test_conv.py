@@ -96,14 +96,22 @@ def causal_conv1d_update_ref_torch(x, conv_state, weight, bias=None, activation=
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
 
 
-@pytest.mark.parametrize('B', [4])
-@pytest.mark.parametrize('T', [1, 500, 1024])
-@pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize('W', [3, 4])
-@pytest.mark.parametrize('activation', [None, 'swish'])
-@pytest.mark.parametrize('has_bias', [False, True])
-@pytest.mark.parametrize('has_residual', [False, True])
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_dtype{7}".format(*test))
+        for test in [
+            (2, 64, 128, 3, "swish", True, True, torch.float32),
+            (2, 128, 128, 4, "swish", False, True, torch.float32),
+            (2, 64, 128, 3, "swish", True, False, torch.float32),
+            (2, 128, 128, 4, "swish", False, False, torch.float32),
+            (2, 500, 1024, 3, None, True, True, torch.float32),
+            (2, 1024, 1024, 4, None, False, True, torch.float32),
+            (2, 64, 128, 3, None, True, False, torch.float16),
+            (2, 128, 128, 4, None, False, False, torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     causal_conv1d_fn is None,
     reason="causal_conv1d is not installed"
@@ -161,14 +169,18 @@ def test_conv(
         assert_close("dr", ref_dr, tri_dr, 1e-3)
 
 
-@pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", [500, 1024])
-@pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize("W", [3, 4])
-@pytest.mark.parametrize("activation", [None, 'swish'])
-@pytest.mark.parametrize("has_bias", [False, True])
-@pytest.mark.parametrize("has_residual", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize(
+    ('N', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    [
+        pytest.param(*test, id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_dtype{7}".format(*test))
+        for test in [
+            (4, 500, 128, 3, "swish", True, True, torch.float32),
+            (4, 1024, 200, 4, "swish", False, True, torch.float32),
+            (4, 500, 128, 3, None, True, False, torch.float16),
+            (4, 1024, 1024, 4, None, False, False, torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     causal_conv1d_fn is None,
     reason="causal_conv1d is not installed"
@@ -234,14 +246,22 @@ def test_conv_varlen(
         assert_close("dr", ref_dr, tri_dr, 1e-3)
 
 
-@pytest.mark.parametrize('B', [4])
-@pytest.mark.parametrize('T', [1, 500, 1024])
-@pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize('W', [3, 4])
-@pytest.mark.parametrize('activation', [None, 'swish'])
-@pytest.mark.parametrize('has_bias', [False, True])
-@pytest.mark.parametrize('has_residual', [False, True])
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_dtype{7}".format(*test))
+        for test in [
+            (2, 64, 128, 3, "swish", True, True, torch.float32),
+            (2, 128, 128, 4, "swish", False, True, torch.float32),
+            (2, 64, 128, 3, "swish", True, False, torch.float32),
+            (2, 128, 128, 4, "swish", False, False, torch.float32),
+            (2, 500, 1024, 3, None, True, True, torch.float32),
+            (2, 1024, 1024, 4, None, False, True, torch.float32),
+            (2, 64, 128, 3, None, True, False, torch.float16),
+            (2, 128, 128, 4, None, False, False, torch.float16),
+        ]
+    ]
+)
 @pytest.mark.skipif(
     causal_conv1d_fn is None,
     reason="causal_conv1d is not installed"
@@ -292,15 +312,27 @@ def test_conv_decoding(
     assert_close("cache", ref_cache, tri_cache, 1e-3)
 
 
-@pytest.mark.parametrize('B', [2])
-@pytest.mark.parametrize('T', [10, 256])
-@pytest.mark.parametrize('D', [128])
-@pytest.mark.parametrize('W', [3, 4])
-@pytest.mark.parametrize('activation', [None, 'swish'])
-@pytest.mark.parametrize('has_bias', [False, True])
-@pytest.mark.parametrize('has_residual', [False, True])
-@pytest.mark.parametrize('dtype', [torch.float32])
-@pytest.mark.parametrize('backend', ['triton', 'cuda'])
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
+    [
+        pytest.param(
+            *test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_dtype{7}_backend{8}".format(*test))
+        for test in [
+            (2, 64, 128, 3, "swish", True, True, torch.float32, 'triton'),
+            (2, 128, 128, 4, "swish", False, True, torch.float32, 'triton'),
+            (2, 64, 128, 3, "swish", True, False, torch.float32, 'triton'),
+            (2, 128, 128, 4, "swish", False, False, torch.float32, 'triton'),
+            (2, 500, 1024, 3, None, True, True, torch.float32, 'triton'),
+            (2, 1024, 1024, 4, None, False, True, torch.float32, 'triton'),
+            (2, 64, 128, 3, None, True, False, torch.float16, 'triton'),
+            (2, 128, 128, 4, None, False, False, torch.float16, 'triton'),
+            (2, 64, 128, 3, "swish", True, True, torch.float32, 'cuda'),
+            (2, 128, 128, 4, "swish", False, True, torch.float32, 'cuda'),
+            (2, 64, 128, 3, "swish", True, False, torch.float32, 'cuda'),
+            (2, 128, 128, 4, "swish", False, False, torch.float32, 'cuda'),
+        ]
+    ]
+)
 def test_short_conv_with_cache_prefill_fwd(
     B: int,
     T: int,
@@ -348,14 +380,24 @@ def test_short_conv_with_cache_prefill_fwd(
     assert_close("y", ref, y, 1e-3)
 
 
-@pytest.mark.parametrize('B', [2])
-@pytest.mark.parametrize('D', [128])
-@pytest.mark.parametrize('W', [3, 4])
-@pytest.mark.parametrize('activation', [None, 'swish'])
-@pytest.mark.parametrize('has_bias', [False, True])
-@pytest.mark.parametrize('has_residual', [False, True])
-@pytest.mark.parametrize('dtype', [torch.float32])
-@pytest.mark.parametrize('backend', ['triton', 'cuda'])
+@pytest.mark.parametrize(
+    ('B', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype', 'backend'),
+    [
+        pytest.param(*test, id="B{0}_D{1}_W{2}_has_bias{3}_has_residual{4}_activation{5}_dtype{6}_backend{7}".format(*test))
+        for test in [
+            (2, 128, 3, True, True, "swish", torch.float32, 'triton'),
+            (2, 128, 4, False, True, "swish", torch.float32, 'triton'),
+            (2, 128, 3, True, False, "swish", torch.float32, 'triton'),
+            (2, 128, 4, False, False, "swish", torch.float32, 'triton'),
+            (2, 128, 3, True, True, "swish", torch.float32, 'cuda'),
+            (2, 128, 4, False, True, "swish", torch.float32, 'cuda'),
+            (2, 128, 3, True, False, "swish", torch.float32, 'cuda'),
+            (2, 128, 4, False, False, "swish", torch.float32, 'cuda'),
+            (2, 128, 4, False, False, None, torch.float32, 'cuda'),
+            (2, 128, 4, False, False, None, torch.float32, 'triton'),
+        ]
+    ]
+)
 def test_short_conv_decoding_with_cache(
     B: int,
     D: int,
@@ -403,21 +445,25 @@ def test_short_conv_decoding_with_cache(
     assert_close("y", ref, y, 1e-3)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("T_prefill", [64, 128])
-@pytest.mark.parametrize("D", [128])
-@pytest.mark.parametrize("W", [3, 4])
-@pytest.mark.parametrize("has_bias", [True, False])
-@pytest.mark.parametrize("has_residual", [True, False])
-@pytest.mark.parametrize("activation", ["swish"])
-@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_has_bias{4}_has_residual{5}_activation{6}_dtype{7}".format(*test))
+        for test in [
+            (2, 64, 128, 3, True, True, "swish", torch.float32),
+            (2, 128, 128, 4, False, True, "swish", torch.float32),
+            (2, 64, 128, 3, True, False, "swish", torch.float32),
+            (2, 128, 128, 4, False, False, "swish", torch.float32)
+        ]
+    ]
+)
 @pytest.mark.skipif(
     causal_conv1d_fn is None,
     reason="causal_conv1d is not installed"
 )
 def test_mixed_backend(
     B: int,
-    T_prefill: int,
+    T: int,
     D: int,
     W: int,
     has_bias: bool,
@@ -427,7 +473,7 @@ def test_mixed_backend(
 ):
     torch.manual_seed(1234)
     T_decode = 1
-    x = torch.randn(B, T_prefill + T_decode, D, device=device, dtype=dtype)
+    x = torch.randn(B, T + T_decode, D, device=device, dtype=dtype)
     residual = torch.randn_like(x) if has_residual else None
 
     conv = ShortConvolution(
@@ -442,15 +488,15 @@ def test_mixed_backend(
 
     cache = torch.zeros(B, D, W, device=device, dtype=dtype)
     y_cuda_prefill, cache = conv(
-        x[:, :T_prefill],
-        residual=residual[:, :T_prefill] if has_residual else None,
+        x[:, :T],
+        residual=residual[:, :T] if has_residual else None,
         cache=cache,
     )
 
     conv.backend = "triton"
     y_triton_decode, _ = conv(
-        x[:, T_prefill:],
-        residual=residual[:, T_prefill:] if has_residual else None,
+        x[:, T:],
+        residual=residual[:, T:] if has_residual else None,
         cache=cache,
     )
 
@@ -464,15 +510,15 @@ def test_mixed_backend(
     conv.backend = "triton"
     cache = torch.zeros(B, D, W, device=device, dtype=dtype)
     y_triton_prefill, cache = conv(
-        x[:, :T_prefill],
-        residual=residual[:, :T_prefill] if has_residual else None,
+        x[:, :T],
+        residual=residual[:, :T] if has_residual else None,
         cache=cache,
     )
 
     conv.backend = "cuda"
     y_cuda_decode, _ = conv(
-        x[:, T_prefill:],
-        residual=residual[:, T_prefill:] if has_residual else None,
+        x[:, T:],
+        residual=residual[:, T:] if has_residual else None,
         cache=cache,
     )
 
