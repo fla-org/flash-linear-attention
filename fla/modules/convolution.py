@@ -480,7 +480,8 @@ class CausalConv1dFunction(torch.autograd.Function):
             bias=bias,
             residual=residual,
             activation=ctx.activation,
-            cu_seqlens=ctx.cu_seqlens
+            cu_seqlens=ctx.cu_seqlens,
+            cache=cache
         )
         return dx, dw, db, dr, None, None, None
 
