@@ -112,10 +112,6 @@ def causal_conv1d_update_ref_torch(x, conv_state, weight, bias=None, activation=
         ]
     ]
 )
-@pytest.mark.skipif(
-    causal_conv1d_fn is None,
-    reason="causal_conv1d is not installed"
-)
 def test_conv(
     B: int,
     T: int,
@@ -134,7 +130,7 @@ def test_conv(
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
     dy = torch.randn(B, T, D).to(device, dtype)
 
-    ref = causal_conv1d_fn(
+    ref = causal_conv1d_ref_torch(
         x=rearrange(x, "b t d -> b d t"),
         weight=weight,
         bias=bias,
@@ -181,10 +177,6 @@ def test_conv(
         ]
     ]
 )
-@pytest.mark.skipif(
-    causal_conv1d_fn is None,
-    reason="causal_conv1d is not installed"
-)
 def test_conv_varlen(
     N: int,
     T: int,
@@ -210,7 +202,7 @@ def test_conv_varlen(
 
     ref = torch.cat([
         rearrange(
-            causal_conv1d_fn(
+            causal_conv1d_ref_torch(
                 x=rearrange(x[:, bos:eos].contiguous(), "b t d -> b d t"),
                 weight=weight,
                 bias=bias,
@@ -262,10 +254,6 @@ def test_conv_varlen(
         ]
     ]
 )
-@pytest.mark.skipif(
-    causal_conv1d_fn is None,
-    reason="causal_conv1d is not installed"
-)
 def test_conv_decoding(
         B: int,
         T: int,
@@ -283,7 +271,7 @@ def test_conv_decoding(
     bias = torch.randn(D).to(device, dtype) if has_bias else None
     residual = x.clone() if has_residual else None
 
-    ref = causal_conv1d_fn(
+    ref = causal_conv1d_ref_torch(
         x=rearrange(x, "b t d -> b d t"),
         weight=weight,
         bias=bias,
@@ -456,10 +444,6 @@ def test_short_conv_decoding_with_cache(
             (2, 128, 128, 4, False, False, "swish", torch.float32)
         ]
     ]
-)
-@pytest.mark.skipif(
-    causal_conv1d_fn is None,
-    reason="causal_conv1d is not installed"
 )
 def test_mixed_backend(
     B: int,
