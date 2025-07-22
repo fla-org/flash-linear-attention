@@ -793,7 +793,7 @@ class ShortConvolution(nn.Conv1d):
             else:
                 cache = None
             if residual is not None:
-                y = y + residual
+                y.add_(residual)
 
             return y, cache
 
@@ -830,7 +830,7 @@ class ShortConvolution(nn.Conv1d):
         )
         y = y.view(shape)
         if residual is not None:
-            y = y + residual
+            y.add_(residual)
         return y, cache
 
     @property
