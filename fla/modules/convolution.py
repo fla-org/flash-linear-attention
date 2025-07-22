@@ -317,7 +317,7 @@ def causal_conv1d_fwd(
     residual: torch.Tensor,
     activation: Optional[str] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
-    cache: Optional[torch.Tensor] = None
+    cache: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -349,7 +349,10 @@ def causal_conv1d_fwd(
         NB=NB,
         ACTIVATION=activation,
     )
-    return y.view(shape)
+    if cache is None:
+        return y.view(shape)
+    else:
+        return y.view(shape), _update_cache(x, cache, cu_seqlens, W, T)
 
 
 def causal_conv1d_bwd(
@@ -375,6 +378,7 @@ def causal_conv1d_bwd(
 
     y = None
     if activation is not None:
+        # will return a tuple if cache is not None
         y = causal_conv1d_fwd(
             x=x,
             weight=weight,
@@ -383,7 +387,7 @@ def causal_conv1d_bwd(
             activation=None,
             cu_seqlens=cu_seqlens,
             cache=cache,
-        )
+        )[0]
     dx = torch.empty_like(x)
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
@@ -477,7 +481,8 @@ class CausalConv1dFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def backward(ctx, dy: torch.Tensor):
+    def backward(ctx, dy: torch.Tensor, dcache: Optional[torch.Tensor] = None):
+        # FIXME, dcache TBD
         x, weight, bias, residual, cache = ctx.saved_tensors
         dx, dw, db, dr = causal_conv1d_bwd(
             x=x,
@@ -595,6 +600,17 @@ def causal_conv1d_varlen_states_fwd(
         BW=BW,
         BD=BD
     )
+    return cache
+
+
+def _update_cache(x, cache, cu_seqlens, W, T):
+    if cache is not None:
+        if cu_seqlens is not None:
+            return causal_conv1d_varlen_states_fwd(x, cache, cu_seqlens, W)
+        else:
+            # history keep at rightmost W tokens
+            cache[:, :, -min(W, T):].copy_(rearrange(x[..., -min(W, T):, :], 'n w d -> n d w'))
+            return cache
     return cache
 
 
@@ -733,16 +749,15 @@ class ShortConvolution(nn.Conv1d):
             self.backend = 'triton'
 
         if self.backend == 'triton':
-            y = causal_conv1d(
-                x=x,
-                weight=rearrange(self.weight, "d 1 w -> d w"),
-                bias=self.bias,
-                residual=residual,
-                activation=self.activation,
-                cu_seqlens=cu_seqlens,
-                cache=cache,
-            )
-            return y, _update_cache(x, cache, cu_seqlens, W)
+            return causal_conv1d(
+                    x=x,
+                    weight=rearrange(self.weight, "d 1 w -> d w"),
+                    bias=self.bias,
+                    residual=residual,
+                    activation=self.activation,
+                    cu_seqlens=cu_seqlens,
+                    cache=cache,
+                )
         else:
             x = rearrange(x, 'b t d -> b d t')
             # Sequence index for each token. Used for varlen.
