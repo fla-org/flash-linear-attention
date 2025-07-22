@@ -81,7 +81,8 @@ class RWKV7FeedForward(nn.Module):
                 module.x_k.data = 1.0 - torch.pow(ddd, ratio_1_to_almost0**4).squeeze()
 
             # Initialize key and value weights as in CMix_x070
-            torch.nn.init.orthogonal_(module.key.weight)
+            original_dtype = module.key.weight.dtype
+            module.key.weight.data = nn.init.orthogonal_(module.key.weight.data.to(torch.float32)).to(original_dtype)
             module.value.weight.data.zero_()
 
     def forward(

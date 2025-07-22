@@ -197,15 +197,22 @@ class RWKV7Attention(nn.Module):
             self.g_norm.weight.data[:] = ((self.layer_idx + 1) / self.num_hidden_layers) ** 0.7
 
             # Initialize Linear projections
-            nn.init.orthogonal_(self.r_proj.weight)
-            nn.init.orthogonal_(self.k_proj.weight, gain=0.1)
-            nn.init.orthogonal_(self.v_proj.weight)
+            self._orthogonal_init(self.r_proj.weight)
+            self._orthogonal_init(self.k_proj.weight, gain=0.1)
+            self._orthogonal_init(self.v_proj.weight)
             self.o_proj.weight.data.zero_()
 
             # Clean up temporary tensors to free memory
             del ddd, www, zigzag, linear
 
         module._is_hf_initialized = True
+
+    @staticmethod
+    def _orthogonal_init(weight, gain=1.0):
+        oringinal_dtype = weight.dtype
+        weight = weight.float()
+        nn.init.orthogonal_(weight, gain=gain)
+        weight = weight.to(oringinal_dtype)
 
     def forward(
         self,
