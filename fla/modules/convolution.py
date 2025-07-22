@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-# code adapted from https://github.com/HazyResearch/zoology/blob/main/zoology/mixers/convolution.py
-
 import math
 import warnings
 from typing import Optional, Tuple
@@ -33,8 +31,8 @@ except ImportError:
     'HAS_WEIGHT': lambda args: args['weight'] is not None,
     'HAS_BIAS': lambda args: args['bias'] is not None,
     'HAS_RESIDUAL': lambda args: args['residual'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'USE_INITIAL_STATE': lambda args: args['cache'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -42,7 +40,7 @@ except ImportError:
         for BD in [16, 32, 64, 128]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['B', 'D', 'W', 'NB'],
+    key=['D', 'W', 'NB'],
 )
 @triton.jit
 def causal_conv1d_fwd_kernel(
@@ -52,10 +50,10 @@ def causal_conv1d_fwd_kernel(
     bias,
     residual,
     cu_seqlens,
-    cache,
+    initial_state,
     chunk_indices,
+    B,
     T,
-    B: tl.constexpr,
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -97,8 +95,8 @@ def causal_conv1d_fwd_kernel(
             if HAS_WEIGHT:
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
-    elif i_t >= W:
-        # To make triton compiler happy, copy codes here
+    elif i_t * BT >= W:
+        # to make triton compiler happy, copy codes here
         for i_w in tl.static_range(-W + 1, 1):
             p_yi = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
@@ -107,29 +105,15 @@ def causal_conv1d_fwd_kernel(
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
     else:
-        o_t = i_t * BT + tl.arange(0, BT)  # [BT]
-        for k in tl.static_range(W):
-            i_w = k - (W - 1)  # [-W+1, 0]
-            o_s = o_t + i_w  # [-W+1, T-1]
-            cache_mask = (o_s >= -W) & (o_s < 0)
-            x_mask = (o_s >= 0) & (o_s < T)
+        o_t = i_t * BT + tl.arange(0, BT)
+        for i_w in tl.static_range(-W + 1, 1):
+            o_x = o_t + i_w
+            m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d
+            m_c = ((o_x + W >= 0) & (o_x < 0))[:, None] & m_d
 
-            b_yi = tl.zeros((BT, BD), dtype=tl.float32)
-            cache_col = o_s + W
+            b_yi = tl.load(x + bos * D + o_x[:, None] * D + o_d, mask=m_x, other=0).to(tl.float32)
 
-            b_cache = tl.load(
-                cache + i_n * D * W + o_d[None, :] * W + cache_col[:, None],
-                mask=cache_mask[:, None] & m_d[None, :],
-                other=0
-            ).to(tl.float32)
-            b_yi += b_cache
-
-            b_x = tl.load(
-                x + bos * D + o_s[:, None] * D + o_d[None, :],
-                mask=x_mask[:, None] & m_d[None, :],
-                other=0
-            )
-            b_yi += b_x
+            b_yi += tl.load(initial_state + i_n * D*W + o_d * W + (o_x + W)[:, None], mask=m_c, other=0).to(tl.float32)
 
             if HAS_WEIGHT:
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
@@ -162,7 +146,7 @@ def causal_conv1d_fwd_kernel(
         for BD in [16, 32, 64, 128]
         for num_warps in [4, 8, 16, 32]
     ],
-    key=['B', 'D', 'W', 'NB'],
+    key=['D', 'W', 'NB'],
 )
 @triton.jit
 def causal_conv1d_bwd_kernel(
@@ -171,14 +155,16 @@ def causal_conv1d_bwd_kernel(
     weight,
     bias,
     residual,
+    dht,
     dy,
     dx,
     dw,
     db,
+    dh0,
     cu_seqlens,
     chunk_indices,
+    B,
     T,
-    B: tl.constexpr,
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -248,6 +234,7 @@ def causal_conv1d_bwd_kernel(
 
 
 @triton.heuristics({
+    'USE_INITIAL_STATE': lambda args: args['cache'] is not None,
     'HAS_WEIGHT': lambda args: args['weight'] is not None,
     'HAS_BIAS': lambda args: args['bias'] is not None,
     'HAS_RESIDUAL': lambda args: args['residual'] is not None,
@@ -265,6 +252,7 @@ def causal_conv1d_update_kernel(
     BD: tl.constexpr,
     BW: tl.constexpr,
     ACTIVATION: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
@@ -280,11 +268,14 @@ def causal_conv1d_update_kernel(
     # [BD]
     b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=0).to(tl.float32)
 
-    # shift the cache by 1 with the last one being discarded
-    p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW + 1), (BD, BW), (1, 0))
-    # [BD, BW]
-    b_cache = tl.load(p_cache, boundary_check=(0, 1)).to(tl.float32)
-    b_cache = tl.where(m_c[None, :], b_cache, b_x[:, None])
+    if USE_INITIAL_STATE:
+        # shift the cache by 1 with the last one being discarded
+        p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW + 1), (BD, BW), (1, 0))
+        # [BD, BW]
+        b_cache = tl.load(p_cache, boundary_check=(0, 1)).to(tl.float32)
+        b_cache = tl.where(m_c[None, :], b_cache, b_x[:, None])
+    else:
+        b_cache = tl.zeros((BD, BW), dtype=tl.float32)
 
     if HAS_WEIGHT:
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
@@ -302,10 +293,11 @@ def causal_conv1d_update_kernel(
 
     tl.store(y + i_n * D + o_d, tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_d)
 
-    b_cache = tl.cast(b_cache, dtype=cache.dtype.element_ty, fp_downcast_rounding='rtne')
-    # update the cache in-place
-    p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW), (BD, BW), (1, 0))
-    tl.store(p_cache, b_cache, boundary_check=(0, 1))
+    if USE_INITIAL_STATE:
+        b_cache = tl.cast(b_cache, dtype=cache.dtype.element_ty, fp_downcast_rounding='rtne')
+        # update the cache in-place
+        p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW), (BD, BW), (1, 0))
+        tl.store(p_cache, b_cache, boundary_check=(0, 1))
 
 
 def causal_conv1d_fwd(
@@ -313,9 +305,10 @@ def causal_conv1d_fwd(
     weight: torch.Tensor,
     bias: torch.Tensor,
     residual: torch.Tensor,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: bool = False,
     activation: Optional[str] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
-    cache: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -336,7 +329,7 @@ def causal_conv1d_fwd(
         bias=bias,
         residual=residual,
         cu_seqlens=cu_seqlens,
-        cache=cache,
+        initial_state=initial_state,
         chunk_indices=chunk_indices,
         B=B,
         T=T,
@@ -347,21 +340,27 @@ def causal_conv1d_fwd(
         NB=NB,
         ACTIVATION=activation,
     )
-    if cache is None:
-        return y.view(shape)
-    else:
-        return y.view(shape), causal_conv1d_states_update(x, cache, cu_seqlens, W)
+    final_state = None
+    if output_final_state:
+        final_state = causal_conv1d_update_states(
+            x=x,
+            state_len=W,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+        )
+    return y.view(shape), final_state
 
 
 def causal_conv1d_bwd(
     x: torch.Tensor,
     dy: torch.Tensor,
+    dht: torch.Tensor,
     weight: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None,
+    initial_state: Optional[torch.Tensor] = None,
     activation: Optional[str] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
-    cache: Optional[torch.Tensor] = None
 ):
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -376,20 +375,21 @@ def causal_conv1d_bwd(
 
     y = None
     if activation is not None:
-        # will return a tuple if cache is not None
-        y = causal_conv1d_fwd(
+        y, _ = causal_conv1d_fwd(
             x=x,
             weight=weight,
             bias=bias,
             residual=None,
+            initial_state=initial_state,
             activation=None,
             cu_seqlens=cu_seqlens,
-            cache=cache,
-        )[0]
+        )
     dx = torch.empty_like(x)
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
     dr = dy if residual is not None else None
+    dh0 = torch.empty_like(initial_state) if initial_state is not None else None
+
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
         x=x,
@@ -397,10 +397,12 @@ def causal_conv1d_bwd(
         weight=weight,
         bias=bias,
         residual=residual,
+        dht=dht,
         dy=dy,
         dx=dx,
         dw=dw,
         db=db,
+        dh0=dh0,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         B=B,
@@ -417,7 +419,7 @@ def causal_conv1d_bwd(
     if bias is not None:
         db = db.sum(0).to(bias)
 
-    return dx.view(shape), dw, db, dr
+    return dx.view(shape), dw, db, dr, dh0
 
 
 @input_guard
@@ -468,35 +470,42 @@ class CausalConv1dFunction(torch.autograd.Function):
         weight: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         residual: Optional[torch.Tensor] = None,
+        initial_state: Optional[torch.Tensor] = None,
+        output_final_state: Optional[bool] = False,
         activation: Optional[str] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
-        cache: Optional[torch.Tensor] = None
     ):
-        if torch.is_grad_enabled() and cache is not None:
-            initial_cache = cache.clone()
-        else:
-            initial_cache = None
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
-        ctx.save_for_backward(x, weight, bias, residual, initial_cache)
-        return causal_conv1d_fwd(x, weight, bias, residual, activation, cu_seqlens, cache)
-
-    @staticmethod
-    @input_guard
-    def backward(ctx, dy: torch.Tensor, dcache: Optional[torch.Tensor] = None):
-        # FIXME, dcache TBD
-        x, weight, bias, residual, cache = ctx.saved_tensors
-        dx, dw, db, dr = causal_conv1d_bwd(
+        ctx.save_for_backward(x, weight, bias, residual, initial_state)
+        y, final_state = causal_conv1d_fwd(
             x=x,
-            dy=dy,
             weight=weight,
             bias=bias,
             residual=residual,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            activation=activation,
+            cu_seqlens=cu_seqlens,
+        )
+        return y, final_state
+
+    @staticmethod
+    @input_guard
+    def backward(ctx, dy: torch.Tensor, dht: torch.Tensor):
+        x, weight, bias, residual, initial_state = ctx.saved_tensors
+        dx, dw, db, dr, dh0 = causal_conv1d_bwd(
+            x=x,
+            dy=dy,
+            dht=dht,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            initial_state=initial_state,
             activation=ctx.activation,
             cu_seqlens=ctx.cu_seqlens,
-            cache=cache
         )
-        return dx, dw, db, dr, None, None, None
+        return dx, dw, db, dr, dh0, None, None, None
 
 
 @input_guard
@@ -505,9 +514,10 @@ def causal_conv1d(
     weight: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None,
+    initial_state: Optional[torch.Tensor] = None,
+    output_final_state: Optional[bool] = False,
     activation: Optional[str] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
-    cache: Optional[torch.Tensor] = None
 ):
     """
     A causal 1D convolution implementation that powers Mamba/Mamba2 and DeltaNet architectures.
@@ -516,27 +526,41 @@ def causal_conv1d(
     described in the paper at https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5240330.
 
     Args:
-        x:
+        x (torch.Tensor):
             Input tensor of shape [B, T, D].
-        weight:
+        weight (Optional[torch.Tensor]):
             Weight tensor of shape [D, W]. Default: `None`.
-        bias:
+        bias (Optional[torch.Tensor]):
             Bias tensor of shape [D]. Default: `None`.
-        residual:
+        residual (Optional[torch.Tensor]):
             Residual tensor of shape [B, T, D]. Default: `None`.
-        activation:
+        initial_state (Optional[torch.Tensor]):
+            Initial state tensor of shape [N, D, W],
+            where `N` is the number of sequences in the batch and `W` is the kernel size.
+            If provided, the initial state is used to initialize the cache. Default: `None`.
+        output_final_state (Optional[bool]):
+            Whether to output the final state of shape [N, D, W]. Default: `False`.
+        activation (Optional[str]):
             Activations applied to output, only `swish`/`silu` or `None` (i.e., no activation) are supported.
             Default: `None`.
-        cu_seqlens:
+        cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths (optional)
-        cache:
-            Cache tensor of shape [N, D, W], where `N` is the number of sequences in the batch and `W` is the kernel size.
-            If provided, the cache is updated **inplace**. Default: `None`.
 
     Returns:
-        Tensor of same shape as input with CausalConv1dFunction applied
+        Tuple of (output, final_state).
+        If `output_final_state` is `False`, the final state is `None`.
     """
-    return CausalConv1dFunction.apply(x, weight, bias, residual, activation, cu_seqlens, cache)
+    y, final_state = CausalConv1dFunction.apply(
+        x,
+        weight,
+        bias,
+        residual,
+        initial_state,
+        output_final_state,
+        activation,
+        cu_seqlens,
+    )
+    return y, final_state
 
 
 def fft_conv(u, k, dropout_mask, gelu=True, k_rev=None):
@@ -562,60 +586,74 @@ def fft_conv(u, k, dropout_mask, gelu=True, k_rev=None):
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.jit
-def causal_conv1d_states_update_kernel(
+def causal_conv1d_states_fwd_kernel(
     x,
-    cache,
-    offsets,
+    initial_state,
+    final_state,
+    cu_seqlens,
+    T,
     D,
     W,
-    T,
     BD: tl.constexpr,
     BW: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    USE_INITIAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_w, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_n = tl.program_id(0), tl.program_id(1)
     if IS_VARLEN:
-        eos = tl.load(offsets + i_n + 1)
-        bos = tl.maximum(tl.load(offsets + i_n), eos - W)
+        bos, eos = tl.load(cu_seqlens + i_n), tl.load(cu_seqlens + i_n + 1)
+        T = eos - bos
     else:
-        eos = (i_n + 1) * T
-        bos = eos - W
+        bos, eos = i_n * T, i_n * T + T
 
-    o_t = eos - (i_w + 1) * BW + tl.arange(0, BW)
+    o_t = eos - BW + tl.arange(0, BW)
     o_d = i_d * BD + tl.arange(0, BD)
-    o_w = W - (i_w + 1) * BW + tl.arange(0, BW)
+    o_w = W - BW + tl.arange(0, BW)
+    m_t = (o_t >= tl.maximum(bos, eos - W))
+    m_d = o_d < D
+    m_w = (o_w >= 0) & (o_w < W)
 
-    b_x = tl.load(x + o_t * D + o_d[:, None], mask=(o_t >= bos) & (o_d[:, None] < D), other=0)
-    tl.store(cache + i_n * D*W + o_d[:, None] * W + o_w, b_x, mask=(o_d[:, None] < D) & (o_w >= 0))
+    b_x = tl.load(x + o_t * D + o_d[:, None], mask=(m_t & m_d[:, None]), other=0)
+    if USE_INITIAL_STATE:
+        if T < BW:
+            o_c = W - (BW - T) + tl.arange(0, BW)
+            m_c = (o_c >= 0) & (o_c < W)
+            b_cache = tl.load(initial_state + i_n * D*W + o_d[:, None] * W + o_c, mask=m_d[:, None] & m_c, other=0)
+            b_x += b_cache
+
+    tl.store(final_state + i_n * D*W + o_d[:, None] * W + o_w, b_x, mask=m_d[:, None] & m_w)
 
 
-def causal_conv1d_states_update(
+@input_guard
+def causal_conv1d_update_states(
     x: torch.Tensor,
-    cache: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    W: int,
+    state_len: int,
+    initial_state: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    N = len(cu_seqlens) - 1 if cu_seqlens is not None else x.shape[0]
-    D = x.shape[-1]
-    cache = torch.empty(N, D, W, dtype=x.dtype, device=x.device) if cache is None else cache
-    BD = min(triton.next_power_of_2(D), 256)
-    BW = min(triton.next_power_of_2(W), 16)
-    grid = (triton.cdiv(D, BD), triton.cdiv(W, BW), N)
+    B, T, D, W = *x.shape, state_len
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
 
-    causal_conv1d_states_update_kernel[grid](
+    final_state = torch.empty(N, D, W, dtype=x.dtype, device=x.device)
+    BD = min(triton.next_power_of_2(D), 256)
+    BW = triton.next_power_of_2(W)
+    grid = (triton.cdiv(D, BD), N)
+    causal_conv1d_states_fwd_kernel[grid](
         x=x,
-        cache=cache,
-        offsets=cu_seqlens,
+        initial_state=initial_state,
+        final_state=final_state,
+        cu_seqlens=cu_seqlens,
+        T=T,
         D=D,
         W=W,
-        T=x.shape[1],
         BW=BW,
         BD=BD
     )
-    return cache
+    return final_state
 
 
 class ShortConvolution(nn.Conv1d):
@@ -727,13 +765,19 @@ class ShortConvolution(nn.Conv1d):
             if cu_seqlens is not None:
                 raise ValueError("`mask` and `cu_seqlens` cannot be provided at the same time")
             x = x.mul_(mask.unsqueeze(-1))
-        if output_final_state and cache is None:
-            cache = x.new_zeros(N, D, W)
-        # during the decoding phase, we assume the batch is composed of sequences of length 1
-        if cache is not None and B * T == N:
-            return self.step(x, residual, cache, cu_seqlens)
 
-        # Check if cu_seqlens and cache are both provided
+        # in decoding phase, the cache (if provided) is updated inplace
+        if B * T == N:
+            y, cache = self.step(
+                x=x,
+                residual=residual,
+                cache=cache,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens
+            )
+            return y, cache
+
+        # check if cu_seqlens and cache are both provided
         if self.backend == 'cuda' and cu_seqlens is not None and cache is not None:
             warnings.warn(
                 "Both `cu_seqlens` and `cache` are provided. "
@@ -743,15 +787,17 @@ class ShortConvolution(nn.Conv1d):
             self.backend = 'triton'
 
         if self.backend == 'triton':
-            return causal_conv1d(
-                    x=x,
-                    weight=rearrange(self.weight, "d 1 w -> d w"),
-                    bias=self.bias,
-                    residual=residual,
-                    activation=self.activation,
-                    cu_seqlens=cu_seqlens,
-                    cache=cache,
-                )
+            y, cache = causal_conv1d(
+                x=x,
+                weight=rearrange(self.weight, "d 1 w -> d w"),
+                bias=self.bias,
+                residual=residual,
+                initial_state=cache,
+                output_final_state=output_final_state,
+                activation=self.activation,
+                cu_seqlens=cu_seqlens,
+            )
+            return y, cache
         else:
             x = rearrange(x, 'b t d -> b d t')
             # Sequence index for each token. Used for varlen.
@@ -769,17 +815,16 @@ class ShortConvolution(nn.Conv1d):
             # if self.activation is not None:
             #     y = ACT2FN[self.activation](x)
 
+            initial_state = None
             if cache is not None:
                 B, _, T = cache.shape
                 # To make causal-conv1d happy
-                initial_states = (
+                initial_state = (
                     cache[:, :, -(W-1):]
-                    .transpose(1, 2)                     # (B, C, W-1)
-                    .contiguous()                        # (B, W-1, C) and stride(2)==1
-                    .transpose(1, 2)                     # (B, C, W-1) and stride(1)==1
+                    .transpose(1, 2)                     # [B, C, W-1]
+                    .contiguous()                        # [B, W-1, C] and stride(2)==1
+                    .transpose(1, 2)                     # [B, C, W-1] and stride(1)==1
                 )
-            else:
-                initial_states = None
 
             result = causal_conv1d_fn(
                 x=x,
@@ -787,15 +832,14 @@ class ShortConvolution(nn.Conv1d):
                 bias=self.bias,
                 activation=self.activation,
                 seq_idx=seq_idx,
-                initial_states=initial_states,
-                return_final_states=cache is not None,
+                initial_states=initial_state,
+                return_final_states=output_final_state,
             )
-            y, cache_out = result if cache is not None else (result, None)
+            y, final_state = result if output_final_state else (result, None)
             y = rearrange(y, 'b d t -> b t d')
-            if cache_out is not None:
-                cache[:, :, -min(W-1, T):].copy_(cache_out[:, :, -min(W-1, T):])
-            else:
-                cache = None
+            if output_final_state:
+                cache = x.new_zeros(N, D, W)
+                cache[:, :, -min(W-1, T):].copy_(final_state[:, :, -min(W-1, T):])
             if residual is not None:
                 y.add_(residual)
 
@@ -806,8 +850,13 @@ class ShortConvolution(nn.Conv1d):
         x: torch.Tensor,
         residual: torch.Tensor,
         cache: torch.Tensor,
+        output_final_state: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None
     ):
+        B, _, D, W = *x.shape, self.kernel_size[0]
+        N = B if cu_seqlens is None else len(cu_seqlens) - 1
+        if output_final_state and cache is None:
+            cache = x.new_zeros(N, D, W)
         # NOTE: we follow the fast mode that updates the cache in-place
         if self.backend == 'triton':
             return causal_conv1d_update(
