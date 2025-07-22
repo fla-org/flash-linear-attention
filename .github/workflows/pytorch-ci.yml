@@ -1,4 +1,4 @@
-name: PyTorch and Python compatibility check
+name: compatibility-check
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  syntax-and-collect:
+  check-pt-python-compatibility:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,11 +23,12 @@ jobs:
             setup.py
             pyproject.toml
 
-      - name: Install PyTorch 2.5 & pytest
+      - name: Install PyTorch 2.5 & pytest & fla
         run: |
           pip install --upgrade pip
           pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
           pip install pytest -U
+          pip install .
 
       - name: Compile all Python files
         run: |
