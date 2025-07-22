@@ -97,30 +97,36 @@ def causal_conv1d_fwd_kernel(
             if HAS_WEIGHT:
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
+    elif i_t >= W:
+        # To make triton compiler happy, copy codes here
+        for i_w in tl.static_range(-W + 1, 1):
+            p_yi = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            # [BT, BD]
+            b_yi = tl.load(p_yi, boundary_check=(0, 1)).to(tl.float32)
+            if HAS_WEIGHT:
+                b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
+            b_y += b_yi
     else:
-        t_out = i_t * BT + tl.arange(0, BT)  # [BT]
-
+        o_t = i_t * BT + tl.arange(0, BT)  # [BT]
         for k in tl.static_range(W):
             i_w = k - (W - 1)  # [-W+1, 0]
-            t_src = t_out + i_w  # [-W+1, T-1]
-
-            from_cache = (t_src >= -W) & (t_src < 0)
-            from_x = (t_src >= 0) & (t_src < T)
+            o_s = o_t + i_w  # [-W+1, T-1]
+            cache_mask = (o_s >= -W) & (o_s < 0)
+            x_mask = (o_s >= 0) & (o_s < T)
 
             b_yi = tl.zeros((BT, BD), dtype=tl.float32)
-            cache_col = t_src + W
+            cache_col = o_s + W
 
             b_cache = tl.load(
                 cache + i_n * D * W + o_d[None, :] * W + cache_col[:, None],
-                mask=from_cache[:, None] & m_d[None, :],
+                mask=cache_mask[:, None] & m_d[None, :],
                 other=0
             ).to(tl.float32)
             b_yi += b_cache
 
-            x_idx = t_src  # [0, T-1]
             b_x = tl.load(
-                x + bos * D + x_idx[:, None] * D + o_d[None, :],
-                mask=from_x[:, None] & m_d[None, :],
+                x + bos * D + o_s[:, None] * D + o_d[None, :],
+                mask=x_mask[:, None] & m_d[None, :],
                 other=0
             )
             b_yi += b_x

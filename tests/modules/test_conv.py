@@ -401,3 +401,80 @@ def test_short_conv_decoding_with_cache(
         y, _ = conv.step(x, residual, state.clone())
 
     assert_close("y", ref, y, 1e-3)
+
+
+@pytest.mark.parametrize("B", [2])
+@pytest.mark.parametrize("T_prefill", [64, 128])
+@pytest.mark.parametrize("D", [128])
+@pytest.mark.parametrize("W", [3, 4])
+@pytest.mark.parametrize("has_bias", [True, False])
+@pytest.mark.parametrize("has_residual", [True, False])
+@pytest.mark.parametrize("activation", ["swish"])
+@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.skipif(
+    causal_conv1d_fn is None,
+    reason="causal_conv1d is not installed"
+)
+def test_mixed_backend(
+    B: int,
+    T_prefill: int,
+    D: int,
+    W: int,
+    has_bias: bool,
+    has_residual: bool,
+    activation: str,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(1234)
+    T_decode = 1
+    x = torch.randn(B, T_prefill + T_decode, D, device=device, dtype=dtype)
+    residual = torch.randn_like(x) if has_residual else None
+
+    conv = ShortConvolution(
+        hidden_size=D,
+        kernel_size=W,
+        bias=has_bias,
+        activation=activation,
+        backend="cuda",
+        device=device,
+        dtype=dtype,
+    )
+
+    cache = torch.zeros(B, D, W, device=device, dtype=dtype)
+    y_cuda_prefill, cache = conv(
+        x[:, :T_prefill],
+        residual=residual[:, :T_prefill] if has_residual else None,
+        cache=cache,
+    )
+
+    conv.backend = "triton"
+    y_triton_decode, _ = conv(
+        x[:, T_prefill:],
+        residual=residual[:, T_prefill:] if has_residual else None,
+        cache=cache,
+    )
+
+    conv.backend = "triton"
+    cache0 = torch.zeros(B, D, W, device=device, dtype=dtype)
+    y_triton_full, _ = conv(x, residual=residual, cache=cache0)
+
+    y_mixed = torch.cat([y_cuda_prefill, y_triton_decode], dim=1)
+    assert_close("cuda→triton vs triton", y_mixed, y_triton_full, 1e-3)
+
+    conv.backend = "triton"
+    cache = torch.zeros(B, D, W, device=device, dtype=dtype)
+    y_triton_prefill, cache = conv(
+        x[:, :T_prefill],
+        residual=residual[:, :T_prefill] if has_residual else None,
+        cache=cache,
+    )
+
+    conv.backend = "cuda"
+    y_cuda_decode, _ = conv(
+        x[:, T_prefill:],
+        residual=residual[:, T_prefill:] if has_residual else None,
+        cache=cache,
+    )
+
+    y_mixed2 = torch.cat([y_triton_prefill, y_cuda_decode], dim=1)
+    assert_close("triton→cuda vs triton", y_mixed2, y_triton_full,  1e-3)
