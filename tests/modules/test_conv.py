@@ -397,11 +397,10 @@ def test_conv_varlen_with_cache_prefill_fwd(
         pytest.skip("causal_conv1d is not installed for CUDA backend")
     torch.manual_seed(42)
 
-
     min_len_each = T // N
     lengths = [min_len_each] * N
     lengths[-1] += T % N
-    assert all(l >= W for l in lengths), "need all lengths ≥ W"
+    assert all(length >= W for length in lengths), "need all lengths ≥ W"
     cu_seqlens = torch.tensor([0] + torch.cumsum(torch.tensor(lengths), 0).tolist(), device=device)
 
     x = torch.randn(1, T, D).to(device, dtype)
@@ -439,7 +438,7 @@ def test_conv_varlen_with_cache_prefill_fwd(
     tri_cache = torch.cat([zero_pad, cache], dim=-1)  # (N, D, W)
     tri, _ = conv(x, residual=residual, cache=tri_cache, cu_seqlens=cu_seqlens)
 
-    assert_close("varlen y", ref, tri,1e-3)
+    assert_close("varlen y", ref, tri, 1e-3)
 
 
 @pytest.mark.parametrize(
