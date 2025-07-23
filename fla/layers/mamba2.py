@@ -124,6 +124,7 @@ class Mamba2(nn.Module):
         norm_eps: float = 1e-5,
         layer_idx: int = None,
         backend: str = "cuda",
+        use_segment_input: bool = False,
     ) -> Mamba2:
         super().__init__()
 
