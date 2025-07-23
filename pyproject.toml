@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 conv1d = ["causal-conv1d>=1.4.0"]
+benchmark = ["matplotlib"]
 
 [project.urls]
 Homepage = "https://github.com/fla-org/flash-linear-attention"

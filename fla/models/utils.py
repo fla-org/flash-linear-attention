@@ -127,7 +127,7 @@ class Cache(transformers.cache_utils.Cache):
             return 0
         return self._seen_tokens
 
-    def get_max_length(self) -> Optional[int]:
+    def get_max_cache_shape(self) -> Optional[int]:
         """Returns the maximum sequence length of the cached states. Cache does not have a maximum length."""
         return None
 

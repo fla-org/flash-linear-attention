@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Optional
 
 import torch
@@ -298,7 +299,7 @@ def chunk_gated_delta_rule(
         )
     """
     if 'head_first' in kwargs:
-        raise DeprecationWarning(
+        warnings.warn(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
