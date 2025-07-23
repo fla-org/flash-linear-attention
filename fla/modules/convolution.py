@@ -797,8 +797,9 @@ class ShortConvolution(nn.Conv1d):
             ((cu_seqlens is not None or seq_idx is not None) and cache is not None) or \
                 (cu_seqlens is not None and output_final_state):
             warnings.warn(
-                "The CUDA backend does not support varlen sequences with cache or output final state. "
-                "Switching to the Triton backend instead."
+                "The CUDA backend does not support both `cu_seqlens` and `cache` being provided, "
+                "or both `cu_seqlens` and `output_final_state` being provided. "
+                "Switching to the Triton backend instead. "
             )
             self.backend = 'triton'
 
