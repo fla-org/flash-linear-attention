@@ -119,7 +119,7 @@ class MomPreTrainedModel(PreTrainedModel):
     def _init_weights(
         self,
         module: nn.Module,
-        rescale_prenorm_residual: bool = True,
+        rescale_prenorm_residual: bool = False,
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, (nn.Linear, nn.Conv1d)):
