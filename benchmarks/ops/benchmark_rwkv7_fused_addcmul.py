@@ -50,13 +50,12 @@ def benchmark(T, provider):
     from fla.utils import device
     dtype = torch.bfloat16
     requires_grad = True
-    # Read B, H, D from environment variables, default to 16, 8, 128 if not set
     hidden_size = 4096
     batch_size = 8
     seq_len = T
     hidden_states = torch.randn(batch_size, seq_len, hidden_size, device=device,
                                 requires_grad=requires_grad, dtype=dtype).to(device)
-    delta = torch.randn_like(hidden_states).to(device)
+    delta = torch.randn(batch_size, seq_len, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     x_r = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     x_w = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
     x_k = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
