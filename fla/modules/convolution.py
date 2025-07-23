@@ -493,7 +493,7 @@ class CausalConv1dFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor] = None):
-        if dht is None:
+        if dht is not None:
             raise NotImplementedError("The gradient of the final state is not supported yet.")
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
