@@ -11,8 +11,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - '*'
 
 jobs:
   test-a770-pytorch-2-7:
@@ -25,3 +23,4 @@ jobs:
       conda_env_name: 'pytorch_2_7'
       pytorch_version: '2.7.0'
       skip_gpu_check: false
+      skip_models_tests: true

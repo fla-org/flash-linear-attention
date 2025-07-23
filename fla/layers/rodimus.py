@@ -85,7 +85,7 @@ class RodimusAttention(nn.Module):
         self.residual_in_fp32 = residual_in_fp32
         self.layer_idx = layer_idx
 
-        assert mode in ['chunk', 'fused_recurrent', 'fused_chunk'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent', 'fused_chunk'], f"Not supported mode `{mode}`."
 
         self.gate_proj = nn.Linear(self.hidden_size, self.d_inner, bias=False)
         self.up_proj = nn.Linear(self.hidden_size, self.d_inner, bias=False)
@@ -306,7 +306,7 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens', None)
 
-        seqlen_offset, max_seqlen = 0, q_len
+        seqlen_offset, max_seqlen = 0, q.shape[1]
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset

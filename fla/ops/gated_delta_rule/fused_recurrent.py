@@ -12,6 +12,9 @@ from fla.utils import input_guard
 
 
 @triton.heuristics({
+    'USE_G': lambda args: args['g'] is not None,
+    'USE_GK': lambda args: args['gk'] is not None,
+    'USE_GV': lambda args: args['gv'] is not None,
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
@@ -22,6 +25,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     k,
     v,
     g,
+    gk,
+    gv,
     beta,
     o,
     h0,
@@ -36,34 +41,41 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     V: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use initial state
-    STORE_FINAL_STATE: tl.constexpr,  # whether to store final state
-    IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
+    USE_G: tl.constexpr,
+    USE_GK: tl.constexpr,
+    USE_GV: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_BETA_HEADWISE: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    STORE_FINAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        all = T
         T = eos - bos
     else:
         bos, eos = i_n * T, i_n * T + T
-        all = B * T
-    o_k = i_k * BK + tl.arange(0, BK)
+    o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
     p_q = q + (bos * H + i_h) * K + o_k
     p_k = k + (bos * H + i_h) * K + o_k
     p_v = v + (bos * HV + i_hv) * V + o_v
+    if USE_G:
+        p_g = g + bos * HV + i_hv
+    if USE_GK:
+        p_gk = gk + (bos * HV + i_hv) * K + o_k
+    if USE_GV:
+        p_gv = gv + (bos * HV + i_hv) * V + o_v
     if IS_BETA_HEADWISE:
-        p_beta = beta + (bos * HV + i_hv) * V + o_v
-    else:
         p_beta = beta + bos * HV + i_hv
-    p_g = g + bos * HV + i_hv
-    p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
+    else:
+        p_beta = beta + (bos * HV + i_hv) * V + o_v
+
+    p_o = o + (bos * HV + i_hv) * V + o_v
 
     mask_k = o_k < K
     mask_v = o_v < V
@@ -78,33 +90,46 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
-        b_g = tl.load(p_g).to(tl.float32)
-
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
-            b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
+            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        # [BK, BV]
-        b_h *= exp(b_g)
-        # [BV]
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
         if IS_BETA_HEADWISE:
-            b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
-        else:
             b_beta = tl.load(p_beta).to(tl.float32)
-        b_v *= b_beta
+        else:
+            b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
+
         # [BK, BV]
-        b_h += b_k[:, None] * b_v[None, :]
+        if USE_G:
+            b_g = tl.load(p_g).to(tl.float32)
+            b_h *= exp(b_g)
+
+        if USE_GK:
+            b_gk = tl.load(p_gk).to(tl.float32)
+            b_h *= exp(b_gk[:, None])
+
+        if USE_GV:
+            b_gv = tl.load(p_gv).to(tl.float32)
+            b_h *= exp(b_gv[None, :])
+
+        b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0))
+        b_h += b_k[:, None] * b_v
+
         # [BV]
         b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         p_q += H*K
         p_k += H*K
-        p_o += HV*V
         p_v += HV*V
-        p_g += HV
-        p_beta += HV * (V if IS_BETA_HEADWISE else 1)
+        if USE_G:
+            p_g += HV
+        if USE_GK:
+            p_gk += HV*K
+        if USE_GV:
+            p_gv += HV*V
+        p_beta += HV * (1 if IS_BETA_HEADWISE else V)
+        p_o += HV*V
 
     if STORE_FINAL_STATE:
         p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -115,11 +140,13 @@ def fused_recurrent_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    scale: float,
-    initial_state: torch.Tensor,
-    output_final_state: bool,
+    g: Optional[torch.Tensor] = None,
+    gk: Optional[torch.Tensor] = None,
+    gv: Optional[torch.Tensor] = None,
+    beta: Optional[torch.Tensor] = None,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -127,23 +154,21 @@ def fused_recurrent_gated_delta_rule_fwd(
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
-    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-    assert NK == 1, "NK > 1 is not supported yet"
+    NV = triton.cdiv(V, BV)
     num_stages = 3
     num_warps = 1
 
-    o = q.new_empty(NK, *v.shape)
-    if output_final_state:
-        final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
-    else:
-        final_state = None
+    o = torch.empty_like(v)
+    final_state = q.new_empty(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
-    grid = (NK, NV, N * HV)
+    grid = (NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
         v=v,
         g=g,
+        gk=gk,
+        gv=gv,
         beta=beta,
         o=o,
         h0=initial_state,
@@ -158,12 +183,11 @@ def fused_recurrent_gated_delta_rule_fwd(
         V=V,
         BK=BK,
         BV=BV,
-        IS_BETA_HEADWISE=beta.ndim == v.ndim,
+        IS_BETA_HEADWISE=beta.ndim != v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         num_warps=num_warps,
         num_stages=num_stages,
     )
-    o = o.squeeze(0)
     return o, final_state
 
 
@@ -176,25 +200,29 @@ class FusedRecurrentFunction(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-        scale: float,
-        initial_state: torch.Tensor,
-        output_final_state: bool,
+        g: Optional[torch.Tensor] = None,
+        gk: Optional[torch.Tensor] = None,
+        gv: Optional[torch.Tensor] = None,
+        beta: Optional[torch.Tensor] = None,
+        scale: float = None,
+        initial_state: torch.Tensor = None,
+        output_final_state: bool = False,
+        use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
-        use_qk_l2norm_in_kernel: bool = False
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
             g=g,
+            gk=gk,
+            gv=gv,
             beta=beta,
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-            cu_seqlens=cu_seqlens
+            cu_seqlens=cu_seqlens,
         )
 
         return o, final_state
@@ -213,13 +241,15 @@ def fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor = None,
+    g: Optional[torch.Tensor] = None,
+    gk: Optional[torch.Tensor] = None,
+    gv: Optional[torch.Tensor] = None,
+    beta: Optional[torch.Tensor] = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -231,7 +261,11 @@ def fused_recurrent_gated_delta_rule(
             values of shape `[B, T, HV, V]`.
             GVA is applied if `HV > H`.
         g (torch.Tensor):
-            g (decays) of shape `[B, T, HV]`.
+            g (decays) of shape `[B, T, HV]`. Default: `None`.
+        gk (torch.Tensor):
+            gk (decays) of shape `[B, T, HV, K]`. Default: `None`.
+        gv (torch.Tensor):
+            gv (decays) of shape `[B, T, HV, V]`. Default: `None`.
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
         scale (Optional[float]):
@@ -243,6 +277,8 @@ def fused_recurrent_gated_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
+        use_qk_l2norm_in_kernel (Optional[bool]):
+            Whether to use L2 normalization in the kernel. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -275,7 +311,7 @@ def fused_recurrent_gated_delta_rule(
         >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = fused_gated_recurrent_delta_rule(
+        >>> o, ht = fused_gated_recurrent_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True,
@@ -295,20 +331,21 @@ def fused_recurrent_gated_delta_rule(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
     if beta is None:
         beta = torch.ones_like(q[..., 0])
+
     o, final_state = FusedRecurrentFunction.apply(
         q,
         k,
         v,
         g,
+        gk,
+        gv,
         beta,
         scale,
         initial_state,
         output_final_state,
+        use_qk_l2norm_in_kernel,
         cu_seqlens,
-        use_qk_l2norm_in_kernel
     )
     return o, final_state

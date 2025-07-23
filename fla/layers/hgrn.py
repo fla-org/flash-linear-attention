@@ -48,7 +48,7 @@ class HGRNAttention(nn.Module):
 
         self.layer_idx = layer_idx
 
-        assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
 
         self.i_proj = nn.Linear(hidden_size, self.input_dim, bias=False)
         self.f_proj = nn.Linear(hidden_size, self.input_dim, bias=False)

@@ -165,40 +165,58 @@ class ChunkMesaNetFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, g, beta, lamb,
-                cu_seqlens, max_CG_iteration,
-                h_kk_init, h_kv_init, output_final_state, use_qk_l2norm_in_kernel):
+    def forward(
+        ctx,
+        q,
+        k,
+        v,
+        g,
+        beta,
+        lamb,
+        cu_seqlens,
+        max_CG_iteration,
+        h_kk_init,
+        h_kv_init,
+        output_final_state,
+        use_qk_l2norm_in_kernel
+    ):
         chunk_size = 64
-        q_orig = q
-        k_orig = k
 
         if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q, output_dtype=torch.float16)
-            k = l2norm_fwd(k, output_dtype=torch.float16)
+            q, q_rstd = l2norm_fwd(q, output_dtype=torch.float16)
+            k, k_rstd = l2norm_fwd(k, output_dtype=torch.float16)
         else:
+            q_rstd, k_rstd = None, None
             q = q.to(torch.float16)
             k = k.to(torch.float16)
-        g_cumsum, q_star, o, (h_kk_final, h_kv_final) = chunk_fwd_mesa_net_fwd(q, k, v, g, beta, lamb,
-                                                                               cu_seqlens, max_CG_iteration, chunk_size,
-                                                                               h_kk_init, h_kv_init, output_final_state)
+
+        g_cumsum, q_star, o, (h_kk_final, h_kv_final) = chunk_fwd_mesa_net_fwd(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            lamb=lamb,
+            cu_seqlens=cu_seqlens,
+            max_CG_iteration=max_CG_iteration,
+            chunk_size=chunk_size,
+            h_kk_init=h_kk_init,
+            h_kv_init=h_kv_init,
+            output_final_state=output_final_state,
+        )
         ctx.max_CG_iteration = max_CG_iteration
         ctx.chunk_size = chunk_size
         ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        ctx.save_for_backward(q_orig, k_orig, v, g_cumsum, beta, lamb, h_kk_init, h_kv_init, q_star, o)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g_cumsum, beta, lamb, h_kk_init, h_kv_init, q_star, o)
         return o, h_kk_final, h_kv_final
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dh_kk_final=None, dh_kv_final=None):
-        q, k, v, g, beta, lamb, h_kk_init, h_kv_init, q_star, o = ctx.saved_tensors
-        if ctx.use_qk_l2norm_in_kernel:
-            q, q_orig = l2norm_fwd(q, output_dtype=torch.float16), q
-            k, k_orig = l2norm_fwd(k, output_dtype=torch.float16), k
-        else:
-            q = q.to(torch.float16)
-            k = k.to(torch.float16)
+        q, q_rstd, k, k_rstd, v, g, beta, lamb, h_kk_init, h_kv_init, q_star, o = ctx.saved_tensors
+
         max_CG_iteration = ctx.max_CG_iteration
         chunk_size = ctx.chunk_size
         cu_seqlens = ctx.cu_seqlens
@@ -208,11 +226,8 @@ class ChunkMesaNetFunction(torch.autograd.Function):
             h_kk_init=h_kk_init, h_kv_init=h_kv_init, dh_kv_final=dh_kv_final, dh_kk_final=dh_kk_final
         )
         if ctx.use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q_orig, dq).to(q_orig)
-            dk = l2norm_bwd(k_orig, dk).to(k_orig)
-        else:
-            dq = dq.to(q)
-            dk = dk.to(k)
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
         return dq, dk, dv.to(v), dg.to(g), dbeta.to(beta), dlamb.to(lamb), None, None, dh0_kk, dh0_kv, None, None
 
 

@@ -14,18 +14,21 @@ from fla.utils import assert_close, device, is_intel_alchemist
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'num_householder', 'gate_logit_normalizer', 'mask_p', 'dtype'),
+    ('B', 'T', 'H', 'D', 'scale', 'num_householder', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-num_householder{}-gate_logit_normalizer{}-mask_p{}-{}".format(*test))
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-scale{}-num_householder{}-gate_logit_normalizer{}-mask_p{}-l2norm{}-{}".format(*test)
+        )
         for test in [
-            (1, 63, 1, 64, 0.1, 1, 1, 0, torch.float16),
-            (2, 200, 3, 60, 0.1, 1, 1, 0, torch.float16),
-            (2, 1000, 4, 64, 0.1, 2, 0.1, 0.5, torch.float16),
-            (2, 1024, 4, 64, 1, 2, 1, 0, torch.float16),
-            (2, 1024, 6, 100, 1, 2, 10, 0, torch.float16),
-            (4, 1500, 8, 128, 0.1, 3, 1, 0.5, torch.float16),
-            (2, 2048, 8, 128, 1, 3, 1, 0, torch.float16),
-            (2, 2048, 8, 128, 1, 3, 1, 0, torch.float16),
+            (1, 63, 1, 64, 0.1, 1, 1, 0, False, torch.float16),
+            (2, 200, 3, 60, 0.1, 1, 1, 0, False, torch.float16),
+            (2, 1000, 4, 64, 0.1, 2, 0.1, 0.5, False, torch.float16),
+            (2, 1024, 4, 64, 1, 2, 1, 0, True, torch.float16),
+            (2, 1024, 6, 100, 1, 2, 10, 0, False, torch.float16),
+            (4, 1500, 8, 128, 0.1, 3, 1, 0.5, False, torch.float16),
+            (2, 2048, 8, 128, 1, 3, 1, 0, False, torch.float16),
+            (2, 2048, 8, 128, 1, 3, 1, 0, True, torch.float16),
         ]
     ]
 )
@@ -38,13 +41,14 @@ def test_chunk(
     num_householder: int,
     gate_logit_normalizer: float,
     mask_p: float,
+    use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
     q = torch.randn(B, T, H, D, dtype=dtype)
-    k = F.normalize(torch.randn(B, T * num_householder, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
+    k = torch.randn(B, T * num_householder, H, D, dtype=dtype)
     v = torch.randn(B, T * num_householder, H, D, dtype=dtype)
     beta = torch.rand(B, T * num_householder, H, dtype=dtype).sigmoid()
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
@@ -54,8 +58,8 @@ def test_chunk(
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
 
     tri, tri_ht = chunk_gated_delta_product(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
@@ -63,6 +67,7 @@ def test_chunk(
         scale=scale,
         output_final_state=True,
         initial_state=h0.clone(),
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     do = torch.randn_like(q)
     dht = torch.randn_like(h0)
@@ -71,15 +76,15 @@ def test_chunk(
     q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
 
     ref, ref_ht = chunk_gated_delta_product_ref(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
         num_householder=num_householder,
         scale=scale,
-        output_final_state=True,
         initial_state=h0.clone(),
+        output_final_state=True,
     )
 
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
@@ -90,8 +95,7 @@ def test_chunk(
     assert_close('dk', ref_dk, tri_dk, 0.008)
     assert_close('dv', ref_dv, tri_dv, 0.008)
     assert_close('db', ref_dbeta, tri_dbeta, 0.02)
-    if gate_logit_normalizer >= 1 and ref_dg.norm() > 0.01:
-        assert_close('dg', ref_dg, tri_dg, 0.02)
+    assert_close('dg', ref_dg, tri_dg, 0.02)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
 
 
@@ -204,5 +208,5 @@ def test_chunk_varlen(
     assert_close('dk', ref_dk, tri_dk, 0.008)
     assert_close('dv', ref_dv, tri_dv, 0.007)
     assert_close('db', ref_dbeta, tri_dbeta, 0.015)
-    assert_close('dh0', ref_dh0, tri_dh0, 0.007)
     assert_close('dg', ref_dg, tri_dg, 0.015)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.007)

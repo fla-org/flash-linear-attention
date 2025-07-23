@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -95,18 +94,13 @@ class RWKV7FeedForward(nn.Module):
     ) -> torch.Tensor:
         if attention_mask is not None:
             x = x.mul(attention_mask[:, -x.shape[-2]:, None])
-        if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
-            shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
-            delta = shifted - x
-        elif state is not None and state[self.layer_idx]['ffn_state'] is not None:
-            shifted = self.time_shift(x)
-            shifted[:, 0] = state[self.layer_idx]['ffn_state'][-1]
-            delta = shifted - x
+        if state is not None:
+            delta, ffn_state = token_shift(x, cu_seqlens, cache=state[self.layer_idx]['ffn_state'], output_cache=True)
         else:
-            delta = token_shift(x, cu_seqlens)
+            delta, ffn_state = token_shift(x, cu_seqlens, output_cache=True)
         if state is not None:
             # no need to update the offset twice
-            state.update(ffn_state=x[:, -1], layer_idx=self.layer_idx, offset=0)
+            state.update(ffn_state=ffn_state, layer_idx=self.layer_idx, offset=0)
         return self.value(self.act_fn(self.key(x.addcmul(delta, self.x_k)))), state
 
 

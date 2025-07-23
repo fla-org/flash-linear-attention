@@ -84,9 +84,9 @@ def fused_recurrent_comba_fwd_kernel(
         b_g = tl.load(p_g).to(tl.float32)
 
         if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q)) + 1e-6)
-            b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k)) + 1e-6)
-            b_p = b_p / (tl.sqrt(tl.sum(b_p * b_p)) + 1e-6)
+            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+            b_p = b_p / tl.sqrt(tl.sum(b_p * b_p) + 1e-6)
         b_q = b_q * scale
         # [BV]
         b_v -= tl.sum(b_h * b_p[:, None], 0)
@@ -174,7 +174,7 @@ def fused_recurrent_comba_fwd(
     return o, final_state
 
 
-class FusedRecurrentFunction(torch.autograd.Function):
+class FusedRecurrentCombaFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
@@ -189,8 +189,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
+        use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
-        use_qk_l2norm_in_kernel: bool = False
     ):
         o, final_state = fused_recurrent_comba_fwd(
             q=q,
@@ -228,8 +228,8 @@ def fused_recurrent_comba(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
     use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -255,6 +255,9 @@ def fused_recurrent_comba(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
+        use_qk_l2norm_in_kernel (Optional[bool]):
+            Whether to use qk l2norm within the kernel for saving GPU memory.
+            Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -313,7 +316,7 @@ def fused_recurrent_comba(
         beta = torch.ones_like(q[..., 0])
     if p is None:
         p = k
-    o, final_state = FusedRecurrentFunction.apply(
+    o, final_state = FusedRecurrentCombaFunction.apply(
         q,
         k,
         p,
@@ -323,7 +326,7 @@ def fused_recurrent_comba(
         scale,
         initial_state,
         output_final_state,
+        use_qk_l2norm_in_kernel,
         cu_seqlens,
-        use_qk_l2norm_in_kernel
     )
     return o, final_state

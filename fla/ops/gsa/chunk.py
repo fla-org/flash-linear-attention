@@ -138,7 +138,7 @@ def chunk_gsa_fwd_k_kernel_intra(
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
 
-    if i_t * BT + i_i * BC > T:
+    if i_t * BT + i_i * BC >= T:
         return
 
     p_g = tl.make_block_ptr(g + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))
@@ -229,7 +229,7 @@ def chunk_gsa_bwd_k_kernel_dA(
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
 
-    if i_t * BT + i_i * BC > T:
+    if i_t * BT + i_i * BC >= T:
         return
 
     p_dA = tl.make_block_ptr(dA+((i_v*all+bos)*HQ+i_hq)*BT, (T, BT), (HQ*BT, 1), (i_t*BT+i_i*BC, i_j*BC), (BC, BC), (1, 0))
@@ -454,7 +454,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
 
-    if i_t * BT + i_i * BC > T:
+    if i_t * BT + i_i * BC >= T:
         return
 
     p_gv = tl.make_block_ptr(g + (bos*H+i_h)*V, (T, V), (H*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))

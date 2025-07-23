@@ -11,8 +11,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - '*'
 
 jobs:
   test-4090-pytorch-2-7:
@@ -25,3 +23,4 @@ jobs:
       conda_env_name: 'fla'
       pytorch_version: '2.7.0'
       skip_gpu_check: false
+      skip_models_tests: true

@@ -16,6 +16,7 @@ from fla.layers import (
     LightNetAttention,
     LinearAttention,
     MesaNet,
+    MultiheadLatentAttention,
     MultiScaleRetention,
     NativeSparseAttention,
     PaTHAttention,
@@ -51,6 +52,8 @@ from fla.models import (
     LinearAttentionModel,
     MesaNetForCausalLM,
     MesaNetModel,
+    MLAForCausalLM,
+    MLAModel,
     NSAForCausalLM,
     NSAModel,
     PaTHAttentionForCausalLM,
@@ -83,6 +86,7 @@ __all__ = [
     'LightNetAttention', 'LightNetForCausalLM', 'LightNetModel',
     'LinearAttention', 'LinearAttentionForCausalLM', 'LinearAttentionModel',
     'MesaNet', 'MesaNetForCausalLM', 'MesaNetModel',
+    'MultiheadLatentAttention', 'MLAForCausalLM', 'MLAModel',
     'MultiScaleRetention', 'RetNetForCausalLM', 'RetNetModel',
     'NativeSparseAttention', 'NSAForCausalLM', 'NSAModel',
     'PaTHAttention', 'PaTHAttentionForCausalLM', 'PaTHAttentionModel',
@@ -92,4 +96,4 @@ __all__ = [
     'RWKV7Attention', 'RWKV7ForCausalLM', 'RWKV7Model',
 ]
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'

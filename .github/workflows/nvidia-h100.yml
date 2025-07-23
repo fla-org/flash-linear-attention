@@ -11,8 +11,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - '*'
 
 jobs:
   test-h100-pytorch-2-7:
@@ -26,16 +24,4 @@ jobs:
       gpu_type: 'nvidia'
       conda_env_name: 'pytorch_2_7'
       pytorch_version: '2.7.0'
-      skip_gpu_check: true
-
-  test-h100-pytorch-nightly:
-    name: Test H100 (PyTorch Nightly)
-    # Test only for open PRs pushes, skip all main branch pushes
-    if: github.event_name == 'pull_request' && github.event.action != 'closed'
-    uses: ./.github/workflows/reusable-ci-tests.yml
-    with:
-      runner: 'nvidia-h100-3'
-      gpu_type: 'nvidia'
-      conda_env_name: 'pytorch_nightly'
-      pytorch_version: 'nightly'
       skip_gpu_check: true

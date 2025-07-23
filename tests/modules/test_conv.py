@@ -2,9 +2,10 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 
-from fla.modules.convolution import causal_conv1d, causal_conv1d_update
+from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
 from fla.utils import assert_close, device
 
 try:
@@ -13,17 +14,103 @@ except ImportError:
     causal_conv1d_fn = None
 
 
-@pytest.mark.parametrize('B', [4])
-@pytest.mark.parametrize('T', [1, 500, 1024])
-@pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize('W', [3, 4])
-@pytest.mark.parametrize('activation', [None, 'swish'])
-@pytest.mark.parametrize('has_bias', [False, True])
-@pytest.mark.parametrize('has_residual', [False, True])
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
-@pytest.mark.skipif(
-    causal_conv1d_fn is None,
-    reason="causal_conv1d is not installed"
+def causal_conv1d_ref_torch(
+    x,
+    weight,
+    bias=None,
+    initial_state=None,
+    output_final_state=False,
+    final_states_out=None,
+    activation=None,
+):
+    """
+    x: (batch, dim, seqlen)
+    weight: (dim, width)
+    bias: (dim,)
+    initial_state: (batch, dim, width - 1)
+    final_states_out: (batch, dim, width - 1)
+
+    out: (batch, dim, seqlen)
+    """
+    if activation not in [None, "silu", "swish"]:
+        raise NotImplementedError("activation must be None, silu, or swish")
+    dtype_in = x.dtype
+    x = x.to(weight.dtype)
+    seqlen = x.shape[-1]
+    dim, width = weight.shape
+    if initial_state is None:
+        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+    else:
+        x = torch.cat([initial_state, x], dim=-1)
+        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
+    out = out[..., :seqlen]
+    if output_final_state:
+        final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(
+            dtype_in
+        )  # (batch, dim, width - 1)
+        if final_states_out is not None:
+            final_states_out.copy_(final_states)
+        else:
+            final_states_out = final_states
+    out = (out if activation is None else F.silu(out)).to(dtype=dtype_in)
+    return out if not output_final_state else (out, final_states_out)
+
+
+def causal_conv1d_update_ref_torch(x, conv_state, weight, bias=None, activation=None, cache_seqlens=None):
+    """
+    x: (batch, dim) or (batch, dim, seqlen)
+    conv_state: (batch, dim, state_len), where state_len >= width - 1
+    weight: (dim, width)
+    bias: (dim,)
+    cache_seqlens: (batch,), dtype int32.
+        If not None, the conv_state is treated as a circular buffer.
+        The conv_state will be updated by copying x to the conv_state starting at the index
+        @cache_seqlens % state_len before performing the convolution.
+
+    out: (batch, dim) or (batch, dim, seqlen)
+    """
+    if activation not in [None, "silu", "swish"]:
+        raise NotImplementedError("activation must be None, silu, or swish")
+    dtype_in = x.dtype
+    unsqueeze = x.dim() == 2
+    if unsqueeze:
+        x = x.unsqueeze(-1)
+    batch, dim, seqlen = x.shape
+    width = weight.shape[1]
+    state_len = conv_state.shape[-1]
+    assert conv_state.shape == (batch, dim, state_len)
+    assert weight.shape == (dim, width)
+    if cache_seqlens is None:
+        x_new = torch.cat([conv_state, x], dim=-1).to(weight.dtype)  # (batch, dim, state_len + seqlen)
+        conv_state.copy_(x_new[:, :, -state_len:])
+    else:
+        width_idx = torch.arange(-(width - 1), 0, dtype=torch.long, device=x.device).unsqueeze(0) + cache_seqlens.unsqueeze(1)
+        width_idx = torch.remainder(width_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
+        x_new = torch.cat([conv_state.gather(2, width_idx), x], dim=-1).to(weight.dtype)
+        copy_idx = torch.arange(seqlen, dtype=torch.long, device=x.device).unsqueeze(0) + cache_seqlens.unsqueeze(1)
+        copy_idx = torch.remainder(copy_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
+        conv_state.scatter_(2, copy_idx, x)
+    out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[:, :, -seqlen:]
+    if unsqueeze:
+        out = out.squeeze(-1)
+    return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test))
+        for test in [
+            (2, 64, 128, 3, "swish", True, True, torch.float32),
+            (2, 128, 128, 4, "swish", False, True, torch.float32),
+            (2, 64, 128, 3, "swish", True, False, torch.float32),
+            (2, 128, 128, 4, "swish", False, False, torch.float32),
+            (2, 500, 1024, 3, None, True, True, torch.float32),
+            (2, 1024, 1024, 4, None, False, True, torch.float32),
+            (2, 64, 128, 3, None, True, False, torch.float16),
+            (2, 128, 128, 4, None, False, False, torch.float16),
+        ]
+    ]
 )
 def test_conv(
     B: int,
@@ -35,8 +122,6 @@ def test_conv(
     has_residual: bool,
     dtype: torch.dtype
 ):
-    if has_bias is False:
-        pytest.skip("causal_conv1d_fn has a bug with no bias")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
@@ -45,7 +130,7 @@ def test_conv(
     residual = x.detach().clone().requires_grad_(True) if has_residual else None
     dy = torch.randn(B, T, D).to(device, dtype)
 
-    ref = causal_conv1d_fn(
+    ref = causal_conv1d_ref_torch(
         x=rearrange(x, "b t d -> b d t"),
         weight=weight,
         bias=bias,
@@ -62,7 +147,7 @@ def test_conv(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri = causal_conv1d(x, weight, bias, residual=residual, activation=activation)
+    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation)
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
@@ -80,17 +165,17 @@ def test_conv(
         assert_close("dr", ref_dr, tri_dr, 1e-3)
 
 
-@pytest.mark.parametrize("N", [4])
-@pytest.mark.parametrize("T", [500, 1024])
-@pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize("W", [3, 4])
-@pytest.mark.parametrize("activation", [None, 'swish'])
-@pytest.mark.parametrize("has_bias", [False, True])
-@pytest.mark.parametrize("has_residual", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
-@pytest.mark.skipif(
-    causal_conv1d_fn is None,
-    reason="causal_conv1d is not installed"
+@pytest.mark.parametrize(
+    ('N', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    [
+        pytest.param(*test, id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test))
+        for test in [
+            (4, 500, 128, 3, "swish", True, True, torch.float32),
+            (4, 1024, 200, 4, "swish", False, True, torch.float32),
+            (4, 500, 128, 3, None, True, False, torch.float16),
+            (4, 1024, 1024, 4, None, False, False, torch.float16),
+        ]
+    ]
 )
 def test_conv_varlen(
     N: int,
@@ -117,7 +202,7 @@ def test_conv_varlen(
 
     ref = torch.cat([
         rearrange(
-            causal_conv1d_fn(
+            causal_conv1d_ref_torch(
                 x=rearrange(x[:, bos:eos].contiguous(), "b t d -> b d t"),
                 weight=weight,
                 bias=bias,
@@ -135,7 +220,7 @@ def test_conv_varlen(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri = causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
+    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
@@ -153,17 +238,21 @@ def test_conv_varlen(
         assert_close("dr", ref_dr, tri_dr, 1e-3)
 
 
-@pytest.mark.parametrize('B', [4])
-@pytest.mark.parametrize('T', [1, 500, 1024])
-@pytest.mark.parametrize('D', [128, 200, 1024])
-@pytest.mark.parametrize('W', [3, 4])
-@pytest.mark.parametrize('activation', [None, 'swish'])
-@pytest.mark.parametrize('has_bias', [False, True])
-@pytest.mark.parametrize('has_residual', [False, True])
-@pytest.mark.parametrize('dtype', [torch.float32, torch.float16])
-@pytest.mark.skipif(
-    causal_conv1d_fn is None,
-    reason="causal_conv1d is not installed"
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test))
+        for test in [
+            (2, 64, 128, 3, "swish", True, True, torch.float32),
+            (2, 128, 128, 4, "swish", False, True, torch.float32),
+            (2, 64, 128, 3, "swish", True, False, torch.float32),
+            (2, 128, 128, 4, "swish", False, False, torch.float32),
+            (2, 500, 1024, 3, None, True, True, torch.float32),
+            (2, 1024, 1024, 4, None, False, True, torch.float32),
+            (2, 64, 128, 3, None, True, False, torch.float16),
+            (2, 128, 128, 4, None, False, False, torch.float16),
+        ]
+    ]
 )
 def test_conv_decoding(
         B: int,
@@ -182,7 +271,7 @@ def test_conv_decoding(
     bias = torch.randn(D).to(device, dtype) if has_bias else None
     residual = x.clone() if has_residual else None
 
-    ref = causal_conv1d_fn(
+    ref = causal_conv1d_ref_torch(
         x=rearrange(x, "b t d -> b d t"),
         weight=weight,
         bias=bias,
@@ -209,3 +298,215 @@ def test_conv_decoding(
 
     assert_close("    y", ref, tri, 1e-3)
     assert_close("cache", ref_cache, tri_cache, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
+    [
+        pytest.param(
+            *test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test))
+        for test in [
+            (2, 64, 128, 3, "swish", True, True, torch.float32, 'triton'),
+            (2, 128, 128, 4, "swish", False, True, torch.float32, 'triton'),
+            (2, 64, 128, 3, "swish", True, False, torch.float32, 'triton'),
+            (2, 128, 128, 4, "swish", False, False, torch.float32, 'triton'),
+            (2, 500, 1024, 3, None, True, True, torch.float32, 'triton'),
+            (2, 1024, 1024, 4, None, False, True, torch.float32, 'triton'),
+            (2, 64, 128, 3, None, True, False, torch.float16, 'triton'),
+            (2, 128, 128, 4, None, False, False, torch.float16, 'triton'),
+            (2, 64, 128, 3, "swish", True, True, torch.float32, 'cuda'),
+            (2, 128, 128, 4, "swish", False, True, torch.float32, 'cuda'),
+            (2, 64, 128, 3, "swish", True, False, torch.float32, 'cuda'),
+            (2, 128, 128, 4, "swish", False, False, torch.float32, 'cuda'),
+        ]
+    ]
+)
+def test_conv_with_cache_prefill_fwd(
+    B: int,
+    T: int,
+    D: int,
+    W: int,
+    activation: str,
+    has_bias: bool,
+    has_residual: bool,
+    dtype: torch.dtype,
+    backend: str,
+):
+    if causal_conv1d_fn is None and backend == 'cuda':
+        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    torch.manual_seed(42)
+
+    x = torch.randn(B, T, D).to(device, dtype)
+    residual = torch.randn(B, T, D).to(device, dtype) if has_residual else None
+
+    conv = ShortConvolution(
+        hidden_size=D,
+        kernel_size=W,
+        bias=has_bias,
+        activation=activation,
+        backend=backend,
+        device=device,
+        dtype=dtype
+    )
+
+    cache = torch.randn(B, D, W - 1).to(device, dtype)
+
+    ref = causal_conv1d_ref_torch(
+        x=x.transpose(1, 2),                    # (B, D, T)
+        weight=rearrange(conv.weight, "d 1 w -> d w"),
+        bias=conv.bias,
+        initial_state=cache,                   # (B, D, W-1)
+        activation=activation,
+    ).transpose(1, 2)                           # (B, T, D)
+    if has_residual:
+        ref += residual
+
+    zero_padding = torch.zeros(B, D, 1).to(device, dtype)
+    tri_cache = torch.cat([zero_padding, cache], dim=-1)  # (B, D, W)
+    tri, _ = conv(x, residual=residual, cache=tri_cache)
+    assert_close("y", ref, tri, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype', 'backend'),
+    [
+        pytest.param(*test, id="B{0}_D{1}_W{2}_has_bias{3}_has_residual{4}_activation{5}_{6}_{7}".format(*test))
+        for test in [
+            (2, 128, 3, True, True, "swish", torch.float32, 'triton'),
+            (2, 128, 4, False, True, "swish", torch.float32, 'triton'),
+            (2, 128, 3, True, False, "swish", torch.float32, 'triton'),
+            (2, 128, 4, False, False, "swish", torch.float32, 'triton'),
+            (2, 128, 3, True, True, "swish", torch.float32, 'cuda'),
+            (2, 128, 4, False, True, "swish", torch.float32, 'cuda'),
+            (2, 128, 3, True, False, "swish", torch.float32, 'cuda'),
+            (2, 128, 4, False, False, "swish", torch.float32, 'cuda'),
+            (2, 128, 4, False, False, None, torch.float32, 'cuda'),
+            (2, 128, 4, False, False, None, torch.float32, 'triton'),
+        ]
+    ]
+)
+def test_conv_decoding_with_cache(
+    B: int,
+    D: int,
+    W: int,
+    activation: str,
+    has_bias: bool,
+    has_residual: bool,
+    dtype: torch.dtype,
+    backend: str,
+):
+    if causal_conv1d_fn is None and backend == 'cuda':
+        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    torch.manual_seed(42)
+
+    x = torch.randn(B, 1, D).to(device, dtype)        # (B, 1, D)
+    residual = x.clone() if has_residual else None
+
+    conv = ShortConvolution(
+        hidden_size=D,
+        kernel_size=W,
+        bias=has_bias,
+        activation=activation,
+        backend=backend,
+        device=device,
+        dtype=dtype
+    )
+
+    state = torch.randn(B, D, W).to(device, dtype)
+
+    # reference
+    ref = causal_conv1d_update_ref_torch(
+        x.squeeze(1),                           # (B, D)
+        conv_state=state.clone(),
+        weight=rearrange(conv.weight, "d 1 w -> d w"),
+        bias=conv.bias,
+        activation=activation,
+    ).unsqueeze(1)                             # (B, 1, D)
+    if has_residual:
+        ref += residual
+
+    # ShortConvolution step
+    with torch.no_grad():
+        y, _ = conv.step(x, residual, state.clone())
+
+    assert_close("y", ref, y, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_has_bias{4}_has_residual{5}_activation{6}_{7}".format(*test))
+        for test in [
+            (2, 64, 128, 3, True, True, "swish", torch.float32),
+            (2, 128, 128, 4, False, True, "swish", torch.float32),
+            (2, 64, 128, 3, True, False, "swish", torch.float32),
+            (2, 128, 128, 4, False, False, "swish", torch.float32)
+        ]
+    ]
+)
+def test_mixed_backend(
+    B: int,
+    T: int,
+    D: int,
+    W: int,
+    has_bias: bool,
+    has_residual: bool,
+    activation: str,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    T_decode = 1
+    x = torch.randn(B, T + T_decode, D, device=device, dtype=dtype)
+    residual = torch.randn_like(x) if has_residual else None
+
+    conv = ShortConvolution(
+        hidden_size=D,
+        kernel_size=W,
+        bias=has_bias,
+        activation=activation,
+        backend="cuda",
+        device=device,
+        dtype=dtype,
+    )
+
+    cache = torch.randn(B, D, W-1, device=device, dtype=dtype)
+    y_cuda_prefill, final_state = conv(
+        x[:, :T],
+        residual=residual[:, :T] if has_residual else None,
+        cache=cache,
+        output_final_state=True
+    )
+
+    conv.backend = "triton"
+    y_triton_decode, _ = conv(
+        x[:, T:],
+        residual=residual[:, T:] if has_residual else None,
+        cache=final_state,
+        output_final_state=True
+    )
+
+    conv.backend = "triton"
+    cache = torch.cat((torch.zeros_like(cache[..., :1]), cache), -1)
+    y_triton_full, _ = conv(x, residual=residual, cache=cache)
+
+    y_mixed = torch.cat([y_cuda_prefill, y_triton_decode], dim=1)
+    assert_close("cuda→triton vs triton", y_mixed, y_triton_full, 1e-3)
+
+    conv.backend = "triton"
+    y_triton_prefill, final_state = conv(
+        x[:, :T],
+        residual=residual[:, :T] if has_residual else None,
+        cache=cache,
+        output_final_state=True
+    )
+
+    conv.backend = "cuda"
+    y_cuda_decode, _ = conv(
+        x[:, T:],
+        residual=residual[:, T:] if has_residual else None,
+        cache=final_state,
+        output_final_state=True
+    )
+
+    y_mixed2 = torch.cat([y_triton_prefill, y_cuda_decode], dim=1)
+    assert_close("triton→cuda vs triton", y_mixed2, y_triton_full,  1e-3)

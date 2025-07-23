@@ -111,8 +111,8 @@ def chunk_fwd_kernel_o(
 
     p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_o = tl.make_block_ptr(o, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-    b_v = tl.load(p_v, boundary_check=(0, 1))
 
+    b_v = tl.load(p_v, boundary_check=(0, 1))
     # to fix mma -> mma layout conversion
     # already solved by triton v3.2 or higher
     b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
@@ -499,16 +499,16 @@ def chunk_fwd_o(
     o = torch.empty_like(v)
     def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)
     chunk_fwd_kernel_o[grid](
-        q,
-        k,
-        v,
-        h,
-        g,
-        g_gamma,
-        o,
-        cu_seqlens,
-        chunk_indices,
-        scale,
+        q=q,
+        k=k,
+        v=v,
+        h=h,
+        g=g,
+        g_gamma=g_gamma,
+        o=o,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
         T=T,
         H=H,
         K=K,
@@ -521,11 +521,11 @@ def chunk_fwd_o(
 def chunk_bwd_dv(
     q: torch.Tensor,
     k: torch.Tensor,
-    g: torch.Tensor,
-    g_gamma: torch.Tensor,
     do: torch.Tensor,
     dh: torch.Tensor,
-    scale: float,
+    g: Optional[torch.Tensor] = None,
+    g_gamma: Optional[torch.Tensor] = None,
+    scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> torch.Tensor:
@@ -543,20 +543,22 @@ def chunk_bwd_dv(
     BV = min(triton.next_power_of_2(V), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
 
     dv = torch.empty_like(do)
     grid = (NV, NT, B * H)
     chunk_bwd_kernel_dv[grid](
-        q,
-        k,
-        g,
-        g_gamma,
-        do,
-        dv,
-        dh,
-        cu_seqlens,
-        chunk_indices,
-        scale,
+        q=q,
+        k=k,
+        g=g,
+        g_gamma=g_gamma,
+        do=do,
+        dv=dv,
+        dh=dh,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
         T=T,
         H=H,
         K=K,
@@ -595,15 +597,15 @@ def chunk_bwd_dv_local(
     dv = torch.empty_like(do)
     grid = (NT, B * H)
     chunk_bwd_kernel_dv_local[grid](
-        q,
-        k,
-        g,
-        g_gamma,
-        do,
-        dv,
-        cu_seqlens,
-        chunk_indices,
-        scale,
+        q=q,
+        k=k,
+        g=g,
+        g_gamma=g_gamma,
+        do=do,
+        dv=dv,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=scale,
         T=T,
         H=H,
         K=K,

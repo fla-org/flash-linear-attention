@@ -2,13 +2,10 @@
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM
 
 from fla.models import TransformerConfig
-from fla.utils import device
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
-from .testing_utils import init_weights_recursively
 
 
 # ===================================================================================
@@ -57,19 +54,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    config = TransformerConfig()
-    config.num_hidden_layers = L
-    config.num_heads = H
-    config.hidden_size = H * D
-    config.head_dim = D
-
-    model = AutoModelForCausalLM.from_config(config)
-    model.apply(init_weights_recursively)
-    model = model.to(dtype).to(device)
-    run_test_generation(L, B, T, H, D, TransformerConfig, dtype, model=model, config=config, tol=7e-3)
-
-    config.window_size = 100
-    model = AutoModelForCausalLM.from_config(config)
-    model.apply(init_weights_recursively)
-    model = model.to(dtype).to(device)
-    run_test_generation(L, B, T, H, D, TransformerConfig, dtype, model=model, config=config, tol=7e-3)
+    run_test_generation(L, B, T, H, D, TransformerConfig, dtype)

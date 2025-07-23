@@ -16,7 +16,7 @@ def token_shift_ref(x):
         # argument names to use as an x-axis for the plot
         x_names=['T'],
         # different possible values for `x_name`
-        x_vals=[128 * 2 ** i for i in range(0, 8)],
+        x_vals=[128 * 2 ** i for i in range(0, 9)],
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``

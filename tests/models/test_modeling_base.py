@@ -8,7 +8,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 from fla.utils import assert_close, device, is_intel_alchemist, is_nvidia_hopper
 
-from .testing_utils import (
+from .test_modeling_utils import (
     GENERATION_UNSUPPORTED,
     HOPPER_EXCLUSIVE,
     MODELING_UNSUPPORTED_VARLEN,

@@ -18,6 +18,7 @@ from fla.modules.token_shift import token_shift
 from fla.ops.rwkv7 import chunk_rwkv7, fused_mul_recurrent_rwkv7
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7
+from fla.ops.rwkv7.gate_output_correction import gate_output_correction
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -62,26 +63,28 @@ class RWKV7Attention(nn.Module):
             self.num_heads = num_heads
         self.head_v_dim = int(self.value_dim // self.num_heads)
 
+        # Increase lora dimension for headdim>64
+        factor = self.head_dim / 64
         if decay_low_rank_dim is None:
-            decay_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
+            decay_low_rank_dim = max(32, int(round((2.5 * (hidden_size**0.5)) * factor / 32) * 32))
             self.decay_low_rank_dim = decay_low_rank_dim
         else:
             self.decay_low_rank_dim = decay_low_rank_dim
 
         if gate_low_rank_dim is None:
-            gate_low_rank_dim = max(32, int(round((0.6 * (hidden_size**0.8)) / 32) * 32))
+            gate_low_rank_dim = max(32, int(round((5 * (hidden_size**0.5)) / 32) * 32))
             self.gate_low_rank_dim = gate_low_rank_dim
         else:
             self.gate_low_rank_dim = gate_low_rank_dim
 
         if a_low_rank_dim is None:
-            a_low_rank_dim = max(32, int(round((1.8 * (hidden_size**0.5)) / 32) * 32))
+            a_low_rank_dim = max(32, int(round((2.5 * (hidden_size**0.5)) * factor / 32) * 32))
             self.a_low_rank_dim = a_low_rank_dim
         else:
             self.a_low_rank_dim = a_low_rank_dim
 
         if v_low_rank_dim is None:
-            v_low_rank_dim = max(32, int(round((1.3 * (hidden_size**0.5)) / 32) * 32))
+            v_low_rank_dim = max(32, int(round((1.7 * (hidden_size**0.5)) * factor / 32) * 32))
             self.v_low_rank_dim = v_low_rank_dim
         else:
             self.v_low_rank_dim = v_low_rank_dim
@@ -217,36 +220,34 @@ class RWKV7Attention(nn.Module):
         cu_seqlens: Optional[torch.LongTensor] = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        batch_size, seq_len, _ = hidden_states.shape
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
-
-        batch_size, seq_len, _ = hidden_states.shape
+            am = attention_mask.narrow(1, attention_mask.size(1) - seq_len, seq_len).unsqueeze(-1)
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
         if attention_mask is not None:
-            hidden_states = hidden_states.mul(attention_mask[:, -seq_len:, None])
+            hidden_states = hidden_states.mul(am)
 
         # delta [batch_size, seq_len, hidden_size]
+        # conv_cache [N, D]
         if last_state is None:
-            delta = token_shift(hidden_states, cu_seqlens)
+            conv_cache = None
             recurrent_state = None
-        elif hidden_states.shape[1] == 1:
-            shifted = last_state['conv_state'].unsqueeze(1)
-            delta = shifted - hidden_states
-            recurrent_state = last_state['recurrent_state']
         else:
-            shifted = self.time_shift(hidden_states)
-            shifted[:, 0] = last_state['conv_state']
-            delta = shifted - hidden_states
+            conv_cache = last_state['conv_state']
             recurrent_state = last_state['recurrent_state']
 
+        delta, conv_state = token_shift(
+                hidden_states, cu_seqlens, output_cache=True, cache=conv_cache
+            )
         xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
                                                      self.x_k, self.x_v, self.x_a, self.x_g)
 
@@ -288,7 +289,7 @@ class RWKV7Attention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            v = v * attention_mask[:, -seq_len:, None]
+            v = v * am
 
         r, w, k, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, a))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
@@ -325,7 +326,7 @@ class RWKV7Attention(nn.Module):
         if past_key_values is not None:
             past_key_values.update(
                 recurrent_state=recurrent_state,
-                conv_state=hidden_states[:, -1],
+                conv_state=conv_state,
                 layer_idx=self.layer_idx,
                 offset=r.shape[1]
             )
@@ -335,8 +336,8 @@ class RWKV7Attention(nn.Module):
         else:
             o = self.g_norm(rearrange(o, 'b t h d -> (b t) (h d)')).view(batch_size, seq_len, -1)
 
-        o = o + ((r * k * self.r_k).sum(-1, keepdim=True) * v).view(batch_size, seq_len, -1)
-        o = self.o_proj(o * g)
+        o = gate_output_correction(o, r, k, self.r_k, v, g)
+        o = self.o_proj(o)
 
         return o, None, past_key_values, v_first
     

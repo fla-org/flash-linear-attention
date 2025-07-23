@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from fla import __version__
 
-COMPILER_MODE = os.getenv("FLA_COMPILER_MODE") == "1"
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 
 
