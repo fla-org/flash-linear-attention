@@ -776,7 +776,10 @@ class ShortConvolution(nn.Conv1d):
                 cu_seqlens=cu_seqlens
             )
             return y, cache
-
+        elif cu_seqlens is None and T < W:
+            raise NotImplementedError("ShortConvolution does not support prefill T < W")
+        elif cu_seqlens is not None and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < W:
+            raise NotImplementedError("ShortConvolution does not support prefill T < W")
         # check if cu_seqlens and cache are both provided
         # Sequence index for each token. Used for varlen.
         # Suppose a batch consists of two sequences with lengths 3 and 4,
