@@ -794,7 +794,7 @@ class ShortConvolution(nn.Conv1d):
         # 1. both `cu_seqlens` and `cache` being provided
         # 2. both `cu_seqlens` and `routput_final_state` being provided
         if self.backend == 'cuda' and \
-            (cu_seqlens is not None and seq_idx is not None) or \
+            ((cu_seqlens is not None or seq_idx is not None) and cache is not None) or \
                 (cu_seqlens is not None and output_final_state):
             warnings.warn(
                 "The CUDA backend does not support varlen sequences with cache or output final state. "

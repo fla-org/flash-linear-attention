@@ -368,6 +368,81 @@ def test_conv_with_cache_prefill_fwd(
 
 
 @pytest.mark.parametrize(
+    ('N', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
+    [
+        pytest.param(
+            *test,
+            id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test)
+        )
+        for test in [
+            (3, 128, 64, 4, "swish", True, True, torch.float32, 'triton'),
+            (4, 256, 128, 3, None,  False, True, torch.float32, 'triton'),
+            (2,  64, 128, 4, "swish", True, False, torch.float16, 'cuda'),
+            (3, 200,  64, 3, None,  False, False, torch.float16, 'cuda'),
+        ]
+    ]
+)
+def test_conv_varlen_with_cache_prefill_fwd(
+    N: int,
+    T: int,
+    D: int,
+    W: int,
+    activation: str,
+    has_bias: bool,
+    has_residual: bool,
+    dtype: torch.dtype,
+    backend: str,
+):
+    if causal_conv1d_fn is None and backend == 'cuda':
+        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    torch.manual_seed(42)
+
+
+    min_len_each = T // N
+    lengths = [min_len_each] * N
+    lengths[-1] += T % N
+    assert all(l >= W for l in lengths), "need all lengths ≥ W"
+    cu_seqlens = torch.tensor([0] + torch.cumsum(torch.tensor(lengths), 0).tolist(), device=device)
+
+    x = torch.randn(1, T, D).to(device, dtype)
+    residual = torch.randn(1, T, D).to(device, dtype) if has_residual else None
+
+    conv = ShortConvolution(
+        hidden_size=D,
+        kernel_size=W,
+        bias=has_bias,
+        activation=activation,
+        backend=backend,
+        device=device,
+        dtype=dtype
+    )
+
+    cache = torch.randn(N, D, W - 1).to(device, dtype)
+
+    ref_list = []
+    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        xi = x[:, bos:eos, :].transpose(1, 2)  # (1, D, l)
+        ci = cache[i:i + 1]                    # (1, D, W-1)
+        refi = causal_conv1d_ref_torch(
+            x=xi,
+            weight=rearrange(conv.weight, "d 1 w -> d w"),
+            bias=conv.bias,
+            initial_state=ci,
+            activation=activation,
+        ).transpose(1, 2)                      # (1, l, D)
+        if has_residual:
+            refi += residual[:, bos:eos, :]
+        ref_list.append(refi)
+    ref = torch.cat(ref_list, dim=1)           # (1, T, D)
+
+    zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
+    tri_cache = torch.cat([zero_pad, cache], dim=-1)  # (N, D, W)
+    tri, _ = conv(x, residual=residual, cache=tri_cache, cu_seqlens=cu_seqlens)
+
+    assert_close("varlen y", ref, tri,1e-3)
+
+
+@pytest.mark.parametrize(
     ('B', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype', 'backend'),
     [
         pytest.param(*test, id="B{0}_D{1}_W{2}_has_bias{3}_has_residual{4}_activation{5}_{6}_{7}".format(*test))
