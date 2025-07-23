@@ -68,10 +68,11 @@ def _upad_input(
     """
     indices_k, cu_seqlens_k, max_seqlen_in_batch_k = get_unpad_data(attention_mask)
     batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
+    head_v_dim = value_layer.shape[-1]
 
     key_layer = index_first_axis(key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k)
     value_layer = index_first_axis(
-        value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+        value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_v_dim), indices_k
     )
     gate_layer = index_first_axis(gate_layer.reshape(batch_size * kv_seq_len, num_key_value_heads), indices_k)
     beta_layer = index_first_axis(beta_layer.reshape(batch_size * kv_seq_len, num_key_value_heads), indices_k)
@@ -568,7 +569,9 @@ class MomAttention(nn.Module):
 
         elif mode == 'fused_recurrent':
             total_len = len(cu_seqlen_all[0])
-            if use_cache and len(cu_seqlens) != total_len:
+            if use_cache and recurrent_state[0] is not None and len(cu_seqlens) != total_len:
+                if recurrent_state[0] is None:
+                    recurrent_state[0] = torch.zeros_like(recurrent_state_[reverse_indices[1:]-1])
                 # select memories that are activated
                 memories = torch.zeros_like(recurrent_state[0][:self.topk*batch_size])
                 mem_id = 0
