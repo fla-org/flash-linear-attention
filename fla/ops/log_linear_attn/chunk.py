@@ -1,7 +1,7 @@
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import math
 import torch
 import torch.nn.functional as F
 import triton
@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.op import safe_exp
-from fla.utils import input_guard, autocast_custom_fwd, autocast_custom_bwd
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 BLOCK_K = 64
 
@@ -35,7 +35,7 @@ def chunkwise_fwd_kernel(
     k,
     v,
     g,
-    l,
+    level_scales,
     llut,
     o,
     h0,
@@ -240,7 +240,7 @@ def chunkwise_fwd_kernel(
     NT = tl.cdiv(T, BT)
     output_offset = -1 * (offset % BT)
     for i_t in range(NT):
-        b_h_ptrs = l + ((bos + i_t * BT + i_idx) * H + i_h) * L + b_llut
+        b_h_ptrs = level_scales + ((bos + i_t * BT + i_idx) * H + i_h) * L + b_llut
         b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
 
         p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
@@ -287,7 +287,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 0 and MAX_LEVEL >= 0:
             if chunk_index & 1:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels),
@@ -299,7 +299,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 1 and MAX_LEVEL >= 1:
             if chunk_index & 2:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 1),
@@ -311,7 +311,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 2 and MAX_LEVEL >= 2:
             if chunk_index & 4:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 2),
@@ -323,7 +323,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 3 and MAX_LEVEL >= 3:
             if chunk_index & 8:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 3),
@@ -335,7 +335,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 4 and MAX_LEVEL >= 4:
             if chunk_index & 16:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 4),
@@ -347,7 +347,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 5 and MAX_LEVEL >= 5:
             if chunk_index & 32:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 5),
@@ -359,7 +359,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 6 and MAX_LEVEL >= 6:
             if chunk_index & 64:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 6),
@@ -371,7 +371,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 7 and MAX_LEVEL >= 7:
             if chunk_index & 128:  # 8192 - 16384
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 7),
@@ -383,7 +383,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 8 and MAX_LEVEL >= 8:
             if chunk_index & 256:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 8),
@@ -395,7 +395,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 9 and MAX_LEVEL >= 9:
             if chunk_index & 512:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 9),
@@ -407,7 +407,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 10 and MAX_LEVEL >= 10:
             if chunk_index & 1024:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 10),
@@ -419,7 +419,7 @@ def chunkwise_fwd_kernel(
         if MIN_LEVEL <= 11 and MAX_LEVEL >= 11:
             if chunk_index & 2048:
                 p_l = tl.make_block_ptr(
-                    l + (bos * H + i_h) * L,
+                    level_scales + (bos * H + i_h) * L,
                     (T, L),
                     (H * L, 1),
                     (i_t * BT, num_intra_levels + 11),
@@ -672,19 +672,19 @@ def copy_input_kernel(
     k,
     v,
     g,
-    l,
+    level_scales,
     cu_seqlens,
     q_prev,
     k_prev,
     v_prev,
     g_prev,
-    l_prev,
+    level_scales_prev,
     offsets,
     q_new,
     k_new,
     v_new,
     g_new,
-    l_new,
+    level_scales_new,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -783,7 +783,7 @@ def copy_input_kernel(
 
         for i in range(L):
             p_l = tl.make_block_ptr(
-                l + (bos * H + i_h) * L,
+                level_scales + (bos * H + i_h) * L,
                 (T, L),
                 (H * L, 1),
                 (i_t * BT + input_offset, i),
@@ -791,7 +791,7 @@ def copy_input_kernel(
                 (1, 0),
             )
             p_l_new = tl.make_block_ptr(
-                l_new + (bos * H + i_h) * L,
+                level_scales_new + (bos * H + i_h) * L,
                 (T, L),
                 (H * L, 1),
                 (i_t * BT, i),
@@ -801,7 +801,7 @@ def copy_input_kernel(
             b_l = tl.load(p_l, boundary_check=(0,))
             if i_t == 0:
                 p_l_prev = tl.make_block_ptr(
-                    l_prev + (i_n * BT * H + i_h) * L,
+                    level_scales_prev + (i_n * BT * H + i_h) * L,
                     (BT, L),
                     (H * L, 1),
                     (0, i),
@@ -823,13 +823,13 @@ def copy_last_chunk_kernel(
     k,
     v,
     g,
-    l,
+    level_scales,
     cu_seqlens,
     q_prev,
     k_prev,
     v_prev,
     g_prev,
-    l_prev,
+    level_scales_prev,
     offsets,
     T,
     H: tl.constexpr,
@@ -889,7 +889,7 @@ def copy_last_chunk_kernel(
 
     for i in range(L):
         p_l = tl.make_block_ptr(
-            l + (bos * H + i_h) * L,
+            level_scales + (bos * H + i_h) * L,
             (T, L),
             (H * L, 1),
             (seq_offset, i),
@@ -897,7 +897,7 @@ def copy_last_chunk_kernel(
             (1, 0),
         )
         p_l_prev = tl.make_block_ptr(
-            l_prev + (i_n * BT * H + i_h) * L,
+            level_scales_prev + (i_n * BT * H + i_h) * L,
             (BT, L),
             (H * L, 1),
             (0, i),
@@ -966,14 +966,14 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         k,
         v,
         g,
-        l,
+        level_scales,
         initial_state,
         output_final_state,
         cu_seqlens,
     ):
         B, T, G, K = k.shape
         _, _, H, V = v.shape
-        _, _, _, L = l.shape
+        _, _, _, L = level_scales.shape
 
         if G != 1:
             raise ValueError("Group dimension must be 1.")
@@ -1030,14 +1030,14 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             k_new = torch.zeros((S0, S1, G, K), dtype=k.dtype, device=k.device)
             v_new = torch.zeros((S0, S1, H, V), dtype=v.dtype, device=v.device)
             g_new = torch.zeros((S0, S1, H), dtype=g.dtype, device=g.device)
-            l_new = torch.zeros((S0, S1, H, L), dtype=l.dtype, device=l.device)
+            level_scales_new = torch.zeros((S0, S1, H, L), dtype=level_scales.dtype, device=level_scales.device)
 
             copy_input_kernel[(B * H,)](
                 q=q,
                 k=k,
                 v=v,
                 g=g,
-                l=l,
+                level_scales=level_scales,
                 cu_seqlens=cu_seqlens,
                 q_prev=initial_state.q_prev,
                 k_prev=initial_state.k_prev,
@@ -1048,7 +1048,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 k_new=k_new,
                 v_new=v_new,
                 g_new=g_new,
-                l_new=l_new,
+                level_scales_new=level_scales_new,
                 offsets=offsets,
                 T=T,
                 H=H,
@@ -1061,7 +1061,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             k = k_new
             v = v_new
             g = g_new
-            l = l_new
+            level_scales = level_scales_new
 
         # Store one extra level (MAX_LEVEL + 2) in case the length is multiple of 2
         ht = (
@@ -1086,7 +1086,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             k=k,
             v=v,
             g=g,
-            l=l,
+            level_scales=level_scales,
             llut=level_lut(BT, v.device),
             o=o,
             h0=h0,
@@ -1111,20 +1111,20 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             k_prev = torch.zeros((B, BT, G, K), dtype=k.dtype, device=k.device)
             v_prev = torch.zeros((B, BT, H, V), dtype=v.dtype, device=v.device)
             g_prev = torch.zeros((B, BT, H), dtype=g.dtype, device=g.device)
-            l_prev = torch.zeros((B, BT, H, L), dtype=l.dtype, device=l.device)
+            level_scales_prev = torch.zeros((B, BT, H, L), dtype=level_scales.dtype, device=level_scales.device)
 
             copy_last_chunk_kernel[(B * H,)](
                 q=q,
                 k=k,
                 v=v,
                 g=g,
-                l=l,
+                level_scales=level_scales,
                 cu_seqlens=cu_seqlens,
                 q_prev=q_prev,
                 k_prev=k_prev,
                 v_prev=v_prev,
                 g_prev=g_prev,
-                l_prev=l_prev,
+                level_scales_prev=level_scales_prev,
                 offsets=new_offsets,
                 T=T,
                 H=H,
@@ -1141,7 +1141,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 k_prev=k_prev,
                 v_prev=v_prev,
                 g_prev=g_prev,
-                l_prev=l_prev,
+                level_scales_prev=level_scales_prev,
             )
             return o.sum(dim=-2), final_state
 
@@ -1162,7 +1162,7 @@ def chunk_log_linear_attn(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    l: torch.Tensor,
+    level_scales: torch.Tensor,
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
@@ -1177,7 +1177,7 @@ def chunk_log_linear_attn(
             values of shape `[B, T, H, V]`.
         g (torch.Tensor):
             Forget gates of shape `[B, T, H]`.
-        l (torch.Tensor):
+        level_scales (torch.Tensor):
             Scales for each level of shape `[B, T, H, L]`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
@@ -1208,7 +1208,7 @@ def chunk_log_linear_attn(
         k,
         v,
         g,
-        l,
+        level_scales,
         initial_state,
         output_final_state,
         cu_seqlens,

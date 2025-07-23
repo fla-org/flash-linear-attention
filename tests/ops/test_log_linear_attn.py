@@ -1,8 +1,8 @@
 import os
 from typing import List
 
-import pytest
 import numpy as np
+import pytest
 import torch
 
 from fla.ops.log_linear_attn import chunk_log_linear_attn
@@ -36,13 +36,13 @@ def test_chunk(
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
     k = torch.randn(B, T, 1, D, dtype=dtype, device=device)
-    l = torch.randn(B, T, H, L, dtype=dtype, device=device)
+    level_scales = torch.randn(B, T, H, L, dtype=dtype, device=device)
     v = (x * dt.unsqueeze(-1)).to(dtype=dtype)
     g = a * dt
 
-    out, _ = chunk_log_linear_attn(q, k, v, g, l)
+    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales)
 
-    ref = naive_log_linear_attn(q, k, v, g, l)
+    ref = naive_log_linear_attn(q, k, v, g, level_scales)
     assert_close("o", ref, out, 0.004)
 
 
@@ -78,11 +78,11 @@ def test_chunk_varlen(
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(1, T, 1, D, dtype=dtype, device=device)
     k = torch.randn(1, T, 1, D, dtype=dtype, device=device)
-    l = torch.randn(1, T, H, L, dtype=dtype, device=device)
+    level_scales = torch.randn(1, T, H, L, dtype=dtype, device=device)
     v = (x * dt.unsqueeze(-1)).to(dtype=dtype)
     g = a * dt
 
-    out, _ = chunk_log_linear_attn(q, k, v, g, l, cu_seqlens=cu_seqlens)
+    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales, cu_seqlens=cu_seqlens)
 
     o = []
     for i in range(cu_seqlens.shape[0] - 1):
@@ -91,9 +91,9 @@ def test_chunk_varlen(
         g_s = g[:, bos:eos]
         k_s = k[:, bos:eos]
         q_s = q[:, bos:eos]
-        l_s = l[:, bos:eos]
+        level_scales_s = level_scales[:, bos:eos]
 
-        o.append(naive_log_linear_attn(q_s, k_s, v_s, g_s, l_s))
+        o.append(naive_log_linear_attn(q_s, k_s, v_s, g_s, level_scales_s))
     ref = torch.cat(o, dim=1)
 
     assert_close("o", ref, out, 0.004)

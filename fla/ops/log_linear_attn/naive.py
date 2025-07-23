@@ -44,7 +44,7 @@ def construct_H_matrix(a, L):
     return H
 
 
-def naive_log_linear_attn(q, k, v, g, l):
-    H = construct_H_matrix(g.permute(0, 2, 1), l.permute(0, 2, 3, 1))
+def naive_log_linear_attn(q, k, v, g, level_scales):
+    H = construct_H_matrix(g.permute(0, 2, 1), level_scales.permute(0, 2, 3, 1))
     M = torch.einsum("bhlc,blhn,bchn->bhlc", H, q, k)
     return torch.einsum("bhlc,bchp->blhp", M, v)
