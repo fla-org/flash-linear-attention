@@ -1,0 +1,34 @@
+name: compatibility-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-pt-python-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install PyTorch 2.5 & pytest & fla
+        run: |
+          pip install --upgrade pip
+          pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+          pip install pytest -U
+          pip install .
+
+      - name: Compile all Python files
+        run: |
+          python -m compileall fla tests
+
+      - name: Collect tests only
+        run: |
+          python -m pytest tests/ops tests/modules tests/models --collect-only -q

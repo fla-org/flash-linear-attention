@@ -46,6 +46,7 @@ setup(
         'pytest'
     ],
     extras_require={
-        'conv1d': ['causal-conv1d>=1.4.0']
+        'conv1d': ['causal-conv1d>=1.4.0'],
+        'benchmark': ['matplotlib'],
     }
 )
