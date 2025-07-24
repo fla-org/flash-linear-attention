@@ -406,6 +406,7 @@ is_gather_supported = hasattr(triton.language, 'gather')
 if is_nvidia and not is_tf32_supported:
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
+
 def get_all_max_shared_mem():
     try:
         return [
