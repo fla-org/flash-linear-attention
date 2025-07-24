@@ -131,7 +131,6 @@ jobs:
           if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" || "${{ runner.name }}" == "n100" ]]; then
             export CIBW_BEFORE_ALL="
               echo '$LLVM_MIRROR_IP llvm.fla-org.com' >> /etc/hosts &&
-              echo '$LLVM_MIRROR_IP pypi-upload.fla-org.com' >> /etc/hosts &&
               sed -e 's|^mirrorlist=|#mirrorlist=|g' \
                   -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
                   -i.bak /etc/yum.repos.d/almalinux*.repo &&
@@ -208,31 +207,22 @@ jobs:
             # For release builds, we do nothing to the wheels.
           fi
 
-
-
           # Only upload if ALL wheels were successfully processed
           if [ "$ALL_WHEELS_PROCESSED" = true ]; then
-            echo "Installing twine and uploading processed wheels..."
-            python3 -m pip install twine pkginfo -U
+            echo "Uploading wheels via FTP..."
             readarray -d '' -t WHEEL_FILES < <(find . -maxdepth 1 -name "*.whl" -print0)
             if [ ${#WHEEL_FILES[@]} -eq 0 ]; then
-              echo "Error: No *.whl files found to upload in the current directory."
+              echo "Error: No *.whl files found to upload."
               exit 1
             fi
-            for WHL_FILE in "${WHEEL_FILES[@]}"; do
-              echo "Uploading: ${WHL_FILE}"
-              python3 -m twine upload \
-                --repository-url http://pypi-upload.fla-org.com/ \
-                --username fla \
-                --password ${{ secrets.FLA_TRITON_PYPI_PASSWD }}  \
-                --non-interactive \
-                "${WHL_FILE}"
-              if [ $? -ne 0 ]; then
-                echo "Error uploading ${WHL_FILE}. Aborting."
-                exit 1
-              fi
-            done
-            echo "All *.whl files uploaded successfully!"
+
+            lftp -u flapypi,"${{ secrets.FLA_TRITON_PYPI_PASSWD }}" "${{ secrets.FLAPYPIFTP }}" <<EOF
+            set ftp:ssl-allow no
+            mput *.whl
+            bye
+            EOF
+
+            echo "All *.whl files uploaded successfully via FTP!"
           else
             echo "One or more wheels failed to process. Skipping upload."
             exit 1
