@@ -96,8 +96,13 @@ jobs:
         working-directory: triton
         run: |
           # ... same script to patch the URL ...
-          if [ -f "python/setup.py" ]; then file_path="python/setup.py"; else file_path="setup.py"; fi
-          sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' "$file_path"
+          LLVM_PROTO="http"
+          [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" || "${{ runner.name }}" == "n100" ]] || LLVM_PROTO="https"
+
+          file_path="python/setup.py"
+          [ -f "$file_path" ] || file_path="setup.py"
+
+          sed -i "s|https://oaitriton.blob.core.windows.net/public/llvm-builds/|${LLVM_PROTO}://llvm.fla-org.com/|g" "$file_path"
           grep "llvm.fla-org.com" "$file_path" || (echo "URL replacement failed"; exit 1)
 
       - name: Build wheels
@@ -123,8 +128,15 @@ jobs:
           esac
 
           # Prerequisite installation based on runner name
+          export LLVM_MIRROR_IP="${{ secrets.LLVM_MIRROR_IP }}"
           if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" || "${{ runner.name }}" == "n100" ]]; then
-            export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' -i.bak /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
+            export CIBW_BEFORE_ALL="
+              echo '$LLVM_MIRROR_IP llvm.fla-org.com' >> /etc/hosts &&
+              echo '$LLVM_MIRROR_IP pypi-upload.fla-org.com' >> /etc/hosts &&
+              sed -e 's|^mirrorlist=|#mirrorlist=|g' \
+                  -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
+                  -i.bak /etc/yum.repos.d/almalinux*.repo &&
+              dnf install clang lld -y"
           else
             export CIBW_BEFORE_ALL="dnf install clang lld -y"
           fi
