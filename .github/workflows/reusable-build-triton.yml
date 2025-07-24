@@ -123,7 +123,6 @@ jobs:
               export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT SOCKS_PROXY=${{ secrets.PVE_PROXY_ENV }} ALL_PROXY=${{ secrets.PVE_PROXY_ENV }} HTTPS_PROXY=${{ secrets.PVE_PROXY_ENV }} PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
               ;;
             *)
-              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
               ;;
           esac
 
