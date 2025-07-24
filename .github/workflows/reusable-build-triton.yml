@@ -131,7 +131,7 @@ jobs:
           if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" || "${{ runner.name }}" == "n100" ]]; then
             export CIBW_BEFORE_ALL="
               echo '$LLVM_MIRROR_IP llvm.fla-org.com' >> /etc/hosts &&
-              echo '$LLVM_MIRROR_IP pypi.fla-org.com' >> /etc/hosts &&
+              echo '$LLVM_MIRROR_IP pypi-upload.fla-org.com' >> /etc/hosts &&
               sed -e 's|^mirrorlist=|#mirrorlist=|g' \
                   -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
                   -i.bak /etc/yum.repos.d/almalinux*.repo &&
@@ -222,10 +222,9 @@ jobs:
             for WHL_FILE in "${WHEEL_FILES[@]}"; do
               echo "Uploading: ${WHL_FILE}"
               python3 -m twine upload \
-                --repository-url http://pypi.fla-org.com/ \
+                --repository-url http://pypi-upload.fla-org.com/ \
                 --username fla \
                 --password ${{ secrets.FLA_TRITON_PYPI_PASSWD }}  \
-                --verbose \
                 --non-interactive \
                 "${WHL_FILE}"
               if [ $? -ne 0 ]; then
