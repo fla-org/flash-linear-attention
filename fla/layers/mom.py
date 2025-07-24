@@ -21,10 +21,6 @@ if TYPE_CHECKING:
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 
 
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
 def _upad_input(
     query_layer: torch.Tensor,
     key_layer: torch.Tensor,
@@ -370,9 +366,7 @@ class MomAttention(nn.Module):
         A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
         A_log = torch.log(A)
         self.A_log = nn.Parameter(A_log)
-        self.A_log._no_weight_decay = True
         self.D = nn.Parameter(torch.ones(self.num_heads))
-        self.D._no_weight_decay = True
         # hard coded for now
         dt_min = 0.001
         dt_max = 0.1
@@ -387,7 +381,6 @@ class MomAttention(nn.Module):
         self.dt_bias = nn.Parameter(inv_dt)
         # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
         # name.endswith("bias") in param_grouping.py
-        self.dt_bias._no_weight_decay = True
 
         if use_short_conv:
             self.conv_size = conv_size
@@ -497,7 +490,8 @@ class MomAttention(nn.Module):
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            conv_mask = attention_mask[:, -hidden_states.shape[2]:].repeat_interleave(self.num_memories, 0) if attention_mask is not None else None
+            conv_mask = attention_mask[:, -hidden_states.shape[2]
+                :].repeat_interleave(self.num_memories, 0) if attention_mask is not None else None
             q, k, v = map(lambda x: rearrange(x, 'e b t d -> (e b) t d'), (q, k, v))
             q, conv_state_q[0] = self.q_conv1d(
                 x=q,
