@@ -1,5 +1,5 @@
-import torch
 import numpy as np
+import torch
 
 
 def segsum(x):
@@ -38,13 +38,13 @@ def construct_H_matrix(a, L):
     T = a.size(-1)
     A = torch.exp(segsum(a))
     H = torch.zeros_like(A)
-    for level in range(int(np.log2(T)) + 1):
+    for level in range(int(np.ceil(np.log2(T))) + 1):
         mask = construct_level_mask(level, L)
         H += A * mask
     return H
 
 
-def naive_log_linear_attn(q, k, v, g, l):
-    H = construct_H_matrix(g.permute(0, 2, 1), l.permute(0, 2, 3, 1))
+def naive_log_linear_attn(q, k, v, g, level_scales):
+    H = construct_H_matrix(g.permute(0, 2, 1), level_scales.permute(0, 2, 3, 1))
     M = torch.einsum("bhlc,blhn,bchn->bhlc", H, q, k)
     return torch.einsum("bhlc,bchp->blhp", M, v)

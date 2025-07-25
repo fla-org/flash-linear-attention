@@ -403,6 +403,9 @@ use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1'
 is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
 is_gather_supported = hasattr(triton.language, 'gather')
 
+if is_nvidia and not is_tf32_supported:
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+
 
 def get_all_max_shared_mem():
     try:

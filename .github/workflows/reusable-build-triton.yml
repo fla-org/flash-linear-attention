@@ -96,8 +96,13 @@ jobs:
         working-directory: triton
         run: |
           # ... same script to patch the URL ...
-          if [ -f "python/setup.py" ]; then file_path="python/setup.py"; else file_path="setup.py"; fi
-          sed -i 's|https://oaitriton.blob.core.windows.net/public/llvm-builds/|https://llvm.fla-org.com/|g' "$file_path"
+          LLVM_PROTO="http"
+          [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" || "${{ runner.name }}" == "n100" ]] || LLVM_PROTO="https"
+
+          file_path="python/setup.py"
+          [ -f "$file_path" ] || file_path="setup.py"
+
+          sed -i "s|https://oaitriton.blob.core.windows.net/public/llvm-builds/|${LLVM_PROTO}://llvm.fla-org.com/|g" "$file_path"
           grep "llvm.fla-org.com" "$file_path" || (echo "URL replacement failed"; exit 1)
 
       - name: Build wheels
@@ -105,20 +110,74 @@ jobs:
         working-directory: triton
         run: |
           # Environment setup based on runner name
-          if [[ "${{ runner.name }}" == "intel-a770" ]]; then
-            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1 SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} ALL_PROXY=${{ secrets.A770_PROXY_ENV }} HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }}"
-          elif [[ "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1 SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} ALL_PROXY=${{ secrets.PI_PROXY_ENV }} HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }}"
-          else
-            export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1"
-          fi
+          export CIBW_ENVIRONMENT="TRITON_BUILD_WITH_CLANG_LLD=1"
+
+          case "${{ runner.name }}" in
+            intel-a770)
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT SOCKS_PROXY=${{ secrets.A770_PROXY_ENV }} ALL_PROXY=${{ secrets.A770_PROXY_ENV }} HTTPS_PROXY=${{ secrets.A770_PROXY_ENV }} PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
+              ;;
+            pi)
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT SOCKS_PROXY=${{ secrets.PI_PROXY_ENV }} ALL_PROXY=${{ secrets.PI_PROXY_ENV }} HTTPS_PROXY=${{ secrets.PI_PROXY_ENV }} PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
+              ;;
+            n100)
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT SOCKS_PROXY=${{ secrets.PVE_PROXY_ENV }} ALL_PROXY=${{ secrets.PVE_PROXY_ENV }} HTTPS_PROXY=${{ secrets.PVE_PROXY_ENV }} PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
+              ;;
+            *)
+              ;;
+          esac
 
           # Prerequisite installation based on runner name
-          if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" ]]; then
-            export CIBW_BEFORE_ALL="sed -e 's|^mirrorlist=|#mirrorlist=|g' -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' -i.bak /etc/yum.repos.d/almalinux*.repo && dnf install clang lld -y"
-          else
-            export CIBW_BEFORE_ALL="dnf install clang lld -y"
-          fi
+          case "${{ runner.name }}" in
+            intel-a770|pi|n100)
+              CIBW_BEFORE_ALL='
+                echo "${{ secrets.LLVM_MIRROR_IP }} llvm.fla-org.com" >> /etc/hosts
+                sed -e "s|^mirrorlist=|#mirrorlist=|g" \
+                    -e "s|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g" \
+                    -i.bak /etc/yum.repos.d/almalinux*.repo
+                dnf install -y --best clang lld'
+              ;;
+            *)
+              CIBW_BEFORE_ALL='dnf install -y --best clang lld'
+              ;;
+          esac
+
+          case "${{ runner.name }}" in
+            intel-a770)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && git config --global http.proxy ${{ secrets.A770_PROXY_ENV }} && git config --global https.proxy ${{ secrets.A770_PROXY_ENV }}"
+              ;;
+            pi)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && git config --global http.proxy ${{ secrets.PI_PROXY_ENV }} && git config --global https.proxy ${{ secrets.PI_PROXY_ENV }}"
+              ;;
+            n100)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && git config --global http.proxy ${{ secrets.PVE_PROXY_ENV }} && git config --global https.proxy ${{ secrets.PVE_PROXY_ENV }}"
+              ;;
+            *)
+              ;;
+          esac
+
+          # Set ccache configuration based on runner name
+          case "${{ runner.name }}" in
+            pi)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && dnf install -y ccache \
+                && mkdir -p /host${{ secrets.PI_CCACHE_DIR }} \
+                && CCACHE_DIR=/host${{ secrets.PI_CCACHE_DIR }} ccache -M 10G"
+              ;;
+            n100)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && dnf install -y ccache \
+                && mkdir -p /host${{ secrets.PVE_CCACHE_DIR }} \
+                && CCACHE_DIR=/host${{ secrets.PVE_CCACHE_DIR }} ccache -M 10G"
+              ;;
+          esac
+
+          export CIBW_BEFORE_ALL
+          case "${{ runner.name }}" in
+            pi)
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT CCACHE_DIR=/host${{ secrets.PI_CCACHE_DIR }}"
+              ;;
+            n100)
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT CCACHE_DIR=/host${{ secrets.PVE_CCACHE_DIR }}"
+              ;;
+          esac
 
           # Image selection based on architecture input
           if [[ "${{ inputs.arch }}" == 'x86_64' ]]; then
@@ -188,32 +247,18 @@ jobs:
             # For release builds, we do nothing to the wheels.
           fi
 
-
-
           # Only upload if ALL wheels were successfully processed
           if [ "$ALL_WHEELS_PROCESSED" = true ]; then
-            echo "Installing twine and uploading processed wheels..."
-            python3 -m pip install twine pkginfo -U
+            echo "Uploading wheels via FTP..."
             readarray -d '' -t WHEEL_FILES < <(find . -maxdepth 1 -name "*.whl" -print0)
             if [ ${#WHEEL_FILES[@]} -eq 0 ]; then
-              echo "Error: No *.whl files found to upload in the current directory."
+              echo "Error: No *.whl files found to upload."
               exit 1
             fi
-            for WHL_FILE in "${WHEEL_FILES[@]}"; do
-              echo "Uploading: ${WHL_FILE}"
-              python3 -m twine upload \
-                --repository-url http://pypi-upload.fla-org.com/ \
-                --username fla \
-                --password ${{ secrets.FLA_TRITON_PYPI_PASSWD }}  \
-                --verbose \
-                --non-interactive \
-                "${WHL_FILE}"
-              if [ $? -ne 0 ]; then
-                echo "Error uploading ${WHL_FILE}. Aborting."
-                exit 1
-              fi
-            done
-            echo "All *.whl files uploaded successfully!"
+
+            lftp -u flapypi,"${{ secrets.FLA_TRITON_PYPI_PASSWD }}" "${{ secrets.FLAPYPIFTP }}" -e "set ftp:ssl-allow no; mput *.whl; bye"
+
+            echo "All *.whl files uploaded successfully via FTP!"
           else
             echo "One or more wheels failed to process. Skipping upload."
             exit 1

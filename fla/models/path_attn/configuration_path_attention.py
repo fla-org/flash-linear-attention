@@ -34,6 +34,7 @@ class PaTHAttentionConfig(PretrainedConfig):
         vocab_size: int = 32000,
         use_forget_gate: bool = False,
         use_w_shortconv: bool = True,
+        use_low_rank_w: bool = True,
         **kwargs,
     ):
         self.hidden_size = hidden_size
@@ -57,6 +58,7 @@ class PaTHAttentionConfig(PretrainedConfig):
 
         self.use_forget_gate = use_forget_gate
         self.use_w_shortconv = use_w_shortconv
+        self.use_low_rank_w = use_low_rank_w
 
         super().__init__(
             pad_token_id=pad_token_id,

@@ -45,6 +45,7 @@ class PaTHAttentionBlock(nn.Module):
             num_kv_heads=config.num_kv_heads,
             use_forget_gate=config.use_forget_gate,
             use_w_shortconv=config.use_w_shortconv,
+            use_low_rank_w=config.use_low_rank_w,
             layer_idx=layer_idx
         )
 

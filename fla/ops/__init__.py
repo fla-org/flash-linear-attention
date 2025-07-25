@@ -19,7 +19,7 @@ from .gsa import chunk_gsa, fused_recurrent_gsa
 from .hgrn import fused_recurrent_hgrn
 from .lightning_attn import chunk_lightning_attn, fused_recurrent_lightning_attn
 from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
-from .log_linear_attn import chunk_log_linear_attn, LogLinearAttentionState
+from .log_linear_attn import LogLinearAttentionState, chunk_log_linear_attn
 from .mesa_net import chunk_mesa_net
 from .nsa import parallel_nsa
 from .path_attn import parallel_path_attention
