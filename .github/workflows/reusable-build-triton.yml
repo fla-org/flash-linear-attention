@@ -216,7 +216,7 @@ jobs:
               exit 1
             fi
 
-            lftp -u flapypi,"${{ secrets.FLA_TRITON_PYPI_PASSWD }}" "${{ secrets.FLAPYPIFTP }}" <<EOF
+            lftp -u flapypi,"${{ secrets.FLA_TRITON_PYPI_PASSWD }}" "${{ secrets.FLAPYPIFTP }}" <<'EOF'
             set ftp:ssl-allow no
             mput *.whl
             bye
