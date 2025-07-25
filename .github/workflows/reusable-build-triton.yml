@@ -134,10 +134,24 @@ jobs:
                 sed -e "s|^mirrorlist=|#mirrorlist=|g" \
                     -e "s|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g" \
                     -i.bak /etc/yum.repos.d/almalinux*.repo
-                dnf install -y clang lld'
+                dnf install -y --best clang lld'
               ;;
             *)
-              CIBW_BEFORE_ALL='dnf install -y clang lld'
+              CIBW_BEFORE_ALL='dnf install -y --best clang lld'
+              ;;
+          esac
+
+          case "${{ runner.name }}" in
+            intel-a770)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && git config --global http.proxy ${{ secrets.A770_PROXY_ENV }} && git config --global https.proxy ${{ secrets.A770_PROXY_ENV }}"
+              ;;
+            pi)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && git config --global http.proxy ${{ secrets.PI_PROXY_ENV }} && git config --global https.proxy ${{ secrets.PI_PROXY_ENV }}"
+              ;;
+            n100)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && git config --global http.proxy ${{ secrets.PVE_PROXY_ENV }} && git config --global https.proxy ${{ secrets.PVE_PROXY_ENV }}"
+              ;;
+            *)
               ;;
           esac
 
