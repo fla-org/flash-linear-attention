@@ -156,6 +156,14 @@ jobs:
           esac
 
           export CIBW_BEFORE_ALL
+          case "${{ runner.name }}" in
+            pi)
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT CCACHE_DIR=/host${{ secrets.PI_CCACHE_DIR }}"
+              ;;
+            n100)
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT CCACHE_DIR=/host${{ secrets.PVE_CCACHE_DIR }}"
+              ;;
+          esac
 
           # Image selection based on architecture input
           if [[ "${{ inputs.arch }}" == 'x86_64' ]]; then
