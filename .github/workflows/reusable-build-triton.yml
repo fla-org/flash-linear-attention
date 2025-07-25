@@ -127,17 +127,35 @@ jobs:
           esac
 
           # Prerequisite installation based on runner name
-          export LLVM_MIRROR_IP="${{ secrets.LLVM_MIRROR_IP }}"
-          if [[ "${{ runner.name }}" == "intel-a770" || "${{ runner.name }}" == "pi" || "${{ runner.name }}" == "n100" ]]; then
-            export CIBW_BEFORE_ALL="
-              echo '$LLVM_MIRROR_IP llvm.fla-org.com' >> /etc/hosts &&
-              sed -e 's|^mirrorlist=|#mirrorlist=|g' \
-                  -e 's|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g' \
-                  -i.bak /etc/yum.repos.d/almalinux*.repo &&
-              dnf install clang lld -y"
-          else
-            export CIBW_BEFORE_ALL="dnf install clang lld -y"
-          fi
+          case "${{ runner.name }}" in
+            intel-a770|pi|n100)
+              CIBW_BEFORE_ALL='
+                echo "${{ secrets.LLVM_MIRROR_IP }} llvm.fla-org.com" >> /etc/hosts
+                sed -e "s|^mirrorlist=|#mirrorlist=|g" \
+                    -e "s|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g" \
+                    -i.bak /etc/yum.repos.d/almalinux*.repo
+                dnf install -y clang lld'
+              ;;
+            *)
+              CIBW_BEFORE_ALL='dnf install -y clang lld'
+              ;;
+          esac
+
+          # Set ccache configuration based on runner name
+          case "${{ runner.name }}" in
+            pi)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && dnf install -y ccache \
+                && mkdir -p /host${{ secrets.PI_CCACHE_DIR }} \
+                && ccache -M 10G -d /host${{ secrets.PI_CCACHE_DIR }}"
+              ;;
+            n100)
+              CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && dnf install -y ccache \
+                && mkdir -p /host${{ secrets.PVE_CCACHE_DIR }} \
+                && ccache -M 10G -d /host${{ secrets.PVE_CCACHE_DIR }}"
+              ;;
+          esac
+
+          export CIBW_BEFORE_ALL
 
           # Image selection based on architecture input
           if [[ "${{ inputs.arch }}" == 'x86_64' ]]; then
