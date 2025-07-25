@@ -146,12 +146,12 @@ jobs:
             pi)
               CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && dnf install -y ccache \
                 && mkdir -p /host${{ secrets.PI_CCACHE_DIR }} \
-                && ccache -M 10G -d /host${{ secrets.PI_CCACHE_DIR }}"
+                && CCACHE_DIR=/host${{ secrets.PI_CCACHE_DIR }} ccache -M 10G"
               ;;
             n100)
               CIBW_BEFORE_ALL="$CIBW_BEFORE_ALL && dnf install -y ccache \
                 && mkdir -p /host${{ secrets.PVE_CCACHE_DIR }} \
-                && ccache -M 10G -d /host${{ secrets.PVE_CCACHE_DIR }}"
+                && CCACHE_DIR=/host${{ secrets.PVE_CCACHE_DIR }} ccache -M 10G"
               ;;
           esac
 
