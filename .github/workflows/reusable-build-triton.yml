@@ -135,6 +135,7 @@ jobs:
                     -e "s|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g" \
                     -i.bak /etc/yum.repos.d/almalinux*.repo
                 dnf install -y --best clang lld'
+                export CIBW_CONTAINER_ENGINE="docker;create_args: --network host"
               ;;
             *)
               CIBW_BEFORE_ALL='dnf install -y --best clang lld'
