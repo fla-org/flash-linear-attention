@@ -254,6 +254,7 @@ def test_conv_varlen(
         ]
     ]
 )
+@torch.no_grad
 def test_conv_decoding(
         B: int,
         T: int,
@@ -318,9 +319,15 @@ def test_conv_decoding(
             (2, 128, 128, 4, "swish", False, True, torch.float32, 'cuda'),
             (2, 64, 128, 3, "swish", True, False, torch.float32, 'cuda'),
             (2, 128, 128, 4, "swish", False, False, torch.float32, 'cuda'),
+            (2, 2, 128, 4, "swish", True, True, torch.float32, 'cuda'),  # T_prefill < W
+            (2, 2, 128, 4, "swish", True, True, torch.float32, 'triton'),
+            (2, 3, 128, 4, "swish", True, True, torch.float32, 'triton'),
+            (2, 4, 128, 4, "swish", True, True, torch.float32, 'triton'),
+            (2, 2, 128, 3, "swish", True, True, torch.float32, 'triton'),
         ]
     ]
 )
+@torch.no_grad
 def test_conv_with_cache_prefill_fwd(
     B: int,
     T: int,
@@ -355,7 +362,7 @@ def test_conv_with_cache_prefill_fwd(
         x=x.transpose(1, 2),                    # (B, D, T)
         weight=rearrange(conv.weight, "d 1 w -> d w"),
         bias=conv.bias,
-        initial_state=cache,                   # (B, D, W-1)
+        initial_state=cache,                    # (B, D, W-1)
         activation=activation,
     ).transpose(1, 2)                           # (B, T, D)
     if has_residual:
@@ -363,8 +370,19 @@ def test_conv_with_cache_prefill_fwd(
 
     zero_padding = torch.zeros(B, D, 1).to(device, dtype)
     tri_cache = torch.cat([zero_padding, cache], dim=-1)  # (B, D, W)
-    tri, _ = conv(x, residual=residual, cache=tri_cache)
+    tri, cache_out = conv(x, residual=residual, cache=tri_cache.clone(), output_final_state=True)
+
     assert_close("y", ref, tri, 1e-3)
+    for p in range(1, W):
+        if p <= T:
+            expected = x[:, -p, :]
+        else:
+            expected = tri_cache[:, :, -(p - T)]
+        torch.testing.assert_close(
+            cache_out[:, :, -p],
+            expected,
+            atol=1e-3, rtol=1e-3
+        )
 
 
 @pytest.mark.parametrize(
@@ -379,9 +397,12 @@ def test_conv_with_cache_prefill_fwd(
             (4, 256, 128, 3, None,  False, True, torch.float32, 'triton'),
             (2,  64, 128, 4, "swish", True, False, torch.float16, 'cuda'),
             (3, 200,  64, 3, None,  False, False, torch.float16, 'cuda'),
+            (2,   3,  64, 4, "swish", True, True, torch.float32, 'triton'),  # T < W
+            (2,   3,  64, 3, None,  False, True, torch.float32, 'cuda'),     # T < W
         ]
     ]
 )
+@torch.no_grad
 def test_conv_varlen_with_cache_prefill_fwd(
     N: int,
     T: int,
@@ -397,11 +418,12 @@ def test_conv_varlen_with_cache_prefill_fwd(
         pytest.skip("causal_conv1d is not installed for CUDA backend")
     torch.manual_seed(42)
 
-    min_len_each = T // N
+    min_len_each = max(1, T // N)
     lengths = [min_len_each] * N
     lengths[-1] += T % N
-    assert all(length >= W for length in lengths), "need all lengths ≥ W"
-    cu_seqlens = torch.tensor([0] + torch.cumsum(torch.tensor(lengths), 0).tolist(), device=device)
+    assert all(length >= 1 for length in lengths), "all lengths must >= 1"
+    cu_seqlens = torch.tensor([0] + torch.cumsum(torch.tensor(lengths), 0).tolist(),
+                              device=device, dtype=torch.int32)
 
     x = torch.randn(1, T, D).to(device, dtype)
     residual = torch.randn(1, T, D).to(device, dtype) if has_residual else None
@@ -417,7 +439,6 @@ def test_conv_varlen_with_cache_prefill_fwd(
     )
 
     cache = torch.randn(N, D, W - 1).to(device, dtype)
-
     ref_list = []
     for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
         xi = x[:, bos:eos, :].transpose(1, 2)  # (1, D, l)
@@ -436,9 +457,27 @@ def test_conv_varlen_with_cache_prefill_fwd(
 
     zero_pad = torch.zeros(N, D, 1, device=device, dtype=dtype)
     tri_cache = torch.cat([zero_pad, cache], dim=-1)  # (N, D, W)
-    tri, _ = conv(x, residual=residual, cache=tri_cache, cu_seqlens=cu_seqlens)
+    tri, cache_out = conv(x,
+                          residual=residual,
+                          cache=tri_cache.clone(),
+                          cu_seqlens=cu_seqlens,
+                          output_final_state=True)
 
     assert_close("varlen y", ref, tri, 1e-3)
+
+    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        length = eos - bos
+        for p in range(1, W):
+            if p <= length:
+                expected = x[0, eos - p, :]
+            else:
+                expected = tri_cache[i, :, -(p - length)]
+            torch.testing.assert_close(
+                cache_out[i, :, -p],
+                expected,
+                atol=1e-3,
+                rtol=1e-3
+            )
 
 
 @pytest.mark.parametrize(
@@ -459,6 +498,7 @@ def test_conv_varlen_with_cache_prefill_fwd(
         ]
     ]
 )
+@torch.no_grad
 def test_conv_decoding_with_cache(
     B: int,
     D: int,
@@ -518,6 +558,7 @@ def test_conv_decoding_with_cache(
         ]
     ]
 )
+@torch.no_grad
 def test_mixed_backend(
     B: int,
     T: int,
