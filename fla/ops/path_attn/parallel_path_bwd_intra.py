@@ -3,7 +3,6 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import check_shared_mem
 
 
 @triton.heuristics({
@@ -168,6 +167,5 @@ def parallel_path_bwd_intra_chunk_fn(
         T=T, S=S, BT=BT, scale=scale,
         G=G, HQ=HQ, H=H, K=K, V=V,
         BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
-        num_stages=3 if check_shared_mem('hopper') else 1
     )
     return dq_new, dk, dv, dw1, dw2, dg_cumsum

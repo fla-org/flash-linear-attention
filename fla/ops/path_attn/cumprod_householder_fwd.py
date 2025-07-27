@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.utils import check_shared_mem
 
 
 @triton.heuristics({
@@ -113,5 +114,6 @@ def chunk_cumprod_householder_fwd_fn(
         T=T, S=S,
         # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
         num_warps=8 if K == 128 else 4,
+        num_stages=3 if check_shared_mem('ampere') else 1
     )
     return k_new, hc_suffix, hc_whole

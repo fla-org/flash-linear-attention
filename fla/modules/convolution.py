@@ -778,10 +778,7 @@ class ShortConvolution(nn.Conv1d):
                 cu_seqlens=cu_seqlens
             )
             return y, cache
-        elif cu_seqlens is None and T < W:
-            raise NotImplementedError("ShortConvolution does not support prefill T < W")
-        elif cu_seqlens is not None and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < W:
-            raise NotImplementedError("ShortConvolution does not support prefill T < W")
+
         # check if cu_seqlens and cache are both provided
         # Sequence index for each token. Used for varlen.
         # Suppose a batch consists of two sequences with lengths 3 and 4,
@@ -792,14 +789,16 @@ class ShortConvolution(nn.Conv1d):
         seq_idx = kwargs.get('seq_idx', None)
         # cuda backend do not support:
         # 1. both `cu_seqlens` and `cache` being provided
-        # 2. both `cu_seqlens` and `routput_final_state` being provided
-        if self.backend == 'cuda' and \
-            ((cu_seqlens is not None or seq_idx is not None) and cache is not None) or \
-                (cu_seqlens is not None and output_final_state):
+        # 2. both `cu_seqlens` and `output_final_state` being provided
+        if self.backend == 'cuda' and (
+            ((cu_seqlens is not None or seq_idx is not None) and cache is not None) or
+            (cu_seqlens is not None and output_final_state)
+        ):
             warnings.warn(
                 "The CUDA backend does not support both `cu_seqlens` and `cache` being provided, "
                 "or both `cu_seqlens` and `output_final_state` being provided. "
-                "Switching to the Triton backend instead. "
+                "Switching to the Triton backend instead. ",
+                stacklevel=2
             )
             self.backend = 'triton'
 

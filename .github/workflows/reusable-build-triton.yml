@@ -135,6 +135,7 @@ jobs:
                     -e "s|^# baseurl=https://repo.almalinux.org|baseurl=https://mirrors.aliyun.com|g" \
                     -i.bak /etc/yum.repos.d/almalinux*.repo
                 dnf install -y --best clang lld'
+                export CIBW_CONTAINER_ENGINE="docker;create_args: --network host"
               ;;
             *)
               CIBW_BEFORE_ALL='dnf install -y --best clang lld'
@@ -170,12 +171,13 @@ jobs:
           esac
 
           export CIBW_BEFORE_ALL
+          COMMON_FLAGS="MAX_JOBS=4 CMAKE_BUILD_PARALLEL_LEVEL=4 MAKEFLAGS=-j4"
           case "${{ runner.name }}" in
             pi)
-              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT CCACHE_DIR=/host${{ secrets.PI_CCACHE_DIR }}"
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT CCACHE_DIR=/host${{ secrets.PI_CCACHE_DIR }} $COMMON_FLAGS"
               ;;
             n100)
-              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT CCACHE_DIR=/host${{ secrets.PVE_CCACHE_DIR }}"
+              export CIBW_ENVIRONMENT="$CIBW_ENVIRONMENT CCACHE_DIR=/host${{ secrets.PVE_CCACHE_DIR }} $COMMON_FLAGS"
               ;;
           esac
 

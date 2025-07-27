@@ -30,9 +30,8 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
     @autocast_custom_fwd
     def forward(ctx, q, k, v, w, beta, g, scale, cu_seqlens, use_cache=False):
         g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, output_dtype=torch.float32) if g is not None else None
-        BS = 64
-        BT = 128 if check_shared_mem('hopper') else 64
-
+        BS = 64 if check_shared_mem('hopper') else 32
+        BT = 128 if check_shared_mem('ampere') else 64
         A = chunk_scaled_dot_kkt_fwd(
             k=w,
             beta=beta,
@@ -82,11 +81,9 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dk_new):
-        if do.shape[-1] > 64 and check_shared_mem('hopper') is False:
-            assert False, "Head dimension 128 only supported on Hopper or later. Stay tuned for Ampere support!"
         q, k, v, w, g_cumsum, o, beta, L, A = ctx.saved_tensors
-        BT = 128 if check_shared_mem('hopper') else 64
-        BS = 64
+        BT = 128 if check_shared_mem('ampere') else 64
+        BS = 64 if check_shared_mem('hopper') else 32
         S = 512
         cu_seqlens = ctx.cu_seqlens
         delta = parallel_attn_bwd_preprocess(o, do)
@@ -198,8 +195,9 @@ def parallel_path_attention(
         k_cache (torch.Tensor):
             k_cache of shape `[B, T, H, K]`
     """
-    if q.shape[-1] > 64 and check_shared_mem('hopper') is False:
-        assert False, "Head dimension 128 only supported on Hopper or later. Stay tuned for Ampere support!"
+    # if q.shape[-1] > 64 and check_shared_mem('hopper') is False:
+    # assert False, "Head dimension 128 only supported on Hopper or later. Stay tuned for Ampere support!"
+
     if scale is None:
         scale = k.shape[-1]**-0.5
     assert q.shape[-1] in [16, 32, 64, 128], "only support head_dim in [16, 32, 64, 128] for now. Stay tuned!"

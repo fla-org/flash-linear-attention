@@ -8,7 +8,7 @@ import torch
 from einops import rearrange
 
 from fla.ops.path_attn.parallel import parallel_path_attention
-from fla.utils import assert_close, check_shared_mem, device, is_intel_alchemist
+from fla.utils import assert_close, device, is_intel_alchemist
 
 
 def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
@@ -88,9 +88,6 @@ def test_parallel(
     use_forget_gate: bool,
     dtype: torch.dtype
 ):
-    if not check_shared_mem('hopper') and D > 64:
-        # maybe we can enable this test on Triton 3.3.0
-        pytest.skip("Skipping test because global shared memory is not available")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
@@ -163,9 +160,6 @@ def test_parallel_varlen(
     cu_seqlens: List[int],
     dtype: torch.dtype
 ):
-    if not check_shared_mem('hopper') and D > 64:
-        # maybe we can enable this test on Triton 3.3.0
-        pytest.skip("Skipping test because global shared memory is not available")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     T = cu_seqlens[-1]
