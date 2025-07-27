@@ -498,20 +498,26 @@ class MomAttention(nn.Module):
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             
-            ocnv_q = self.prepare_recurrent_state(conv_state_q[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            conv_cu_seqlens = cu_seqlens
+            if self.training and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < self.q_conv1d.kernel_size[0]:
+                # During training, some memories may degrade and the numbers of tokens routed to them are smaller than
+                # short conv kernel size which is not supported, so we set cu_seqlens to None during pretraining.
+                conv_cu_seqlens = None
+
+            conv_q = self.prepare_recurrent_state(conv_state_q[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
             cu_q, conv_q_new = self.q_conv1d(
                 x=cu_q,
-                cache=ocnv_q,
+                cache=conv_q,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
+                cu_seqlens=conv_cu_seqlens,
             )
             conv_state_q[0] = self.handle_recurrent_state(conv_state_q[0], conv_q_new, cu_seqlens, cu_seqlen_all[0], reverse_indices)
-            ocnv_k = self.prepare_recurrent_state(conv_state_k[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            conv_k = self.prepare_recurrent_state(conv_state_k[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
             cu_k, conv_k_new = self.k_conv1d(
                 x=cu_k,
-                cache=ocnv_k,
+                cache=conv_k,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
+                cu_seqlens=conv_cu_seqlens,
             )
             conv_state_k[0] = self.handle_recurrent_state(conv_state_k[0], conv_k_new, cu_seqlens, cu_seqlen_all[0], reverse_indices)
             conv_v = self.prepare_recurrent_state(conv_state_v[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
@@ -519,7 +525,7 @@ class MomAttention(nn.Module):
                 x=cu_v,
                 cache=conv_v,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
+                cu_seqlens=conv_cu_seqlens,
             )
             conv_state_v[0] = self.handle_recurrent_state(conv_state_v[0], conv_v_new, cu_seqlens, cu_seqlen_all[0], reverse_indices)
 
@@ -612,6 +618,13 @@ class MomAttention(nn.Module):
             # o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
             #                 seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
+        o = o.squeeze(0).contiguous()
+        o = pad_input(o, indices_q, batch_size*self.num_memories, max_len)
+        o = rearrange(o, '(e b) l h d -> e b l (h d)', b=batch_size)
+        o = reconstruct(o, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
+                seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
+        o = rearrange(o, 'b l (h d) -> b l h d', h=self.num_heads)
+        
         if self.shared_mem:
             shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state,
                                      use_cache, conv_state_q, conv_state_k, conv_state_v)
@@ -626,19 +639,15 @@ class MomAttention(nn.Module):
             )
 
         if self.use_output_gate:
-            hidden_states = index_first_axis(rearrange(hidden_states, "e b s ... -> (e b s) ..."), indices_q).unsqueeze(0)
-            g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
+            if attention_mask is not None:
+                indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -seq_len:])
+                shared_hidden_states = index_first_axis(rearrange(shared_hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+            g = rearrange(self.g_proj(shared_hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
         else:
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
-
-        o = o.squeeze(0).contiguous()
-        o = pad_input(o, indices_q, batch_size*self.num_memories, max_len)
-        o = rearrange(o, '(e b) l d -> e b l d', b=batch_size)
-        o = reconstruct(o, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
-                seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
         if origin_cu_seqlens is not None:
             indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
@@ -667,7 +676,9 @@ class MomAttention(nn.Module):
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
+        cu_seqlens = None
         if attention_mask is not None:
+            batch_size, q_len = hidden_states.shape[0], hidden_states.shape[1]
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
@@ -726,6 +737,8 @@ class MomAttention(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
+        if attention_mask is not None:
+            o = pad_input(o.squeeze(0), indices, batch_size, q_len)
         return o
 
     def cu2pad(self, x, cu_seqlens):
