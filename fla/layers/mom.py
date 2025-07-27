@@ -438,6 +438,10 @@ class MomAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
+        origin_cu_seqlens = kwargs.get('cu_seqlens', None)
+        if origin_cu_seqlens is not None:
+            hidden_states, attention_mask = self.cu2pad(hidden_states, origin_cu_seqlens)
+
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
@@ -636,6 +640,9 @@ class MomAttention(nn.Module):
         o = reconstruct(o, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
                 seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
+        if origin_cu_seqlens is not None:
+            indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
+            o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
         return o, None, past_key_values, router_logits
 
     def shared_o(
@@ -724,6 +731,22 @@ class MomAttention(nn.Module):
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
         return o
+
+    def cu2pad(self, x, cu_seqlens):
+        batch_size = cu_seqlens.shape[0] - 1
+        max_len = (cu_seqlens[1:] - cu_seqlens [:-1]).max().item()
+        indices = torch.tensor([], dtype=torch.long, device=x.device)
+        attention_mask = torch.ones((batch_size, max_len), dtype=torch.bool, device=x.device)
+        for i in range(batch_size):
+            seq_len = cu_seqlens[i+1] - cu_seqlens[i]
+            pad_len = max_len - seq_len
+            batch_indices = torch.arange(pad_len, max_len, device=x.device)
+            batch_indices = batch_indices + i * max_len
+            indices = torch.cat([indices, batch_indices])
+            attention_mask[i, :pad_len] = False
+        x = pad_input(x.squeeze(0), indices, batch_size, max_len)
+        return x, attention_mask
+
 
     def prepare_conv_state(self, conv_state, cu_seqlens, cu_seqlen_all, reverse_indices, batch_size):
         if conv_state is None:
