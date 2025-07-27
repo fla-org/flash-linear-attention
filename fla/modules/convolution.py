@@ -789,16 +789,16 @@ class ShortConvolution(nn.Conv1d):
         seq_idx = kwargs.get('seq_idx', None)
         # cuda backend do not support:
         # 1. both `cu_seqlens` and `cache` being provided
-        # 2. both `cu_seqlens` and `routput_final_state` being provided
-        if self.backend == 'cuda' and \
-            ((cu_seqlens is not None or seq_idx is not None) and cache is not None) or \
+        # 2. both `cu_seqlens` and `output_final_state` being provided
+        if self.backend == 'cuda':
+            if ((cu_seqlens is not None or seq_idx is not None) and cache is not None) or \
                 (cu_seqlens is not None and output_final_state):
-            warnings.warn(
-                "The CUDA backend does not support both `cu_seqlens` and `cache` being provided, "
-                "or both `cu_seqlens` and `output_final_state` being provided. "
-                "Switching to the Triton backend instead. "
-            )
-            self.backend = 'triton'
+                warnings.warn(
+                    "The CUDA backend does not support both `cu_seqlens` and `cache` being provided, "
+                    "or both `cu_seqlens` and `output_final_state` being provided. "
+                    "Switching to the Triton backend instead. "
+                )
+                self.backend = 'triton'
 
         if self.backend == 'triton':
             y, cache = causal_conv1d(
