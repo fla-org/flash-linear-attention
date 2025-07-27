@@ -612,10 +612,10 @@ class MomAttention(nn.Module):
             # o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
             #                 seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
-        # if self.shared_mem:
-        #     shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state,
-        #                              use_cache, conv_state_q, conv_state_k, conv_state_v)
-        #     o += shared_o
+        if self.shared_mem:
+            shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state,
+                                     use_cache, conv_state_q, conv_state_k, conv_state_v)
+            o += shared_o
 
         if past_key_values is not None:
             past_key_values.update(
@@ -667,25 +667,28 @@ class MomAttention(nn.Module):
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
+        if attention_mask is not None:
+            indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
+            hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+
         if self.use_short_conv:
-            conv_mask = attention_mask[:, -hidden_states.shape[1]:] if attention_mask is not None else None
             q, conv_state_q[1] = self.q_conv1d(
                 x=self.q_proj(hidden_states),
                 cache=conv_state_q[1],
                 output_final_state=use_cache,
-                mask=conv_mask
+                cu_seqlens=cu_seqlens
             )
             k, conv_state_k[1] = self.k_conv1d(
                 x=self.shared_k(hidden_states),
                 cache=conv_state_k[1],
                 output_final_state=use_cache,
-                mask=conv_mask
+                cu_seqlens=cu_seqlens
             )
             v, conv_state_v[1] = self.v_conv1d(
                 x=self.shared_v(hidden_states),
                 cache=conv_state_v[1],
                 output_final_state=use_cache,
-                mask=conv_mask
+                cu_seqlens=cu_seqlens
             )
         else:
             q = self.silu(self.q_proj(hidden_states))
@@ -696,25 +699,18 @@ class MomAttention(nn.Module):
         beta = self.shared_b(hidden_states).sigmoid()
         g = -self.A_log.float().exp() * F.softplus(self.shared_a(hidden_states).float() + self.dt_bias)
 
-        # dealing with padding
-        if attention_mask is not None:
-            beta = beta.mul(attention_mask[:, -beta.shape[-2]:, None])
-            g = g.mul(attention_mask[:, -g.shape[-2]:, None])
-
-        cu_seqlens = kwargs.get('cu_seqlens', None)
         if mode == 'chunk':
             o, recurrent_state[-1] = chunk_gated_delta_rule(
-                q=q.to(dtype=torch.bfloat16),
-                k=k.to(dtype=torch.bfloat16),
-                v=v.to(dtype=torch.bfloat16),
-                g=g.to(dtype=torch.bfloat16),
-                beta=beta.to(dtype=torch.bfloat16),
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=True
             )
-            o = o.to(dtype=q.dtype)
         elif mode == 'fused_recurrent':
             o, recurrent_state[-1] = fused_recurrent_gated_delta_rule(
                 q=q,
@@ -724,8 +720,8 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=True
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
@@ -746,27 +742,7 @@ class MomAttention(nn.Module):
             attention_mask[i, :pad_len] = False
         x = pad_input(x.squeeze(0), indices, batch_size, max_len)
         return x, attention_mask
-
-
-    def prepare_conv_state(self, conv_state, cu_seqlens, cu_seqlen_all, reverse_indices, batch_size):
-        if conv_state is None:
-            return None
-        
-        total_len = len(cu_seqlen_all)
-        if len(cu_seqlens) != total_len:
-            # select memories that are activated
-            memories = torch.zeros_like(conv_state[:self.topk*batch_size])
-            mem_id = 0
-            for i in range(total_len-1):
-                if cu_seqlen_all[i] != cu_seqlen_all[i+1]:
-                    memories[mem_id] = conv_state[i]
-                    mem_id += 1
-            assert mem_id == self.topk * batch_size, "The number of memories is not correct."
-        else:
-            memories = conv_state
-        
-        return memories
-    
+   
     def prepare_recurrent_state(self, recurrent_state, cu_seqlens, cu_seqlen_all, reverse_indices, batch_size):
         if recurrent_state is None:
             return None
@@ -785,22 +761,6 @@ class MomAttention(nn.Module):
             memories = recurrent_state
         
         return memories
- 
-
-    def handle_conv_state(self, conv_state, conv_state_new, cu_seqlens, cu_seqlen_all, reverse_indices):
-        if conv_state_new is None:
-            return None
-        if conv_state is None:
-            conv_state = torch.zeros_like(conv_state_new[reverse_indices[1:]-1])
-        total_len = len(cu_seqlen_all)
-        if len(cu_seqlens) != total_len:
-            # handle the case where some memories are not used
-            for i in range(total_len-1):
-                if cu_seqlen_all[i] != cu_seqlen_all[i+1]:
-                    conv_state[i] = conv_state_new[reverse_indices[i+1]-1]
-        else:
-            conv_state = conv_state_new
-        return conv_state
 
     def handle_recurrent_state(self, recurrent_state, recurrent_state_new, cu_seqlens, cu_seqlen_all, reverse_indices):
         if recurrent_state_new is None:
