@@ -12,6 +12,7 @@ from fla.utils import assert_close, device
     ('B', 'T', 'D'),
     [
         (1, 1, 64),
+        (2, 500, 128),
         (2, 512, 128),
         (3, 2048, 1200),
     ]
@@ -34,6 +35,7 @@ def test_sigmoid(B: int, T: int, D: int):
     ('B', 'T', 'D', 'temperature'),
     [
         (1, 1, 64, 1.0),
+        (2, 500, 128, 0.5),
         (2, 512, 128, 0.5),
         (3, 2048, 1200, 2.0),
     ]
@@ -56,6 +58,7 @@ def test_logsigmoid(B: int, T: int, D: int, temperature: float):
     ('B', 'T', 'D'),
     [
         (1, 1, 64),
+        (2, 500, 128),
         (2, 512, 128),
         (3, 2048, 1200),
     ]
@@ -78,6 +81,7 @@ def test_swish(B: int, T: int, D: int):
     ('B', 'T', 'D'),
     [
         (1, 1, 64),
+        (2, 500, 128),
         (2, 512, 128),
         (3, 2048, 1200),
     ]
@@ -104,6 +108,8 @@ def test_swiglu(B: int, T: int, D: int):
     [
         (2, 512, 128, 256),
         (1, 1, 64, 32),
+        (2, 500, 128, 64),
+        (3, 2048, 1200, 600),
     ]
 )
 def test_swiglu_linear(B: int, T: int, D: int, O: int):  # noqa: E741
