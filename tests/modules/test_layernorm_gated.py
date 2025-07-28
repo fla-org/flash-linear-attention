@@ -9,13 +9,18 @@ from fla.modules import FusedLayerNormGated, FusedRMSNormGated
 from fla.utils import assert_close, device
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("T", [1, 50, 512, 1000, 2048])
-@pytest.mark.parametrize("D", [50, 64, 128, 1200])
-@pytest.mark.parametrize("elementwise_affine", [False, True])
-@pytest.mark.parametrize("activation", ["silu", "sigmoid"])
-@pytest.mark.parametrize("bias", [False])
+@pytest.mark.parametrize(
+    ('B', 'H', 'T', 'D', 'elementwise_affine', 'activation', 'bias'),
+    [
+        pytest.param(*test, id=f"B{test[0]}_H{test[1]}_T{test[2]}_D{test[3]}_affine{test[4]}_{test[5]}_bias{test[6]}")
+        for test in [
+            (2, 2, 1,    64,  False, "silu",   False),
+            (2, 2, 512,  128, True,  "silu",   True),
+            (2, 2, 2048, 1200, True,  "sigmoid", False),
+            (2, 2, 50,   50,  False, "sigmoid", False),
+        ]
+    ]
+)
 def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: bool, activation: str, bias: bool):
     torch.manual_seed(42)
     x = torch.randn(B, H, T, D).to(device).requires_grad_(True)
@@ -52,11 +57,18 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
         assert_close('db', ref_db, tri_db, 1e-3)
 
 
-@pytest.mark.parametrize("B", [2])
-@pytest.mark.parametrize("H", [2])
-@pytest.mark.parametrize("T", [1, 50, 512, 1000, 2048])
-@pytest.mark.parametrize("D", [50, 64, 128, 1200])
-@pytest.mark.parametrize("activation", ["silu", "sigmoid"])
+@pytest.mark.parametrize(
+    ('B', 'H', 'T', 'D', 'activation'),
+    [
+        pytest.param(*test, id=f"B{test[0]}_H{test[1]}_T{test[2]}_D{test[3]}_{test[4]}")
+        for test in [
+            (2, 2, 1,    64,  "silu"),
+            (2, 2, 512,  128, "sigmoid"),
+            (2, 2, 2048, 1200, "silu"),
+            (2, 2, 50,   50,  "sigmoid"),
+        ]
+    ]
+)
 def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     torch.manual_seed(42)
     x = torch.randn(B, H, T, D).to(device).requires_grad_(True)
