@@ -2,12 +2,10 @@
 
 import torch
 import triton
-from fla.utils import device
 
-from fla.modules.activations import (
-    sigmoid, logsigmoid, swish, sqrelu, swiglu,
-    fast_gelu_impl as gelu,
-)
+from fla.modules.activations import fast_gelu_impl as gelu
+from fla.modules.activations import logsigmoid, sigmoid, sqrelu, swiglu, swish
+from fla.utils import device
 
 DTYPE = torch.bfloat16
 
@@ -27,7 +25,7 @@ def fwdbwd(fn, *args):
         x_names=['B', 'T', 'D'],
         x_vals=[
             (b, t, d)
-            for b in [4]             
+            for b in [4]
             for t in [512, 1024, 2048, 4096, 8192]
             for d in [1024, 2048, 4096]
         ],
@@ -88,9 +86,9 @@ def benchmark(B, T, D, provider):
         raise ValueError(provider)
 
     if provider.endswith('fwd'):
-        fn_to_call = lambda: fwd(fn, *inputs)
+        fn_to_call = lambda: fwd(fn, *inputs)  # noqa: E731
     elif provider.endswith('fwdbwd'):
-        fn_to_call = lambda: fwdbwd(fn, *inputs)
+        fn_to_call = lambda: fwdbwd(fn, *inputs)  # noqa: E731
     else:
         raise ValueError(provider)
 
