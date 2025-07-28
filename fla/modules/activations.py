@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, get_multiprocessor_count, input_guard, is_amd
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_amd
 
 try:
     from torch.distributed.tensor import DTensor
@@ -16,30 +16,67 @@ except (ImportError, AttributeError):
 
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
-sigmoid_fwd_codestring = """
-template <typename T> T sigmoid_fwd(T x) {
-    return 1.0f / (1.0f + ::exp(-float(x)));
-}
-"""
-sigmoid_bwd_codestring = """
-template <typename T> T sigmoid_bwd(T x, T g) {
-    float x_sigmoid = 1.0f / (1.0f + ::exp(-float(x)));
-    return float(g) * x_sigmoid * (1.0f - x_sigmoid);
-}
-"""
 
-sigmoid_fwd_jit_fn = torch.cuda.jiterator._create_jit_fn(sigmoid_fwd_codestring)
-sigmoid_bwd_jit_fn = torch.cuda.jiterator._create_jit_fn(sigmoid_bwd_codestring)
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D']
+)
+@triton.jit(do_not_specialize=['T'])
+def sigmoid_fwd_kernel(
+    x, y,
+    T,
+    B: tl.constexpr,
+    D: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs = pid * B + tl.arange(0, B)
+    mask = offs < T
+    x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
+    y_val = 1.0 / (1.0 + tl.exp(-x_val))
+    tl.store(y + offs, y_val.to(y.dtype.element_ty), mask=mask)
 
 
-@torch.compiler.disable
-def sigmoid_fwd(x):
-    return sigmoid_fwd_jit_fn(x)
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D']
+)
+@triton.jit(do_not_specialize=['T'])
+def sigmoid_bwd_kernel(
+    x, dy, dx,
+    T,
+    B: tl.constexpr,
+    D: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs = pid * B + tl.arange(0, B)
+    mask = offs < T
+    x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
+    g_val = tl.load(dy + offs, mask=mask, other=0.).to(tl.float32)
+    s = 1.0 / (1.0 + tl.exp(-x_val))
+    dx_val = g_val * s * (1.0 - s)
+    tl.store(dx + offs, dx_val.to(dx.dtype.element_ty), mask=mask)
 
 
-@torch.compiler.disable
-def sigmoid_bwd(x, g):
-    return sigmoid_bwd_jit_fn(x, g)
+def sigmoid_fwd(x: torch.Tensor) -> torch.Tensor:
+    T, D = x.numel(), x.shape[-1]
+    y = torch.empty_like(x)
+    sigmoid_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](x, y, T=T, D=D)
+    return y
+
+
+def sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
+    T, D = x.numel(), x.shape[-1]
+    dx = torch.empty_like(x)
+    sigmoid_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](x, dy, dx, T=T, D=D)
+    return dx
 
 
 class SigmoidFunction(torch.autograd.Function):
@@ -60,7 +97,8 @@ sigmoid = SigmoidFunction.apply
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D']
@@ -71,8 +109,8 @@ def logsigmoid_fwd_kernel(
     y,
     temperature,
     T,
-    D: tl.constexpr,
-    B: tl.constexpr
+    B: tl.constexpr,
+    D: tl.constexpr
 ):
     i = tl.program_id(0)
     o_i = i * B + tl.arange(0, B)
@@ -87,7 +125,8 @@ def logsigmoid_fwd_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D']
@@ -99,8 +138,8 @@ def logsigmoid_bwd_kernel(
     dy,
     temperature,
     T,
-    D: tl.constexpr,
-    B: tl.constexpr
+    B: tl.constexpr,
+    D: tl.constexpr
 ):
     i = tl.program_id(0)
     o_i = i * B + tl.arange(0, B)
@@ -114,31 +153,27 @@ def logsigmoid_bwd_kernel(
 
 def logsigmoid_fwd(x: torch.Tensor, temperature: float = 1.) -> torch.Tensor:
     T, D = x.numel(), x.shape[-1]
-    B = triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index)))
     y = torch.empty_like(x)
-    logsigmoid_fwd_kernel[(triton.cdiv(T, B),)](
+    logsigmoid_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         y=y,
         temperature=temperature,
         T=T,
         D=D,
-        B=B
     )
     return y
 
 
 def logsigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, temperature: float = 1.) -> torch.Tensor:
     T, D = x.numel(), x.shape[-1]
-    B = triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index)))
     dx = torch.empty_like(x)
-    logsigmoid_bwd_kernel[(triton.cdiv(T, B),)](
+    logsigmoid_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         dx=dx,
         dy=dy,
         temperature=temperature,
         T=T,
         D=D,
-        B=B
     )
     return dx
 
@@ -163,31 +198,67 @@ def logsigmoid(x: torch.Tensor, temperature: float = 1.) -> torch.Tensor:
     return LogSigmoidFunction.apply(x, temperature)
 
 
-swish_fwd_codestring = """
-template <typename T> T swish_fwd(T x) {
-    float x_sigmoid = 1.0f / (1.0f + ::exp(-float(x)));
-    return float(x) * x_sigmoid;
-}
-"""
-swish_bwd_codestring = """
-template <typename T> T swish_bwd(T x, T g) {
-    float x_sigmoid = 1.0f / (1.0f + ::exp(-float(x)));
-    return float(g) * x_sigmoid * (1.0f - float(x) * x_sigmoid + float(x));
-}
-"""
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D']
+)
+@triton.jit(do_not_specialize=['T'])
+def swish_fwd_kernel(
+    x, y,
+    T,
+    B: tl.constexpr,
+    D: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs = pid * B + tl.arange(0, B)
+    mask = offs < T
+    x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
+    s = 1.0 / (1.0 + tl.exp(-x_val))
+    y_val = x_val * s
+    tl.store(y + offs, y_val.to(y.dtype.element_ty), mask=mask)
 
-swish_fwd_jit_fn = torch.cuda.jiterator._create_jit_fn(swish_fwd_codestring)
-swish_bwd_jit_fn = torch.cuda.jiterator._create_jit_fn(swish_bwd_codestring)
+
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D']
+)
+@triton.jit(do_not_specialize=['T'])
+def swish_bwd_kernel(
+    x, dy, dx,
+    T,
+    B: tl.constexpr,
+    D: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs = pid * B + tl.arange(0, B)
+    mask = offs < T
+    x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
+    g_val = tl.load(dy + offs, mask=mask, other=0.).to(tl.float32)
+    s = 1.0 / (1.0 + tl.exp(-x_val))
+    dx_val = g_val * s * (1.0 + x_val * (1.0 - s))
+    tl.store(dx + offs, dx_val.to(dx.dtype.element_ty), mask=mask)
 
 
-@torch.compiler.disable
-def swish_fwd(x):
-    return swish_fwd_jit_fn(x)
+def swish_fwd(x: torch.Tensor) -> torch.Tensor:
+    T, D = x.numel(), x.shape[-1]
+    y = torch.empty_like(x)
+    swish_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](x, y, T=T, D=D)
+    return y
 
 
-@torch.compiler.disable
-def swish_bwd(x, g):
-    return swish_bwd_jit_fn(x, g)
+def swish_bwd(x: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
+    T, D = x.numel(), x.shape[-1]
+    dx = torch.empty_like(x)
+    swish_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](x, dy, dx, T=T, D=D)
+    return dx
 
 
 class SwishFunction(torch.autograd.Function):
@@ -224,7 +295,7 @@ def bias_gelu(y, bias):
 # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
 @torch.compile
 def bias_gelu_bwd(g, y, bias):
-    """Assume that y has shape (B, D) and bias has shape (D)"""
+    """Assume that y has shape (B, D=D) and bias has shape (D)"""
     x = bias + y
     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
     # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
@@ -323,76 +394,89 @@ class SquaredReLUFunction(torch.autograd.Function):
 sqrelu = SquaredReLUFunction.apply
 
 
-swiglu_fwd_codestring = """
-template <typename T> T swiglu_fwd(T x, T y) {
-    return float(x) * float(y) / (1.0f + ::exp(-float(x)));
-}
-"""
-swiglu_bwd_codestring = """
-template <typename T> T swiglu_bwd(T x, T y, T g, T& dx, T& dy) {
-    float x_sigmoid = 1.0f / (1.0f + ::exp(-float(x)));
-    dx = x_sigmoid * (1 + float(x) * (1.0f - x_sigmoid)) * float(g) * float(y);
-    dy = float(x) * x_sigmoid * float(g);
-}
-"""
-
-swiglu_fwdbwd_codestring = """
-template <typename T> T swiglu_fwdbwd(T x, T y, T g, T& dx, T& dy, T& z) {
-    float x_sigmoid = 1.0f / (1.0f + ::exp(-float(x)));
-    float x_swish = float(x) * x_sigmoid;
-    dx = x_sigmoid * (1 + float(x) * (1.0f - x_sigmoid)) * float(g) * float(y);
-    dy = x_swish * float(g);
-    z = x_swish * float(y);
-}
-"""
-
-
-swiglu_fwd_jit_fn = torch.cuda.jiterator._create_jit_fn(swiglu_fwd_codestring)
-swiglu_bwd_jit_fn = torch.cuda.jiterator._create_multi_output_jit_fn(swiglu_bwd_codestring, num_outputs=2)
-swiglu_fwdbwd_jit_fn = torch.cuda.jiterator._create_multi_output_jit_fn(swiglu_fwdbwd_codestring, num_outputs=3)
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D']
+)
+@triton.jit(do_not_specialize=['T'])
+def swiglu_fwd_kernel(
+    x, y, z,
+    T,
+    B: tl.constexpr,
+    D: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs = pid * B + tl.arange(0, B)
+    mask = offs < T
+    x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
+    y_val = tl.load(y + offs, mask=mask, other=0.).to(tl.float32)
+    s = 1.0 / (1.0 + tl.exp(-x_val))
+    z_val = x_val * s * y_val
+    tl.store(z + offs, z_val.to(z.dtype.element_ty), mask=mask)
 
 
-@torch.compiler.disable
-def swiglu_fwd(x, y):
-    return swiglu_fwd_jit_fn(x, y)
+@triton.heuristics({
+    'HAS_WEIGHT': lambda args: args['z'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D']
+)
+@triton.jit(do_not_specialize=['T'])
+def swiglu_fwdbwd_kernel(
+    x, y, g, dx, dy, z,
+    T,
+    B: tl.constexpr,
+    D: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs = pid * B + tl.arange(0, B)
+    mask = offs < T
+    x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
+    y_val = tl.load(y + offs, mask=mask, other=0.).to(tl.float32)
+    g_val = tl.load(g + offs, mask=mask, other=0.).to(tl.float32)
+
+    s = 1.0 / (1.0 + tl.exp(-x_val))
+    x_s = x_val * s
+    dx_val = g_val * s * (1.0 + x_val * (1.0 - s)) * y_val
+    dy_val = g_val * x_s
+
+    tl.store(dx + offs, dx_val.to(dx.dtype.element_ty), mask=mask)
+    tl.store(dy + offs, dy_val.to(dy.dtype.element_ty), mask=mask)
+    if HAS_WEIGHT:
+        z_val = x_s * y_val
+        tl.store(z + offs, z_val.to(z.dtype.element_ty),  mask=mask)
 
 
-@torch.compiler.disable
-def swiglu_bwd(x, y, g):
-    return swiglu_bwd_jit_fn(x, y, g)
+def swiglu_fwd(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    T, D = x.numel(), x.shape[-1]
+    z = torch.empty_like(x)
+    swiglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](x, y, z, T=T, D=D)
+    return z
 
 
-@torch.compiler.disable
-def swiglu_fwdbwd(x, y, g):
-    return swiglu_fwdbwd_jit_fn(x, y, g)
-
-
-@torch.compile
-def swiglu_fwd_torch(x, y):
-    return (F.silu(x.float()) * y).to(x.dtype)
-
-
-@torch.compile
-def swiglu_bwd_torch(x, y, g):
-    dtype = x.dtype
-    x, y, g = x.float(), y.float(), g.float()
-    x_sigmoid = x.sigmoid()
-    x_swish = x * x_sigmoid
-    dx = x_sigmoid * (1 + x * (1.0 - x_sigmoid)) * g * y
-    dy = x_swish * g
-    return dx.to(dtype), dy.to(dtype)
-
-
-@torch.compile
-def swiglu_fwdbwd_torch(x, y, g):
-    dtype = x.dtype
-    x, y, g = x.float(), y.float(), g.float()
-    x_sigmoid = x.sigmoid()
-    x_swish = x * x_sigmoid
-    dx = x_sigmoid * (1 + x * (1.0 - x_sigmoid)) * g * y
-    dy = x_swish * g
-    z = x_swish * y
-    return dx.to(dtype), dy.to(dtype), z.to(dtype)
+def swiglu_fwdbwd(x: torch.Tensor, y: torch.Tensor, g: torch.Tensor, use_weight: bool = False):
+    T, D = x.numel(), x.shape[-1]
+    dx = torch.empty_like(x)
+    dy = torch.empty_like(x)
+    if use_weight:
+        # recomputed for weight grad
+        z = torch.empty_like(x)
+    else:
+        z = None
+    swiglu_fwdbwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](x, y, g, dx, dy, z, T=T, D=D)
+    if use_weight:
+        return dx, dy, z
+    return dx, dy
 
 
 class SwiGLUFunction(torch.autograd.Function):
@@ -406,18 +490,12 @@ class SwiGLUFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, y):
         ctx.save_for_backward(x, y)
-        if torch.compiler.is_compiling() or isinstance(x, DTensor):
-            return swiglu_fwd_torch(x, y)
-        else:
-            return swiglu_fwd(x, y)
+        return swiglu_fwd(x, y)
 
     @staticmethod
     def backward(ctx, dout):
         x, y = ctx.saved_tensors
-        if torch.compiler.is_compiling() or isinstance(x, DTensor):
-            return swiglu_bwd_torch(x, y, dout)
-        else:
-            return swiglu_bwd(x, y, dout)
+        return swiglu_fwdbwd(x, y, dout)
 
 
 class SwiGLULinearFunction(torch.autograd.Function):
@@ -433,11 +511,7 @@ class SwiGLULinearFunction(torch.autograd.Function):
     @staticmethod
     @autocast_custom_fwd
     def forward(ctx, x, y, weight, bias):
-        with torch.no_grad():
-            if torch.compiler.is_compiling() or isinstance(x, DTensor):
-                z = swiglu_fwd_torch(x, y)
-            else:
-                z = swiglu_fwd(x, y)
+        z = swiglu_fwd(x, y)
         out = F.linear(z, weight, bias)
         # We don't store z, will be recomputed in the backward pass to save memory
         ctx.save_for_backward(x, y, weight)
@@ -450,11 +524,7 @@ class SwiGLULinearFunction(torch.autograd.Function):
         x, y, weight = ctx.saved_tensors
         dout = dout.reshape(-1, dout.shape[-1])
         dz = F.linear(dout, weight.t()).view_as(x)
-        with torch.no_grad():
-            if torch.compiler.is_compiling() or isinstance(x, DTensor):
-                dx, dy, z = swiglu_fwdbwd_torch(x, y, dz)
-            else:
-                dx, dy, z = swiglu_fwdbwd(x, y, dz)
+        dx, dy, z = swiglu_fwdbwd(x, y, dz, use_weight=True)
         dlinear_weight = torch.einsum("bo,bi->oi", dout, z.reshape(-1, z.shape[-1]))
         dlinear_bias = None if ctx.linear_bias_is_none else dout.sum(0)
         return dx, dy, dlinear_weight, dlinear_bias
