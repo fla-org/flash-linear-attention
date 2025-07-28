@@ -61,7 +61,8 @@ class MomBlock(nn.Module):
                     topk=config.topk,
                     capacity=config.capacity,
                     shared_mem=config.shared_mem,
-                    single_kv_proj=config.single_kv_proj
+                    single_kv_proj=config.single_kv_proj,
+                    aux_loss_scale=config.aux_loss_scale,
                 )
             else:
                 raise NotImplementedError(f"The MoM backend {config.mom_backend} is not currently supported.")
@@ -86,7 +87,7 @@ class MomBlock(nn.Module):
         residual = hidden_states
         if hasattr(self, 'attn_norm'):
             hidden_states = self.attn_norm(hidden_states)
-        hidden_states, attentions, past_key_values, router_logits = self.attn(
+        hidden_states, attentions, past_key_values, aux_loss = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -102,7 +103,7 @@ class MomBlock(nn.Module):
         hidden_states = self.mlp(hidden_states, **kwargs)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, attentions, past_key_values, router_logits)
+        outputs = (hidden_states, attentions, past_key_values, aux_loss)
 
         return outputs
 
@@ -154,7 +155,7 @@ class MomPreTrainedModel(PreTrainedModel):
 
 @dataclass
 class MomOutputWithPast(BaseModelOutputWithPast):
-    router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
+    aux_loss: Optional[torch.FloatTensor] = None
 
 
 class MomModel(MomPreTrainedModel):
@@ -217,14 +218,14 @@ class MomModel(MomPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
-        all_router_logits = ()
+        total_aux_loss = 0.
 
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values, router_logits = self._gradient_checkpointing_func(
+                hidden_states, attentions, past_key_values, aux_loss = self._gradient_checkpointing_func(
                     layer.__call__,
                     hidden_states,
                     attention_mask,
@@ -234,7 +235,7 @@ class MomModel(MomPreTrainedModel):
                     **kwargs
                 )
             else:
-                hidden_states, attentions, past_key_values, router_logits = layer(
+                hidden_states, attentions, past_key_values, aux_loss = layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
@@ -245,7 +246,8 @@ class MomModel(MomPreTrainedModel):
 
             if output_attentions:
                 all_attns += (attentions,)
-            all_router_logits += (router_logits,)
+            if aux_loss is not None:
+                total_aux_loss = total_aux_loss + aux_loss
 
         hidden_states = self.norm(hidden_states)
 
@@ -260,14 +262,13 @@ class MomModel(MomPreTrainedModel):
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
             attentions=all_attns,
-            router_logits=all_router_logits
+            aux_loss=total_aux_loss
         )
 
 
 @dataclass
 class MomCausalLMOutputWithPast(CausalLMOutputWithPast):
     aux_loss: Optional[torch.FloatTensor] = None
-    router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 
 class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
@@ -282,6 +283,7 @@ class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
         self.num_memories = config.num_memories
         self.topk = config.topk
         self.aux_loss_scale = config.aux_loss_scale
+        self.num_hidden_layers = config.num_hidden_layers
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -410,18 +412,18 @@ class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
             else:
                 loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
 
-            valid_router_logits = tuple(
-                logits
-                for logits in (outputs.router_logits if return_dict else outputs[-1])
-                if logits is not None
-            )
-            aux_loss = load_balancing_loss_func(
-                valid_router_logits,
-                self.num_memories,
-                self.topk,
-                use_layer_wise_balance=self.config.use_layer_wise_balance,
-            )
-            aux_loss *= self.aux_loss_scale
+            # valid_router_logits = tuple(
+            #     logits
+            #     for logits in (outputs.router_logits if return_dict else outputs[-1])
+            #     if logits is not None
+            # )
+            # aux_loss = load_balancing_loss_func(
+            #     valid_router_logits,
+            #     self.num_memories,
+            #     self.topk,
+            #     use_layer_wise_balance=self.config.use_layer_wise_balance,
+            # )
+            aux_loss = self.aux_loss_scale * outputs.aux_loss / self.num_hidden_layers
 
             loss += aux_loss
 
@@ -435,7 +437,6 @@ class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            router_logits=outputs.router_logits,
             aux_loss=aux_loss
         )
 

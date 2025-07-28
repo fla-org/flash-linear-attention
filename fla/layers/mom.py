@@ -300,6 +300,7 @@ class MomAttention(nn.Module):
         capacity: float = 1.0,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
+        aux_loss_scale: float = 0.01,
         **kwargs
     ) -> MomAttention:
         super().__init__()
@@ -499,35 +500,36 @@ class MomAttention(nn.Module):
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             
             conv_cu_seqlens = cu_seqlens
-            if self.training and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < self.q_conv1d.kernel_size[0]:
+            if seq_len != 1 and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < self.q_conv1d.kernel_size[0]:
+                assert self.training, "Memory degradation should only happen during training."
                 # During training, some memories may degrade and the numbers of tokens routed to them are smaller than
                 # short conv kernel size which is not supported, so we set cu_seqlens to None during pretraining.
                 conv_cu_seqlens = None
 
-            conv_q = self.prepare_recurrent_state(conv_state_q[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            conv_q = self.prepare_recurrent_state(conv_state_q[0], conv_cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
             cu_q, conv_q_new = self.q_conv1d(
                 x=cu_q,
                 cache=conv_q,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
             )
-            conv_state_q[0] = self.handle_recurrent_state(conv_state_q[0], conv_q_new, cu_seqlens, cu_seqlen_all[0], reverse_indices)
-            conv_k = self.prepare_recurrent_state(conv_state_k[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            conv_state_q[0] = self.handle_recurrent_state(conv_state_q[0], conv_q_new, conv_cu_seqlens, cu_seqlen_all[0], reverse_indices)
+            conv_k = self.prepare_recurrent_state(conv_state_k[0], conv_cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
             cu_k, conv_k_new = self.k_conv1d(
                 x=cu_k,
                 cache=conv_k,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
             )
-            conv_state_k[0] = self.handle_recurrent_state(conv_state_k[0], conv_k_new, cu_seqlens, cu_seqlen_all[0], reverse_indices)
-            conv_v = self.prepare_recurrent_state(conv_state_v[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            conv_state_k[0] = self.handle_recurrent_state(conv_state_k[0], conv_k_new, conv_cu_seqlens, cu_seqlen_all[0], reverse_indices)
+            conv_v = self.prepare_recurrent_state(conv_state_v[0], conv_cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
             cu_v, conv_v_new = self.v_conv1d(
                 x=cu_v,
                 cache=conv_v,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
             )
-            conv_state_v[0] = self.handle_recurrent_state(conv_state_v[0], conv_v_new, cu_seqlens, cu_seqlen_all[0], reverse_indices)
+            conv_state_v[0] = self.handle_recurrent_state(conv_state_v[0], conv_v_new, conv_cu_seqlens, cu_seqlen_all[0], reverse_indices)
 
         else:
             q, k, v = self.silu(q), self.silu(k), self.silu(v),
@@ -656,7 +658,9 @@ class MomAttention(nn.Module):
         if origin_cu_seqlens is not None:
             indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
             o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
-        return o, None, past_key_values, router_logits
+
+        aux_loss = self.cal_aux_loss(routing_weights_full, selected_memories) if self.training else None
+        return o, None, past_key_values, aux_loss
 
     def shared_o(
         self,
@@ -792,3 +796,28 @@ class MomAttention(nn.Module):
         else:
             recurrent_state = recurrent_state_new
         return recurrent_state
+
+    def cal_aux_loss(self, routing_weights_full, selected_experts):
+        # cast the expert indices to int64, otherwise one-hot encoding will fail
+        if selected_experts.dtype != torch.int64:
+            selected_experts = selected_experts.to(torch.int64)
+
+        if len(selected_experts.shape) == 2:
+            selected_experts = selected_experts.unsqueeze(2)
+
+        expert_mask = torch.nn.functional.one_hot(selected_experts, self.num_memories)
+
+        # For a given token, determine if it was routed to a given expert.
+        expert_mask = torch.max(expert_mask, axis=-2).values
+
+        # cast to float32 otherwise mean will fail
+        expert_mask = expert_mask.to(torch.float32)
+        tokens_per_group_and_expert = torch.mean(expert_mask, axis=-2)
+
+        router_prob_per_group_and_expert = torch.mean(routing_weights_full, axis=-2)
+
+        # ✨ balance loss for this layer
+        balance_loss = torch.mean(
+            tokens_per_group_and_expert * router_prob_per_group_and_expert
+        ) * (self.num_memories**2)
+        return balance_loss
