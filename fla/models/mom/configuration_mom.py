@@ -37,7 +37,7 @@ class MomConfig(PretrainedConfig):
         capacity: float = 1.0,
         use_layer_wise_balance: bool = True,
         aux_loss_scale: float = 0.01,
-        shared_mem: bool = False,
+        shared_mem: bool = True,
         single_kv_proj: bool = False,
         mom_backend: str = 'gated_deltanet',
         fuse_norm: bool = True,

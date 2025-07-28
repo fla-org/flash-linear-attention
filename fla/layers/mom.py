@@ -642,12 +642,16 @@ class MomAttention(nn.Module):
             if attention_mask is not None:
                 indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -seq_len:])
                 shared_hidden_states = index_first_axis(rearrange(shared_hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
+                o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
             g = rearrange(self.g_proj(shared_hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
         else:
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
+
+        if attention_mask is not None:
+            o = pad_input(o.squeeze(0), indices, batch_size, seq_len)
 
         if origin_cu_seqlens is not None:
             indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
