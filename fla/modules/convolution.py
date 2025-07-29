@@ -225,9 +225,15 @@ def causal_conv1d_bwd_kernel(
         if HAS_WEIGHT:
             # [BT, BD]
             b_wdy = b_wdy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)
-            # [BD]
-            b_dw = tl.sum(b_dy * b_x, 0)
-            tl.store(dw + i_tg * D*W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+            if i_t * BT >= W:
+                # [BD]
+                b_dw = tl.sum(b_dy * b_x, 0)
+                tl.store(dw + i_tg * D*W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+            else:
+                # TBD
+                pass
+
+
         if HAS_BIAS and i_w == 0:
             b_db += tl.sum(b_dy, 0)
         b_dx += b_wdy
@@ -413,7 +419,7 @@ def causal_conv1d_bwd(
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
     dr = dy if residual is not None else None
-    dh0 = torch.empty_like(initial_state) if initial_state is not None else None
+    dh0 = torch.zeros_like(initial_state) if initial_state is not None else None
 
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
