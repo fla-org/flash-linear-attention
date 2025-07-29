@@ -443,12 +443,7 @@ def token_shift_bwd(
     BD = triton.next_power_of_2(D)
     dx = torch.empty_like(dy)
     if has_init_cache:
-        if cu_seqlens is not None:
-            # TODO It's not clear how to design and calculate the gradient, need to
-            # think about it later.
-            raise NotImplementedError("Initial cache is not supported for variable length sequences")
-        else:
-            grad_cache_out = torch.empty((N, D), device=dy.device, dtype=dy.dtype)
+        grad_cache_out = torch.empty((N, D), device=dy.device, dtype=dy.dtype)
     else:
         grad_cache_out = None
     if use_short_kernel:
