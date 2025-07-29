@@ -137,6 +137,8 @@ def causal_conv1d_fwd_kernel(
 @triton.heuristics({
     'HAS_WEIGHT': lambda args: args['dw'] is not None,
     'HAS_BIAS': lambda args: args['db'] is not None,
+    'HAS_DH0': lambda args: args['dh0'] is not None,
+    'HAS_DHT': lambda args: args['dht'] is not None,
     'HAS_RESIDUAL': lambda args: args['residual'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
@@ -155,12 +157,13 @@ def causal_conv1d_bwd_kernel(
     weight,
     bias,
     residual,
+    initial_state,
+    dh0,
     dht,
     dy,
     dx,
     dw,
     db,
-    dh0,
     cu_seqlens,
     chunk_indices,
     B,
@@ -174,6 +177,8 @@ def causal_conv1d_bwd_kernel(
     ACTIVATION: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_DH0: tl.constexpr,
+    HAS_DHT: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -202,6 +207,7 @@ def causal_conv1d_bwd_kernel(
     b_dx = tl.zeros((BT, BD), dtype=tl.float32)
     if HAS_BIAS:
         b_db = tl.zeros((BD,), dtype=tl.float32)
+
     for i_w in tl.static_range(0, W):
         p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
 
@@ -225,9 +231,27 @@ def causal_conv1d_bwd_kernel(
         if HAS_BIAS and i_w == 0:
             b_db += tl.sum(b_dy, 0)
         b_dx += b_wdy
+
     if HAS_BIAS:
         b_db = tl.cast(b_db, dtype=db.dtype.element_ty, fp_downcast_rounding='rtne')
         tl.store(db + i_tg * D + o_d, b_db, mask=m_d)
+
+    if HAS_DHT:
+        if (i_t+1) * BT >= T-W:
+            start_tok = max(0, T - (W - 1))
+            offset = i_t * BT + tl.arange(0, BT)
+            tok_idx = offset - start_tok
+            mask = (offset >= start_tok) & (offset < T)
+            w_idx = 1 + tok_idx
+            dht_off = i_n * D * W + o_d[None, :] * W + w_idx[:, None]
+            b_dht = tl.load(dht + dht_off,
+                            mask=mask[:, None] & m_d[None, :],
+                            other=0.).to(tl.float32)
+            b_dx += b_dht
+
+    if HAS_DH0:
+        if i_t == 0:
+            pass
 
     p_dx = tl.make_block_ptr(dx + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
     tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
@@ -383,6 +407,7 @@ def causal_conv1d_bwd(
             initial_state=initial_state,
             activation=None,
             cu_seqlens=cu_seqlens,
+            output_final_state=False
         )
     dx = torch.empty_like(x)
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
@@ -397,12 +422,13 @@ def causal_conv1d_bwd(
         weight=weight,
         bias=bias,
         residual=residual,
+        initial_state=initial_state,
+        dh0=dh0,
         dht=dht,
         dy=dy,
         dx=dx,
         dw=dw,
         db=db,
-        dh0=dh0,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         B=B,
@@ -493,8 +519,6 @@ class CausalConv1dFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor] = None):
-        if dht is not None:
-            raise NotImplementedError("The gradient of the final state is not supported yet.")
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
