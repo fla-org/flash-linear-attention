@@ -653,7 +653,7 @@ def test_conv_cache_backward(
     weight = torch.randn(D, W, device=device, dtype=dtype, requires_grad=True)
     bias = torch.randn(D, device=device, dtype=dtype, requires_grad=True) if has_bias else None
     residual = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True) if has_residual else None
-    cache = torch.randn(B, D, W - 1, device=device, dtype=dtype, requires_grad=True)
+    cache = torch.zeros(B, D, W - 1, device=device, dtype=dtype, requires_grad=True)
  
     # --- 参考实现 ---
     def ref_func(x, weight, bias, residual, cache):
