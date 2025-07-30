@@ -407,6 +407,8 @@ is_tma_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 9) \
     hasattr(triton.language, '_experimental_make_tensor_descriptor')
 
 if is_nvidia and not is_tf32_supported:
+    # Make old card happy, since triton will use tf32 by default.
+    # This is a workaround for old nvidia card.
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
 if is_tma_supported:
