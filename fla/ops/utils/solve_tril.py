@@ -58,10 +58,15 @@ def solve_tril_16x16_kernel(
     Ai = Ai + (bos*H + i_h) * 16
 
     offset = (i_t * 16) % BT
-    p_A = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * 16, offset), (16, 16), (1, 0))
-    p_Ai = tl.make_block_ptr(Ai, (T, 16), (H*16, 1), (i_t * 16, 0), (16, 16), (1, 0))
-    # [16, 16]
-    b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+    if not USE_TMA:
+        p_A = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * 16, offset), (16, 16), (1, 0))
+        p_Ai = tl.make_block_ptr(Ai, (T, 16), (H*16, 1), (i_t * 16, 0), (16, 16), (1, 0))
+        # [16, 16]
+        b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
+    else:
+        desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
+        desc_o = make_tensor_descriptor(Ai, [T, 16], [H*16, 1], [16, 16])
+        b_A = desc.load([i_t * 16 + offset, 0]).to(tl.float32)
     b_A = -tl.where(m_A, b_A, 0)
 
     for i in range(2, min(16, T - i_t * 16)):
@@ -70,7 +75,10 @@ def solve_tril_16x16_kernel(
         b_a = b_a + tl.sum(b_a[:, None] * b_A, 0)
         b_A = tl.where((o_i == i)[:, None], b_a, b_A)
     b_A += m_I
-    tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    if not USE_TMA:
+        tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    else:
+        desc_o.store([i_t * 16 + offset, 0], b_A.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @triton.heuristics({
@@ -112,12 +120,20 @@ def merge_16x16_to_32x32_inverse_kernel(
     A += (bos * H + i_h) * BT
     Ai += (bos * H + i_h) * BT
 
-    p_A_11 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_A_22 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
+    if not USE_TMA:
+        p_A_11 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
+        p_A_22 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
+        b_Ai_11 = tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32)
+        b_Ai_22 = tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32)
+    else:
+        desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
+        desc_o = make_tensor_descriptor(Ai, [T, BT], [H*BT, 1], [16, 16])
+        b_Ai_11 = desc.load([i_t * BT + 0, 0]).to(tl.float32)
+        b_Ai_22 = desc.load([i_t * BT + 16, 16]).to(tl.float32)
 
     # [16, 16]
-    b_Ai_11 = -tl.where(m_A, tl.load(p_A_11, boundary_check=(0, 1)).to(tl.float32), 0)
-    b_Ai_22 = -tl.where(m_A, tl.load(p_A_22, boundary_check=(0, 1)).to(tl.float32), 0)
+    b_Ai_11 = -tl.where(m_A, b_Ai_11, 0)
+    b_Ai_22 = -tl.where(m_A, b_Ai_22, 0)
 
     for i in range(2, min(16, T - i_t * BT)):
         b_a_11 = -tl.load(A + (i_t * BT + i) * H*BT + o_i)
@@ -131,16 +147,25 @@ def merge_16x16_to_32x32_inverse_kernel(
     b_Ai_11 += m_I
     b_Ai_22 += m_I
 
-    p_A_21 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
+    if not USE_TMA:
+        p_A_21 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
+        b_A_21 = tl.load(p_A_21, boundary_check=(0, 1)).to(tl.float32)
+    else:
+        b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
+
     b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION), b_Ai_11, input_precision=DOT_PRECISION)
 
-    p_Ai_11 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
-    p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
-    p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
-    tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
-    tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    if not USE_TMA:
+        p_Ai_11 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT, 0), (16, 16), (1, 0))
+        p_Ai_21 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 16, 0), (16, 16), (1, 0))
+        p_Ai_22 = tl.make_block_ptr(Ai, (T, BT), (H*BT, 1), (i_t * BT + 16, 16), (16, 16), (1, 0))
+        tl.store(p_Ai_11, b_Ai_11.to(p_Ai_11.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+        tl.store(p_Ai_22, b_Ai_22.to(p_Ai_22.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+        tl.store(p_Ai_21, b_Ai_21.to(p_Ai_21.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
+    else:
+        desc_o.store([i_t * BT + 0, 0], b_Ai_11.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 0], b_Ai_21.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * BT + 16, 16], b_Ai_22.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @triton.heuristics({
