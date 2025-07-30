@@ -38,7 +38,14 @@ if not is_gather_supported:
 else:
     gather = tl.gather
 
-if not hasattr(triton.language, '_experimental_make_tensor_descriptor'):
+
+if hasattr(triton.language, '_experimental_make_tensor_descriptor'):
+    # For Triton 3.3.x
+    make_tensor_descriptor = triton.language._experimental_make_tensor_descriptor
+elif hasattr(triton.language, 'make_tensor_descriptor'):
+    # For Triton 3.4.x and later
+    make_tensor_descriptor = triton.language.make_tensor_descriptor
+else:
     """
     Fallback implementation when TMA is not supported.
     Returns None to indicate TMA descriptors are unavailable.
@@ -52,5 +59,3 @@ if not hasattr(triton.language, '_experimental_make_tensor_descriptor'):
         _builder=None,
     ):
         return None
-else:
-    make_tensor_descriptor = triton.language._experimental_make_tensor_descriptor
