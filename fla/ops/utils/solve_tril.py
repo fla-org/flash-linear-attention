@@ -60,13 +60,12 @@ def solve_tril_16x16_kernel(
     offset = (i_t * 16) % BT
     if not USE_TMA:
         p_A = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_t * 16, offset), (16, 16), (1, 0))
-        p_Ai = tl.make_block_ptr(Ai, (T, 16), (H*16, 1), (i_t * 16, 0), (16, 16), (1, 0))
         # [16, 16]
         b_A = tl.load(p_A, boundary_check=(0, 1)).to(tl.float32)
     else:
         desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
         desc_o = make_tensor_descriptor(Ai, [T, 16], [H*16, 1], [16, 16])
-        b_A = desc.load([i_t * 16 + offset, 0]).to(tl.float32)
+        b_A = desc.load([i_t * 16, offset]).to(tl.float32)
     b_A = -tl.where(m_A, b_A, 0)
 
     for i in range(2, min(16, T - i_t * 16)):
@@ -76,9 +75,10 @@ def solve_tril_16x16_kernel(
         b_A = tl.where((o_i == i)[:, None], b_a, b_A)
     b_A += m_I
     if not USE_TMA:
+        p_Ai = tl.make_block_ptr(Ai, (T, 16), (H*16, 1), (i_t * 16, 0), (16, 16), (1, 0))
         tl.store(p_Ai, b_A.to(p_Ai.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     else:
-        desc_o.store([i_t * 16 + offset, 0], b_A.to(desc_o.dtype, fp_downcast_rounding="rtne"))
+        desc_o.store([i_t * 16, 0], b_A.to(desc_o.dtype, fp_downcast_rounding="rtne"))
 
 
 @triton.heuristics({
