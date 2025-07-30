@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-from .asm import fp32_to_tf32_asm
 from .cumsum import (
     chunk_global_cumsum,
     chunk_global_cumsum_scalar,
@@ -49,6 +48,5 @@ __all__ = [
     'mean_pooling',
     'softmax_bwd',
     'softmax_fwd',
-    'fp32_to_tf32_asm',
     'solve_tril',
 ]
