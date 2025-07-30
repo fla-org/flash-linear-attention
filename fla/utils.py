@@ -9,7 +9,7 @@ import sys
 import warnings
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Callable, Dict, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
 import triton
@@ -372,17 +372,9 @@ def get_available_device() -> str:
         return 'cpu'
 
 
-@lru_cache(maxsize=None)
-def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa', 'npu']:
-    device = get_available_device()
-    if device == 'cuda':
-        return 'nvidia'
-    elif device == 'hip':
-        return 'amd'
-    elif device == 'xpu':
-        return 'intel'
-    else:
-        return device
+def map_triton_backend_to_torch_device() -> str:
+    backend = get_available_device()        # 'cuda' | 'hip' | 'xpu' | 'cpu' | ...
+    return {'cuda': 'cuda', 'hip': 'cuda', 'xpu': 'xpu'}.get(backend, backend)
 
 
 # For AMD GPUs, the triton backend is 'hip', while for Nvidia GPUs, the triton backend is 'cuda'.
@@ -390,11 +382,12 @@ def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa', 'npu']:
 # Therefore, we need to check the triton backend to determine the actual GPU vendor.
 device = get_available_device() if get_available_device() != 'hip' else 'cuda'
 device_torch_lib = getattr(torch, device)
-device_platform = _check_platform()
+device_platform = get_available_device()
+device_name = map_triton_backend_to_torch_device()
 
-is_amd = (device_platform == 'amd')
+is_amd = (device_platform == 'hip')
 is_intel = (device_platform == 'intel')
-is_nvidia = (device_platform == 'nvidia')
+is_nvidia = (device_platform == 'cuda')
 is_intel_alchemist = (is_intel and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
 is_nvidia_hopper = (is_nvidia and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] >= 9))
 use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
@@ -415,7 +408,7 @@ if is_tma_supported:
     logger.info('TMA is supported, using TMA by default.')
 
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-        return torch.empty(size, device=device_torch_lib.device(device_torch_lib.current_device()), dtype=torch.int8)
+        return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
 
     triton.set_allocator(alloc_fn)
 
