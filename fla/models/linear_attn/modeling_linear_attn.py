@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -23,6 +23,10 @@ from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as LinearAttentionMLP
 from fla.modules import RMSNorm
 from fla.modules.l2warp import l2_warp
+
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
+
 
 logger = logging.get_logger(__name__)
 
@@ -352,7 +356,8 @@ class LinearAttentionForCausalLM(LinearAttentionPreTrainedModel, GenerationMixin
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0
+        logits_to_keep: Optional[int] = 0,
+        **kwargs: Unpack[Dict]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
