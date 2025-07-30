@@ -51,6 +51,7 @@ else:
     Returns None to indicate TMA descriptors are unavailable.
     Just make triton compiler happy.
     """
+    @triton.jit
     def make_tensor_descriptor(
         base,
         shape,
