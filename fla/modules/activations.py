@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import div, exp, log
+from fla.ops.utils.op import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_amd
 
 try:
@@ -36,7 +36,7 @@ def sigmoid_fwd_kernel(
     offs = pid * B + tl.arange(0, B)
     mask = offs < T
     x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
-    y_val = div(1.0, (1.0 + exp(-x_val)))
+    y_val = 1.0 / (1.0 + exp(-x_val))
     tl.store(y + offs, y_val.to(y.dtype.element_ty), mask=mask)
 
 
@@ -60,7 +60,7 @@ def sigmoid_bwd_kernel(
     mask = offs < T
     x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
     g_val = tl.load(dy + offs, mask=mask, other=0.).to(tl.float32)
-    s = div(1.0, (1.0 + exp(-x_val)))
+    s = 1.0 / (1.0 + exp(-x_val))
     dx_val = g_val * s * (1.0 - s)
     tl.store(dx + offs, dx_val.to(dx.dtype.element_ty), mask=mask)
 
@@ -119,7 +119,7 @@ def logsigmoid_fwd_kernel(
     b_x = tl.load(x + o_i, mask=m_i, other=0.).to(tl.float32)
     b_m = tl.minimum(0., b_x)
     b_z = 1. + exp(-tl.abs(b_x))
-    b_y = div((b_m - log(b_z)), temperature)
+    b_y = (b_m - log(b_z)) / temperature
     tl.store(y + o_i, b_y.to(y.dtype.element_ty), mask=m_i)
 
 
@@ -147,7 +147,7 @@ def logsigmoid_bwd_kernel(
 
     b_x = tl.load(x + o_i, mask=m_i, other=0.).to(tl.float32)
     b_dy = tl.load(dy + o_i, mask=m_i, other=0.).to(tl.float32)
-    b_dx = b_dy * div((1. - tl.sigmoid(b_x)), temperature)
+    b_dx = b_dy * ((1. - tl.sigmoid(b_x)) / temperature)
     tl.store(dx + o_i, b_dx.to(dx.dtype.element_ty), mask=m_i)
 
 
@@ -217,7 +217,7 @@ def swish_fwd_kernel(
     offs = pid * B + tl.arange(0, B)
     mask = offs < T
     x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
-    s = div(1.0, (1.0 + exp(-x_val)))
+    s = 1.0 / (1.0 + exp(-x_val))
     y_val = x_val * s
     tl.store(y + offs, y_val.to(y.dtype.element_ty), mask=mask)
 
@@ -242,7 +242,7 @@ def swish_bwd_kernel(
     mask = offs < T
     x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
     g_val = tl.load(dy + offs, mask=mask, other=0.).to(tl.float32)
-    s = div(1.0, (1.0 + exp(-x_val)))
+    s = 1.0 / (1.0 + exp(-x_val))
     dx_val = g_val * s * (1.0 + x_val * (1.0 - s))
     tl.store(dx + offs, dx_val.to(dx.dtype.element_ty), mask=mask)
 
@@ -414,7 +414,7 @@ def swiglu_fwd_kernel(
     mask = offs < T
     x_val = tl.load(x + offs, mask=mask, other=0.).to(tl.float32)
     y_val = tl.load(y + offs, mask=mask, other=0.).to(tl.float32)
-    s = div(1.0, (1.0 + exp(-x_val)))
+    s = 1.0 / (1.0 + exp(-x_val))
     z_val = x_val * s * y_val
     tl.store(z + offs, z_val.to(z.dtype.element_ty), mask=mask)
 
@@ -445,7 +445,7 @@ def swiglu_fwdbwd_kernel(
     y_val = tl.load(y + offs, mask=mask, other=0.).to(tl.float32)
     g_val = tl.load(g + offs, mask=mask, other=0.).to(tl.float32)
 
-    s = div(1.0, (1.0 + exp(-x_val)))
+    s = 1.0 / (1.0 + exp(-x_val))
     x_s = x_val * s
     dx_val = g_val * s * (1.0 + x_val * (1.0 - s)) * y_val
     dy_val = g_val * x_s

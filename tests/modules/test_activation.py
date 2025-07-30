@@ -9,19 +9,19 @@ from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D'),
+    ('B', 'T', 'D', 'compile'),
     [
-        (1, 1, 64),
-        (2, 500, 128),
-        (2, 512, 128),
-        (3, 2048, 1200),
+        (1, 1, 64, False),
+        (2, 500, 128, False),
+        (2, 512, 128, True),
+        (3, 2048, 1200, True),
     ]
 )
-def test_sigmoid(B: int, T: int, D: int):
+def test_sigmoid(B: int, T: int, D: int, compile: bool):
     torch.manual_seed(42)
     x = torch.randn(B, T, D, device=device, requires_grad=True)
     y_ref = torch.sigmoid(x)
-    y_tri = sigmoid(x)
+    y_tri = sigmoid(x) if not compile else torch.compile(sigmoid)(x)
 
     g = torch.randn_like(y_ref)
     dx_ref = torch.autograd.grad(y_ref, x, g)[0]
@@ -32,19 +32,19 @@ def test_sigmoid(B: int, T: int, D: int):
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'temperature'),
+    ('B', 'T', 'D', 'temperature', 'compile'),
     [
-        (1, 1, 64, 1.0),
-        (2, 500, 128, 0.5),
-        (2, 512, 128, 0.5),
-        (3, 2048, 1200, 2.0),
+        (1, 1, 64, 1.0, False),
+        (2, 500, 128, 0.5, False),
+        (2, 512, 128, 0.5, True),
+        (3, 2048, 1200, 2.0, True),
     ]
 )
-def test_logsigmoid(B: int, T: int, D: int, temperature: float):
+def test_logsigmoid(B: int, T: int, D: int, temperature: float, compile: bool):
     torch.manual_seed(42)
     x = torch.randn(B, T, D, device=device, requires_grad=True)
     y_ref = F.logsigmoid(x) / temperature
-    y_tri = logsigmoid(x, temperature)
+    y_tri = logsigmoid(x, temperature) if not compile else torch.compile(logsigmoid)(x, temperature)
 
     g = torch.randn_like(y_ref)
     dx_ref = torch.autograd.grad(y_ref, x, g)[0]
@@ -55,19 +55,19 @@ def test_logsigmoid(B: int, T: int, D: int, temperature: float):
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D'),
+    ('B', 'T', 'D', 'compile'),
     [
-        (1, 1, 64),
-        (2, 500, 128),
-        (2, 512, 128),
-        (3, 2048, 1200),
+        (1, 1, 64, True),
+        (2, 500, 128, True),
+        (2, 512, 128, False),
+        (3, 2048, 1200, False),
     ]
 )
-def test_swish(B: int, T: int, D: int):
+def test_swish(B: int, T: int, D: int, compile: bool):
     torch.manual_seed(42)
     x = torch.randn(B, T, D, device=device, requires_grad=True)
     y_ref = F.silu(x)
-    y_tri = swish(x)
+    y_tri = swish(x) if not compile else torch.compile(swish)(x)
 
     g = torch.randn_like(y_ref)
     dx_ref = torch.autograd.grad(y_ref, x, g)[0]
@@ -78,21 +78,21 @@ def test_swish(B: int, T: int, D: int):
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D'),
+    ('B', 'T', 'D', 'compile'),
     [
-        (1, 1, 64),
-        (2, 500, 128),
-        (2, 512, 128),
-        (3, 2048, 1200),
+        (1, 1, 64, True),
+        (2, 500, 128, True),
+        (2, 512, 128, False),
+        (3, 2048, 1200, False),
     ]
 )
-def test_swiglu(B: int, T: int, D: int):
+def test_swiglu(B: int, T: int, D: int, compile: bool):
     torch.manual_seed(42)
     x = torch.randn(B, T, D, device=device, requires_grad=True)
     y = torch.randn(B, T, D, device=device, requires_grad=True)
 
     y_ref = F.silu(x) * y
-    y_tri = swiglu(x, y)
+    y_tri = swiglu(x, y) if not compile else torch.compile(swiglu)(x, y)
 
     g = torch.randn_like(y_ref)
     dx_ref, dy_ref = torch.autograd.grad(y_ref, (x, y), g)
@@ -104,15 +104,15 @@ def test_swiglu(B: int, T: int, D: int):
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'O'),
+    ('B', 'T', 'D', 'O', 'compile'),
     [
-        (2, 512, 128, 256),
-        (1, 1, 64, 32),
-        (2, 500, 128, 64),
-        (3, 2048, 1200, 600),
+        (2, 512, 128, 256, True),
+        (1, 1, 64, 32, False),
+        (2, 500, 128, 64, True),
+        (3, 2048, 1200, 600, False),
     ]
 )
-def test_swiglu_linear(B: int, T: int, D: int, O: int):  # noqa: E741
+def test_swiglu_linear(B: int, T: int, D: int, O: int, compile: bool):  # noqa: E741
     torch.manual_seed(42)
     x = torch.randn(B, T, D, device=device, requires_grad=True)
     y = torch.randn(B, T, D, device=device, requires_grad=True)
@@ -121,7 +121,7 @@ def test_swiglu_linear(B: int, T: int, D: int, O: int):  # noqa: E741
 
     z_ref = F.silu(x) * y
     out_ref = F.linear(z_ref, w, b)
-    out_tri = swiglu_linear(x, y, w, b)
+    out_tri = swiglu_linear(x, y, w, b) if not compile else torch.compile(swiglu_linear)(x, y, w, b)
 
     g = torch.randn_like(out_ref)
     dx_ref, dy_ref, dw_ref, db_ref = torch.autograd.grad(out_ref, (x, y, w, b), g)
