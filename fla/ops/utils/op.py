@@ -34,3 +34,15 @@ if not is_gather_supported:
         return src
 else:
     gather = tl.gather
+
+if not hasattr(triton.language, '_experimental_make_tensor_descriptor'):
+    def make_tensor_descriptor(
+        base,
+        shape,
+        strides,
+        block_shape,
+        _builder=None,
+    ):
+        return None
+else:
+    make_tensor_descriptor = triton.language._experimental_make_tensor_descriptor

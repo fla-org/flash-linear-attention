@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import os
 from typing import Optional
 
-import os
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
+from fla.ops.utils.op import make_tensor_descriptor
 from fla.utils import input_guard, is_amd, is_tma_supported
 
 FLA_TRIL_PRECISION = os.environ.get('FLA_TRIL_PRECISION', 'ieee')
@@ -191,8 +192,8 @@ def merge_16x16_to_64x64_inverse_kernel(
         b_Ai_33 = tl.load(p_A_33, boundary_check=(0, 1)).to(tl.float32)
         b_Ai_44 = tl.load(p_A_44, boundary_check=(0, 1)).to(tl.float32)
     else:
-        desc = tl._experimental_make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
-        desc_o = tl._experimental_make_tensor_descriptor(Ai, [T, BT], [H*BT, 1], [16, 16])
+        desc = make_tensor_descriptor(A, [T, BT], [H*BT, 1], [16, 16])
+        desc_o = make_tensor_descriptor(Ai, [T, BT], [H*BT, 1], [16, 16])
         b_Ai_11 = desc.load([i_t * BT + 0, 0]).to(tl.float32)
         b_Ai_22 = desc.load([i_t * BT + 16, 16]).to(tl.float32)
         b_Ai_33 = desc.load([i_t * BT + 32, 32]).to(tl.float32)

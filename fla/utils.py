@@ -403,12 +403,15 @@ use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1'
 is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
 is_gather_supported = hasattr(triton.language, 'gather')
 is_tma_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 9) \
-    and os.environ.get('FLA_NO_USE_TMA', '0') != '1'
+    and os.environ.get('FLA_NO_USE_TMA', '0') != '1' and \
+    hasattr(triton.language, '_experimental_make_tensor_descriptor')
 
 if is_nvidia and not is_tf32_supported:
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
 if is_tma_supported:
+    logger.info('TMA is supported, using TMA by default.')
+
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
         return torch.empty(size, device="cuda", dtype=torch.int8)
 
