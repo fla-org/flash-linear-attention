@@ -230,8 +230,32 @@ def causal_conv1d_bwd_kernel(
                 b_dw = tl.sum(b_dy * b_x, 0)
                 tl.store(dw + i_tg * D*W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
             else:
-                # TBD
-                pass
+                # ---------- 一次性索引 ----------
+                k = W - 1 - i_w          # 当前 weight 索引
+                o_t = i_t * BT + tl.arange(0, BT)  # 绝对 token 索引
+                pos = o_t - k            # 卷积窗口中心偏移
+
+                # ---------- 一维扁平掩码 ----------
+                mask_cache = (pos < 0) & (pos >= -(W - 1))
+                mask_input = (pos >= 0) & (pos < T)
+
+                # ---------- 一维扁平加载 ----------
+                flat_x   = bos * D + pos * D + o_d
+                flat_s = i_n * D * W + o_d * W + (W - 1 + pos)
+
+
+                x_val = tl.load(x + flat_x, mask=mask_input, other=0.)
+                s_val = tl.load(initial_state + flat_s, mask=mask_cache, other=0.)
+
+                # ✅ 关键修正：不要加，要选
+                b_full = tl.where(mask_input, x_val, s_val)
+                b_dw   = tl.sum(b_dy * b_full, 0)
+
+
+                # ---------- 写回 ----------
+                tl.store(dw + i_tg * D * W + o_d * W + k,
+                        b_dw.to(dw.dtype.element_ty),
+                        mask=m_d)
 
 
         if HAS_BIAS and i_w == 0:
