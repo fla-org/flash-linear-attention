@@ -415,7 +415,7 @@ if is_tma_supported:
     logger.info('TMA is supported, using TMA by default.')
 
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-        return torch.empty(size, device="cuda", dtype=torch.int8)
+        return torch.empty(size, device=device_torch_lib.device(device_torch_lib.current_device()), dtype=torch.int8)
 
     triton.set_allocator(alloc_fn)
 
