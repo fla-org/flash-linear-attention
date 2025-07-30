@@ -29,13 +29,21 @@ def safe_exp(x):
 if not is_gather_supported:
     @triton.jit
     def gather(src, index, axis, _builder=None):
-        # This is a fallback implementation when tl.gather is not supported
-        # In order to pass triton compiler, there is no actual gather operation
-        return src
+        """
+        Gather operation that works when tl.gather is not supported.
+        This is a fallback implementation that returns None.
+        Just to make triton compiler happy.
+        """
+        return None
 else:
     gather = tl.gather
 
 if not hasattr(triton.language, '_experimental_make_tensor_descriptor'):
+    """
+    Fallback implementation when TMA is not supported.
+    Returns None to indicate TMA descriptors are unavailable.
+    Just make triton compiler happy.
+    """
     def make_tensor_descriptor(
         base,
         shape,
