@@ -54,8 +54,8 @@ jobs:
           arch_choice="${{ github.event.inputs.build_architecture }}"
 
           # Define configurations for each architecture
-          x64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'x64-docker']\", \"arch\": \"x86_64\", \"timeout\": 360}}"
-          aarch64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'aarch64-docker']\", \"arch\": \"aarch64\", \"timeout\": 1200}}"
+          x64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'x64-docker']\", \"arch\": \"x86_64\", \"timeout\": \"360\""}}"
+          aarch64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'aarch64-docker']\", \"arch\": \"aarch64\", \"timeout\": \"1200\""}}"
 
           # Build the final JSON matrix string
           matrix_content=""
