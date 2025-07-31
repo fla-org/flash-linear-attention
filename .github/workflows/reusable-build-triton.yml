@@ -184,14 +184,15 @@ jobs:
           # Image selection based on architecture input
           if [[ "${{ inputs.arch }}" == 'x86_64' ]]; then
             export CIBW_MANYLINUX_X86_64_IMAGE="quay.io/pypa/manylinux_2_28_x86_64:latest"
+            docker pull "${CIBW_MANYLINUX_X86_64_IMAGE}"
           else
             export CIBW_MANYLINUX_AARCH64_IMAGE="quay.io/pypa/manylinux_2_28_aarch64:latest"
+            docker pull "${CIBW_MANYLINUX_AARCH64_IMAGE}"
           fi
 
           # Set build/skip from inputs. This is the core of the customization.
           export CIBW_BUILD="${{ inputs.cibw-build }}"
           export CIBW_SKIP="${{ inputs.cibw-skip }}"
-          export CIBW_FREE_THREADED_SUPPORT=1
 
           echo "--- CIBW Settings ---"
           echo "CIBW_BUILD: ${CIBW_BUILD}"

@@ -330,7 +330,7 @@ jobs:
               $CONDA_BIN_PATH/pip install .
               if [[ "${{ inputs.runner }}" == nvidia-h100* ]]; then
                 echo "Installing causal-conv1d for H100"
-                $CONDA_BIN_PATH/pip install git+https://github.com/Dao-AILab/causal-conv1d.git@e940ead --no-build-isolation
+                $CONDA_BIN_PATH/pip install -U causal-conv1d --no-build-isolation
                 echo "Installing flash-attn for NVIDIA"
                 $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
               fi
