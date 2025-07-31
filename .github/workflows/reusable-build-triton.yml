@@ -17,7 +17,7 @@ on:
         description: 'Job timeout in minutes'
         required: false
         type: number
-        default: 120
+        default: 720
 
       checkout-ref:
         description: 'The branch, tag, or SHA to checkout. Defaults to the "main" branch.'
