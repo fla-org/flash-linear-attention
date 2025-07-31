@@ -16,8 +16,8 @@ on:
       timeout:
         description: 'Job timeout in minutes'
         required: false
-        type: number
-        default: 720
+        type: string
+        default: '720'
 
       checkout-ref:
         description: 'The branch, tag, or SHA to checkout. Defaults to the "main" branch.'
@@ -52,7 +52,7 @@ on:
 jobs:
   build-and-publish:
     runs-on: ${{ fromJson(inputs.runner) }}
-    timeout-minutes: ${{ inputs.timeout }}
+    timeout-minutes: ${{ fromJson(inputs.timeout) }}
 
     steps:
       - name: Prune stale docker containers
