@@ -36,8 +36,8 @@ jobs:
       fail-fast: false
       matrix:
         config:
-        - {runs_on: "['self-hosted', 'x64-docker']", arch: 'x86_64', timeout: 120}
-        - {runs_on: "['self-hosted', 'aarch64-docker']", arch: 'aarch64', timeout: 720}
+        - {runs_on: "['self-hosted', 'x64-docker']", arch: 'x86_64', timeout: 360}
+        - {runs_on: "['self-hosted', 'aarch64-docker']", arch: 'aarch64', timeout: 1200}
     uses: ./.github/workflows/reusable-build-triton.yml
     with:
       runner: ${{ matrix.config.runs_on }}
@@ -99,4 +99,5 @@ jobs:
       checkout-ref: 'main'
       package-name: 'triton-nightly'
       cibw-build: ${{ matrix.cibw_build_spec }}
+      cibw-skip: 'cp{35,36,37,38,39}-*'
     secrets: inherit
