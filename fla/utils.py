@@ -386,7 +386,7 @@ device_platform = get_available_device()
 device_name = map_triton_backend_to_torch_device()
 
 is_amd = (device_platform == 'hip')
-is_intel = (device_platform == 'intel')
+is_intel = (device_platform == 'xpu')
 is_nvidia = (device_platform == 'cuda')
 is_intel_alchemist = (is_intel and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
 is_nvidia_hopper = (is_nvidia and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] >= 9))
