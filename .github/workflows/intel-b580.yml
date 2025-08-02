@@ -13,8 +13,8 @@ on:
       - main
 
 jobs:
-  test-a770-pytorch-2-7:
-    name: Test A770 (PyTorch 2.7)
+  test-b580-pytorch-2-7:
+    name: Test B580 (PyTorch 2.7)
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
