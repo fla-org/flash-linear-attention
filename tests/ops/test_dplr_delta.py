@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule, fused_recurrent_dplr_delta_rule
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device
 
 
 def recurrent_dplr_delta_rule_ref(
@@ -269,10 +269,6 @@ def test_fused_recurrent(
         ]
     ]
 )
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
-)
 def test_chunk(
     B: int,
     T: int,
@@ -353,10 +349,6 @@ def test_chunk(
             (4, 100, 0, [0, 15, 100, 300, 1111, 1599, 2000], torch.float16),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
     H: int,

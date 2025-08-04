@@ -9,13 +9,9 @@ import torch.nn.functional as F
 
 from fla.ops.rwkv6 import chunk_rwkv6
 from fla.ops.rwkv6.fused_recurrent import fused_recurrent_rwkv6
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device
 
 
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure"
-)
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'gate_logit_normalizer', 'dtype'),
     [

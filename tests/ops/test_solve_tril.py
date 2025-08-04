@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils.solve_tril import solve_tril
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -24,10 +24,6 @@ from fla.utils import assert_close, device, device_platform
             (4, 2048, 8, 64),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Pytorch Failure'
 )
 def test_solve_tril(B, T, H, chunk_size):
     # do not randomly intiialize A otherwise the inverse is not stable
@@ -62,10 +58,6 @@ def test_solve_tril(B, T, H, chunk_size):
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Pytorch Failure'
 )
 def test_solve_tril_varlen(
     H: int,

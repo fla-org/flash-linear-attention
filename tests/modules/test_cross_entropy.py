@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize("B", [2])
@@ -15,10 +15,6 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("reduction", ['mean'])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure"
-)
 def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
     logits = torch.randn(B * T, V).to(device).to(dtype=dtype).requires_grad_()
@@ -47,10 +43,6 @@ def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dty
 @pytest.mark.parametrize("scale", [1., 0.5])
 @pytest.mark.parametrize("reduction", ['mean'])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason="Intel Triton Failure"
-)
 def test_fused_linear_cross_entropy(B: int, T: int, D: int, V: int, scale: float, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
 

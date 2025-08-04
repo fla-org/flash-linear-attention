@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step, naive_mesa_net_decoding_one_step, naive_mesa_net_exact
-from fla.utils import assert_close, device, device_platform, is_intel_alchemist
+from fla.utils import assert_close, device, is_intel_alchemist
 
 
 @pytest.mark.parametrize(
@@ -24,10 +24,6 @@ from fla.utils import assert_close, device, device_platform, is_intel_alchemist
             (4, 2048, 8, 64, [0.8, 0.99], torch.float16)
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_chunk(
     B: int,

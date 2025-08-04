@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -23,10 +23,6 @@ from fla.utils import assert_close, device, device_platform
             (4, 2048, 8, 64, 0.1, False, torch.float16),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_chunk(
     B: int,
@@ -94,10 +90,6 @@ def test_chunk(
             (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
     H: int,

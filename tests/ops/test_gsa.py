@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from fla.ops.gsa import chunk_gsa, fused_recurrent_gsa
 from fla.ops.gsa.naive import naive_recurrent_gsa
-from fla.utils import assert_close, check_shared_mem, device, device_platform
+from fla.utils import assert_close, check_shared_mem, device
 
 
 @pytest.mark.parametrize(
@@ -28,10 +28,6 @@ from fla.utils import assert_close, check_shared_mem, device, device_platform
             (2, 1024, 8, 128, 64, 10, torch.float16),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_fused_recurrent(
     B: int,
@@ -107,10 +103,6 @@ def test_fused_recurrent(
             (4, 128, 64, [0, 200, 512, 1200, 2048], torch.float16),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_fused_recurrent_varlen(
     H: int,
@@ -207,10 +199,6 @@ def test_fused_recurrent_varlen(
         ]
     ]
 )
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
-)
 def test_chunk(
     B: int,
     T: int,
@@ -299,10 +287,6 @@ def test_chunk(
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_chunk_varlen(
     H: int,
@@ -393,10 +377,6 @@ def test_chunk_varlen(
             (2, 256, 16, 4, 128, 64, torch.float),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_inference(
     B: int,

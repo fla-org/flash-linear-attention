@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from fla.ops.gla import chunk_gla, fused_recurrent_gla
 from fla.ops.gla.naive import naive_recurrent_gla
-from fla.utils import assert_close, device, device_platform
+from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -27,10 +27,6 @@ from fla.utils import assert_close, device, device_platform
             (2, 1024, 8, 128, 10, torch.float16),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_fused_recurrent(
     B: int,
@@ -101,10 +97,6 @@ def test_fused_recurrent(
             (4, 128, [0, 200, 512, 1200, 2048], torch.float16),
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_fused_recurrent_varlen(
     H: int,
@@ -186,10 +178,6 @@ def test_fused_recurrent_varlen(
             (4, 2048, 8, 64, 1, torch.float16)
         ]
     ]
-)
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure'
 )
 def test_chunk(
     B: int,
