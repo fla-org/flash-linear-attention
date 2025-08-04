@@ -165,7 +165,7 @@ def transform(
 
     with torch.no_grad():
         batch_indices = torch.arange(b, device=x.device).unsqueeze(-1)
-        batch_indices = batch_indices.expand(b, s).reshape(-1)
+        batch_indices = batch_indices.repeat(1, s).reshape(-1)
         if attention_mask is not None:
             # sort the masked tokens to the end
             batch_indices[attention_mask.repeat_interleave(topk, dim=1).bitwise_not().flatten()] = b
@@ -433,6 +433,7 @@ class MomAttention(nn.Module):
         **kwargs: Unpack[Dict]
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
         if attention_mask is not None:
+            attention_mask = (attention_mask == 1)
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
@@ -498,13 +499,15 @@ class MomAttention(nn.Module):
             conv_state_q, conv_state_k, conv_state_v = [None, None], [None, None], [None, None]
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            
+
             conv_cu_seqlens = cu_seqlens
-            if seq_len != 1 and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < self.q_conv1d.kernel_size[0]:
-                assert self.training, "Memory degradation should only happen during training."
-                # During training, some memories may degrade and the numbers of tokens routed to them are smaller than
-                # short conv kernel size which is not supported, so we set cu_seqlens to None during pretraining.
-                conv_cu_seqlens = None
+            padded = False
+            if seq_len != 1 and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < self.conv_size:
+                if self.training:
+                    conv_cu_seqlens = None
+                else:
+                    padded = True
+                    conv_cu_seqlens, cu_q, cu_k, cu_v, pad_lengths = self.pad_for_conv(cu_seqlens, cu_q, cu_k, cu_v)
 
             conv_q = self.prepare_recurrent_state(conv_state_q[0], conv_cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
             cu_q, conv_q_new = self.q_conv1d(
@@ -531,17 +534,13 @@ class MomAttention(nn.Module):
             )
             conv_state_v[0] = self.handle_recurrent_state(conv_state_v[0], conv_v_new, conv_cu_seqlens, cu_seqlen_all[0], reverse_indices)
 
+            if padded:
+                cu_q, cu_k, cu_v = self.unpad_after_conv(conv_cu_seqlens, cu_seqlens, cu_q, cu_k, cu_v, pad_lengths)
+
         else:
             q, k, v = self.silu(q), self.silu(k), self.silu(v),
 
         cu_q, cu_k, cu_v = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=self.num_heads), (cu_q, cu_k, cu_v))
-
-        # dealing with padding
-        # if attention_mask is not None:
-        #     v = v.mul(attention_mask[None, :, -v.shape[-3]:, None, None])
-        #     k = k.mul(attention_mask[None, :, -k.shape[-3]:, None, None])
-        #     beta = beta.mul(attention_mask[None, :, -beta.shape[-2]:, None])
-        #     g = g.mul(attention_mask[None, :, -g.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else [
             None for _ in range(1 + self.shared_mem)]
@@ -558,39 +557,8 @@ class MomAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(recurrent_state[0], recurrent_state_, cu_seqlens, cu_seqlen_all[0], reverse_indices)
-            # total_len = len(cu_seqlen_all[0])
-            # if use_cache and len(cu_seqlens) != total_len:
-            #     # handle the case where some memories are not used
-            #     recurrent_state[0] = recurrent_state_[reverse_indices[1:]-1]
-            #     for i in range(total_len-1):
-            #         if cu_seqlen_all[0][i] == cu_seqlen_all[0][i+1]:
-            #             recurrent_state[0][i] = torch.zeros_like(recurrent_state[0][i])
-            # else:
-            #     recurrent_state[0] = recurrent_state_
-
-            # o_ = o_.squeeze(0).contiguous()
-            # o = pad_input(o_, indices_q, batch_size*self.num_memories, max_len)
-            # o = rearrange(o, '(e b) l h d -> e b l h d', b=batch_size)
-            # o_list = o_list[:, :, -max_len:]
-
-            # o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
-            #                 seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
         elif mode == 'fused_recurrent':
-            # total_len = len(cu_seqlen_all[0])
-            # if use_cache and recurrent_state[0] is not None and len(cu_seqlens) != total_len:
-            #     if recurrent_state[0] is None:
-            #         recurrent_state[0] = torch.zeros_like(recurrent_state_[reverse_indices[1:]-1])
-            #     # select memories that are activated
-            #     memories = torch.zeros_like(recurrent_state[0][:self.topk*batch_size])
-            #     mem_id = 0
-            #     for i in range(total_len-1):
-            #         if cu_seqlen_all[0][i] != cu_seqlen_all[0][i+1]:
-            #             memories[mem_id] = recurrent_state[0][i]
-            #             mem_id += 1
-            #     assert seq_len != 1 or mem_id == self.topk * batch_size, "The number of memories is not correct."
-            # else:
-            #     memories = recurrent_state[0]
             memories = self.prepare_recurrent_state(recurrent_state[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
 
             o, recurrent_state_ = fused_recurrent_gated_delta_rule(
@@ -605,20 +573,6 @@ class MomAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(recurrent_state[0], recurrent_state_, cu_seqlens, cu_seqlen_all[0], reverse_indices)
-            # if use_cache and len(cu_seqlens) != total_len:
-            #     if recurrent_state[0] is None:
-            #         recurrent_state[0] = torch.zeros_like(recurrent_state_[reverse_indices[1:]-1])
-            #     # handle the case where some memories are not used
-            #     for i in range(total_len-1):
-            #         if cu_seqlen_all[0][i] != cu_seqlen_all[0][i+1]:
-            #             recurrent_state[0][i] = recurrent_state_[reverse_indices[i+1]-1]
-            # else:
-            #     recurrent_state[0] = recurrent_state_
-            
-            # o_list = o_list[:, :, -max_len:]
-
-            # o = reconstruct(o_list, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
-            #                 seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
 
         o = o.squeeze(0).contiguous()
         o = pad_input(o, indices_q, batch_size*self.num_memories, max_len)
@@ -641,19 +595,12 @@ class MomAttention(nn.Module):
             )
 
         if self.use_output_gate:
-            if attention_mask is not None:
-                indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -seq_len:])
-                shared_hidden_states = index_first_axis(rearrange(shared_hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
-                o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
             g = rearrange(self.g_proj(shared_hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
         else:
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
-
-        if attention_mask is not None:
-            o = pad_input(o.squeeze(0), indices, batch_size, seq_len)
 
         if origin_cu_seqlens is not None:
             indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
@@ -764,9 +711,54 @@ class MomAttention(nn.Module):
         x = pad_input(x.squeeze(0), indices, batch_size, max_len)
         return x, attention_mask
    
+    def pad_for_conv(self, cu_seqlens, cu_q, cu_k, cu_v):
+        lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        pad_lengths = torch.clamp(self.conv_size - lengths, min=0)
+        new_lengths = lengths + pad_lengths
+        new_cu_seqlens = torch.cat([
+            torch.tensor([0], device=cu_seqlens.device, dtype=cu_seqlens.dtype),
+            torch.cumsum(new_lengths, dim=0)
+        ])
+        final_total_len = new_cu_seqlens[-1].item()
+        new_q = torch.zeros((1, final_total_len, cu_q.shape[-1]), dtype=cu_q.dtype, device=cu_q.device)
+        new_k = torch.zeros((1, final_total_len, cu_k.shape[-1]), dtype=cu_k.dtype, device=cu_k.device)
+        new_v = torch.zeros((1, final_total_len, cu_v.shape[-1]), dtype=cu_v.dtype, device=cu_v.device)
+        num_sequences = len(lengths)
+        for i in range(num_sequences):
+            src_start = cu_seqlens[i]
+            src_end = cu_seqlens[i+1]
+            dest_start = new_cu_seqlens[i] + pad_lengths[i]
+            dest_end = new_cu_seqlens[i+1]
+            new_q[:, dest_start:dest_end, ...] = cu_q[:, src_start:src_end, ...]
+            new_k[:, dest_start:dest_end, ...] = cu_k[:, src_start:src_end, ...]
+            new_v[:, dest_start:dest_end, ...] = cu_v[:, src_start:src_end, ...]
+
+        return new_cu_seqlens, new_q, new_k, new_v, pad_lengths
+
+    def unpad_after_conv(self, conv_cu_seqlens, cu_seqlens, cu_q, cu_k, cu_v, pad_lengths):
+        original_total_len = cu_seqlens[-1].item()
+        orig_q = torch.empty((1, original_total_len, cu_q.shape[-1]), dtype=cu_q.dtype, device=cu_q.device)
+        orig_k = torch.empty((1, original_total_len, cu_k.shape[-1]), dtype=cu_k.dtype, device=cu_k.device)
+        orig_v = torch.empty((1, original_total_len, cu_v.shape[-1]), dtype=cu_v.dtype, device=cu_v.device)
+
+        num_sequences = len(pad_lengths)
+        for i in range(num_sequences):
+            dest_start = cu_seqlens[i]
+            dest_end = cu_seqlens[i+1]
+            src_start = conv_cu_seqlens[i] + pad_lengths[i]
+            src_end = conv_cu_seqlens[i+1]
+
+            orig_q[:, dest_start:dest_end, ...] = cu_q[:, src_start:src_end, ...]
+            orig_k[:, dest_start:dest_end, ...] = cu_k[:, src_start:src_end, ...]
+            orig_v[:, dest_start:dest_end, ...] = cu_v[:, src_start:src_end, ...]
+        return orig_q, orig_v, orig_v
+
     def prepare_recurrent_state(self, recurrent_state, cu_seqlens, cu_seqlen_all, reverse_indices, batch_size):
         if recurrent_state is None:
             return None
+        
+        if cu_seqlens is None:
+            return recurrent_state
         
         total_len = len(cu_seqlen_all)
         if len(cu_seqlens) != total_len:
@@ -777,7 +769,7 @@ class MomAttention(nn.Module):
                 if cu_seqlen_all[i] != cu_seqlen_all[i+1]:
                     memories[mem_id] = recurrent_state[i]
                     mem_id += 1
-            assert mem_id == self.topk * batch_size, "The number of memories is not correct."
+            assert mem_id == self.topk * batch_size, f"The number of memories {mem_id} is not correct."
         else:
             memories = recurrent_state
         
@@ -786,6 +778,8 @@ class MomAttention(nn.Module):
     def handle_recurrent_state(self, recurrent_state, recurrent_state_new, cu_seqlens, cu_seqlen_all, reverse_indices):
         if recurrent_state_new is None:
             return None
+        if cu_seqlens is None:
+            return recurrent_state_new
         if recurrent_state is None:
             recurrent_state = torch.zeros_like(recurrent_state_new[reverse_indices[1:]-1])
         total_len = len(cu_seqlen_all)
