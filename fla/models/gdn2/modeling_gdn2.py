@@ -63,12 +63,12 @@ class GDN2Block(nn.Module):
                 head_dim=config.head_dim,
                 num_heads=config.num_heads,
                 num_v_heads=config.num_v_heads,
-                use_gate=config.use_gate,
+                use_output_gate=config.use_output_gate,
                 use_short_conv=config.use_short_conv,
                 allow_neg_eigval=config.allow_neg_eigval,
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,
-                layer_idx=layer_idx
+                layer_idx=layer_idx,
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = GDN2MLP(
@@ -129,6 +129,21 @@ class GDN2PreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: Optional[str] = None,
         num_residuals_per_layer: int = 2,
     ):
+        if isinstance(module, GDN2) and next(module.parameters()).device.type != 'meta':
+            if self.config.decay_type == 'mamba':
+                with torch.no_grad():
+                    module.A.copy_(
+                        nn.init.uniform_(
+                            module.A[:module.num_heads], a=0, b=16
+                        ).unsqueeze(-1).repeat(1, module.head_k_dim).view(-1).log()
+                    )
+
+                    dt = torch.exp(
+                        nn.init.uniform_(module.f_proj[1].bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001)
+                    ).clamp(min=1e-4)
+                    inv_dt = dt + torch.log(-torch.expm1(-dt))
+                    module.f_proj[1].bias.copy_(inv_dt)
+                    module.f_proj[1].bias._hf_initialized = True
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617

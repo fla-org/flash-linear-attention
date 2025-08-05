@@ -37,14 +37,14 @@ class GDN2(nn.Module):
 
     Similar to Mamba2, each layer contains around 6*hidden_size*hidden_size parameters.
 
-    Parameter alloation when use_gate=True:
+    Parameter alloation when use_output_gate=True:
         - 0.75 * hidden_size * hidden_size for the q_proj and k_proj each
         - 1.5 * hidden_size * hidden_size for the v_proj, g_proj and o_proj each
         - Others are ignorably small.
         - In total = 0.75 * 2 + 1.5 * 3 = 6 * hidden_size * hidden_size
     NOTE: num_heads * head_dim = 0.75 * hidden_size, please make sure to set the correct num_heads and head_dim.
 
-    Parameter allocation when use_gate=False:
+    Parameter allocation when use_output_gate=False:
         - 1 * hidden_size * hidden_size for the q_proj and k_proj each
         - 2 * hidden_size * hidden_size for the v_proj and o_proj each
         - Others are ignorably small.
@@ -68,7 +68,7 @@ class GDN2(nn.Module):
             Default: `chunk`.
         use_beta (bool, Optional):
             Whether to use beta. Default: `True`.
-        use_gate (bool, Optional):
+        use_output_gate (bool, Optional):
             Whether to use output gate. Default: `True`.
         use_short_conv (bool, Optional):
             Whether to use short convolutions. Default: `True`.
@@ -93,7 +93,7 @@ class GDN2(nn.Module):
         num_heads: int = 6,
         num_v_heads: int = None,
         mode: str = 'chunk',
-        use_gate: bool = True,
+        use_output_gate: bool = True,
         use_short_conv: bool = True,
         allow_neg_eigval: bool = False,
         conv_size: int = 4,
@@ -109,7 +109,7 @@ class GDN2(nn.Module):
         self.hidden_size = hidden_size
         self.expand_v = expand_v
 
-        self.use_gate = use_gate
+        self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
@@ -167,15 +167,20 @@ class GDN2(nn.Module):
                 activation='silu'
             )
 
+        self.A = nn.Parameter(torch.log(torch.empty(self.key_dim, dtype=torch.float32).uniform_(0, 16)))
         self.f_proj = nn.Sequential(
             nn.Linear(hidden_size, self.head_v_dim, bias=False),
-            nn.Linear(self.head_v_dim, self.value_dim, bias=True)
+            nn.Linear(self.head_v_dim, self.key_dim, bias=True)
         )
+
         self.b_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
 
-        if use_gate:
-            self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
-            self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
+        if use_output_gate:
+            self.g_proj = nn.Sequential(
+                nn.Linear(hidden_size, self.head_v_dim, bias=False),
+                nn.Linear(self.head_v_dim, self.value_dim, bias=True)
+            )
+            self.o_norm = FusedRMSNormGated(self.head_v_dim, activation='sigmoid', eps=norm_eps)
         else:
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
@@ -237,7 +242,8 @@ class GDN2(nn.Module):
             q = F.silu(self.q_proj(hidden_states))
             k = F.silu(self.k_proj(hidden_states))
             v = F.silu(self.v_proj(hidden_states))
-        g = F.logsigmoid(self.f_proj(hidden_states))
+
+        g = -self.A.float().exp() * F.softplus(self.f_proj(hidden_states).float())
         beta = self.b_proj(hidden_states).sigmoid()
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
@@ -287,7 +293,7 @@ class GDN2(nn.Module):
                 offset=q_len
             )
 
-        if self.use_gate:
+        if self.use_output_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
         else:
