@@ -143,7 +143,7 @@ def attn_decoding_one_step(
     if scale is None:
         scale = K ** -0.5
 
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
     if check_shared_mem('hopper', q.device.index):
         BS = min(64, max(16, triton.next_power_of_2(T)))
         BV = min(256, max(16, triton.next_power_of_2(V)))

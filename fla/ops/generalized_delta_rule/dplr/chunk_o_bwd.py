@@ -345,8 +345,8 @@ def chunk_dplr_bwd_o(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    BK = min(triton.next_power_of_2(K), 64) if check_shared_mem() else min(triton.next_power_of_2(K), 32)
-    BV = min(triton.next_power_of_2(V), 64) if check_shared_mem() else min(triton.next_power_of_2(K), 32)
+    BK = min(max(triton.next_power_of_2(K), 16), 64) if check_shared_mem() else min(triton.next_power_of_2(K), 32)
+    BV = min(max(triton.next_power_of_2(V), 16), 64) if check_shared_mem() else min(triton.next_power_of_2(K), 32)
     NK = triton.cdiv(K, BK)
     dq = torch.empty_like(k)
     dk = torch.empty_like(k)
@@ -402,7 +402,7 @@ def chunk_dplr_bwd_dAu(
     if check_shared_mem('ampere'):  # A100
         BV = min(triton.next_power_of_2(V), 128)
     elif check_shared_mem('ada'):  # 4090
-        BV = min(triton.next_power_of_2(V), 64)
+        BV = min(max(triton.next_power_of_2(V), 16), 64)
     else:
         BV = min(triton.next_power_of_2(V), 32)
 

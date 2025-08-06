@@ -164,7 +164,7 @@ def chunk_dplr_fwd_intra(
     Aak = q.new_empty(B, T, H, BT, dtype=torch.float)
 
     grid = (NT, B, H)
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
     qg = torch.empty_like(q)
     kg = torch.empty_like(k, dtype=q.dtype)
     ag = torch.empty_like(a, dtype=q.dtype)

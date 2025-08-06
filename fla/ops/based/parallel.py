@@ -310,9 +310,8 @@ class ParallelBasedFunction(torch.autograd.Function):
         BTL, BTS = 128, 32
         assert BTL % BTS == 0
         # assert q.shape[-1] % 16 == 0
-        BK = min(128, triton.next_power_of_2(k.shape[-1]))
-        BV = min(128, triton.next_power_of_2(v.shape[-1]))
-        BK, BV = max(BK, 16), max(BV, 16)
+        BK = min(128, max(triton.next_power_of_2(k.shape[-1]), 16))
+        BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
         B, H, T, K, V = *k.shape, v.shape[-1]
         num_stages = 2
         num_warps = 4
@@ -351,9 +350,8 @@ class ParallelBasedFunction(torch.autograd.Function):
         scale = ctx.scale
         BTL, BTS = 64, 32
         assert BTL % BTS == 0
-        BK = min(128, triton.next_power_of_2(k.shape[-1]))
-        BV = min(128, triton.next_power_of_2(v.shape[-1]))
-        BK, BV = max(BK, 16), max(BV, 16)
+        BK = min(128, max(triton.next_power_of_2(k.shape[-1]), 16))
+        BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
         B, H, T, K, V = *k.shape, v.shape[-1]
         num_stages = 2
         num_warps = 4

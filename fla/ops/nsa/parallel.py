@@ -502,7 +502,7 @@ def parallel_nsa_topk(
     S = triton.next_power_of_2(S)
     # here we set BC = BS, but beware that they are actually decoupled
     BC = BS = block_size
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
 
     block_indices = torch.zeros(B, T, H, S, dtype=torch.int32, device=q.device)
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
@@ -629,8 +629,8 @@ def parallel_nsa_bwd(
     HQ = q.shape[2]
     G = HQ // H
     BS = block_size
-    BK = triton.next_power_of_2(K)
-    BV = min(128, triton.next_power_of_2(v.shape[-1]))
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
     NV = triton.cdiv(V, BV)
 
     delta = parallel_attn_bwd_preprocess(o, do)
