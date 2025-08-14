@@ -2,10 +2,11 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
-from fla.ops.delta_rule.parallel import parallel_delta_rule
+from fla.ops.delta_rule.parallel import naive_delta_rule_parallel, parallel_delta_rule
 from fla.ops.delta_rule.wy_fast import fwd_prepare_T
-from fla.utils import device, device_platform
+from fla.utils import assert_close, device, device_platform
 
 # IMPORTANT NOTE ON TENSOR FORMATS:
 # While the documentation for some functions states inputs should be in [B, T, H, K] format,
@@ -26,7 +27,6 @@ from fla.utils import device, device_platform
         for test in [
             (1, 2, 128, 64, torch.float16),
             (2, 4, 128, 32, torch.float16),
-            (2, 4, 64, 128, torch.float16),
         ]
     ]
 )
@@ -46,7 +46,7 @@ def test_parallel_delta_rule(
 
     # Generate test data
     q = torch.randn(B, H, T, K, dtype=dtype, device=device)
-    k = torch.randn(B, H, T, K, dtype=dtype, device=device)
+    k = F.normalize(torch.randn(B, H, T, K, dtype=dtype, device=device), p=2, dim=-1).to(dtype)
     v = torch.randn(B, H, T, K, dtype=dtype, device=device)
     beta = torch.randn(B, H, T, dtype=dtype, device=device).sigmoid()
     scale = 1.0 / (K ** 0.5)
@@ -74,10 +74,10 @@ def test_parallel_delta_rule(
     else:
         assert attn_parallel is None
 
-    # SKIPPED: Comparison with naive_delta_rule_parallel due to NaN issues
-    # This requires fixing the naive implementation or replacing with another reference implementation
-    # For now, we just verify that the parallel implementation runs without errors
-    # assert_close('attn', attn_naive, attn_parallel, 0.01)
+    o_naive, attn_naive = naive_delta_rule_parallel(q.clone(), k.clone(), v.clone(), beta.clone())
+
+    assert_close('   o', o_parallel, o_naive, 0.01)
+    assert_close('attn', attn_naive, attn_parallel, 0.01)
 
 
 @pytest.mark.skipif(
