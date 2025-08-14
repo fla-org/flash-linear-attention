@@ -54,7 +54,20 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
+      - name: Check skip keyword in LATEST commit
+        id: check_skip
+        run: |
+          COMMIT_MSG=$(git log --no-merges -1 --pretty=%s)
+          echo "Latest commit message: $COMMIT_MSG"
+          if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
+            echo "::notice::Tests skipped by commit message"
+            echo "skip_tests=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Discover Conda Path and Set Env Vars
+        if: steps.check_skip.outputs.skip_tests == 'false'
         id: find_conda
         shell: bash
         run: |
@@ -109,6 +122,7 @@ jobs:
           fi
 
       - name: Install/Update Dependencies
+        if: steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
           $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
@@ -150,6 +164,7 @@ jobs:
           fi
 
       - name: Verify Environment and GPU
+        if: steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
           # Now $CONDA_BIN_PATH is available from the previous step.
@@ -170,22 +185,6 @@ jobs:
             else
               echo "::warning::FLA not found or import failed. Skipping dependent GPU check."
             fi
-          fi
-
-      - name: Check skip keyword in LATEST commit (Push only)
-        id: check_skip
-        run: |
-          if [ "${{ github.event_name }}" = "push" ] && ! [[ "${{ github.ref }}" =~ ^refs/tags/ ]]; then
-            COMMIT_MSG=$(jq -r '.head_commit.message' <<< '${{ toJSON(github.event) }}')
-            echo "Latest commit message: $COMMIT_MSG"
-            if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
-              echo "::notice::Tests skipped by commit message"
-              echo "skip_tests=true" >> $GITHUB_OUTPUT
-            else
-              echo "skip_tests=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "skip_tests=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Get changed files
@@ -223,7 +222,20 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
+      - name: Check skip keyword in LATEST commit
+        id: check_skip
+        run: |
+          COMMIT_MSG=$(git log --no-merges -1 --pretty=%s)
+          echo "Latest commit message: $COMMIT_MSG"
+          if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
+            echo "::notice::Tests skipped by commit message"
+            echo "skip_tests=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip_tests=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Discover Conda Path and Set Env Vars
+        if: steps.check_skip.outputs.skip_tests == 'false'
         id: find_conda
         shell: bash
         run: |
@@ -280,24 +292,11 @@ jobs:
           fi
 
       - name: Verify Environment
+        if: steps.check_skip.outputs.skip_tests == 'false'
         shell: bash
         run: |
           echo "Conda environment bin path is set to: $CONDA_BIN_PATH"
           echo "Python executable path is: $CONDA_BIN_PATH/python"
-
-      - name: Check skip keyword in LATEST commit (Push only)
-        id: check_skip
-        run: |
-          if [ "${{ github.event_name }}" = "push" ] && ! [[ "${{ github.ref }}" =~ ^refs/tags/ ]]; then
-            COMMIT_MSG=$(jq -r '.head_commit.message' <<< '${{ toJSON(github.event) }}')
-            if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
-              echo "skip_tests=true" >> $GITHUB_OUTPUT
-            else
-              echo "skip_tests=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "skip_tests=false" >> $GITHUB_OUTPUT
-          fi
 
       - name: Get changed files
         if: steps.check_skip.outputs.skip_tests == 'false'
