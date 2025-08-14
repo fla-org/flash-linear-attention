@@ -542,7 +542,7 @@ def parallel_nsa_fwd(
     token_indices: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
-    _, T_q, HQ, _ = q.shape 
+    _, T_q, HQ, _ = q.shape
     G = HQ // H
     BS = block_size
     if check_shared_mem('hopper', q.device.index):
@@ -556,7 +556,7 @@ def parallel_nsa_fwd(
     assert NK == 1, "The key dimension can not be larger than 256"
 
     grid = (T_q, NV, B * H)
-    o = torch.empty(B, T_q, HQ, V, dtype=v.dtype, device=q.device) 
+    o = torch.empty(B, T_q, HQ, V, dtype=v.dtype, device=q.device)
     lse = torch.empty(B, T_q, HQ, dtype=torch.float, device=q.device)
 
     parallel_nsa_fwd_kernel[grid](
