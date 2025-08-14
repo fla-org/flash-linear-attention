@@ -654,18 +654,18 @@ def test_simple_gla_to_mamba2(vary_A, dtype):
         assert final_ssd.allclose(final_fuse, 0, atol), f'final diff: {torch.abs(final_ssd - final_fuse).max()}'
 
     # mapping inputs Mamba2 -> FLA
-    # C, B, X: [batch, seq, head, hidden] -> [batch, head, seq, hidden]
-    # g: [batch, seq, head] -> [batch, head, seq]
-    q = C.transpose(1, 2)
-    k = B.transpose(1, 2)
-    v = x.transpose(1, 2)
-    g = (A * dt).transpose(1, 2)
+    # FLA Now use head_first = False, therefore there is no need to transpose inputs
+    q = C
+    k = B
+    v = x
+    g = (A * dt)
 
     # mapping outputs Mamba2 -> FLA
-    y_rearrange = y_ssd.transpose(1, 2)
+    y_rearrange = y_ssd
     final_rearrange = final_ssd.transpose(2, 3)
 
     # comparing output results between FLA kernel and Mamba2 kernel
+    # final_gla_fuse :[N, H, K, V]
     outputs_gla_fuse, final_gla_fuse = chunk_simple_gla(q, k, v, g, scale=1.0, output_final_state=True)
     assert y_rearrange.allclose(outputs_gla_fuse, 0, atol), f'y diff: {torch.abs(y_rearrange - outputs_gla_fuse).max()}'
     final_gla_fuse = final_gla_fuse.to(dtype)  # states hard-coded to float32 in FLA kernel

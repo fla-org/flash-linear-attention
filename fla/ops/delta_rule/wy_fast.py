@@ -216,8 +216,8 @@ def recompute_w_u_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = 64
     CONST_TILING = 64 if check_shared_mem() else 32
-    BK = min(triton.next_power_of_2(K), CONST_TILING)
-    BV = min(triton.next_power_of_2(V), CONST_TILING)
+    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
+    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -256,8 +256,8 @@ def prepare_wy_repr_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
     CONST_TILING = 64 if check_shared_mem() else 32
-    BK = min(triton.next_power_of_2(K), CONST_TILING)
-    BV = min(triton.next_power_of_2(V), CONST_TILING)
+    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
+    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)

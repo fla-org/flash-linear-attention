@@ -12,9 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""MAMBA configuration"""
 
 import math
+import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -127,6 +127,7 @@ class MambaConfig(PretrainedConfig):
         use_cache: bool = True,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         tie_word_embeddings: bool = False,
         **kwargs,
@@ -157,7 +158,19 @@ class MambaConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
+
+        if fuse_cross_entropy and fuse_linear_cross_entropy:
+            raise ValueError(
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
+            )
+        if fuse_linear_cross_entropy:
+            warnings.warn(
+                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
+                "at the potential cost of reduced precision. "
+                "If you observe issues like loss divergence, consider disabling this setting."
+            )
 
         super().__init__(
             bos_token_id=bos_token_id,

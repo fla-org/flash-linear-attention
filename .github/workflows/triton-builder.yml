@@ -54,8 +54,8 @@ jobs:
           arch_choice="${{ github.event.inputs.build_architecture }}"
 
           # Define configurations for each architecture
-          x64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'x64-docker']\", \"arch\": \"x86_64\", \"timeout\": 120}}"
-          aarch64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'aarch64-docker']\", \"arch\": \"aarch64\", \"timeout\": 720}}"
+          x64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'x64-docker']\", \"arch\": \"x86_64\", \"timeout\": \"360\""}}"
+          aarch64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'aarch64-docker']\", \"arch\": \"aarch64\", \"timeout\": \"1200\""}}"
 
           # Build the final JSON matrix string
           matrix_content=""
@@ -91,6 +91,6 @@ jobs:
       timeout: ${{ matrix.config.timeout }}
       checkout-ref: ${{ needs.prepare-release-build.outputs.tag }} # Use output from the single 'needs' job
       package-name: 'triton'
-      cibw-build: 'cp3*-manylinux_${{ matrix.config.arch }}'
+      cibw-build: 'cp3{10,11,12,13}-manylinux_${{ matrix.config.arch }}'
       cibw-skip: 'cp{35,36,37,38,39}-*'
     secrets: inherit

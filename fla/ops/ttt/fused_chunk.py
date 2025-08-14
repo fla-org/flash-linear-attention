@@ -438,7 +438,7 @@ def fused_chunk_ttt_linear_bwd_h(
     B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     N, NT = B, triton.cdiv(T, BT)
-    BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
+    BK, BV = max(triton.next_power_of_2(K), 16), max(triton.next_power_of_2(V), 16)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
 
     h = k.new_empty(B, NT, H, K, V)
@@ -502,7 +502,7 @@ def fused_chunk_ttt_linear_bwd_dh(
     B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     N = B
-    BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
+    BK, BV = max(triton.next_power_of_2(K), 16), max(triton.next_power_of_2(V), 16)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
 
     dh0 = torch.empty_like(initial_state, dtype=torch.float32) if initial_state is not None else None
@@ -568,7 +568,7 @@ def fused_chunk_ttt_linear_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
+    BK, BV = max(triton.next_power_of_2(K), 16), max(triton.next_power_of_2(V), 16)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
     o = torch.empty_like(v)
     final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None

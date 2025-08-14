@@ -6,7 +6,7 @@
 
 </div>
 
-This repo aims at providing a collection of efficient Triton-based implementations for state-of-the-art linear attention models. **Any pull requests are welcome!**
+This repo aims at providing a collection of efficient Triton-based implementations for state-of-the-art linear attention models. **All implementations are written purely in PyTorch and Triton, making them platform-agnostic.** Currently verified platforms include NVIDIA, AMD, and Intel. **Any pull requests are welcome!**
 
 <div align="center">
   <img width="400" alt="image" src="https://github.com/fla-org/flash-linear-attention/assets/18402347/02ff2e26-1495-4088-b701-e72cd65ac6cf">
@@ -15,7 +15,6 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 * [News](#news)
 * [Models](#models)
 * [Installation](#installation)
-  * [ARM (aarch64) Support for Triton](#arm-aarch64-support-for-triton)
 * [Usage](#usage)
   * [Token Mixing](#token-mixing)
   * [Fused Modules](#fused-modules)
@@ -84,7 +83,7 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 
 ## Installation
 
-[![nvidia-4090-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml) [![nvidia-a100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-a100.yml/badge.svg?branch=main)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-a100.yml) [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml) [![intel-a770-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml/badge.svg?event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-a770.yml)
+[![nvidia-4090-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-4090.yml) [![nvidia-a100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-a100.yml/badge.svg?branch=main)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-a100.yml) [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml) [![intel-b580-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-b580.yml/badge.svg?event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/intel-b580.yml)
 
 The following requirements should be satisfied
 - [PyTorch](https://pytorch.org/) >= 2.5
@@ -115,9 +114,6 @@ pip install einops ninja datasets transformers numpy
 pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 ```
 
-### ARM (aarch64) Support for Triton
-
-You need to choose a specific version to install, see [FAQs](FAQs.md)
 
 ## Usage
 
@@ -237,6 +233,12 @@ We offer a collection of fused modules in `fla.modules` to facilitate faster tra
 * [`Cross Entropy`](fla/modules/fused_cross_entropy.py): faster Triton implementation of cross entropy loss.
 * [`Linear Cross Entropy`](fla/modules/fused_linear_cross_entropy.py): fused linear layer and cross entropy loss to avoid the materialization of large logits tensors. Also refer to implementations by [mgmalek](https://github.com/mgmalek/efficient_cross_entropy) and [Liger-Kernel](https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_linear_cross_entropy.py).
 * [`Linear KL Divergence`](fla/modules/fused_kl_div.py): fused linear layer and KL divergence loss in a similar vein as CE loss.
+
+> [!IMPORTANT]
+> You can control using `fuse_linear_cross_entropy` in the model configuration to enable/disable the fused linear cross entropy loss.
+>
+> This fused implementation is more memory-efficient but may reduce numerical precision. Due to this trade-off, it is disabled by default.
+> If you enable this feature and encounter training instability (e.g., loss divergence), we recommend disabling it to see if the issue is resolved.
 
 ### Generation
 
@@ -551,4 +553,4 @@ If you find this repository helpful, please cite our work:
 
 ## Acknowledgments
 
-We extend our gratitude to [Intel Corporation](https://www.intel.com/) and [Bitdeer](https://www.bitdeer.com/) for providing CI server resources that power our infrastructure.
+We extend our gratitude to [Bitdeer](https://www.bitdeer.com/) for providing CI server resources that power our infrastructure.

@@ -553,15 +553,14 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         has_labels = (labels is not None) or (shift_labels is not None)
-        if not (fuse_linear_and_cross_entropy and has_labels):
+        if not (self.config.fuse_linear_cross_entropy and has_labels):
             logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if has_labels:
             if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
+                if self.config.fuse_linear_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
@@ -575,7 +574,7 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
                 shift_labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
             shift_labels = shift_labels.to(hidden_states.device)
 
-            if fuse_linear_and_cross_entropy:
+            if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, shift_labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(shift_labels.numel(), -1), shift_labels.view(-1))

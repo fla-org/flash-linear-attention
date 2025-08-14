@@ -137,7 +137,7 @@ def chunk_mesa_cg_bwd(
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, chunk_size) if cu_seqlens is None else len(chunk_indices)
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
     grid = (NT, H*B)
 
     chunk_fwd_mesa_cg_dim64_kernel[grid](

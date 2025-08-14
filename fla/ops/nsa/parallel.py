@@ -123,7 +123,9 @@ def parallel_nsa_kernel_topk(
     b_i = tl.full([BC], -1, dtype=tl.float32)
     o_i = tl.zeros([BC], dtype=tl.int32)
     m_i = tl.arange(0, BC) < BC//2
-    for i_c in range(0, i_t // BS + 1, BC):
+
+    IC = i_t // BS
+    for i_c in range(0, tl.cdiv(i_t + 1, BS), BC):
         o_c = i_c + tl.arange(0, BC)
 
         p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
@@ -131,13 +133,15 @@ def parallel_nsa_kernel_topk(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [G, BC]
         b_s = tl.dot(b_q, b_k)
-        b_s = tl.where((i_t // BS > o_c)[None, :], b_s, float('-inf'))
+        b_s = tl.where(o_c < IC, b_s, float('-inf'))
         # [G, BC]
-        b_p = tl.where((i_t // BS == o_c)[None, :], float(1.0), exp(b_s - b_lse[:, None]))
+        # the 1st and the last 2 blocks are always selected
+        b_p = tl.where((o_c == 0) | ((o_c == IC - 1) | (o_c == IC)), 1., exp(b_s - b_lse[:, None]))
         # the importance scores of the current block
         # [BC]
         b_i, b_ip = tl.sum(b_p, 0), b_i
-        o_i, o_ip = tl.where(o_c <= i_t // BS, o_c + 1, 0), o_i
+        # blocks with index < 0 will be skipped
+        o_i, o_ip = tl.where(o_c <= IC, o_c, -1), o_i
 
         n_dims: tl.constexpr = tl.standard._log2(b_i.shape[0])
         for i in tl.static_range(1, n_dims):
@@ -152,7 +156,7 @@ def parallel_nsa_kernel_topk(
             b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), n_dims, True, n_dims)
 
     m_top = tl.arange(0, BC//S) == 0
-    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i - 1, [BC//S, S]), 0)
+    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BC//S, S]), 0)
 
     p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
     tl.store(p_b, b_top.to(p_b.dtype.element_ty))
@@ -498,16 +502,19 @@ def parallel_nsa_topk(
     B, T, HQ, K = q.shape
     H = k.shape[2]
     G = HQ // H
+    # the number of selected blocks for each token
     S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
     S = triton.next_power_of_2(S)
-    # here we set BC = BS, but beware that they are actually decoupled
+    # here we set BC = BS, but beware that they can be chosen separately if required
     BC = BS = block_size
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
+    assert BC >= 2 * S, f"BC ({BC}) must be greater than or equal to 2 * S ({S})"
 
     block_indices = torch.zeros(B, T, H, S, dtype=torch.int32, device=q.device)
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
     grid = (T, B * H)
+    # the 1st and the last 2 blocks are always selected
     parallel_nsa_kernel_topk[grid](
         q=q,
         k=k,
@@ -629,8 +636,8 @@ def parallel_nsa_bwd(
     HQ = q.shape[2]
     G = HQ // H
     BS = block_size
-    BK = triton.next_power_of_2(K)
-    BV = min(128, triton.next_power_of_2(v.shape[-1]))
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
     NV = triton.cdiv(V, BV)
 
     delta = parallel_attn_bwd_preprocess(o, do)
@@ -776,7 +783,6 @@ def parallel_nsa(
     window_size: int = 0,
     scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
 ) -> torch.Tensor:
     r"""
     Args:
@@ -788,18 +794,18 @@ def parallel_nsa(
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g_cmp (torch.Tensor):
-            Gate score for compressed attention of shape `[B, T, HQ]` if  `head_first=False` else `[B, HQ, T]`.
+            Gate score for compressed attention of shape `[B, T, HQ]`.
         g_slc (torch.Tensor):
-            Gate score for selected attention of shape `[B, T, HQ]` if  `head_first=False` else `[B, HQ, T]`.
+            Gate score for selected attention of shape `[B, T, HQ]`.
         g_swa (torch.Tensor):
-            Gate score for sliding attentionof shape `[B, T, HQ]` if  `head_first=False` else `[B, HQ, T]`.
+            Gate score for sliding attentionof shape `[B, T, HQ]`.
         block_indices (torch.LongTensor):
-            Block indices of shape `[B, T, H, S]` if `head_first=False` else `[B, H, T, S]`.
+            Block indices of shape `[B, T, H, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
             If `g_cmp` is provided, the passed `block_indices` will be ignored.
         block_counts (Optional[Union[torch.LongTensor, int]]):
             Number of selected blocks for each query.
-            If a tensor is provided, with shape `[B, T, H]` if `head_first=False` else `[B, H, T]`,
+            If a tensor is provided, with shape `[B, T, H]`,
             each query can select the same number of blocks.
             If not provided, it will default to 16.
         block_size (int):
@@ -812,20 +818,12 @@ def parallel_nsa(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
     assert block_counts is not None, "block counts must be provided for selection"
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
