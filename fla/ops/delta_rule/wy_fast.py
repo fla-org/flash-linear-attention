@@ -10,7 +10,7 @@ import triton.language as tl
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.solve_tril import solve_tril
-from fla.utils import check_shared_mem, is_nvidia_hopper
+from fla.utils import check_shared_mem, input_guard, is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
@@ -294,6 +294,7 @@ bwd_prepare_wy_repr = prepare_wy_repr_bwd
 fwd_recompute_w_u = recompute_w_u_fwd
 
 
+@input_guard
 def fwd_prepare_T(
     k: torch.Tensor,
     beta: torch.Tensor,
@@ -316,8 +317,8 @@ def fwd_prepare_T(
         A: Transformation matrix of shape [B, H, T, chunk_size]
     """
     # Convert from head-first [B, H, T, K] to seq-first [B, T, H, K]
-    k_seq_first = k.transpose(1, 2)
-    beta_seq_first = beta.transpose(1, 2)
+    k_seq_first = k.transpose(1, 2).contiguous()
+    beta_seq_first = beta.transpose(1, 2).contiguous()
 
     A = chunk_scaled_dot_kkt_fwd(
         k=k_seq_first,
@@ -333,5 +334,5 @@ def fwd_prepare_T(
     )
 
     # Convert back from [B, T, H, chunk_size] to [B, H, T, chunk_size]
-    A = A.transpose(1, 2)
+    A = A.transpose(1, 2).contiguous()
     return A
