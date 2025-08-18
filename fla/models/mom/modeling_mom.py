@@ -29,6 +29,89 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
+
+def load_balancing_loss_func(
+    gate_logits: Union[torch.Tensor, tuple[torch.Tensor], None],
+    num_experts: Optional[int] = None,
+    top_k=2,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, int]:
+    r"""
+    Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
+
+    See Switch Transformer (https://huggingface.co/papers/2101.03961) for more details. This function implements the loss
+    function presented in equations (4) - (6) of the paper. It aims at penalizing cases where the routing between
+    experts is too unbalanced.
+
+    Args:
+        gate_logits:
+            Logits from the `gate`, should be a tuple of model.config.num_hidden_layers tensors of
+            shape [batch_size X sequence_length, num_experts].
+        num_experts:
+            Number of experts
+        top_k:
+            The number of experts to route per-token, can be also interpreted as the `top-k` routing
+            parameter.
+        attention_mask (`torch.Tensor`, *optional*):
+            The attention_mask used in forward function
+            shape [batch_size X sequence_length] if not None.
+
+    Returns:
+        The auxiliary loss.
+    """
+    if gate_logits is None or not isinstance(gate_logits, tuple):
+        return 0
+
+    if isinstance(gate_logits, tuple):
+        compute_device = gate_logits[0].device
+        concatenated_gate_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0)
+
+    routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
+
+    _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
+
+    expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
+
+    if attention_mask is None:
+        # Compute the percentage of tokens routed to each experts
+        tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
+
+        # Compute the average probability of routing to these experts
+        router_prob_per_expert = torch.mean(routing_weights, dim=0)
+    else:
+        batch_size, sequence_length = attention_mask.shape
+        num_hidden_layers = concatenated_gate_logits.shape[0] // (batch_size * sequence_length)
+
+        # Compute the mask that masks all padding tokens as 0 with the same shape of expert_mask
+        expert_attention_mask = (
+            attention_mask[None, :, :, None, None]
+            .expand((num_hidden_layers, batch_size, sequence_length, top_k, num_experts))
+            .reshape(-1, top_k, num_experts)
+            .to(compute_device)
+        )
+
+        # Compute the percentage of tokens routed to each experts
+        tokens_per_expert = torch.sum(expert_mask.float() * expert_attention_mask, dim=0) / torch.sum(
+            expert_attention_mask, dim=0
+        )
+
+        # Compute the mask that masks all padding tokens as 0 with the same shape of tokens_per_expert
+        router_per_expert_attention_mask = (
+            attention_mask[None, :, :, None]
+            .expand((num_hidden_layers, batch_size, sequence_length, num_experts))
+            .reshape(-1, num_experts)
+            .to(compute_device)
+        )
+
+        # Compute the average probability of routing to these experts
+        router_prob_per_expert = torch.sum(routing_weights * router_per_expert_attention_mask, dim=0) / torch.sum(
+            router_per_expert_attention_mask, dim=0
+        )
+
+    overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(0))
+    return overall_loss * num_experts
+
+
 class MomBlock(nn.Module):
     def __init__(self, config: MomConfig, layer_idx: int):
         super().__init__()
@@ -62,7 +145,6 @@ class MomBlock(nn.Module):
                     capacity=config.capacity,
                     shared_mem=config.shared_mem,
                     single_kv_proj=config.single_kv_proj,
-                    aux_loss_scale=config.aux_loss_scale,
                 )
             else:
                 raise NotImplementedError(f"The MoM backend {config.mom_backend} is not currently supported.")
@@ -87,7 +169,7 @@ class MomBlock(nn.Module):
         residual = hidden_states
         if hasattr(self, 'attn_norm'):
             hidden_states = self.attn_norm(hidden_states)
-        hidden_states, attentions, past_key_values, aux_loss = self.attn(
+        hidden_states, attentions, past_key_values, router_logits = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -103,7 +185,7 @@ class MomBlock(nn.Module):
         hidden_states = self.mlp(hidden_states, **kwargs)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, attentions, past_key_values, aux_loss)
+        outputs = (hidden_states, attentions, past_key_values, router_logits)
 
         return outputs
 
@@ -155,7 +237,7 @@ class MomPreTrainedModel(PreTrainedModel):
 
 @dataclass
 class MomOutputWithPast(BaseModelOutputWithPast):
-    aux_loss: Optional[torch.FloatTensor] = None
+    router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 
 class MomModel(MomPreTrainedModel):
@@ -218,14 +300,14 @@ class MomModel(MomPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
-        total_aux_loss = 0.
+        all_router_logits = ()
 
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
             if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values, aux_loss = self._gradient_checkpointing_func(
+                hidden_states, attentions, past_key_values, router_logits = self._gradient_checkpointing_func(
                     layer.__call__,
                     hidden_states,
                     attention_mask,
@@ -235,7 +317,7 @@ class MomModel(MomPreTrainedModel):
                     **kwargs
                 )
             else:
-                hidden_states, attentions, past_key_values, aux_loss = layer(
+                hidden_states, attentions, past_key_values, router_logits = layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
@@ -246,8 +328,7 @@ class MomModel(MomPreTrainedModel):
 
             if output_attentions:
                 all_attns += (attentions,)
-            if aux_loss is not None:
-                total_aux_loss = total_aux_loss + aux_loss
+            all_router_logits += (router_logits,)
 
         hidden_states = self.norm(hidden_states)
 
@@ -262,13 +343,14 @@ class MomModel(MomPreTrainedModel):
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
             attentions=all_attns,
-            aux_loss=total_aux_loss
+            router_logits=all_router_logits
         )
 
 
 @dataclass
 class MomCausalLMOutputWithPast(CausalLMOutputWithPast):
     aux_loss: Optional[torch.FloatTensor] = None
+    router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 
 class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
@@ -283,7 +365,6 @@ class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
         self.num_memories = config.num_memories
         self.topk = config.topk
         self.aux_loss_scale = config.aux_loss_scale
-        self.num_hidden_layers = config.num_hidden_layers
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -412,20 +493,16 @@ class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
             else:
                 loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
 
-            # valid_router_logits = tuple(
-            #     logits
-            #     for logits in (outputs.router_logits if return_dict else outputs[-1])
-            #     if logits is not None
-            # )
-            # aux_loss = load_balancing_loss_func(
-            #     valid_router_logits,
-            #     self.num_memories,
-            #     self.topk,
-            #     use_layer_wise_balance=self.config.use_layer_wise_balance,
-            # )
-            aux_loss = self.aux_loss_scale * outputs.aux_loss / self.num_hidden_layers
+            aux_loss = load_balancing_loss_func(
+                outputs.router_logits,
+                self.num_memories,
+                self.topk,
+                attention_mask,
+            )
 
-            loss += aux_loss
+            # print(aux_loss)
+
+            loss += aux_loss.to(loss.device) * self.aux_loss_scale
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -437,79 +514,6 @@ class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            router_logits=outputs.router_logits,
             aux_loss=aux_loss
         )
-
-
-def load_balancing_loss_func(
-    gate_logits: Union[torch.Tensor, Tuple],
-    num_memories: torch.Tensor = None,
-    top_k=2,
-    use_layer_wise_balance=False,
-) -> torch.FloatTensor:
-    r"""
-    Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
-
-    See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details. This function implements the loss
-    function presented in equations (4) - (6) of the paper. It aims at penalizing cases where the routing between
-    experts is too unbalanced.
-
-    Args:
-        gate_logits (Union[`torch.Tensor`, Tuple[torch.Tensor]):
-            Logits from the `gate`, should be a tuple of tensors. Shape: [batch_size, seqeunce_length, num_memories].
-        num_memories (`int`, *optional*):
-            Number of experts
-
-    Returns:
-        The auxiliary loss.
-    """
-    if gate_logits is None or (
-        isinstance(gate_logits, Iterable) and len(gate_logits) == 0
-    ):
-        return 0
-
-    # ✨ Here is the fix for balance loss in Mixtral.
-    # We should calculate the balance loss in a layer-wise manner otherwise it may lead to degenerated solutions.
-    if use_layer_wise_balance:
-        if not isinstance(gate_logits, Iterable):
-            gate_logits = (gate_logits,)
-    else:
-        if isinstance(gate_logits, Iterable):
-            gate_logits = (torch.cat(gate_logits, dim=0),)
-        else:
-            gate_logits = (gate_logits,)
-
-    all_balance_losses = []
-
-    for logits in gate_logits:
-        routing_weights, selected_experts = torch.topk(logits, top_k, dim=-1)
-        routing_weights = routing_weights.softmax(dim=-1).to(logits.dtype)
-        routing_weights_full = torch.zeros_like(logits).scatter(-1, selected_experts, routing_weights)
-
-        # cast the expert indices to int64, otherwise one-hot encoding will fail
-        if selected_experts.dtype != torch.int64:
-            selected_experts = selected_experts.to(torch.int64)
-
-        if len(selected_experts.shape) == 2:
-            selected_experts = selected_experts.unsqueeze(2)
-
-        expert_mask = torch.nn.functional.one_hot(selected_experts, num_memories)
-
-        # For a given token, determine if it was routed to a given expert.
-        expert_mask = torch.max(expert_mask, axis=-2).values
-
-        # cast to float32 otherwise mean will fail
-        expert_mask = expert_mask.to(torch.float32)
-        tokens_per_group_and_expert = torch.mean(expert_mask, axis=-2)
-
-        router_prob_per_group_and_expert = torch.mean(routing_weights_full, axis=-2)
-
-        # ✨ balance loss for this layer
-        balance_loss = torch.mean(
-            tokens_per_group_and_expert * router_prob_per_group_and_expert
-        ) * (num_memories**2)
-        all_balance_losses.append(balance_loss.reshape(1))
-
-    all_balance_losses = torch.cat(all_balance_losses).mean()  # ✨
-
-    return all_balance_losses

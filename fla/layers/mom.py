@@ -300,7 +300,6 @@ class MomAttention(nn.Module):
         capacity: float = 1.0,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
-        aux_loss_scale: float = 0.01,
         **kwargs
     ) -> MomAttention:
         super().__init__()
@@ -363,9 +362,8 @@ class MomAttention(nn.Module):
                 self.shared_a = nn.Linear(hidden_size, self.num_heads, bias=False)
 
         A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
-        A_log = torch.log(A)
-        self.A_log = nn.Parameter(A_log)
-        self.D = nn.Parameter(torch.ones(self.num_heads))
+        self.A_log = nn.Parameter(torch.log(A))
+        self.A_log._no_weight_decay = True
         # hard coded for now
         dt_min = 0.001
         dt_max = 0.1
@@ -380,6 +378,7 @@ class MomAttention(nn.Module):
         self.dt_bias = nn.Parameter(inv_dt)
         # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
         # name.endswith("bias") in param_grouping.py
+        self.dt_bias._no_weight_decay = True
 
         if use_short_conv:
             self.conv_size = conv_size
@@ -502,12 +501,11 @@ class MomAttention(nn.Module):
 
             conv_cu_seqlens = cu_seqlens
             padded = False
-            if seq_len != 1 and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < self.conv_size:
-                if self.training:
-                    conv_cu_seqlens = None
-                else:
-                    padded = True
-                    conv_cu_seqlens, cu_q, cu_k, cu_v, pad_lengths = self.pad_for_conv(cu_seqlens, cu_q, cu_k, cu_v)
+            if self.training:
+                conv_cu_seqlens = None
+            elif seq_len != 1 and (cu_seqlens[1:] - cu_seqlens[:-1]).min().item() < self.conv_size:
+                padded = True
+                conv_cu_seqlens, cu_q, cu_k, cu_v, pad_lengths = self.pad_for_conv(cu_seqlens, cu_q, cu_k, cu_v)
 
             conv_q = self.prepare_recurrent_state(conv_state_q[0], conv_cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
             cu_q, conv_q_new = self.q_conv1d(
@@ -560,7 +558,6 @@ class MomAttention(nn.Module):
 
         elif mode == 'fused_recurrent':
             memories = self.prepare_recurrent_state(recurrent_state[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
-
             o, recurrent_state_ = fused_recurrent_gated_delta_rule(
                 q=cu_q,
                 k=cu_k,
@@ -606,8 +603,7 @@ class MomAttention(nn.Module):
             indices, _, _ = get_unpad_data(attention_mask[:, -seq_len:])
             o = index_first_axis(rearrange(o, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
-        aux_loss = self.cal_aux_loss(routing_weights_full, selected_memories) if self.training else None
-        return o, None, past_key_values, aux_loss
+        return o, None, past_key_values, router_logits.view(-1, self.num_memories)
 
     def shared_o(
         self,
@@ -751,7 +747,7 @@ class MomAttention(nn.Module):
             orig_q[:, dest_start:dest_end, ...] = cu_q[:, src_start:src_end, ...]
             orig_k[:, dest_start:dest_end, ...] = cu_k[:, src_start:src_end, ...]
             orig_v[:, dest_start:dest_end, ...] = cu_v[:, src_start:src_end, ...]
-        return orig_q, orig_v, orig_v
+        return orig_q, orig_k, orig_v
 
     def prepare_recurrent_state(self, recurrent_state, cu_seqlens, cu_seqlen_all, reverse_indices, batch_size):
         if recurrent_state is None:
@@ -790,28 +786,3 @@ class MomAttention(nn.Module):
         else:
             recurrent_state = recurrent_state_new
         return recurrent_state
-
-    def cal_aux_loss(self, routing_weights_full, selected_experts):
-        # cast the expert indices to int64, otherwise one-hot encoding will fail
-        if selected_experts.dtype != torch.int64:
-            selected_experts = selected_experts.to(torch.int64)
-
-        if len(selected_experts.shape) == 2:
-            selected_experts = selected_experts.unsqueeze(2)
-
-        expert_mask = torch.nn.functional.one_hot(selected_experts, self.num_memories)
-
-        # For a given token, determine if it was routed to a given expert.
-        expert_mask = torch.max(expert_mask, axis=-2).values
-
-        # cast to float32 otherwise mean will fail
-        expert_mask = expert_mask.to(torch.float32)
-        tokens_per_group_and_expert = torch.mean(expert_mask, axis=-2)
-
-        router_prob_per_group_and_expert = torch.mean(routing_weights_full, axis=-2)
-
-        # ✨ balance loss for this layer
-        balance_loss = torch.mean(
-            tokens_per_group_and_expert * router_prob_per_group_and_expert
-        ) * (self.num_memories**2)
-        return balance_loss
