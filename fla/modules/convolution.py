@@ -96,7 +96,7 @@ def causal_conv1d_fwd_kernel(
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
     elif i_t * BT >= W:
-        # to make triton compiler happy, copy codes here
+        # To make Triton compiler happy, we need to copy codes.
         for i_w in tl.static_range(-W + 1, 1):
             p_yi = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
@@ -208,29 +208,78 @@ def causal_conv1d_bwd_kernel(
     if HAS_BIAS:
         b_db = tl.zeros((BD,), dtype=tl.float32)
 
-    for i_w in tl.static_range(0, W):
-        p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
-
-        # [BT, BD]
-        b_dy = tl.load(p_dy, boundary_check=(0, 1))
-
-        if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-            p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
-
-            b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
-            b_ys = tl.sigmoid(b_y)
-            b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
-
-        b_wdy = b_dy
-        if HAS_WEIGHT:
+    if not HAS_DHT:
+        for i_w in tl.static_range(0, W):
+            p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
-            b_wdy = b_wdy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)
-            # [BD]
-            b_dw = tl.sum(b_dy * b_x, 0)
-            tl.store(dw + i_tg * D*W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
-        if HAS_BIAS and i_w == 0:
-            b_db += tl.sum(b_dy, 0)
-        b_dx += b_wdy
+            b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+            if ACTIVATION == 'swish' or ACTIVATION == 'silu':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_ys = tl.sigmoid(b_y)
+                b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
+            b_wdy = b_dy
+            if HAS_WEIGHT:
+                # [BT, BD]
+                b_wdy = b_wdy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)
+                # [BD]
+                b_dw = tl.sum(b_dy * b_x, 0)
+                tl.store(dw + i_tg * D*W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+            if HAS_BIAS and i_w == 0:
+                b_db += tl.sum(b_dy, 0)
+            b_dx += b_wdy
+    elif i_t * BT >= W:
+        for i_w in tl.static_range(0, W):
+            p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            # [BT, BD]
+            b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+            if ACTIVATION == 'swish' or ACTIVATION == 'silu':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_ys = tl.sigmoid(b_y)
+                b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
+            b_wdy = b_dy
+            if HAS_WEIGHT:
+                # [BT, BD]
+                b_wdy = b_wdy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)
+                # [BD]
+                b_dw = tl.sum(b_dy * b_x, 0)
+                tl.store(dw + i_tg * D*W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+            if HAS_BIAS and i_w == 0:
+                b_db += tl.sum(b_dy, 0)
+            b_dx += b_wdy
+    else:
+        # 需要更改 b_x. 这里的 b_x 需要在前面掩码加载一个 initial——state 的权重。
+        o_t = i_t * BT + tl.arange(0, BT)
+        for i_w in tl.static_range(0, W):
+            p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            # [BT, BD]
+            b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+            if ACTIVATION == 'swish' or ACTIVATION == 'silu':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_ys = tl.sigmoid(b_y)
+                b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
+            b_wdy = b_dy
+            if HAS_WEIGHT:
+                # [BT, BD]
+                b_wdy = b_wdy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)
+                # [BD]
+                b_dw = tl.sum(b_dy * b_x, 0)
+                # 加载当前的weight对应乘过的 intial_state
+                # [BT, BD]
+                o_c = W - i_w + o_t
+                mask_c = (o_c >= 1) & (o_c < W) 
+                b_xc = tl.load(
+                    initial_state + i_n * D * W + o_d[None, :] * W + o_c,
+                    mask=mask_c[:, None],
+                    other=0.0
+                )  # [BT, BD]
+                b_dw += tl.sum(b_dy * b_xc, 0)
+                tl.store(dw + i_tg * D*W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+            if HAS_BIAS and i_w == 0:
+                b_db += tl.sum(b_dy, 0)
+            b_dx += b_wdy
 
     if HAS_BIAS:
         b_db = tl.cast(b_db, dtype=db.dtype.element_ty, fp_downcast_rounding='rtne')
@@ -413,7 +462,7 @@ def causal_conv1d_bwd(
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
     dr = dy if residual is not None else None
-    dh0 = torch.empty_like(initial_state) if initial_state is not None else None
+    dh0 = torch.zeros_like(initial_state) if initial_state is not None else None
 
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
