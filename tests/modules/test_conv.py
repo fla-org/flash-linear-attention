@@ -644,7 +644,7 @@ def test_conv_cache_backward(
     rtol=1e-5,
     atol=1e-6,
 ):
-    torch.manual_seed(0)
+    torch.manual_seed(42)
 
     device = torch.device("cuda")
 

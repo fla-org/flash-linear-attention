@@ -249,36 +249,61 @@ def causal_conv1d_bwd_kernel(
                 b_db += tl.sum(b_dy, 0)
             b_dx += b_wdy
     else:
-        # 需要更改 b_x. 这里的 b_x 需要在前面掩码加载一个 initial——state 的权重。
+        # which may use initial state
         o_t = i_t * BT + tl.arange(0, BT)
+
         for i_w in tl.static_range(0, W):
-            p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
-            # [BT, BD]
-            b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
+            p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1),
+                                     (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            b_dy_shift = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
-                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
-                b_ys = tl.sigmoid(b_y)
-                b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
-            b_wdy = b_dy
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1),
+                                        (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y_shift = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_ys = tl.sigmoid(b_y_shift)
+                b_dy_shift = b_dy_shift * b_ys * (1 + b_y_shift * (1 - b_ys))
+
             if HAS_WEIGHT:
-                # [BT, BD]
-                b_wdy = b_wdy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)
-                # [BD]
-                b_dw = tl.sum(b_dy * b_x, 0)
-                # 加载当前的weight对应乘过的 intial_state
-                # [BT, BD]
-                o_c = W - i_w + o_t
-                mask_c = (o_c >= 1) & (o_c < W) 
-                b_xc = tl.load(
-                    initial_state + i_n * D * W + o_d[None, :] * W + o_c,
-                    mask=mask_c[:, None],
-                    other=0.0
-                )  # [BT, BD]
-                b_dw += tl.sum(b_dy * b_xc, 0)
-                tl.store(dw + i_tg * D*W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+                # gradient comes from x：sum_t dy[t+i_w] * x[t]
+                b_dw = tl.sum(b_dy_shift * b_x, 0)
+                # index of cache：c = W - i_w + t
+                if HAS_DH0:
+                    mask_head_rows = (o_t < i_w)
+                    # dy_head = dy[t]
+                    b_dy_head = tl.load(
+                        dy + bos * D + o_t[:, None] * D + o_d,
+                        mask=(mask_head_rows[:, None] & m_d[None, :]),
+                        other=0.0
+                    ).to(tl.float32)
+
+                    if ACTIVATION == 'swish' or ACTIVATION == 'silu':
+                        # use y[t] （not y[t+i_w]）
+                        b_y_head = tl.load(
+                            y + bos * D + o_t[:, None] * D + o_d,
+                            mask=(mask_head_rows[:, None] & m_d[None, :]),
+                            other=0.0
+                        ).to(tl.float32)
+                        b_ys_head = tl.sigmoid(b_y_head)
+                        b_dy_head = b_dy_head * b_ys_head * (1 + b_y_head * (1 - b_ys_head))
+
+                    o_c = W - i_w + o_t
+                    # index 0 is padding 0
+                    mask_c = (mask_head_rows & (o_c >= 1) & (o_c < W))
+                    b_xc = tl.load(
+                        initial_state + i_n * D * W + o_d[None, :] * W + o_c[:, None],
+                        mask=(mask_c[:, None] & m_d[None, :]),
+                        other=0.0
+                    ).to(tl.float32)
+
+                    # add the gradient comes from initial_state
+                    b_dw += tl.sum(b_dy_head * b_xc, 0)
+
+                tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1,
+                         b_dw.to(dw.dtype.element_ty), mask=m_d)
+
             if HAS_BIAS and i_w == 0:
-                b_db += tl.sum(b_dy, 0)
+                b_db += tl.sum(b_dy_shift, 0)
+            b_wdy = b_dy_shift if not HAS_WEIGHT else (b_dy_shift * tl.sum(b_w * (o_w == (W - i_w - 1)), 1))
             b_dx += b_wdy
 
     if HAS_BIAS:
@@ -297,10 +322,6 @@ def causal_conv1d_bwd_kernel(
                             mask=mask[:, None] & m_d[None, :],
                             other=0.).to(tl.float32)
             b_dx += b_dht
-
-    if HAS_DH0:
-        if i_t == 0:
-            pass
 
     p_dx = tl.make_block_ptr(dx + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
     tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
