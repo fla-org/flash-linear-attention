@@ -50,7 +50,7 @@ def test_parallel(
     for b in range(B):
         for t in range(T):
             for h in range(H):
-                i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
+                i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
                 block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
 
@@ -114,7 +114,7 @@ def test_parallel_varlen(
     for i in range(T):
         _, t = seq_indices[i]
         for h in range(H):
-            i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
+            i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
             block_indices[0, i, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
 
