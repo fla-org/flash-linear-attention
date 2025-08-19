@@ -8,10 +8,11 @@ import torch
 import triton
 
 from fla.ops.nsa.naive import naive_nsa
-from fla.ops.nsa.parallel import parallel_nsa
+from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd
 from fla.ops.utils import prepare_token_indices
 from fla.utils import assert_close, device
 
+os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
 # FIXME
 @pytest.mark.parametrize(
@@ -148,3 +149,76 @@ def test_parallel_varlen(
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 16, 64, 16, 32, 1.0, torch.float16),
+            (3, 111, 15, 1, 32, 100, 16, 32, 1.0, torch.float16),
+            (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, torch.float16),
+            (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, torch.float16),
+            (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, torch.float16)
+        ]
+    ]
+)
+def test_parallel_selective_decode(
+    B: int,
+    T: int,
+    Tq: int,
+    H: int,
+    HQ: int,
+    D: int,
+    S: int,
+    block_size: int,
+    scale: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device)
+
+    block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
+    for b in range(B):
+        for t in range(T):
+            for h in range(H):
+                i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
+                block_indices[b, t, h, :len(i_i)] = i_i
+    block_indices = block_indices.sort(-1)[0]
+
+    o_full, lse_full = parallel_nsa_fwd(
+        q, k, v,
+        block_indices,
+        S,
+        block_size,
+        scale,
+    )
+
+    o_short, lse_short = parallel_nsa_fwd(
+        q[:, -Tq:].contiguous(),      # only the last T_q queries
+        k, v,
+        block_indices[:, -Tq:].contiguous(),
+        S,
+        block_size,
+        scale,
+    )
+
+    o_naive_fla = naive_nsa(
+        q, k, v, block_indices, block_size, scale
+    )
+
+    assert_close(
+        'outputs: full-vs-naive',
+        o_naive_fla, o_full, 0.005
+    )
+    assert_close(
+        'outputs: full-vs-cached',
+        o_short, o_full[:, -Tq:], 0.005
+    )
+    assert_close(
+        'log-sum-exp: full-vs-cached',
+        lse_short, lse_full[:, -Tq:], 0.005
+    )
