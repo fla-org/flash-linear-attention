@@ -627,35 +627,34 @@ def test_mixed_backend(
     assert_close("triton→cuda vs triton", y_mixed2, y_triton_full,  1e-3)
 
 
-import torch
-import torch.nn.functional as F
-from torch.autograd import gradcheck
-import numpy as np
-
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_has_bias{4}_has_residual{5}_activation{6}_{7}".format(*test))
+        for test in [
+            (2, 64, 128, 3, True, True, "swish", torch.float32),
+            (2, 128, 128, 4, True, True, "swish", torch.float32),
+        ]
+    ]
+)
 def test_conv_cache_backward(
-    B=1,
-    T=16,
-    D=1,
-    W=4,
-    activation="silu",
-    has_bias=True,
-    has_residual=True,
-    dtype=torch.float32,
-    rtol=1e-5,
-    atol=1e-6,
+    B: int,
+    T: int,
+    D: int,
+    W: int,
+    has_bias: bool,
+    has_residual: bool,
+    activation: str,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
-    device = torch.device("cuda")
-
-    # 构造输入
     x = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
     weight = torch.randn(D, W, device=device, dtype=dtype, requires_grad=True)
     bias = torch.randn(D, device=device, dtype=dtype, requires_grad=True) if has_bias else None
     residual = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True) if has_residual else None
     cache = torch.randn(B, D, W - 1, device=device, dtype=dtype, requires_grad=True)
 
-    # --- 参考实现 ---
     def ref_func(x, weight, bias, residual, cache):
         out, cache_out = causal_conv1d_ref_torch(
             x.transpose(1, 2),
@@ -669,8 +668,7 @@ def test_conv_cache_backward(
         if residual is not None:
             out += residual
         return out, cache_out
- 
-    # --- Triton 实现（返回 [B, D, W]） ---
+
     def triton_func(x, weight, bias, residual, cache):
         zero_padding = torch.zeros(B, D, 1, device=device, dtype=dtype)
         triton_cache = torch.cat([zero_padding, cache], dim=-1)
@@ -683,18 +681,15 @@ def test_conv_cache_backward(
             output_final_state=True,
             activation=activation,
         )
-        # 只取最后 W-1 个位置
         cache_out_triton = cache_out_triton[..., 1:]  # [B, D, W-1]
         return tri, cache_out_triton
- 
-    # --- 构造输出梯度 ---
+
     d_tri = torch.randn_like(x)
     d_cache_out = torch.randn_like(cache)
- 
-    # --- 计算梯度 ---
+
     def get_grads(func, *inputs):
         out, cache_out = func(*inputs)
-        loss = (out * d_tri).sum()*100  + (cache_out * d_cache_out).sum() * 50
+        loss = (out * d_tri).sum()*100 + (cache_out * d_cache_out).sum() * 50
         grads = torch.autograd.grad(
             loss,
             inputs,
@@ -702,18 +697,11 @@ def test_conv_cache_backward(
             create_graph=False,
         )
         return grads
- 
+
     inputs = (x, weight, bias, residual, cache)
     grads_ref = get_grads(ref_func, *inputs)
     grads_tri = get_grads(triton_func, *inputs)
- 
-    # --- 打印对比 ---
+
     names = ["x", "weight", "bias", "residual", "cache"]
     for name, g_ref, g_tri in zip(names, grads_ref, grads_tri):
-        if g_ref is None:
-            continue
-        diff = (g_ref - g_tri).abs().max()
-        if diff > 5e-5:
-            print(name+"_grad_diff", (g_ref - g_tri), g_ref, g_tri)
-
-    # print("✅ 最后 W-1 个位置梯度一致")
+        assert_close(name, g_ref, g_tri, ratio=1e-3)
