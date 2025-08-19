@@ -7,10 +7,12 @@ import pytest
 import torch
 import triton
 
-from fla.ops.nsa.naive import naive_nsa
-from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd
+from fla.ops.nsa.naive import naive_nsa, naive_nsa_cmp
+from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd, parallel_nsa_topk
+from fla.ops.nsa.compression import parallel_nsa_compression_fwd
 from fla.ops.utils import prepare_token_indices
 from fla.utils import assert_close, device
+from fla.ops.utils.pooling import mean_pooling
 
 os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
@@ -222,3 +224,83 @@ def test_parallel_selective_decode(
         'log-sum-exp: full-vs-cached',
         lse_short, lse_full[:, -Tq:], 0.005
     )
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 16, 64, 16, 32, 1.0, torch.float16),
+            (3, 111, 15, 1, 32, 100, 16, 32, 1.0, torch.float16),
+            (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, torch.float16),
+            (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, torch.float16),
+            (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, torch.float16)
+        ]
+    ]
+)
+def test_parallel_compressive_decode(
+    B: int,
+    T: int,
+    Tq: int,
+    H: int,
+    HQ: int,
+    D: int,
+    S: int,
+    block_size: int,
+    scale: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device)
+
+    k_cmp, v_cmp = mean_pooling(k, block_size), mean_pooling(v, block_size)
+    o_full, lse_full = parallel_nsa_compression_fwd(
+        q=q,
+        k=k_cmp,
+        v=v_cmp,
+        TK=T,
+        block_size=block_size,
+        scale=scale,
+    )
+
+    o_naive, lse_naive = naive_nsa_cmp(
+        q=q,
+        k_cmp=k_cmp,
+        v_cmp=v_cmp,
+        block_size=block_size,
+        scale=scale,
+    )
+
+    assert_close(
+        'outputs: full-vs-naive',
+        o_full, o_naive, 0.005
+    )
+    # For positions not attending to any token, the log-sum-exp should be -inf; the kernel returns 0 instead, it is
+    # OK as those positions will not be used in the compressive attention anyway.
+    assert_close(
+        'log-sum-exp: full-vs-naive',
+        lse_full, torch.where(lse_naive == float('-inf'), 0, lse_naive), 0.005
+    )
+
+    o_short, lse_short = parallel_nsa_compression_fwd(
+        q[:, -Tq:].contiguous(),      # only the last T_q queries
+        k_cmp, v_cmp,
+        T,
+        block_size,
+        scale,
+    )
+
+    assert_close(
+        'outputs: full-vs-cached',
+        o_short, o_full[:, -Tq:], 0.005
+    )
+
+    assert_close(
+        'log-sum-exp: full-vs-cached',
+        lse_short, lse_full[:, -Tq:], 0.005
+    )
+

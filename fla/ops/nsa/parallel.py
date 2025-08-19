@@ -847,25 +847,25 @@ def parallel_nsa(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]`.
+            queries of shape `[B, TQ, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g_cmp (torch.Tensor):
-            Gate score for compressed attention of shape `[B, T, HQ]`.
+            Gate score for compressed attention of shape `[B, TQ, HQ]`.
         g_slc (torch.Tensor):
-            Gate score for selected attention of shape `[B, T, HQ]`.
+            Gate score for selected attention of shape `[B, TQ, HQ]`.
         g_swa (torch.Tensor):
-            Gate score for sliding attentionof shape `[B, T, HQ]`.
+            Gate score for sliding attentionof shape `[B, TQ, HQ]`.
         block_indices (torch.LongTensor):
-            Block indices of shape `[B, T, H, S]`.
+            Block indices of shape `[B, TQ, H, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
             If `g_cmp` is provided, the passed `block_indices` will be ignored.
         block_counts (Optional[Union[torch.LongTensor, int]]):
             Number of selected blocks for each query.
-            If a tensor is provided, with shape `[B, T, H]`,
+            If a tensor is provided, with shape `[B, TQ, H]`,
             each query can select the same number of blocks.
             If not provided, it will default to 16.
         block_size (int):
@@ -897,6 +897,7 @@ def parallel_nsa(
             q=q,
             k=k_cmp,
             v=v_cmp,
+            TK=k.shape[1],
             block_size=block_size,
             scale=scale,
             cu_seqlens=cu_seqlens

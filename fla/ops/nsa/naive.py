@@ -6,6 +6,8 @@ from typing import Optional
 
 import torch
 from einops import repeat
+from torch.nn.attention.flex_attention import create_block_mask
+from torch.nn.attention.flex_attention import flex_attention
 
 
 def naive_nsa(
@@ -101,3 +103,24 @@ def naive_nsa(
                 o[0][cu_seqlens[i]+i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
 
     return o.to(dtype)
+
+def naive_nsa_cmp(q, k_cmp, v_cmp, block_size, scale, cu_seqlens=None):
+    assert cu_seqlens is None, "Not implemented yet"
+
+    @torch.compile
+    def cmp_mask(b, h, q_idx, kv_idx):
+        return q_idx >= (kv_idx + 1) * block_size - 1
+
+    B, H, TQ, TKV = q.shape[0], k_cmp.shape[1], q.shape[1], k_cmp.shape[1]
+    block_mask = create_block_mask(cmp_mask, B, H, TQ, TKV)
+
+    o_cmp, lse_cmp = flex_attention(
+        q.transpose(1, 2),
+        k_cmp.transpose(1, 2),
+        v_cmp.transpose(1, 2),
+        block_mask=block_mask,
+        enable_gqa=True,
+        return_lse=True,
+        scale=scale,
+    )
+    return o_cmp.transpose(1, 2), lse_cmp.transpose(1, 2)
