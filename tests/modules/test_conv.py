@@ -625,3 +625,90 @@ def test_mixed_backend(
 
     y_mixed2 = torch.cat([y_triton_prefill, y_cuda_decode], dim=1)
     assert_close("triton→cuda vs triton", y_mixed2, y_triton_full,  1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_has_bias{4}_has_residual{5}_activation{6}_{7}".format(*test))
+        for test in [
+            (2, 64, 100, 3, True, True, "swish", torch.float32),
+            (2, 128, 128, 4, True, True, "swish", torch.float32),
+            (3, 128, 128, 4, True, True, "swish", torch.float32),
+            (3, 128, 256, 4, True, True, "swish", torch.float32),
+            (3, 128, 512, 4, True, True, "swish", torch.float32),
+            (2, 128, 1024, 4, True, True, "swish", torch.float32),
+            (2, 128, 2048, 3, True, True, "swish", torch.float32),
+            (2, 128, 4096, 4, True, True, "swish", torch.float32),
+            (2, 128, 8192, 4, True, True, "swish", torch.float32),
+        ]
+    ]
+)
+def test_conv_cache_backward(
+    B: int,
+    T: int,
+    D: int,
+    W: int,
+    has_bias: bool,
+    has_residual: bool,
+    activation: str,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    x = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(D, W, device=device, dtype=dtype, requires_grad=True)
+    bias = torch.randn(D, device=device, dtype=dtype, requires_grad=True) if has_bias else None
+    residual = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True) if has_residual else None
+    cache = torch.randn(B, D, W - 1, device=device, dtype=dtype, requires_grad=True)
+
+    def ref_func(x, weight, bias, residual, cache):
+        out, cache_out = causal_conv1d_ref_torch(
+            x.transpose(1, 2),
+            weight,
+            bias,
+            initial_state=cache,
+            output_final_state=True,
+            activation=activation,
+        )
+        out = out.transpose(1, 2)
+        if residual is not None:
+            out += residual
+        return out, cache_out
+
+    def triton_func(x, weight, bias, residual, cache):
+        zero_padding = torch.zeros(B, D, 1, device=device, dtype=dtype)
+        triton_cache = torch.cat([zero_padding, cache], dim=-1).contiguous()
+        tri, cache_out_triton = causal_conv1d(
+            x,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            initial_state=triton_cache,
+            output_final_state=True,
+            activation=activation,
+        )
+        cache_out_triton = cache_out_triton[..., 1:].clone()  # [B, D, W-1]
+        return tri, cache_out_triton
+
+    d_tri = torch.randn_like(x)
+    d_cache_out = torch.randn_like(cache)
+
+    def get_grads(func, *inputs):
+        out, cache_out = func(*inputs)
+        loss = (out * d_tri).sum() + (cache_out * d_cache_out).sum()
+        grads = torch.autograd.grad(
+            loss,
+            inputs,
+            retain_graph=True,
+            create_graph=False,
+        )
+        return grads
+
+    inputs = (x, weight, bias, residual, cache)
+    grads_ref = get_grads(ref_func, *inputs)
+    grads_tri = get_grads(triton_func, *inputs)
+
+    names = ["x", "weight", "bias", "residual", "cache"]
+    for name, g_ref, g_tri in zip(names, grads_ref, grads_tri):
+        assert_close(name, g_ref, g_tri, ratio=1e-3)
