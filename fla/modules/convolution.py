@@ -96,7 +96,7 @@ def causal_conv1d_fwd_kernel(
                 b_yi *= tl.sum(b_w * (o_w == (i_w + W - 1)), 1)
             b_y += b_yi
     elif i_t * BT >= W:
-        # To make Triton compiler happy, we need to copy codes.
+        # to make Triton compiler happy, we need to copy codes
         for i_w in tl.static_range(-W + 1, 1):
             p_yi = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
@@ -137,9 +137,9 @@ def causal_conv1d_fwd_kernel(
 @triton.heuristics({
     'HAS_WEIGHT': lambda args: args['dw'] is not None,
     'HAS_BIAS': lambda args: args['db'] is not None,
-    'HAS_DH0': lambda args: args['dh0'] is not None,
-    'HAS_DHT': lambda args: args['dht'] is not None,
     'HAS_RESIDUAL': lambda args: args['residual'] is not None,
+    'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
+    'USE_FINAL_STATE': lambda args: args['dht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
@@ -177,8 +177,8 @@ def causal_conv1d_bwd_kernel(
     ACTIVATION: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
-    HAS_DH0: tl.constexpr,
-    HAS_DHT: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    USE_FINAL_STATE: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -208,7 +208,7 @@ def causal_conv1d_bwd_kernel(
     if HAS_BIAS:
         b_db = tl.zeros((BD,), dtype=tl.float32)
 
-    if not HAS_DHT:
+    if not USE_FINAL_STATE:
         for i_w in tl.static_range(0, W):
             p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
@@ -257,8 +257,7 @@ def causal_conv1d_bwd_kernel(
                                      (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             b_dy_shift = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1),
-                                        (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
                 b_y_shift = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                 b_ys = tl.sigmoid(b_y_shift)
                 b_dy_shift = b_dy_shift * b_ys * (1 + b_y_shift * (1 - b_ys))
@@ -267,7 +266,7 @@ def causal_conv1d_bwd_kernel(
                 # gradient comes from x：sum_t dy[t+i_w] * x[t]
                 b_dw = tl.sum(b_dy_shift * b_x, 0)
                 # index of cache：c = W - i_w + t
-                if HAS_DH0:
+                if USE_INITIAL_STATE:
                     mask_head_rows = (o_t < i_w)
                     # dy_head = dy[t]
                     b_dy_head = tl.load(
@@ -298,22 +297,19 @@ def causal_conv1d_bwd_kernel(
                     # add the gradient comes from initial_state
                     b_dw += tl.sum(b_dy_head * b_xc, 0)
 
-                tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1,
-                         b_dw.to(dw.dtype.element_ty), mask=m_d)
+                tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
 
             if HAS_BIAS and i_w == 0:
                 b_db += tl.sum(b_dy_shift, 0)
             b_wdy = b_dy_shift if not HAS_WEIGHT else (b_dy_shift * tl.sum(b_w * (o_w == (W - i_w - 1)), 1))
             b_dx += b_wdy
 
-        if HAS_DH0:
-            p_dy0 = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1),
-                                      (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        if USE_INITIAL_STATE:
+            p_dy0 = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
             b_dy0 = tl.load(p_dy0, boundary_check=(0, 1)).to(tl.float32)
 
             if ACTIVATION == 'swish' or ACTIVATION == 'silu':
-                p_y0 = tl.make_block_ptr(y + bos * D, (T, D), (D, 1),
-                                         (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+                p_y0 = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
                 b_y0 = tl.load(p_y0, boundary_check=(0, 1)).to(tl.float32)
                 b_ys0 = tl.sigmoid(b_y0)
                 b_dy0 = b_dy0 * b_ys0 * (1 + b_y0 * (1 - b_ys0))
@@ -322,16 +318,18 @@ def causal_conv1d_bwd_kernel(
                 m_rows = (o_t < i_w)
 
                 if HAS_WEIGHT:
-                    w_idx_rows = i_w - 1 - o_t                     # [BT]
-                    w_mask = (o_w[None, :] == w_idx_rows[:, None])   # [BT, BW]
+                    # [BT]
+                    w_idx_rows = i_w - 1 - o_t
+                    # [BT, BW]
+                    w_mask = (o_w[None, :] == w_idx_rows[:, None])
                     w_pick = tl.sum(b_w[None, :, :] * w_mask[:, None, :], 2)
                 else:
                     w_pick = 1.0
 
                 contrib = (b_dy0 * w_pick).to(tl.float32)
                 contrib = tl.where(m_rows[:, None] & m_d[None, :], contrib, 0.0)
-
-                b_dh0_s = tl.sum(contrib, 0)  # [BD]
+                # [BD]
+                b_dh0_s = tl.sum(contrib, 0)
 
                 # dh0: [NT, B, D, W]
                 tl.store(dh0 + i_t * B * D * W + i_n * D * W + o_d * W + i_w,
@@ -341,17 +339,15 @@ def causal_conv1d_bwd_kernel(
         b_db = tl.cast(b_db, dtype=db.dtype.element_ty, fp_downcast_rounding='rtne')
         tl.store(db + i_tg * D + o_d, b_db, mask=m_d)
 
-    if HAS_DHT:
-        if (i_t+1) * BT >= T-W:
+    if USE_FINAL_STATE:
+        if i_t * BT + BT >= T-W:
             start_tok = max(0, T - (W - 1))
             offset = i_t * BT + tl.arange(0, BT)
             tok_idx = offset - start_tok
             mask = (offset >= start_tok) & (offset < T)
             w_idx = 1 + tok_idx
             dht_off = i_n * D * W + o_d[None, :] * W + w_idx[:, None]
-            b_dht = tl.load(dht + dht_off,
-                            mask=mask[:, None] & m_d[None, :],
-                            other=0.).to(tl.float32)
+            b_dht = tl.load(dht + dht_off, mask=mask[:, None] & m_d[None, :], other=0.).to(tl.float32)
             b_dx += b_dht
 
     p_dx = tl.make_block_ptr(dx + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
