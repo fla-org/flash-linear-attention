@@ -21,7 +21,7 @@ class Cache(transformers.cache_utils.Cache):
         self,
         seen_tokens: int = 0
     ) -> Cache:
-        super().__init__()
+        super().__init__(layer_classes=transformers.cache_utils.DynamicLayer)
 
         self.states: List[Dict[str, Any]] = []
 
