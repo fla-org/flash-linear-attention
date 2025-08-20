@@ -8,9 +8,18 @@ import torch
 from einops import repeat
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.nn.attention.flex_attention import flex_attention
+from fla.ops.utils.pooling import mean_pooling
 
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+except ImportError:
+    warnings.warn(
+        "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
+        category=ImportWarning
+    )
+    flash_attn_func = None
 
-def naive_nsa(
+def naive_nsa_sel(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -233,3 +242,111 @@ def naive_nsa_topk(
                                          device=device, dtype=topi.dtype)), dim=-1)
 
     return out
+
+
+def naive_nsa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_cmp: Optional[torch.Tensor] = None,
+    g_slc: Optional[torch.Tensor] = None,
+    g_swa: Optional[torch.Tensor] = None,
+    block_indices: Optional[torch.LongTensor] = None,
+    block_counts: Union[torch.LongTensor, int] = 16,
+    block_size: int = 64,
+    window_size: int = 0,
+    scale: Optional[float] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+) -> torch.Tensor:
+    r"""
+    Args:
+        q (torch.Tensor):
+            queries of shape `[B, TQ, HQ, K]`.
+        k (torch.Tensor):
+            keys of shape `[B, T, H, K]`.
+            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
+        v (torch.Tensor):
+            values of shape `[B, T, H, V]`.
+        g_cmp (torch.Tensor):
+            Gate score for compressed attention of shape `[B, TQ, HQ]`.
+        g_slc (torch.Tensor):
+            Gate score for selected attention of shape `[B, TQ, HQ]`.
+        g_swa (torch.Tensor):
+            Gate score for sliding attentionof shape `[B, TQ, HQ]`.
+        block_indices (torch.LongTensor):
+            Block indices of shape `[B, TQ, H, S]`.
+            `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
+            If `g_cmp` is provided, the passed `block_indices` will be ignored.
+        block_counts (Optional[Union[torch.LongTensor, int]]):
+            Number of selected blocks for each query.
+            If a tensor is provided, with shape `[B, TQ, H]`,
+            each query can select the same number of blocks.
+            If not provided, it will default to 16.
+        block_size (int):
+            Selected block size. Default: 64.
+        window_size (int):
+            Sliding window size. Default: 0.
+        scale (Optional[float]):
+            Scale factor for attention scores.
+            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+
+    Returns:
+        o (torch.Tensor):
+            Outputs of shape `[B, T, HQ, V]`.
+    """
+    assert block_counts is not None, "block counts must be provided for selection"
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    if cu_seqlens is not None:
+        assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
+    assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
+
+    k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
+    o_cmp, lse_cmp = None, None
+    if g_cmp is not None:
+        o_cmp, lse_cmp = naive_nsa_cmp(
+            q=q,
+            k_cmp=k_cmp,
+            v_cmp=v_cmp,
+            block_size=block_size,
+            scale=scale,
+            cu_seqlens=cu_seqlens
+        )
+        if block_indices is not None:
+            warnings.warn("`block_indices` will be ignored when `g_cmp` is provided")
+        block_indices = naive_nsa_topk(
+            q=q,
+            k_cmp=k_cmp,
+            block_counts=block_counts,
+            block_size=block_size,
+            scale=scale,
+            cu_seqlens=cu_seqlens
+        )
+    o = o_slc = naive_nsa_sel(q, k, v, block_indices, block_size, scale, cu_seqlens)
+    if g_slc is not None:
+        o = o_slc * g_slc.unsqueeze(-1)
+    if o_cmp is not None:
+        o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
+    if window_size > 0:
+        if cu_seqlens is not None:
+            max_seqlen = q.shape[1]
+            o_swa = flash_attn_varlen_func(
+                q.squeeze(0), k.squeeze(0), v.squeeze(0),
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=True,
+                window_size=(window_size-1, 0)
+            ).unsqueeze(0)
+        else:
+            o_swa = flash_attn_func(
+                q, k, v,
+                causal=True,
+                window_size=(window_size-1, 0)
+            )
+        o = torch.addcmul(o, o_swa, g_swa.unsqueeze(-1))
+    return o

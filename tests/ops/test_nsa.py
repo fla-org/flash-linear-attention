@@ -8,7 +8,7 @@ import torch
 import triton
 import warnings
 
-from fla.ops.nsa.naive import naive_nsa, naive_nsa_cmp, naive_nsa_topk
+from fla.ops.nsa.naive import naive_nsa, naive_nsa_sel, naive_nsa_cmp, naive_nsa_topk
 from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd, parallel_nsa_topk
 from fla.ops.nsa.compression import parallel_nsa_compression_fwd
 from fla.ops.utils import prepare_token_indices
@@ -43,7 +43,6 @@ def test_parallel(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
     k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
@@ -58,7 +57,7 @@ def test_parallel(
                 block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
 
-    ref = naive_nsa(q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
+    ref = naive_nsa_sel(q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -101,7 +100,6 @@ def test_parallel_varlen(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
@@ -122,7 +120,7 @@ def test_parallel_varlen(
             block_indices[0, i, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
 
-    ref = naive_nsa(
+    ref = naive_nsa_sel(
         q=q,
         k=k,
         v=v,
@@ -209,7 +207,7 @@ def test_parallel_selective_decode(
         scale,
     )
 
-    o_naive_fla = naive_nsa(
+    o_naive_fla = naive_nsa_sel(
         q, k, v, block_indices, block_size, scale
     )
 
@@ -414,3 +412,56 @@ def test_parallel_topk_decode(
         "Different in forcefully selected block indices compared to full"
     assert (free_block_indices_short == free_block_indices[:, -Tq:]).all(), \
         "Different in free block indices compared to full"
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'window_size', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-{}".format(*test))
+        for test in [
+            (1, 1, 1, 1, 16, 64, 16, 32, 1.0, 0, torch.float16),
+            (3, 111, 15, 1, 32, 100, 16, 32, 1.0, 128, torch.float16),
+            (3, 1024, 256, 1, 32, 100, 16, 32, 1.0, 128, torch.float16),
+            (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, 128, torch.float16),
+            (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, 0, torch.float16),
+            (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, 512, torch.float16)
+        ]
+    ]
+)
+def test_parallel_decode(
+    B: int,
+    T: int,
+    Tq: int,
+    H: int,
+    HQ: int,
+    D: int,
+    S: int,
+    block_size: int,
+    scale: float,
+    window_size: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    q = torch.rand((B, T, HQ, D), dtype=dtype, device=device) * 3 - 2
+    k = torch.rand((B, T, H, D), dtype=dtype, device=device) * 3 - 2
+    v = torch.rand((B, T, H, D), dtype=dtype, device=device) * 3 - 2
+
+    g = torch.randn((B, T, HQ, 3), dtype=dtype, device=device)
+    g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
+
+    o_full = parallel_nsa(q, k, v, g_cmp, g_slc, g_swa,
+                          block_counts=S, block_size=block_size, scale=scale, window_size=window_size)
+
+    o_short = parallel_nsa(
+        q[:, -Tq:].contiguous(),      # only the last T_q queries
+        k, v,
+        g_cmp[:, -Tq:].contiguous(),
+        g_slc[:, -Tq:].contiguous(),
+        g_swa[:, -Tq:].contiguous(),
+        block_counts=S,
+        block_size=block_size,
+        scale=scale,
+        window_size=window_size
+    )
+
+    assert_close('short vs full', o_short, o_full[:, -Tq:], 0.005)
