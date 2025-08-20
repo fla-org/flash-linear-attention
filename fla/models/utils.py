@@ -24,12 +24,7 @@ class FlashLinearLayer(CacheLayerMixin):
 
     def __init__(self):
         super().__init__()
-        self.state: Dict[str, Any] = {
-            "recurrent_state": None,
-            "attn_state": None,
-            "conv_state": None,
-            "ffn_state": None,
-        }
+        self.state = None
 
     def update(
         self,
@@ -38,7 +33,6 @@ class FlashLinearLayer(CacheLayerMixin):
         attn_state: Optional[tuple[torch.Tensor, ...]] = None,
         conv_state: Optional[Any] = None,
         ffn_state: Optional[Any] = None,
-        offset: int = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
         **_: Any,
     ) -> Dict[str, Any]:
@@ -48,6 +42,14 @@ class FlashLinearLayer(CacheLayerMixin):
 
         if attn_state is not None and not isinstance(attn_state, (tuple, list)):
             raise ValueError("`attn_state` must be a tuple/list of tensors")
+
+        if self.state is None:
+            self.state = {
+                "recurrent_state": None,
+                "attn_state": None,
+                "conv_state": None,
+                "ffn_state": None,
+            }
 
         if recurrent_state is not None:
             self.state["recurrent_state"] = recurrent_state
@@ -265,7 +267,6 @@ class NewStyleCache(HFCacheBase):
             attn_state=attn_state,
             conv_state=conv_state,
             ffn_state=ffn_state,
-            offset=offset,
             cache_kwargs=cache_kwargs,
         )
 
