@@ -633,7 +633,7 @@ def test_mixed_backend(
         pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_has_bias{4}_has_residual{5}_activation{6}_{7}".format(*test))
         for test in [
             (2, 64, 128, 3, True, True, "swish", torch.float32),
-            (2, 128, 128, 4, True, True, "swish", torch.float32),
+            (2, 128, 128, 4, True, True, "swish", torch.float16),
         ]
     ]
 )

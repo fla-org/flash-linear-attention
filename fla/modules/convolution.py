@@ -306,6 +306,37 @@ def causal_conv1d_bwd_kernel(
             b_wdy = b_dy_shift if not HAS_WEIGHT else (b_dy_shift * tl.sum(b_w * (o_w == (W - i_w - 1)), 1))
             b_dx += b_wdy
 
+        if HAS_DH0:
+            p_dy0 = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1),
+                                      (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+            b_dy0 = tl.load(p_dy0, boundary_check=(0, 1)).to(tl.float32)
+
+            if ACTIVATION == 'swish' or ACTIVATION == 'silu':
+                p_y0 = tl.make_block_ptr(y + bos * D, (T, D), (D, 1),
+                                         (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+                b_y0 = tl.load(p_y0, boundary_check=(0, 1)).to(tl.float32)
+                b_ys0 = tl.sigmoid(b_y0)
+                b_dy0 = b_dy0 * b_ys0 * (1 + b_y0 * (1 - b_ys0))
+
+            for i_w in tl.static_range(1, W):
+                m_rows = (o_t < i_w)
+
+                if HAS_WEIGHT:
+                    w_idx_rows = i_w - 1 - o_t                     # [BT]
+                    w_mask = (o_w[None, :] == w_idx_rows[:, None])   # [BT, BW]
+                    w_pick = tl.sum(b_w[None, :, :] * w_mask[:, None, :], 2)
+                else:
+                    w_pick = 1.0
+
+                contrib = (b_dy0 * w_pick).to(tl.float32)
+                contrib = tl.where(m_rows[:, None] & m_d[None, :], contrib, 0.0)
+
+                b_dh0_s = tl.sum(contrib, 0)  # [BD]
+
+                # dh0: [NT, B, D, W]
+                tl.store(dh0 + i_t * B * D * W + i_n * D * W + o_d * W + i_w,
+                         b_dh0_s.to(dh0.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_d)
+
     if HAS_BIAS:
         b_db = tl.cast(b_db, dtype=db.dtype.element_ty, fp_downcast_rounding='rtne')
         tl.store(db + i_tg * D + o_d, b_db, mask=m_d)
@@ -483,7 +514,7 @@ def causal_conv1d_bwd(
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
     dr = dy if residual is not None else None
-    dh0 = torch.zeros_like(initial_state) if initial_state is not None else None
+    dh0 = initial_state.new_empty(NT, *initial_state.shape) if initial_state is not None else None
 
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
@@ -514,6 +545,8 @@ def causal_conv1d_bwd(
         dw = dw.sum(0).to(weight)
     if bias is not None:
         db = db.sum(0).to(bias)
+    if initial_state is not None:
+        dh0 = dh0.sum(0, dtype=torch.float32).to(initial_state)
 
     return dx.view(shape), dw, db, dr, dh0
 
