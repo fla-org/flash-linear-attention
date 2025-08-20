@@ -6,8 +6,9 @@ from typing import List
 import pytest
 import torch
 import triton
+import warnings
 
-from fla.ops.nsa.naive import naive_nsa, naive_nsa_cmp
+from fla.ops.nsa.naive import naive_nsa, naive_nsa_cmp, naive_nsa_topk
 from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd, parallel_nsa_topk
 from fla.ops.nsa.compression import parallel_nsa_compression_fwd
 from fla.ops.utils import prepare_token_indices
@@ -304,3 +305,112 @@ def test_parallel_compressive_decode(
         lse_short, lse_full[:, -Tq:], 0.005
     )
 
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype', 'reuse_lse'),
+    [
+        pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-{}-reuse_lse{}".format(*test))
+        for test in [
+            (1, 1, 1, 1, 16, 64, 16, 32, 1.0, torch.float16, True),
+            (3, 111, 15, 1, 32, 100, 16, 32, 1.0, torch.float16, False),
+            (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, torch.float16, True),
+            (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, torch.float16, False),
+            (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, torch.float32, True) # Use FP32 to reduce numerical issues
+        ]
+    ]
+)
+def test_parallel_topk_decode(
+    B: int,
+    T: int,
+    Tq: int,
+    H: int,
+    HQ: int,
+    D: int,
+    S: int,
+    block_size: int,
+    scale: float,
+    dtype: torch.dtype,
+    reuse_lse: bool,
+):
+    torch.manual_seed(42)
+    # Use a wider range to reduce numerical issues, otherwise there will be too many mismatches due to close scores.
+    q = torch.rand((B, T, HQ, D), dtype=dtype, device=device) * 10 - 5
+    k = torch.rand((B, T, H, D), dtype=dtype, device=device) * 10 - 5
+    v = torch.rand((B, T, H, D), dtype=dtype, device=device) * 10 - 5
+
+    k_cmp, v_cmp = mean_pooling(k, block_size), mean_pooling(v, block_size)
+
+    if reuse_lse:
+        # For positions not attending to any token, the log-sum-exp should be -inf; the kernel returns 0 instead, it is
+        # OK as those positions will not be used in the compressive attention anyway.
+        _, lse_full = naive_nsa_cmp(
+            q=q,
+            k_cmp=k_cmp,
+            v_cmp=v_cmp,
+            block_size=block_size,
+            scale=scale,
+        )
+        lse_full = torch.where(lse_full == float('-inf'), 0, lse_full).contiguous()
+    else:
+        lse_full = None
+
+    block_indices = parallel_nsa_topk(
+        q=q,
+        k=k_cmp,
+        TK=T,
+        lse=lse_full,
+        block_counts=S,
+        block_size=block_size,
+        scale=scale,
+    )
+
+    block_indices_naive = naive_nsa_topk(
+        q, k_cmp, block_counts=S, block_size=block_size, scale=scale,
+    )
+
+    # Separate checks for forcefully selected blocks (0, -1, -2)
+    fixed_block_indices, free_block_indices = block_indices[:, :, :, :3], block_indices[:, :, :, 3:]
+    fixed_block_indices_naive, free_block_indices_naive = block_indices_naive[:, :, :, :3], block_indices_naive[:, :, :, 3:]
+
+    fixed_block_indices, _ = torch.sort(fixed_block_indices, dim=-1)
+    fixed_block_indices_naive, _ = torch.sort(fixed_block_indices_naive, dim=-1)
+
+    assert (fixed_block_indices == fixed_block_indices_naive).all(), \
+        "Different in forcefully selected block indices compared to naive"
+
+    if not (free_block_indices == free_block_indices_naive).all():
+        indices = torch.nonzero(free_block_indices != free_block_indices_naive, as_tuple=False)
+        for idx in range(indices.shape[0]):
+            b_i, t_i, h_i, s_i = indices[idx]
+            q_vals = q[b_i.item(), t_i.item(), h_i * (HQ // H): (h_i + 1) * (HQ // H), :]
+            k_vals = k_cmp[b_i.item(), :, h_i.item()]
+            a_s = torch.einsum('h k, s k -> s h', q_vals, k_vals) * scale
+            a_s[t_i // block_size + ((t_i + 1) % block_size == 0).int():] = float('-inf')
+            a_sn = torch.softmax(a_s, dim=0)
+            a_snm = a_sn.mean(-1)
+            a_lse = torch.log(torch.exp(a_s).sum(0))
+            if lse_full is not None:
+                k_lse = lse_full[b_i.item(), t_i.item(), h_i * (HQ // H): (h_i + 1) * (HQ // H)]
+                assert_close('lse vs naive', a_lse, k_lse, ratio=0.005)
+
+            assert_close('block-score vs naive', a_snm[free_block_indices[b_i, t_i, h_i, s_i]],
+                         a_snm[free_block_indices_naive[b_i, t_i, h_i, s_i]], ratio=0.005)
+        warnings.warn(f"Block indices mismatch: {len(indices)}/{block_indices.numel()} "
+              f"({len(indices) / free_block_indices_naive.numel():.2f}), seemingly due to numerical issues.")
+
+    block_indices_short = parallel_nsa_topk(
+        q=q[:, -Tq:].contiguous(),
+        k=k_cmp,
+        lse=lse_full[:, -Tq:].contiguous() if lse_full is not None else None,
+        TK=T,
+        block_counts=S,
+        block_size=block_size,
+        scale=scale,
+    )
+
+    fixed_block_indices_short, free_block_indices_short = block_indices_short[:, :, :, :3], block_indices_short[:, :, :, 3:]
+    fixed_block_indices_short, _ = torch.sort(fixed_block_indices_short, dim=-1)
+    assert (fixed_block_indices_short == fixed_block_indices[:, -Tq:]).all(), \
+        "Different in forcefully selected block indices compared to full"
+    assert (free_block_indices_short == free_block_indices[:, -Tq:]).all(), \
+        "Different in free block indices compared to full"
