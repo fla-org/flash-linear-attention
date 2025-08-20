@@ -248,14 +248,14 @@ class NewStyleCache(HFCacheBase):
 
     def update(
         self,
-        recurrent_state=None,
-        attn_state=None,
-        conv_state=None,
-        ffn_state=None,
-        layer_idx=0,
-        offset=1,
-        cache_kwargs=None,
-    ):
+        recurrent_state: Optional[tuple[torch.Tensor]] = None,
+        attn_state: Optional[tuple[torch.Tensor]] = None,
+        conv_state: Optional[tuple[torch.Tensor]] = None,
+        ffn_state: Optional[tuple[torch.Tensor]] = None,
+        layer_idx: int = 0,
+        offset: Optional[int] = 1,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         self.append_new_layers(layer_idx)
         if layer_idx == 0:
             self._seen_tokens += int(offset)
