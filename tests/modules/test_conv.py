@@ -635,6 +635,8 @@ def test_mixed_backend(
             (2, 64, 100, 3, True, True, "swish", torch.float32),
             (2, 128, 128, 4, True, True, "swish", torch.float32),
             (3, 128, 128, 4, True, True, "swish", torch.float32),
+            (3, 128, 256, 4, True, True, "swish", torch.float32),
+            (3, 128, 512, 4, True, True, "swish", torch.float32),
             (2, 128, 1024, 4, True, True, "swish", torch.float32),
             (2, 128, 2048, 3, True, True, "swish", torch.float32),
             (2, 128, 4096, 4, True, True, "swish", torch.float32),
@@ -676,7 +678,7 @@ def test_conv_cache_backward(
 
     def triton_func(x, weight, bias, residual, cache):
         zero_padding = torch.zeros(B, D, 1, device=device, dtype=dtype)
-        triton_cache = torch.cat([zero_padding, cache], dim=-1)
+        triton_cache = torch.cat([zero_padding, cache], dim=-1).contiguous()
         tri, cache_out_triton = causal_conv1d(
             x,
             weight=weight,
@@ -686,7 +688,7 @@ def test_conv_cache_backward(
             output_final_state=True,
             activation=activation,
         )
-        cache_out_triton = cache_out_triton[..., 1:]  # [B, D, W-1]
+        cache_out_triton = cache_out_triton[..., 1:].clone()  # [B, D, W-1]
         return tri, cache_out_triton
 
     d_tri = torch.randn_like(x)
@@ -694,7 +696,7 @@ def test_conv_cache_backward(
 
     def get_grads(func, *inputs):
         out, cache_out = func(*inputs)
-        loss = (out * d_tri).sum()*100 + (cache_out * d_cache_out).sum() * 50
+        loss = (out * d_tri).sum() + (cache_out * d_cache_out).sum()
         grads = torch.autograd.grad(
             loss,
             inputs,

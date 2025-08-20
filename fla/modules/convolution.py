@@ -514,7 +514,7 @@ def causal_conv1d_bwd(
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
     db = bias.new_empty(B*NT, *bias.shape, dtype=torch.float) if bias is not None else None
     dr = dy if residual is not None else None
-    dh0 = initial_state.new_empty(NT, *initial_state.shape) if initial_state is not None else None
+    dh0 = initial_state.new_zeros(NT, *initial_state.shape) if initial_state is not None else None
 
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
