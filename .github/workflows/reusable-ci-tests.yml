@@ -143,7 +143,7 @@ jobs:
               STABLE_URL="https://download.pytorch.org/whl/${{ inputs.pytorch_cuda_version }}"
               echo "Using stable index URL: $STABLE_URL"
               $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} triton --index-url $STABLE_URL
-              $CONDA_BIN_PATH/pip install -U numpy
+              $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
               $CONDA_BIN_PATH/pip install .
               if [[ "${{ inputs.runner }}" == nvidia-h100* ]]; then
                 echo "Installing causal-conv1d for H100"
@@ -156,7 +156,7 @@ jobs:
             XPU_URL="https://download.pytorch.org/whl/xpu"
             echo "Using XPU index URL: $XPU_URL"
             $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} pytorch-triton-xpu --index-url $XPU_URL
-            $CONDA_BIN_PATH/pip install -U numpy
+            $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
             $CONDA_BIN_PATH/pip install .
           else
             echo "::error::Unsupported GPU type: ${{ inputs.gpu_type }}"
