@@ -64,7 +64,7 @@ class FlashLinearLayer(CacheLayerMixin):
                     new_tuple = []
                     for old_x, new_x in zip(old, attn_state):
                         rolled = old_x.roll(-input_size, dims=1)
-                        tail = new_x if input_size <= window_size else new_x[:, -window_size:]
+                        tail = new_x[:, -window_size:]
                         rolled[:, -tail.shape[1]:] = tail
                         new_tuple.append(rolled)
                     self.state["attn_state"] = tuple(new_tuple)
