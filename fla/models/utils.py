@@ -317,6 +317,10 @@ class NewStyleCache(HFCacheBase):
 
 
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
-    Cache = NewStyleCache
+    class Cache(NewStyleCache):
+        def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
+            super().__init__(seen_tokens=seen_tokens, **kwargs)
 else:
-    Cache = LegacyCache
+    class Cache(LegacyCache):
+        def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
+            super().__init__(seen_tokens=seen_tokens, **kwargs)
