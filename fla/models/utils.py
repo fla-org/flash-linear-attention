@@ -323,4 +323,4 @@ if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
 else:
     class Cache(LegacyCache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
-            super().__init__(seen_tokens=seen_tokens, **kwargs)
+            super().__init__(seen_tokens=seen_tokens)
