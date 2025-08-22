@@ -30,9 +30,11 @@ def _upad_input(
     attention_mask: torch.Tensor,
 ):
     """
-    Unpads query, key, and values tensors, using a single dimension for all tokens even though they belong to different batches.
+    Unpads query, key, and values tensors, using a single dimension for all tokens even though they belong to
+    different batches.
 
-    This function is used instead of `flash_attn.bert_padding.unpad_input` in order to avoid the recomputation of the same intermediary
+    This function is used instead of `flash_attn.bert_padding.unpad_input` in order to avoid the recomputation
+    of the same intermediary
     tensors for query, key, value tensors.
 
     Arguments:
@@ -57,9 +59,11 @@ def _upad_input(
         indices_q (`torch.Tensor`):
             The indices of non-masked tokens from the flattened input target sequence.
         (cu_seqlens_q, cu_seqlens_k) (`Tuple[int]`):
-            The cumulative sequence lengths for the target (query) and source (key, value), used to index into ragged (unpadded) tensors. `cu_seqlens` shape is (batch_size + 1,).
+            The cumulative sequence lengths for the target (query) and source (key, value), used to index
+            into ragged (unpadded) tensors. `cu_seqlens` shape is (batch_size + 1,).
         (max_seqlen_in_batch_q, max_seqlen_in_batch_k) (`Tuple[int]`):
-            Maximum sequence length in batch (`max_seqlen_in_batch_q` for the target sequence i.e. query, `max_seqlen_in_batch_k` for the source sequence i.e. key/value).
+            Maximum sequence length in batch (`max_seqlen_in_batch_q` for the target sequence i.e. query,
+            `max_seqlen_in_batch_k` for the source sequence i.e. key/value).
     """
     query_length = query_layer.shape[1]
     indices_k, cu_seqlens_k, max_seqlen_in_batch_k = get_unpad_data(attention_mask)
@@ -106,45 +110,33 @@ def transform(
     routing_mask: torch.Tensor,
     num_memories: int,
     selected_memories: torch.Tensor,
-    capacity: float,
     attention_mask: torch.Tensor,
 ):
-    '''
-    Transform input sequences into memory-organized chunks with capacity constraints.
+    """
+    Reorganize token embeddings into memory-aligned chunks.
 
-    Processes input sequences by routing tokens to designated memory states according to routing_mask,
-    sorts tokens by memory assignments, handles token truncation/padding based on memory capacity,
-    and returns memory-aligned tensors for parallel processing.
-
-    Key operations:
-    1. Expands input tensors when multiple memories are selected per token (top-k routing)
-    2. Sorts tokens globally by (batch_idx, memory_idx) to group memory-assigned tokens
-    3. Applies capacity-aware truncation (left-truncate oldest tokens when exceeding capacity)
-    4. Pads memory chunks to uniform length for tensorization
+    Steps:
+        - Expand for top-k routing if needed.
+        - Mask out padded tokens via `attention_mask`.
+        - Sort tokens by (batch, memory).
+        - Gather and pad tokens per memory slot.
 
     Args:
-        x: Input hidden states
-            Shape: (batch_size, seq_len, hidden_size)
-        routing_mask: Binary mask indicating active memory assignments
-            Shape: (batch_size, seq_len, num_memories)
-        num_memories: Total number of memories per batch
-        selected_memories: Memory indices assigned to each token. When using top-k routing,
-            this contains k memory indices per token (k >= 1)
-            Shape: (batch_size, seq_len) for k=1 or (batch_size, seq_len, topk) for k>1
-        capacity: Scaling factor for memory capacity calculation. Actual capacity per memory is
-            ceil(seq_len * capacity), maintaining proportional capacity to sequence length
+        x: (batch, seq, hidden) input embeddings.
+        routing_mask: (batch, seq, num_memories) binary routing mask.
+        num_memories: number of memory slots.
+        selected_memories: memory indices per token,
+            (batch, seq) if k=1 else (batch, seq, topk).
+        attention_mask: (batch, seq) valid-token mask.
 
     Returns:
-        transformed_x: Memory-organized tensor with zero-padded capacity alignment
-            Shape: (num_memories, batch_size, capacity_len, hidden_size)
-        truncation_indices: Original indices used for gathering tokens after capacity truncation
-            Shape: (batch*num_memories, max_len)
-        sorted_indices: Sorting indices used to group tokens by memory assignments
-            Shape: (batch_size*seq_len*topk)
-        max_len: Maximum tokens per memory
-        mask: Boolean mask indicating valid (non-padded) positions in transformed_x
-            Shape: (batch*num_memories, max_len)
-    '''
+        transformed_x: (num_memories, batch, max_len, hidden) reorganized tokens.
+        truncation_indices: (batch*num_memories, max_len) gather indices.
+        sorted_indices: (batch*seq*topk,) global sort order.
+        max_len: int, max tokens per memory.
+        mask: (batch*num_memories, max_len) validity mask.
+        mask_2: (num_memories, batch, max_len) validity mask reshaped.
+    """
     if selected_memories.dim() == 3:
         # (batch, seq, topk)
         topk = selected_memories.shape[2]
@@ -154,7 +146,7 @@ def transform(
         # (batch, seq, topk)
         selected_memories = selected_memories.reshape(selected_memories.shape[0], -1)
         # (batch, seq * topk)
-        
+
     if attention_mask is not None:
         attention_mask = attention_mask[:, -routing_mask.shape[1]:]
         # mask out the masked tokens
@@ -183,8 +175,10 @@ def transform(
         # (b, num_memories)
         flatten_offset = batch_memory_tokens.flatten().cumsum(dim=0)
         max_len = batch_memory_tokens.max()
-        indices = torch.arange(max_len, device=flatten_offset.device).unsqueeze(0).expand(
-            b*num_memories, -1) + torch.cat([torch.tensor([0], device=flatten_offset.device), flatten_offset[:-1]], dim=0).unsqueeze(1)
+        indices = (
+            torch.arange(max_len, device=flatten_offset.device).unsqueeze(0).expand(b * num_memories, -1)
+            + torch.cat([torch.tensor([0], device=flatten_offset.device), flatten_offset[:-1]], dim=0).unsqueeze(1)
+        )
         mask = indices < flatten_offset.unsqueeze(-1)
         truncation_indices = torch.where(mask, indices, torch.zeros_like(indices))
 
@@ -219,7 +213,8 @@ def reconstruct(
     Key operations:
     1. Reshapes and transposes `transformed_x` to prepare for scattering.
     2. Applies the `mask` to zero out invalid positions.
-    3. Uses `torch.scatter_add_` to scatter and sum the transformed outputs back to their original positions based on `indices`.
+    3. Uses `torch.scatter_add_` to scatter and sum the transformed outputs back to their original positions
+        based on `indices`.
     4. Rearranges the scattered outputs using `sorted_indices` to ensure correct ordering.
     5. Applies the `routing_weights` to weight the outputs.
     6. Sums over the `topk` dimension to produce the final reconstructed output.
@@ -474,7 +469,7 @@ class MomAttention(nn.Module):
 
         shared_hidden_states = hidden_states
         hidden_states, indices, sorted_indices, max_len, mask, mask_2 = transform(
-            hidden_states, routing_mask, self.num_memories, selected_memories, self.capacity, attention_mask)
+            hidden_states, routing_mask, self.num_memories, selected_memories, attention_mask)
 
         q = self.q_proj(hidden_states)
         if self.single_kv_proj:
@@ -507,30 +502,65 @@ class MomAttention(nn.Module):
                 padded = True
                 conv_cu_seqlens, cu_q, cu_k, cu_v, pad_lengths = self.pad_for_conv(cu_seqlens, cu_q, cu_k, cu_v)
 
-            conv_q = self.prepare_recurrent_state(conv_state_q[0], conv_cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            conv_q = self.prepare_recurrent_state(
+                conv_state_q[0],
+                conv_cu_seqlens,
+                cu_seqlen_all[0],
+                reverse_indices,
+                batch_size
+            )
             cu_q, conv_q_new = self.q_conv1d(
                 x=cu_q,
                 cache=conv_q,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
             )
-            conv_state_q[0] = self.handle_recurrent_state(conv_state_q[0], conv_q_new, conv_cu_seqlens, cu_seqlen_all[0], reverse_indices)
-            conv_k = self.prepare_recurrent_state(conv_state_k[0], conv_cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            conv_state_q[0] = self.handle_recurrent_state(
+                conv_state_q[0],
+                conv_q_new,
+                conv_cu_seqlens,
+                cu_seqlen_all[0],
+                reverse_indices
+            )
+            conv_k = self.prepare_recurrent_state(
+                conv_state_k[0],
+                conv_cu_seqlens,
+                cu_seqlen_all[0],
+                reverse_indices,
+                batch_size
+            )
             cu_k, conv_k_new = self.k_conv1d(
                 x=cu_k,
                 cache=conv_k,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
             )
-            conv_state_k[0] = self.handle_recurrent_state(conv_state_k[0], conv_k_new, conv_cu_seqlens, cu_seqlen_all[0], reverse_indices)
-            conv_v = self.prepare_recurrent_state(conv_state_v[0], conv_cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            conv_state_k[0] = self.handle_recurrent_state(
+                conv_state_k[0],
+                conv_k_new,
+                conv_cu_seqlens,
+                cu_seqlen_all[0],
+                reverse_indices
+            )
+            conv_v = self.prepare_recurrent_state(
+                conv_state_v[0],
+                conv_cu_seqlens,
+                cu_seqlen_all[0],
+                reverse_indices,
+                batch_size
+            )
             cu_v, conv_v_new = self.v_conv1d(
                 x=cu_v,
                 cache=conv_v,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
             )
-            conv_state_v[0] = self.handle_recurrent_state(conv_state_v[0], conv_v_new, conv_cu_seqlens, cu_seqlen_all[0], reverse_indices)
+            conv_state_v[0] = self.handle_recurrent_state(
+                conv_state_v[0],
+                conv_v_new, conv_cu_seqlens,
+                cu_seqlen_all[0],
+                reverse_indices
+            )
 
             if padded:
                 cu_q, cu_k, cu_v = self.unpad_after_conv(conv_cu_seqlens, cu_seqlens, cu_q, cu_k, cu_v, pad_lengths)
@@ -554,10 +584,20 @@ class MomAttention(nn.Module):
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
-            recurrent_state[0] = self.handle_recurrent_state(recurrent_state[0], recurrent_state_, cu_seqlens, cu_seqlen_all[0], reverse_indices)
+            recurrent_state[0] = self.handle_recurrent_state(
+                recurrent_state[0],
+                recurrent_state_,
+                cu_seqlens,
+                cu_seqlen_all[0],
+                reverse_indices,
+            )
 
         elif mode == 'fused_recurrent':
-            memories = self.prepare_recurrent_state(recurrent_state[0], cu_seqlens, cu_seqlen_all[0], reverse_indices, batch_size)
+            memories = self.prepare_recurrent_state(
+                recurrent_state[0],
+                cu_seqlens, cu_seqlen_all[0],
+                reverse_indices, batch_size
+            )
             o, recurrent_state_ = fused_recurrent_gated_delta_rule(
                 q=cu_q,
                 k=cu_k,
@@ -569,15 +609,21 @@ class MomAttention(nn.Module):
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
-            recurrent_state[0] = self.handle_recurrent_state(recurrent_state[0], recurrent_state_, cu_seqlens, cu_seqlen_all[0], reverse_indices)
+            recurrent_state[0] = self.handle_recurrent_state(
+                recurrent_state[0],
+                recurrent_state_,
+                cu_seqlens,
+                cu_seqlen_all[0],
+                reverse_indices,
+            )
 
         o = o.squeeze(0).contiguous()
         o = pad_input(o, indices_q, batch_size*self.num_memories, max_len)
         o = rearrange(o, '(e b) l h d -> e b l (h d)', b=batch_size)
         o = reconstruct(o, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
-                seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
+                        seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
         o = rearrange(o, 'b l (h d) -> b l h d', h=self.num_heads)
-        
+
         if self.shared_mem:
             shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state,
                                      use_cache, conv_state_q, conv_state_k, conv_state_v)
@@ -694,7 +740,7 @@ class MomAttention(nn.Module):
 
     def cu2pad(self, x, cu_seqlens):
         batch_size = cu_seqlens.shape[0] - 1
-        max_len = (cu_seqlens[1:] - cu_seqlens [:-1]).max().item()
+        max_len = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         indices = torch.tensor([], dtype=torch.long, device=x.device)
         attention_mask = torch.ones((batch_size, max_len), dtype=torch.bool, device=x.device)
         for i in range(batch_size):
@@ -706,7 +752,7 @@ class MomAttention(nn.Module):
             attention_mask[i, :pad_len] = False
         x = pad_input(x.squeeze(0), indices, batch_size, max_len)
         return x, attention_mask
-   
+
     def pad_for_conv(self, cu_seqlens, cu_q, cu_k, cu_v):
         lengths = cu_seqlens[1:] - cu_seqlens[:-1]
         pad_lengths = torch.clamp(self.conv_size - lengths, min=0)
@@ -752,10 +798,10 @@ class MomAttention(nn.Module):
     def prepare_recurrent_state(self, recurrent_state, cu_seqlens, cu_seqlen_all, reverse_indices, batch_size):
         if recurrent_state is None:
             return None
-        
+
         if cu_seqlens is None:
             return recurrent_state
-        
+
         total_len = len(cu_seqlen_all)
         if len(cu_seqlens) != total_len:
             # select memories that are activated
@@ -768,7 +814,7 @@ class MomAttention(nn.Module):
             assert mem_id == self.topk * batch_size, f"The number of memories {mem_id} is not correct."
         else:
             memories = recurrent_state
-        
+
         return memories
 
     def handle_recurrent_state(self, recurrent_state, recurrent_state_new, cu_seqlens, cu_seqlen_all, reverse_indices):
