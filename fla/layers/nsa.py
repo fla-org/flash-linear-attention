@@ -95,10 +95,11 @@ class NativeSparseAttention(nn.Module):
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
 
-            if attention_mask is not None:
-                # to deliminate the offsets of padding tokens
-                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q.shape[1] + max(seqlen_offset)
+            # Disable for now; varlen is not supported yet, and the "correct" RoPE offsets will disturb outputs
+            # if attention_mask is not None:
+            #     # to deliminate the offsets of padding tokens
+            #     seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
+            #     max_seqlen = q.shape[1] + max(seqlen_offset)
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
@@ -110,7 +111,6 @@ class NativeSparseAttention(nn.Module):
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
                 offset=seq_len,
-                cache_kwargs=dict(window_size=self.window_size)
             )['attn_state']
             if cache_has_content:
                 k, v = k_cached, v_cached
