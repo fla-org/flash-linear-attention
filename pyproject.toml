@@ -40,3 +40,6 @@ multi_line_output = 3
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "INFO"
+pythonpath = [
+  "."
+]
