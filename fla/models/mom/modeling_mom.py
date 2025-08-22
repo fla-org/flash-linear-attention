@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.get_logger(__name__)
-
 
 
 def load_balancing_loss_func(
