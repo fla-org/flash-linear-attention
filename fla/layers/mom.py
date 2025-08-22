@@ -175,8 +175,10 @@ def transform(
         # (b, num_memories)
         flatten_offset = batch_memory_tokens.flatten().cumsum(dim=0)
         max_len = batch_memory_tokens.max()
-        indices = torch.arange(max_len, device=flatten_offset.device).unsqueeze(0).expand(b*num_memories, -1) \
-              + torch.cat([torch.tensor([0], device=flatten_offset.device), flatten_offset[:-1]], dim=0).unsqueeze(1)
+        indices = (
+            torch.arange(max_len, device=flatten_offset.device).unsqueeze(0).expand(b * num_memories, -1)
+            + torch.cat([torch.tensor([0], device=flatten_offset.device), flatten_offset[:-1]], dim=0).unsqueeze(1)
+        )
         mask = indices < flatten_offset.unsqueeze(-1)
         truncation_indices = torch.where(mask, indices, torch.zeros_like(indices))
 
