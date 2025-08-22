@@ -146,7 +146,7 @@ def transform(
         # (batch, seq, topk)
         selected_memories = selected_memories.reshape(selected_memories.shape[0], -1)
         # (batch, seq * topk)
-        
+
     if attention_mask is not None:
         attention_mask = attention_mask[:, -routing_mask.shape[1]:]
         # mask out the masked tokens
@@ -213,7 +213,7 @@ def reconstruct(
     Key operations:
     1. Reshapes and transposes `transformed_x` to prepare for scattering.
     2. Applies the `mask` to zero out invalid positions.
-    3. Uses `torch.scatter_add_` to scatter and sum the transformed outputs back to their original positions 
+    3. Uses `torch.scatter_add_` to scatter and sum the transformed outputs back to their original positions
         based on `indices`.
     4. Rearranges the scattered outputs using `sorted_indices` to ensure correct ordering.
     5. Applies the `routing_weights` to weight the outputs.
@@ -623,7 +623,7 @@ class MomAttention(nn.Module):
         o = reconstruct(o, indices=indices, sorted_indices=sorted_indices, batch_size=batch_size,
                         seq_len=seq_len, topk=self.topk, routing_weights=routing_weights, mask=mask)
         o = rearrange(o, 'b l (h d) -> b l h d', h=self.num_heads)
-        
+
         if self.shared_mem:
             shared_o = self.shared_o(shared_hidden_states, attention_mask, recurrent_state,
                                      use_cache, conv_state_q, conv_state_k, conv_state_v)
@@ -752,7 +752,7 @@ class MomAttention(nn.Module):
             attention_mask[i, :pad_len] = False
         x = pad_input(x.squeeze(0), indices, batch_size, max_len)
         return x, attention_mask
-   
+
     def pad_for_conv(self, cu_seqlens, cu_q, cu_k, cu_v):
         lengths = cu_seqlens[1:] - cu_seqlens[:-1]
         pad_lengths = torch.clamp(self.conv_size - lengths, min=0)
@@ -798,10 +798,10 @@ class MomAttention(nn.Module):
     def prepare_recurrent_state(self, recurrent_state, cu_seqlens, cu_seqlen_all, reverse_indices, batch_size):
         if recurrent_state is None:
             return None
-        
+
         if cu_seqlens is None:
             return recurrent_state
-        
+
         total_len = len(cu_seqlen_all)
         if len(cu_seqlens) != total_len:
             # select memories that are activated
@@ -814,7 +814,7 @@ class MomAttention(nn.Module):
             assert mem_id == self.topk * batch_size, f"The number of memories {mem_id} is not correct."
         else:
             memories = recurrent_state
-        
+
         return memories
 
     def handle_recurrent_state(self, recurrent_state, recurrent_state_new, cu_seqlens, cu_seqlen_all, reverse_indices):
