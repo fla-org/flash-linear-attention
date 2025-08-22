@@ -1,4 +1,4 @@
-name: intel-a770-ci
+name: intel-b580-ci
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -11,16 +11,14 @@ on:
   push:
     branches:
       - main
-    tags:
-      - '*'
 
 jobs:
-  test-a770-pytorch-2-7:
-    name: Test A770 (PyTorch 2.7)
+  test-b580-pytorch-2-7:
+    name: Test B580 (PyTorch 2.7)
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
-      runner: 'intel-a770'
+      runner: 'intel-b580'
       gpu_type: 'intel'
       conda_env_name: 'pytorch_2_7'
       pytorch_version: '2.7.0'

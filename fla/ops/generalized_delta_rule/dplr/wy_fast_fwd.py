@@ -217,8 +217,8 @@ def wu_fwd(
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    BK = min(max(triton.next_power_of_2(K), 16), 64)
+    BV = min(max(triton.next_power_of_2(V), 16), 64)
 
     w = torch.empty_like(ag)
     u = torch.empty_like(v)

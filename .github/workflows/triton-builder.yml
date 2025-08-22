@@ -11,6 +11,11 @@ on:
         - aarch64
         - all
         default: 'all'
+      manual_ref:
+        description: '🔧 Optional: Tag, or SHA to checkout. Defaults to be empty for latest tag.'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   # ===================================================================
@@ -28,10 +33,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ! command -v jq &> /dev/null; then echo "::error::'jq' not installed."; exit 1; fi
-          latest_tag=$(curl -sL -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/triton-lang/triton/tags | jq -r '.[0].name')
-          if [ -z "$latest_tag" ] || [ "$latest_tag" == "null" ]; then echo "::error::Failed to fetch tag."; exit 1; fi
-          echo "Discovered latest Triton tag: ${latest_tag}"
-          echo "tag=${latest_tag}" >> $GITHUB_OUTPUT
+          manual_ref="${{ github.event.inputs.manual_ref }}"
+          if [[ -n "$manual_ref" ]]; then
+            ref_to_use="$manual_ref"
+            echo "Using manually provided ref: $ref_to_use"
+          else
+            ref_to_use=$(curl -sL -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/triton-lang/triton/tags | jq -r '.[0].name')
+            if [[ -z "$ref_to_use" || "$ref_to_use" == "null" ]]; then
+              echo "::error::Failed to fetch latest tag."
+              exit 1
+            fi
+            echo "Using latest tag: $ref_to_use"
+          fi
+          echo "tag=$ref_to_use" >> $GITHUB_OUTPUT
 
       - name: Generate execution matrix for release
         id: generate-matrix
@@ -39,8 +54,8 @@ jobs:
           arch_choice="${{ github.event.inputs.build_architecture }}"
 
           # Define configurations for each architecture
-          x64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'x64-docker']\", \"arch\": \"x86_64\", \"timeout\": 120}}"
-          aarch64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'aarch64-docker']\", \"arch\": \"aarch64\", \"timeout\": 720}}"
+          x64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'x64-docker']\", \"arch\": \"x86_64\", \"timeout\": \"360\""}}"
+          aarch64_config="{\"config\": {\"runs_on\": \"['self-hosted', 'aarch64-docker']\", \"arch\": \"aarch64\", \"timeout\": \"1200\""}}"
 
           # Build the final JSON matrix string
           matrix_content=""
@@ -76,6 +91,6 @@ jobs:
       timeout: ${{ matrix.config.timeout }}
       checkout-ref: ${{ needs.prepare-release-build.outputs.tag }} # Use output from the single 'needs' job
       package-name: 'triton'
-      cibw-build: 'cp3*-manylinux_${{ matrix.config.arch }}'
+      cibw-build: 'cp3{10,11,12,13}-manylinux_${{ matrix.config.arch }}'
       cibw-skip: 'cp{35,36,37,38,39}-*'
     secrets: inherit

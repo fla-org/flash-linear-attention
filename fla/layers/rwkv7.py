@@ -197,15 +197,22 @@ class RWKV7Attention(nn.Module):
             self.g_norm.weight.data[:] = ((self.layer_idx + 1) / self.num_hidden_layers) ** 0.7
 
             # Initialize Linear projections
-            nn.init.orthogonal_(self.r_proj.weight)
-            nn.init.orthogonal_(self.k_proj.weight, gain=0.1)
-            nn.init.orthogonal_(self.v_proj.weight)
+            self._orthogonal_init(self.r_proj.weight)
+            self._orthogonal_init(self.k_proj.weight, gain=0.1)
+            self._orthogonal_init(self.v_proj.weight)
             self.o_proj.weight.data.zero_()
 
             # Clean up temporary tensors to free memory
             del ddd, www, zigzag, linear
 
         module._is_hf_initialized = True
+
+    @staticmethod
+    def _orthogonal_init(weight, gain=1.0):
+        oringinal_dtype = weight.dtype
+        weight = weight.float()
+        nn.init.orthogonal_(weight, gain=gain)
+        weight = weight.to(oringinal_dtype)
 
     def forward(
         self,
@@ -218,36 +225,34 @@ class RWKV7Attention(nn.Module):
         cu_seqlens: Optional[torch.LongTensor] = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        batch_size, seq_len, _ = hidden_states.shape
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
-
-        batch_size, seq_len, _ = hidden_states.shape
+            am = attention_mask.narrow(1, attention_mask.size(1) - seq_len, seq_len).unsqueeze(-1)
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
         if attention_mask is not None:
-            hidden_states = hidden_states.mul(attention_mask[:, -seq_len:, None])
+            hidden_states = hidden_states.mul(am)
 
         # delta [batch_size, seq_len, hidden_size]
+        # conv_cache [N, D]
         if last_state is None:
-            delta = token_shift(hidden_states, cu_seqlens)
+            conv_cache = None
             recurrent_state = None
-        elif hidden_states.shape[1] == 1:
-            shifted = last_state['conv_state'].unsqueeze(1)
-            delta = shifted - hidden_states
-            recurrent_state = last_state['recurrent_state']
         else:
-            shifted = self.time_shift(hidden_states)
-            shifted[:, 0] = last_state['conv_state']
-            delta = shifted - hidden_states
+            conv_cache = last_state['conv_state']
             recurrent_state = last_state['recurrent_state']
 
+        delta, conv_state = token_shift(
+                hidden_states, cu_seqlens, output_cache=True, cache=conv_cache
+            )
         xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
                                                      self.x_k, self.x_v, self.x_a, self.x_g)
 
@@ -289,7 +294,7 @@ class RWKV7Attention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            v = v * attention_mask[:, -seq_len:, None]
+            v = v * am
 
         r, w, k, a = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_dim), (r, w, k, a))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
@@ -326,7 +331,7 @@ class RWKV7Attention(nn.Module):
         if past_key_values is not None:
             past_key_values.update(
                 recurrent_state=recurrent_state,
-                conv_state=hidden_states[:, -1],
+                conv_state=conv_state,
                 layer_idx=self.layer_idx,
                 offset=r.shape[1]
             )

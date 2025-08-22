@@ -269,7 +269,7 @@ def chunk_scaled_dot_kkt_fwd(
 
     BC = min(16, BT)
     NC = triton.cdiv(BT, BC)
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
     A = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
     grid = (NT, NC * NC, B * H)
     chunk_scaled_dot_kkt_fwd_kernel_intra_sub_inter[grid](

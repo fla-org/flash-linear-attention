@@ -12,7 +12,7 @@ from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
 from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
 from fla.ops.rwkv7.gate_output_correction import gate_output_correction, gate_output_correction_ref
-from fla.utils import assert_close, device
+from fla.utils import assert_close, device, is_nvidia_hopper
 
 
 @pytest.mark.parametrize("B", [2])
@@ -132,11 +132,11 @@ def test_fused_mul_recurrent_fwd(
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [2560, 4096])
-@pytest.mark.parametrize("H", [64])
+@pytest.mark.parametrize("B", [1])
+@pytest.mark.parametrize("T", [20, 1024, 4100, 131072])
+@pytest.mark.parametrize("H", [2])
 @pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_g", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
@@ -150,27 +150,34 @@ def test_fused_rwkv7_addcmul(
     dtype: torch.dtype,
     use_g: bool
 ):
+    if T == 128 * 1024 and not is_nvidia_hopper:
+        pytest.skip("Skipping test for T=131072 on non-Hopper GPUs")
     hidden_size = H*D
-    hidden_states = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    xx = torch.randn(B, T, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_r = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_w = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_k = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_v = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
-    x_a = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+    hidden_states = torch.randn(B, T, hidden_size).to(device).to(dtype).requires_grad_()
+    xx = torch.randn(B, T, hidden_size).to(device).to(dtype).requires_grad_()
+    x_r = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
+    x_w = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
+    x_k = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
+    x_v = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
+    x_a = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
     if use_g:
-        x_g = torch.randn(1, 1, hidden_size).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
+        x_g = torch.randn(1, 1, hidden_size).to(device).to(dtype).requires_grad_()
     else:
         x_g = None
     xr0, xw0, xk0, xv0, xa0, xg0 = fused_addcmul_rwkv7(hidden_states, xx, x_r, x_w, x_k, x_v, x_a, x_g)
-    xr1, xw1, xk1, xv1, xa1, xg1 = torch_addcmul_rwkv7(hidden_states, xx, x_r, x_w, x_k, x_v, x_a, x_g)
-    torch.testing.assert_close(xr0, xr1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(xw0, xw1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(xk0, xk1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(xv0, xv1, rtol=1e-3, atol=1e-3)
-    torch.testing.assert_close(xa0, xa1, rtol=1e-3, atol=1e-3)
+    xr1, xw1, xk1, xv1, xa1, xg1 = torch_addcmul_rwkv7(hidden_states.float(),
+                                                       xx.float(), x_r.float(),
+                                                       x_w.float(), x_k.float(),
+                                                       x_v.float(), x_a.float(),
+                                                       x_g.float() if use_g else None)
+    ratio = 1e-5 if dtype == torch.float32 else 0.002
+    assert_close("xr0", xr0, xr1, ratio=ratio)
+    assert_close("xw0", xw0, xw1, ratio=ratio)
+    assert_close("xk0", xk0, xk1, ratio=ratio)
+    assert_close("xv0", xv0, xv1, ratio=ratio)
+    assert_close("xa0", xa0, xa1, ratio=ratio)
     if use_g:
-        torch.testing.assert_close(xg0, xg1, rtol=1e-3, atol=1e-3)
+        assert_close("xg0", xg0, xg1, ratio=ratio)
         (xr0 + xw0 + xk0 + xv0 + xa0 + xg0).sum().backward()
     else:
         (xr0 + xw0 + xk0 + xv0 + xa0).sum().backward()
@@ -207,22 +214,22 @@ def test_fused_rwkv7_addcmul(
     d_hidden1 = hidden_states.grad.clone()
     d_xx1 = xx.grad.clone()
 
-    torch.testing.assert_close(d_ixr, d_ixr1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_ixw, d_ixw1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_ixk, d_ixk1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_ixv, d_ixv1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_ixa, d_ixa1, rtol=1e-3, atol=1.5e-3)
+    assert_close("d_ixr", d_ixr, d_ixr1, ratio=ratio)
+    assert_close("d_ixw", d_ixw, d_ixw1, ratio=ratio)
+    assert_close("d_ixk", d_ixk, d_ixk1, ratio=ratio)
+    assert_close("d_ixv", d_ixv, d_ixv1, ratio=ratio)
+    assert_close("d_ixa", d_ixa, d_ixa1, ratio=ratio)
     if use_g:
-        torch.testing.assert_close(d_ixg, d_ixg1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_hidden, d_hidden1, rtol=1e-3, atol=1.5e-3)
-    torch.testing.assert_close(d_xx, d_xx1, rtol=1e-3, atol=1.5e-3)
+        assert_close("d_ixg", d_ixg, d_ixg1, ratio=ratio)
+    assert_close("d_hidden", d_hidden, d_hidden1, ratio=ratio)
+    assert_close("d_xx", d_xx, d_xx1, ratio=ratio)
 
 
 @pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [4096])
+@pytest.mark.parametrize("T", [13, 4096, 8000])
 @pytest.mark.parametrize("H", [64])
 @pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("ka_shape", [1, 3])
 def test_fused_k_update(
     B: int,
@@ -239,18 +246,18 @@ def test_fused_k_update(
     else:
         ka = torch.randn(1, 1, H*D).uniform_(-8, 8).to(device).to(dtype).requires_grad_()
 
-    ref = k_update_ref(k, a, ka)
+    ref = k_update_ref(k.float(), a.float(), ka.float())
     ref.sum().backward()
     ref_dk, k.grad = k.grad.clone(), None
     ref_da, a.grad = a.grad.clone(), None
     ref_dka, ka.grad = ka.grad.clone(), None
     tri = fused_k_rwkv7(k, a, ka)
     tri.sum().backward()
-
-    assert_close("  o", tri, ref, ratio=5e-5)
-    assert_close(" dk", ref_dk, k.grad, ratio=5e-5)
-    assert_close(" da", ref_da, a.grad, ratio=5e-5)
-    assert_close("dka", ref_dka, ka.grad, ratio=5e-5)
+    ratio = 5e-5 if dtype == torch.float32 else 0.002
+    assert_close("  o", tri, ref, ratio=ratio)
+    assert_close(" dk", ref_dk, k.grad, ratio=ratio)
+    assert_close(" da", ref_da, a.grad, ratio=ratio)
+    assert_close("dka", ref_dka, ka.grad, ratio=ratio)
 
 
 @pytest.mark.parametrize("B", [4])

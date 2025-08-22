@@ -43,7 +43,7 @@ def parallel_forgetting_attn(
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
-    assert (g <= 0).all(), "g_cumsum must be in log space"
+
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:

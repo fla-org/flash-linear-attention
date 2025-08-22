@@ -761,7 +761,7 @@ def chunk_rwkv6_fwd_intra(
     grid = (NT, NC, B * H)
     # load the entire [BC, K] blocks into SRAM at once
     if K <= 256:
-        BK = triton.next_power_of_2(K)
+        BK = max(triton.next_power_of_2(K), 16)
         chunk_rwkv6_fwd_A_kernel_intra_sub_intra[grid](
             q,
             k,

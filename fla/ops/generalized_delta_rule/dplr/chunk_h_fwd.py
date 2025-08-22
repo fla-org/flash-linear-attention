@@ -127,7 +127,7 @@ def chunk_dplr_fwd_h(
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
 

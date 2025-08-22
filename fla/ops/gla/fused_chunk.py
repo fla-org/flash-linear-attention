@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import warnings
 from typing import Tuple
 
 import torch
@@ -495,7 +496,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
             num_warps=1
         )
 
-        BK, BV = min(triton.next_power_of_2(K), 64), min(triton.next_power_of_2(V), 64)
+        BK, BV = min(max(triton.next_power_of_2(K), 16), 64), min(max(triton.next_power_of_2(V), 16), 64)
         NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
         num_stages = 1
         num_warps = 2
@@ -541,7 +542,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
         dv2 = A.transpose(-1, -2) @ do2
         dv2 = rearrange(dv2, 'b h n c d -> b h (n c) d', n=NT)
 
-        BK = min(triton.next_power_of_2(K), 16)
+        BK = 16
         NK = triton.cdiv(K, BK)
         dk2 = torch.empty_like(k)
         dq2 = torch.empty_like(q)
@@ -560,7 +561,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
             num_stages=3
         )
 
-        BK = min(triton.next_power_of_2(K), 32)
+        BK = min(max(triton.next_power_of_2(K), 16), 32)
         NK = triton.cdiv(K, BK)
         dg = torch.empty_like(g, dtype=torch.float32)
         grid = (NK, triton.cdiv(T, BT), B * H)
@@ -615,11 +616,27 @@ def fused_chunk_gla(
     scale: int = -1,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
+    head_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if head_first:
+        warnings.warn(
+            "head_first is deprecated and will be removed in a future version. "
+            "Please use head_first=False for now instead."
+        )
+        q, k, v, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, g))
+    if not head_first and q.shape[1] < q.shape[2]:
+        warnings.warn(
+            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
+            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
+            "when head_first=False was specified. "
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+        )
     if scale == -1:
         scale = q.shape[-1] ** -0.5
     seq_len = q.shape[-2]
     q, k, v, g = map(lambda x: pad(x), [q, k, v, g])
     o, final_state = FusedChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state)
     o = o[..., :seq_len, :].contiguous()
+    if head_first:
+        o = rearrange(o, 'b t h ... -> b h t ...')
     return o, final_state

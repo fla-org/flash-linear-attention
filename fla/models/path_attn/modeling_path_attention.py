@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -45,6 +44,7 @@ class PaTHAttentionBlock(nn.Module):
             num_kv_heads=config.num_kv_heads,
             use_forget_gate=config.use_forget_gate,
             use_w_shortconv=config.use_w_shortconv,
+            use_low_rank_w=config.use_low_rank_w,
             layer_idx=layer_idx
         )
 
@@ -372,13 +372,13 @@ class PaTHAttentionForCausalLM(PaTHAttentionPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
+
+        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
+                if self.config.fuse_linear_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
@@ -389,7 +389,7 @@ class PaTHAttentionForCausalLM(PaTHAttentionPreTrainedModel, GenerationMixin):
             # Enable model parallelism
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
+            if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))

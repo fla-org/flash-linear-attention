@@ -233,7 +233,7 @@ def test_chunk(
     g = g / gate_logit_normalizer
     g = g * (torch.rand_like(g) > mask_p)
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
-    q, k, v, p, beta, g, h0 = map(lambda x: x.cuda().requires_grad_(True), (q, k, v, p, beta, g, h0))
+    q, k, v, p, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, p, beta, g, h0))
 
     tri, tri_ht = chunk_comba(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),

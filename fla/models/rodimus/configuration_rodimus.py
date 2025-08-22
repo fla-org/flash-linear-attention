@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import warnings
 from typing import Dict, Optional, Union
 
 from transformers.configuration_utils import PretrainedConfig
@@ -39,6 +40,7 @@ class RodimusConfig(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 126464,
         **kwargs
@@ -69,8 +71,20 @@ class RodimusConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+
+        if fuse_cross_entropy and fuse_linear_cross_entropy:
+            raise ValueError(
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
+            )
+        if fuse_linear_cross_entropy:
+            warnings.warn(
+                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
+                "at the potential cost of reduced precision. "
+                "If you observe issues like loss divergence, consider disabling this setting."
+            )
 
         if attn is not None:
             if not isinstance(attn, Dict):

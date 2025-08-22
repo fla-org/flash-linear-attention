@@ -9,7 +9,7 @@ import sys
 import warnings
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Callable, Dict, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
 import triton
@@ -83,7 +83,6 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
         return
     if warning or (FLA_CI_ENV and (error_rate < 0.01 or abs_atol <= 0.3)):
         if error_rate > ratio:
-            import warnings
             warnings.warn(msg)
     else:
         assert error_rate < ratio, msg
@@ -347,7 +346,6 @@ def check_pytorch_version(version_s: str = '2.4') -> bool:
 
 
 def _cpu_device_warning():
-    import warnings
     warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=1)
 
 
@@ -372,17 +370,9 @@ def get_available_device() -> str:
         return 'cpu'
 
 
-@lru_cache(maxsize=None)
-def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa', 'npu']:
-    device = get_available_device()
-    if device == 'cuda':
-        return 'nvidia'
-    elif device == 'hip':
-        return 'amd'
-    elif device == 'xpu':
-        return 'intel'
-    else:
-        return device
+def map_triton_backend_to_torch_device() -> str:
+    backend = get_available_device()        # 'cuda' | 'hip' | 'xpu' | 'cpu' | ...
+    return {'cuda': 'cuda', 'hip': 'cuda', 'xpu': 'xpu'}.get(backend, backend)
 
 
 # For AMD GPUs, the triton backend is 'hip', while for Nvidia GPUs, the triton backend is 'cuda'.
@@ -390,11 +380,12 @@ def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa', 'npu']:
 # Therefore, we need to check the triton backend to determine the actual GPU vendor.
 device = get_available_device() if get_available_device() != 'hip' else 'cuda'
 device_torch_lib = getattr(torch, device)
-device_platform = _check_platform()
+device_platform = get_available_device()
+device_name = map_triton_backend_to_torch_device()
 
-is_amd = (device_platform == 'amd')
-is_intel = (device_platform == 'intel')
-is_nvidia = (device_platform == 'nvidia')
+is_amd = (device_platform == 'hip')
+is_intel = (device_platform == 'xpu')
+is_nvidia = (device_platform == 'cuda')
 is_intel_alchemist = (is_intel and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
 is_nvidia_hopper = (is_nvidia and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] >= 9))
 use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
@@ -402,6 +393,22 @@ use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1'
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
 is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
 is_gather_supported = hasattr(triton.language, 'gather')
+is_tma_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 9) \
+    and os.environ.get('FLA_NO_USE_TMA', '0') != '1' and \
+    (hasattr(triton.language, '_experimental_make_tensor_descriptor') or hasattr(triton.language, 'make_tensor_descriptor'))
+
+if is_nvidia and not is_tf32_supported:
+    # Make old card happy, since triton will use tf32 by default.
+    # This is a workaround for old nvidia card.
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+
+if is_tma_supported:
+    logger.info('TMA is supported, using TMA by default.')
+
+    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+        return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
+
+    triton.set_allocator(alloc_fn)
 
 
 def get_all_max_shared_mem():

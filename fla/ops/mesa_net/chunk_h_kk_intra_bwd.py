@@ -155,8 +155,8 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     # CONST_TILING = 64
-    BK = triton.next_power_of_2(K)
-    BV = triton.next_power_of_2(V)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
     dk = torch.empty_like(k)
     dg = torch.empty_like(g)
     dbeta = torch.empty_like(beta)

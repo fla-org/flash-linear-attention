@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -82,7 +81,8 @@ class RWKV7FeedForward(nn.Module):
                 module.x_k.data = 1.0 - torch.pow(ddd, ratio_1_to_almost0**4).squeeze()
 
             # Initialize key and value weights as in CMix_x070
-            torch.nn.init.orthogonal_(module.key.weight)
+            original_dtype = module.key.weight.dtype
+            module.key.weight.data = nn.init.orthogonal_(module.key.weight.data.to(torch.float32)).to(original_dtype)
             module.value.weight.data.zero_()
 
     def forward(
@@ -95,18 +95,13 @@ class RWKV7FeedForward(nn.Module):
     ) -> torch.Tensor:
         if attention_mask is not None:
             x = x.mul(attention_mask[:, -x.shape[-2]:, None])
-        if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
-            shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
-            delta = shifted - x
-        elif state is not None and state[self.layer_idx]['ffn_state'] is not None:
-            shifted = self.time_shift(x)
-            shifted[:, 0] = state[self.layer_idx]['ffn_state'][-1]
-            delta = shifted - x
+        if state is not None:
+            delta, ffn_state = token_shift(x, cu_seqlens, cache=state[self.layer_idx]['ffn_state'], output_cache=True)
         else:
-            delta = token_shift(x, cu_seqlens)
+            delta, ffn_state = token_shift(x, cu_seqlens, output_cache=True)
         if state is not None:
             # no need to update the offset twice
-            state.update(ffn_state=x[:, -1], layer_idx=self.layer_idx, offset=0)
+            state.update(ffn_state=ffn_state, layer_idx=self.layer_idx, offset=0)
         return self.value(self.act_fn(self.key(x.addcmul(delta, self.x_k)))), state
 
 
@@ -558,15 +553,14 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
         has_labels = (labels is not None) or (shift_labels is not None)
-        if not (fuse_linear_and_cross_entropy and has_labels):
+        if not (self.config.fuse_linear_cross_entropy and has_labels):
             logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if has_labels:
             if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
+                if self.config.fuse_linear_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
@@ -580,7 +574,7 @@ class RWKV7ForCausalLM(RWKV7PreTrainedModel, GenerationMixin):
                 shift_labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
             shift_labels = shift_labels.to(hidden_states.device)
 
-            if fuse_linear_and_cross_entropy:
+            if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, shift_labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(shift_labels.numel(), -1), shift_labels.view(-1))
