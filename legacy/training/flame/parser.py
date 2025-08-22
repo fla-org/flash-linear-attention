@@ -6,9 +6,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import transformers
-from transformers import HfArgumentParser, TrainingArguments
-
 from flame.logging import get_logger
+from transformers import HfArgumentParser, TrainingArguments
 
 logger = get_logger(__name__)
 
