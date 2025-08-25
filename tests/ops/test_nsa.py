@@ -17,6 +17,24 @@ from fla.ops.utils.pooling import mean_pooling
 
 os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
+def build_block_indices(B, T, H, S, block_size, seq_indices=None):
+    block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
+    for b in range(B):
+        for i in range(T):
+            if seq_indices is None:
+                t = i
+            else:
+                _, t = seq_indices[i]
+            for h in range(H):
+                i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
+                block_indices[b, i, h, :len(i_i)] = i_i
+    block_indices = block_indices.sort(-1)[0]
+    return block_indices
+
+def build_partial_varlen(x, cu_seqlens, q_lens):
+    partial_x = torch.cat([x[:, cu_seqlens[i + 1] - q_lens[i]: cu_seqlens[i + 1]] for i in range(len(q_lens))], dim=1)
+    return partial_x
+
 # FIXME
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype'),
@@ -49,13 +67,7 @@ def test_parallel(
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
     do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
 
-    block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
-    for b in range(B):
-        for t in range(T):
-            for h in range(H):
-                i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
-                block_indices[b, t, h, :len(i_i)] = i_i
-    block_indices = block_indices.sort(-1)[0]
+    block_indices = build_block_indices(B, T, H, S, block_size)
 
     ref = naive_nsa_sel(q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
     ref.backward(do)
@@ -111,15 +123,8 @@ def test_parallel_varlen(
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
 
-    block_indices = torch.full((1, T, H, S), T, dtype=torch.long, device=device)
-    seq_indices = prepare_token_indices(cu_seqlens).tolist()
-
-    for i in range(T):
-        _, t = seq_indices[i]
-        for h in range(H):
-            i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
-            block_indices[0, i, h, :len(i_i)] = i_i
-    block_indices = block_indices.sort(-1)[0]
+    seq_indices = prepare_token_indices(cu_seqlens)
+    block_indices = build_block_indices(1, T, H, S, block_size, seq_indices.tolist())
 
     ref = naive_nsa_sel(
         q=q,
@@ -184,13 +189,7 @@ def test_parallel_selective_decode(
     k = torch.randn((B, T, H, D), dtype=dtype, device=device)
     v = torch.randn((B, T, H, D), dtype=dtype, device=device)
 
-    block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
-    for b in range(B):
-        for t in range(T):
-            for h in range(H):
-                i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
-                block_indices[b, t, h, :len(i_i)] = i_i
-    block_indices = block_indices.sort(-1)[0]
+    block_indices = build_block_indices(B, T, H, S, block_size)
 
     o_full, lse_full = parallel_nsa_fwd(
         q, k, v,
@@ -468,20 +467,6 @@ def test_parallel_decode(
 
     assert_close('short vs full', o_short, o_full[:, -Tq:], 0.005)
 
-def build_partial_varlen(x, cu_seqlens, q_lens):
-    partial_x = torch.cat([x[:, cu_seqlens[i + 1] - q_lens[i]: cu_seqlens[i + 1]] for i in range(len(q_lens))], dim=1)
-    return partial_x
-
-def build_block_indices(T, H, S, block_size, seq_indices):
-    block_indices = torch.full((1, T, H, S), T, dtype=torch.long, device=device)
-    for i in range(T):
-        _, t = seq_indices[i]
-        for h in range(H):
-            i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
-            block_indices[0, i, h, :len(i_i)] = i_i
-    block_indices = block_indices.sort(-1)[0]
-    return block_indices
-
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'S', 'block_size', 'cu_seqlens', 'q_lens', 'dtype'),
     [
@@ -522,7 +507,7 @@ def test_parallel_varlen_decoding(
     scale = 1.0 / (D ** 0.5)
 
     seq_indices = prepare_token_indices(cu_seqlens)
-    block_indices = build_block_indices(T, H, S, block_size, seq_indices.tolist())
+    block_indices = build_block_indices(1, T, H, S, block_size, seq_indices.tolist())
 
     o_full, lse_full = parallel_nsa_fwd(
         q, k, v,
