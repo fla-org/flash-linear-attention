@@ -2,7 +2,7 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 
 import torch
 import triton
@@ -165,7 +165,7 @@ def parallel_nsa_kernel_topk(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens_q'] is not None,
     'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor),
 })
 @triton.autotune(
@@ -185,9 +185,9 @@ def parallel_nsa_fwd_kernel(
     scale,
     block_indices,
     block_counts,
-    cu_seqlens,
-    token_indices,
-    Q_OFFSET,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    token_indices_q,
     TQ,
     TK,
     H: tl.constexpr,
@@ -214,39 +214,39 @@ def parallel_nsa_fwd_kernel(
         # for example, if the passed `cu_seqlens` is [0, 2, 6],
         # then there are 2 and 4 tokens in the 1st and 2nd sequences respectively, and `token_indices` will be
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
+        i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int32)
         # Then i_t becomes the token index inside the sequence, and i_n is the sequence index.
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        TQ = eos - bos
+        bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int32), tl.load(cu_seqlens_q + i_n + 1).to(tl.int32)
+        bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int32), tl.load(cu_seqlens_k + i_n + 1).to(tl.int32)
+        TQ = eos_q - bos_q
+        TK = eos_k - bos_k
     else:
-        bos, eos = i_b * TK, i_b * TK + TK
+        bos_q, eos_q = i_b * TQ, i_b * TQ + TQ
+        bos_k, eos_k = i_b * TK, i_b * TK + TK
     # Then i_t is always the token_idx inside each sequence
     # bos, eos are the token_idx for * flattened * tokens, of the current sequence
 
-    k += (bos * H + i_h) * K
-    v += (bos * H + i_h) * V
-    if IS_VARLEN:
-        blk_offset = (bos + i_t) * H * S + i_h * S
-    else:
-        blk_offset = (i_b * TQ + i_t) * H * S + i_h * S
-    block_indices += blk_offset
+    # We assume that q tokens are logically the last TQ tokens in the current sequence
+    Q_OFFSET = TK - TQ
+
+    k += (bos_k * H + i_h) * K
+    v += (bos_k * H + i_h) * V
+    block_indices += (bos_q + i_t) * H * S + i_h * S
 
     # k, v: shifted to the start of the current sequence at head i_h, i.e. k[i_b, 0, i_h]
     # because bos is at the start of the current sequence at [B, T] dimensions
     # bos + i_t is the index of the current token on [B, T] dimensions
     # block_indices: shifted to block_indices[i_b, i_t, i_h]
 
+    # block_counts: [B, TQ, H]
     if USE_BLOCK_COUNTS:
-        if IS_VARLEN:
-            NS = tl.load(block_counts + (bos + i_t) * H + i_h)
-        else:
-            NS = tl.load(block_counts + (i_b * TQ + i_t) * H + i_h)
+        NS = tl.load(block_counts + (bos_q + i_t) * H + i_h)
     else:
         NS = S
 
     # q: [B, TQ, HQ, K]
     p_q = tl.make_block_ptr(
-        q + (i_b * TQ + i_t) * HQ * K,  # base
+        q + (bos_q + i_t) * HQ * K,  # base
         (HQ, K), (K, 1),               # full tensor shape & strides
         (i_h * G, 0), (G, BK), (1, 0),
     )
@@ -258,12 +258,12 @@ def parallel_nsa_fwd_kernel(
     b_q = (b_q * scale).to(b_q.dtype)
 
     p_o = tl.make_block_ptr(
-        o + (i_b * TQ + i_t) * HQ * V,
+        o + (bos_q + i_t) * HQ * V,
         (HQ, V), (V, 1),
         (i_h * G, i_v * BV), (G, BV), (1, 0),
     )
     # Similar to p_q; but BV can be smaller than V, so it can be a sub-block of V
-    p_lse = lse + (i_b * TQ + i_t) * HQ + i_h * G + tl.arange(0, G)
+    p_lse = lse + (bos_q + i_t) * HQ + i_h * G + tl.arange(0, G)
     # lse + (bos + i_t) * HQ is the start of the current sequence at head i_h
     # i_h * G is the offset for the current head, and tl.arange(0, G) is the offset for the group of heads
 
@@ -611,8 +611,9 @@ def parallel_nsa_fwd(
     block_counts: Union[torch.LongTensor, int],
     block_size: int,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    token_indices: Optional[torch.LongTensor] = None,
+    cu_seqlens_q: Optional[torch.LongTensor] = None,
+    cu_seqlens_k: Optional[torch.LongTensor] = None,
+    token_indices_q: Optional[torch.LongTensor] = None,
 ):
     B, T_kv, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
     assert block_indices.is_contiguous()
@@ -647,9 +648,9 @@ def parallel_nsa_fwd(
         scale=scale,
         block_indices=block_indices,
         block_counts=block_counts,
-        cu_seqlens=cu_seqlens,
-        token_indices=token_indices,
-        Q_OFFSET=T_kv - T_q,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        token_indices_q=token_indices_q,
         TQ=T_q,
         TK=T_kv,
 	    H=H,
@@ -800,7 +801,14 @@ class ParallelNSAFunction(torch.autograd.Function):
         # for example, if the passed `cu_seqlens` is [0, 2, 6],
         # then there are 2 and 4 tokens in the 1st and 2nd sequences respectively, and `token_indices` will be
         # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
-        token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
+        if cu_seqlens is not None:
+            if isinstance(cu_seqlens, tuple):
+                cu_seqlens_q, cu_seqlens_k = cu_seqlens
+            else:
+                cu_seqlens_q = cu_seqlens_k = cu_seqlens
+            token_indices_q = prepare_token_indices(cu_seqlens_q)
+        else:
+            cu_seqlens_q = cu_seqlens_k = token_indices_q = None
 
         o, lse = parallel_nsa_fwd(
             q=q,
@@ -810,14 +818,16 @@ class ParallelNSAFunction(torch.autograd.Function):
             block_counts=block_counts,
             block_size=block_size,
             scale=scale,
-            cu_seqlens=cu_seqlens,
-            token_indices=token_indices
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            token_indices_q=token_indices_q
         )
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.block_indices = block_indices
         ctx.block_counts = block_counts
-        ctx.cu_seqlens = cu_seqlens
-        ctx.token_indices = token_indices
+        # Use cu_seqlens of q in backward, as cu_seqlens for q & k are different only for inference
+        ctx.cu_seqlens = cu_seqlens_q
+        ctx.token_indices = token_indices_q
         ctx.block_size = block_size
         ctx.scale = scale
         return o.to(q.dtype)
@@ -852,11 +862,11 @@ def parallel_nsa(
     g_slc: Optional[torch.Tensor] = None,
     g_swa: Optional[torch.Tensor] = None,
     block_indices: Optional[torch.LongTensor] = None,
-    block_counts: Union[torch.LongTensor, int] = 16,
+    block_counts: Optional[Union[torch.LongTensor, int]] = None,
     block_size: int = 64,
     window_size: int = 0,
     scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor]] = None,
 ) -> torch.Tensor:
     r"""
     Args:
@@ -904,7 +914,14 @@ def parallel_nsa(
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
-    k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
+    if cu_seqlens is not None:
+        if isinstance(cu_seqlens, tuple):
+            cu_seqlens_q, cu_seqlens_k = cu_seqlens
+        else:
+            cu_seqlens_q = cu_seqlens_k = cu_seqlens
+    else:
+        cu_seqlens_q = cu_seqlens_k = None
+    k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens_k), mean_pooling(v, block_size, cu_seqlens_k)
     o_cmp, lse_cmp = None, None
     if g_cmp is not None:
         o_cmp, lse_cmp = parallel_nsa_compression(
@@ -935,13 +952,12 @@ def parallel_nsa(
         o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
     if window_size > 0:
         if cu_seqlens is not None:
-            max_seqlen = q.shape[1]
             o_swa = flash_attn_varlen_func(
                 q.squeeze(0), k.squeeze(0), v.squeeze(0),
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=q.shape[1],
+                max_seqlen_k=k.shape[1],
                 causal=True,
                 window_size=(window_size-1, 0)
             ).unsqueeze(0)

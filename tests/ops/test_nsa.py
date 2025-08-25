@@ -63,7 +63,7 @@ def test_parallel(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri = parallel_nsa(q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
+    tri = parallel_nsa(q=q, k=k, v=v, block_indices=block_indices, block_counts=S, block_size=block_size, scale=scale)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -81,6 +81,7 @@ def test_parallel(
         pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-cu_seqlens{}-{}".format(*test))
         for test in [
             (1, 16, 64, 16, 32, [0, 15], torch.float16),
+            (1, 16, 64, 8, 16, [0, 15, 205, 550, 800], torch.float16),
             (2, 32, 64, 16, 32, [0, 256, 500, 1000], torch.float16),
             (2, 32, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
@@ -138,6 +139,7 @@ def test_parallel_varlen(
         k=k,
         v=v,
         block_indices=block_indices,
+        block_counts=S,
         block_size=block_size,
         cu_seqlens=cu_seqlens
     )
@@ -465,3 +467,102 @@ def test_parallel_decode(
     )
 
     assert_close('short vs full', o_short, o_full[:, -Tq:], 0.005)
+
+def build_partial_varlen(x, cu_seqlens, q_lens):
+    partial_x = torch.cat([x[:, cu_seqlens[i + 1] - q_lens[i]: cu_seqlens[i + 1]] for i in range(len(q_lens))], dim=1)
+    return partial_x
+
+def build_block_indices(T, H, S, block_size, seq_indices):
+    block_indices = torch.full((1, T, H, S), T, dtype=torch.long, device=device)
+    for i in range(T):
+        _, t = seq_indices[i]
+        for h in range(H):
+            i_i = torch.randperm(triton.cdiv(t + 1, block_size))[:S]
+            block_indices[0, i, h, :len(i_i)] = i_i
+    block_indices = block_indices.sort(-1)[0]
+    return block_indices
+
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'S', 'block_size', 'cu_seqlens', 'q_lens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-cu_seqlens{}-q_lens{}-{}".format(*test))
+        for test in [
+            (1, 16, 64, 16, 32, [0, 15], [1,], torch.float16),
+            (1, 16, 64, 8, 16, [0, 15, 205, 550, 800], [3, 15, 30, 8], torch.float16),
+            (2, 32, 64, 16, 32, [0, 256, 500, 1000], [1, 15, 4], torch.float16),
+            (2, 32, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float16),
+        ]
+    ]
+)
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
+)
+def test_parallel_varlen_decoding(
+    H: int,
+    HQ: int,
+    D: int,
+    S: int,
+    block_size: int,
+    cu_seqlens,
+    q_lens,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(0)
+    device = "cuda"
+    dtype = torch.float16
+
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+    # seq-first required for inputs with variable lengths
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device)
+    scale = 1.0 / (D ** 0.5)
+
+    seq_indices = prepare_token_indices(cu_seqlens)
+    block_indices = build_block_indices(T, H, S, block_size, seq_indices.tolist())
+
+    o_full, lse_full = parallel_nsa_fwd(
+        q, k, v,
+        block_indices,
+        S,
+        block_size,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        scale=scale,
+        token_indices_q=seq_indices,
+    )
+
+    ref = naive_nsa_sel(
+        q=q,
+        k=k,
+        v=v,
+        block_indices=block_indices,
+        block_size=block_size,
+        cu_seqlens=cu_seqlens
+    )
+
+    q_short = build_partial_varlen(q, cu_seqlens, q_lens)
+    block_indices_short = build_partial_varlen(block_indices, cu_seqlens, q_lens)
+    cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).to(device)
+    token_indices_q = prepare_token_indices(cu_seqlens_q)
+
+    o_short_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
+    lse_short_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens)
+
+    o_short, lse_short = parallel_nsa_fwd(
+        q_short, k, v,
+        block_indices_short,
+        S,
+        block_size,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens,
+        scale= 1.0 / (D ** 0.5),
+        token_indices_q=token_indices_q
+    )
+
+    assert_close('outputs: full vs naive', ref, o_full, 0.005)
+    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
+    assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
