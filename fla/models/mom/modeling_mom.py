@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from transformers.generation import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -111,7 +112,8 @@ def load_balancing_loss_func(
     return overall_loss * num_experts
 
 
-class MomBlock(nn.Module):
+class MomBlock(GradientCheckpointingLayer):
+
     def __init__(self, config: MomConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -305,25 +307,14 @@ class MomModel(MomPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values, router_logits = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    use_cache,
-                    output_attentions,
-                    **kwargs
-                )
-            else:
-                hidden_states, attentions, past_key_values, router_logits = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    **kwargs
-                )
+            hidden_states, attentions, past_key_values, router_logits = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                **kwargs
+            )
 
             if output_attentions:
                 all_attns += (attentions,)

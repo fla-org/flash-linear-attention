@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 import torch
 from torch import nn
 from transformers.generation import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
 from transformers.utils.deprecation import deprecate_kwarg
@@ -28,7 +29,8 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-class SambaBlock(nn.Module):
+class SambaBlock(GradientCheckpointingLayer):
+
     def __init__(self, config, layer_idx):
         super().__init__()
 
@@ -258,19 +260,11 @@ class SambaModel(SambaPreTrainedModel):
         hidden_states = inputs_embeds
         all_hidden_states = () if output_hidden_states else None
         for mixer_block in self.layers:
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    mixer_block.__call__,
-                    hidden_states,
-                    cache_params,
-                    **kwargs
-                )
-            else:
-                hidden_states = mixer_block(
-                    hidden_states,
-                    cache_params=cache_params,
-                    **kwargs
-                )
+            hidden_states = mixer_block(
+                hidden_states,
+                cache_params=cache_params,
+                **kwargs
+            )
 
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)

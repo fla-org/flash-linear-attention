@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from transformers.generation import GenerationMixin
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -70,7 +71,7 @@ class BitNetMLP(nn.Module):
         return self.down_proj(swiglu(gate, y))
 
 
-class BitNetBlock(nn.Module):
+class BitNetBlock(GradientCheckpointingLayer):
 
     def __init__(self, config: BitNetConfig, layer_idx: int):
         super().__init__()
@@ -264,25 +265,14 @@ class BitNetModel(BitNetPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                    **kwargs
-                )
-            else:
-                layer_outputs = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    **kwargs
-                )
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                **kwargs
+            )
 
             hidden_states = layer_outputs[0]
 
