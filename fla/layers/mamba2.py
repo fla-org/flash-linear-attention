@@ -348,11 +348,12 @@ class Mamba2(nn.Module):
                     )
                     if self.backend == 'cuda':
                         hidden_states_B_C = _conv1d_output
+                        hidden_states_B_C = hidden_states_B_C.transpose(1, 2)
                     elif self.backend == 'triton':
                         hidden_states_B_C, _ = _conv1d_output
+                        hidden_states_B_C = hidden_states_B_C.transpose(1, 2).contiguous()
                     else:
                         raise ValueError(f"Unsupported backend: {self.backend}")
-                    hidden_states_B_C = hidden_states_B_C.transpose(1, 2).contiguous()
 
                 hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
                 hidden_states, B, C = torch.split(
