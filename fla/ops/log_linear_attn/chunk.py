@@ -1786,8 +1786,10 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         dg_last = torch.zeros((B, NT, H), dtype=torch.float, device=v.device)
 
         grid = (B * H,)
+
         def grid_f(meta):
             return (triton.cdiv(K, meta["BK"]), B * H)
+
         grid_t = (NT, B * H)
 
         num_inter_chunk_levels = ceil_log(NT, 2)
