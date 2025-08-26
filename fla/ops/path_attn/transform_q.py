@@ -5,7 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils import prepare_chunk_indices, get_max_num_splits
 
 
 @triton.heuristics({
@@ -71,7 +71,7 @@ def transform_q_fwd_fn(
     indices_BT = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices_BT)
     grid = (NT, B * HQ)
-    num_blocks = triton.cdiv(T, S) if cu_seqlens is None else len(cu_seqlens) - 1
+    num_blocks = triton.cdiv(T, S) if cu_seqlens is None else get_max_num_splits(cu_seqlens, S)
     q_new = torch.empty(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
     transform_q_fwd_kernel[grid](
         q=q,

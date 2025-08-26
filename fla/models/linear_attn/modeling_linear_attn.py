@@ -27,10 +27,16 @@ if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
 
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ImportError:
+    from fla.models.modeling_layers import GradientCheckpointingLayer
+
 logger = logging.get_logger(__name__)
 
 
-class LinearAttentionBlock(nn.Module):
+class LinearAttentionBlock(GradientCheckpointingLayer):
+
     def __init__(self, config: LinearAttentionConfig, layer_idx: int):
         super().__init__()
 
@@ -214,10 +220,6 @@ class LinearAttentionModel(LinearAttentionPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
-            use_cache = False
-
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
 
@@ -225,23 +227,13 @@ class LinearAttentionModel(LinearAttentionPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    use_cache,
-                    output_attentions,
-                )
-            else:
-                hidden_states, attentions, past_key_values = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions
-                )
+            hidden_states, attentions, past_key_values = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions
+            )
 
             if output_attentions:
                 all_attns += (attentions,)

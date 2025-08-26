@@ -340,12 +340,20 @@ class Mamba2(nn.Module):
                         self.conv1d(hidden_states_B_C.transpose(1, 2))[..., :seq_len].transpose(1, 2)
                     )
                 else:
-                    hidden_states_B_C = self.causal_conv1d_fn(
+                    _conv1d_output = self.causal_conv1d_fn(
                         x=hidden_states_B_C.transpose(1, 2).contiguous(),
                         weight=self.conv1d.weight.squeeze(1),
                         bias=self.conv1d.bias,
                         activation=self.activation,
-                    ).transpose(1, 2)
+                    )
+                    if self.backend == 'cuda':
+                        hidden_states_B_C = _conv1d_output
+                        hidden_states_B_C = hidden_states_B_C.transpose(1, 2)
+                    elif self.backend == 'triton':
+                        hidden_states_B_C, _ = _conv1d_output
+                        hidden_states_B_C = hidden_states_B_C.transpose(1, 2).contiguous()
+                    else:
+                        raise ValueError(f"Unsupported backend: {self.backend}")
 
                 hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
                 hidden_states, B, C = torch.split(
