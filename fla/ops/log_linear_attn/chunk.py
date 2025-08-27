@@ -1487,7 +1487,7 @@ class LogLinearAttentionState:
     k_prev: torch.Tensor
     v_prev: torch.Tensor
     g_prev: torch.Tensor
-    l_prev: torch.Tensor
+    level_scales_prev: torch.Tensor
 
 
 class ChunkLogLinearAttentionFunction(torch.autograd.Function):
@@ -1581,7 +1581,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 k_prev=initial_state.k_prev,
                 v_prev=initial_state.v_prev,
                 g_prev=initial_state.g_prev,
-                l_prev=initial_state.l_prev,
+                level_scales_prev=initial_state.level_scales_prev,
                 q_new=q_new,
                 k_new=k_new,
                 v_new=v_new,
