@@ -1,6 +1,7 @@
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -1578,6 +1579,10 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         if K % BLOCK_K != 0:
             raise ValueError(f"State dimension must be divisible by {BLOCK_K}.")
 
+        if triton.__version__ > "3.2.0":
+            warnings.warn("Triton>3.2.0 detected, which is known to have worse performance. "
+                          "For optimal performance, it is recommended to install Triton==3.2.0 (if possible).")
+
         BT = 64  # chunk size
 
         h0 = initial_state.ht if initial_state is not None else None
@@ -1664,7 +1669,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         new_offsets = torch.zeros((B,), dtype=torch.int32, device=v.device)
         g = chunk_local_cumsum(
-            g, BT, offsets=None, head_first=None, cu_seqlens=cu_seqlens
+            g, BT, offsets=None, cu_seqlens=cu_seqlens
         )
 
         def grid(meta):
@@ -1748,6 +1753,9 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
+        if triton.__version__ < "3.1.0":
+            raise ValueError("Triton>=3.1.0 is required")
+
         q, k, v, g, level_scales, initial_state, cu_seqlens = ctx.saved_tensors
         chunk_size = ctx.chunk_size
         llut = ctx.llut
@@ -1895,7 +1903,6 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             chunk_size,
             reverse=True,
             offsets=None,
-            head_first=None,
             cu_seqlens=cu_seqlens,
         ).to(g.dtype)
 
