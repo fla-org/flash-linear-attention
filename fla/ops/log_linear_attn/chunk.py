@@ -663,11 +663,9 @@ def chunkwise_fwd_kernel(
         tl.store(new_offsets + i_n, (offset // BT) * BT + T)
 
 
-@triton.heuristics(
-    {
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
+@triton.heuristics({
+    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+})
 @triton.jit(do_not_specialize=["T"])
 def copy_input_kernel(
     q,
@@ -1491,6 +1489,7 @@ class LogLinearAttentionState:
 
 
 class ChunkLogLinearAttentionFunction(torch.autograd.Function):
+
     @staticmethod
     @input_guard
     @autocast_custom_fwd
@@ -1609,9 +1608,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         )
 
         new_offsets = torch.zeros((B,), dtype=torch.int32, device=v.device)
-        g = chunk_local_cumsum(
-            g, BT, offsets=None, cu_seqlens=cu_seqlens
-        )
+        g = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=cu_seqlens)
 
         def grid(meta):
             return (triton.cdiv(K, meta["BK"]), B * H)
@@ -1839,13 +1836,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             BT=BT,
         )
 
-        dg = chunk_local_cumsum(
-            dg,
-            chunk_size,
-            reverse=True,
-            offsets=None,
-            cu_seqlens=cu_seqlens,
-        ).to(g.dtype)
+        dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens).to(g.dtype)
 
         dq = reduce(dq, "b t (g h) k -> b t g k", "sum", g=G, h=H // G)
         dk = reduce(dk, "b t (g h) k -> b t g k", "sum", g=G, h=H // G)
