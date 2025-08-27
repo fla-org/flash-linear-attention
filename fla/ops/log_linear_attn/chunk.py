@@ -1,7 +1,7 @@
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Optional, Tuple
-import warnings
 
 import torch
 import torch.nn.functional as F
@@ -1423,73 +1423,14 @@ def chunkwise_bwd_kernel_diag(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
-    p_mask_0 = tl.make_block_ptr(
-        mask + 0 * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
-    )
-    p_mask_1 = tl.make_block_ptr(
-        mask + 1 * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
-    )
-    p_mask_2 = tl.make_block_ptr(
-        mask + 2 * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
-    )
-    p_mask_3 = tl.make_block_ptr(
-        mask + 3 * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
-    )
-    p_mask_4 = tl.make_block_ptr(
-        mask + 4 * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
-    )
-    p_mask_5 = tl.make_block_ptr(
-        mask + 5 * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
-    )
-    p_mask_6 = tl.make_block_ptr(
-        mask + 6 * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
-    )
+    num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
 
-    b_mask_0 = tl.load(p_mask_0, boundary_check=(0, 1))
-    b_mask_1 = tl.load(p_mask_1, boundary_check=(0, 1))
-    b_mask_2 = tl.load(p_mask_2, boundary_check=(0, 1))
-    b_mask_3 = tl.load(p_mask_3, boundary_check=(0, 1))
-    b_mask_4 = tl.load(p_mask_4, boundary_check=(0, 1))
-    b_mask_5 = tl.load(p_mask_5, boundary_check=(0, 1))
-    b_mask_6 = tl.load(p_mask_6, boundary_check=(0, 1))
-
-    dl_0 = tl.sum(tl.where(b_mask_0 == 1, b_dl, 0), axis=1)
-    dl_1 = tl.sum(tl.where(b_mask_1 == 1, b_dl, 0), axis=1)
-    dl_2 = tl.sum(tl.where(b_mask_2 == 1, b_dl, 0), axis=1)
-    dl_3 = tl.sum(tl.where(b_mask_3 == 1, b_dl, 0), axis=1)
-    dl_4 = tl.sum(tl.where(b_mask_4 == 1, b_dl, 0), axis=1)
-    dl_5 = tl.sum(tl.where(b_mask_5 == 1, b_dl, 0), axis=1)
-    dl_6 = tl.sum(tl.where(b_mask_6 == 1, b_dl, 0), axis=1)
-
-    p_dl_0 = tl.make_block_ptr(
-        dl + (bos * H + i_h) * L + 0, (T,), (H * L,), (i_t * BT,), (BT,), (0,)
-    )
-    p_dl_1 = tl.make_block_ptr(
-        dl + (bos * H + i_h) * L + 1, (T,), (H * L,), (i_t * BT,), (BT,), (0,)
-    )
-    p_dl_2 = tl.make_block_ptr(
-        dl + (bos * H + i_h) * L + 2, (T,), (H * L,), (i_t * BT,), (BT,), (0,)
-    )
-    p_dl_3 = tl.make_block_ptr(
-        dl + (bos * H + i_h) * L + 3, (T,), (H * L,), (i_t * BT,), (BT,), (0,)
-    )
-    p_dl_4 = tl.make_block_ptr(
-        dl + (bos * H + i_h) * L + 4, (T,), (H * L,), (i_t * BT,), (BT,), (0,)
-    )
-    p_dl_5 = tl.make_block_ptr(
-        dl + (bos * H + i_h) * L + 5, (T,), (H * L,), (i_t * BT,), (BT,), (0,)
-    )
-    p_dl_6 = tl.make_block_ptr(
-        dl + (bos * H + i_h) * L + 6, (T,), (H * L,), (i_t * BT,), (BT,), (0,)
-    )
-
-    tl.store(p_dl_0, dl_0)
-    tl.store(p_dl_1, dl_1)
-    tl.store(p_dl_2, dl_2)
-    tl.store(p_dl_3, dl_3)
-    tl.store(p_dl_4, dl_4)
-    tl.store(p_dl_5, dl_5)
-    tl.store(p_dl_6, dl_6)
+    for i in range(num_intra_levels):
+        p_mask = tl.make_block_ptr(mask + i * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
+        b_mask = tl.load(p_mask, boundary_check=(0, 1))
+        dl_i = tl.sum(tl.where(b_mask == 1, b_dl, 0), axis=1)
+        p_dl_i = tl.make_block_ptr(dl + (bos * H + i_h) * L + i, (T,), (H * L,), (i_t * BT,), (BT,), (0,))
+        tl.store(p_dl_i, dl_i, boundary_check=(0,))
 
 
 def construct_binary_level_mask(level, T):
