@@ -617,7 +617,9 @@ def causal_conv1d(
     initial_state: Optional[torch.Tensor] = None,
     output_final_state: Optional[bool] = False,
     activation: Optional[str] = None,
+    backend: Optional[str] = 'triton',
     cu_seqlens: Optional[torch.Tensor] = None,
+    **kwargs,
 ):
     """
     A causal 1D convolution implementation that powers Mamba/Mamba2 and DeltaNet architectures.
@@ -643,6 +645,9 @@ def causal_conv1d(
         activation (Optional[str]):
             Activations applied to output, only `swish`/`silu` or `None` (i.e., no activation) are supported.
             Default: `None`.
+        backend (Optional[str]):
+            Specifies the backend to use for the convolution operation. Supported values are `'cuda'` and `'triton'`.
+            Default: `'triton'`.
         cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths (optional)
 
@@ -650,16 +655,66 @@ def causal_conv1d(
         Tuple of (output, final_state).
         If `output_final_state` is `False`, the final state is `None`.
     """
-    y, final_state = CausalConv1dFunction.apply(
-        x,
-        weight,
-        bias,
-        residual,
-        initial_state,
-        output_final_state,
-        activation,
-        cu_seqlens,
+
+    if backend == 'triton':
+        y, final_state = CausalConv1dFunction.apply(
+            x,
+            weight,
+            bias,
+            residual,
+            initial_state,
+            output_final_state,
+            activation,
+            cu_seqlens,
+        )
+        return y, final_state
+
+    B, T, D, W = *x.shape, weight.shape[-1]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    x = rearrange(x, 'b t d -> b d t')
+
+    # check if cu_seqlens and cache are both provided
+    # Sequence index for each token. Used for varlen.
+    # Suppose a batch consists of two sequences with lengths 3 and 4,
+    # seq_idx=[0, 0, 0, 1, 1, 1, 1] for this batch.
+    # NOTE: No need to provide this arg if `cu_seqlens` is passed.
+    # This arg is just for BC, and will be removed in the future.
+    # [B, T]
+    seq_idx = kwargs.get('seq_idx', None)
+    if cu_seqlens is not None and seq_idx is None:
+        seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
+
+    # equivalent to:
+    # y = _conv_forward(x, weight, bias)[..., :x.shape[-1]]
+    # if activation is not None:
+    #     y = ACT2FN[activation](x)
+
+    if initial_state is not None:
+        # To make causal-conv1d happy
+        initial_state = (
+            initial_state[:, :, -(W-1):]   # [N, D, W-1]
+            .transpose(1, 2).contiguous()  # [N, W-1, D] and stride(2)==1
+            .transpose(1, 2)               # [N, D, W-1] and stride(1)==1
+        )
+
+    result = causal_conv1d_fn(
+        x=x,
+        weight=weight,
+        bias=bias,
+        activation=activation,
+        seq_idx=seq_idx,
+        initial_states=initial_state,
+        return_final_states=output_final_state,
     )
+    y, final_state = result if output_final_state else (result, None)
+    y = rearrange(y, 'b d t -> b t d')
+    if output_final_state:
+        cache = x.new_zeros(N, D, W)
+        cache[:, :, -min(W-1, T):].copy_(final_state[:, :, -min(W-1, T):])
+        final_state = cache
+    if residual is not None:
+        y.add_(residual)
+
     return y, final_state
 
 
@@ -859,7 +914,7 @@ class ShortConvolution(nn.Conv1d):
             Tensor of shape `[B, T, D]`.
         """
 
-        B, T, D, W = *x.shape, self.kernel_size[0]
+        B, T, *_ = x.shape
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
         if mask is not None:
             if cu_seqlens is not None:
@@ -877,19 +932,11 @@ class ShortConvolution(nn.Conv1d):
             )
             return y, cache
 
-        # check if cu_seqlens and cache are both provided
-        # Sequence index for each token. Used for varlen.
-        # Suppose a batch consists of two sequences with lengths 3 and 4,
-        # seq_idx=[0, 0, 0, 1, 1, 1, 1] for this batch.
-        # NOTE: No need to provide this arg if `cu_seqlens` is passed.
-        # This arg is just for BC, and will be removed in the future.
-        # [B, T]
-        seq_idx = kwargs.get('seq_idx', None)
         # cuda backend do not support:
         # 1. both `cu_seqlens` and `cache` being provided
         # 2. both `cu_seqlens` and `output_final_state` being provided
         if self.backend == 'cuda' and (
-            ((cu_seqlens is not None or seq_idx is not None) and cache is not None) or
+            (cu_seqlens is not None and cache is not None) or
             (cu_seqlens is not None and output_final_state)
         ):
             warnings.warn(
@@ -900,58 +947,18 @@ class ShortConvolution(nn.Conv1d):
             )
             self.backend = 'triton'
 
-        if self.backend == 'triton':
-            y, cache = causal_conv1d(
-                x=x,
-                weight=rearrange(self.weight, "d 1 w -> d w"),
-                bias=self.bias,
-                residual=residual,
-                initial_state=cache,
-                output_final_state=output_final_state,
-                activation=self.activation,
-                cu_seqlens=cu_seqlens,
-            )
-            return y, cache
-        else:
-            x = rearrange(x, 'b t d -> b d t')
-
-            if cu_seqlens is not None and seq_idx is None:
-                seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
-
-            # equivalent to:
-            # y = self._conv_forward(x, self.weight, self.bias)[..., :x.shape[-1]]
-            # if self.activation is not None:
-            #     y = ACT2FN[self.activation](x)
-
-            initial_state = None
-            if cache is not None:
-                B, _, T = cache.shape
-                # To make causal-conv1d happy
-                initial_state = (
-                    cache[:, :, -(W-1):]
-                    .transpose(1, 2)                     # [B, C, W-1]
-                    .contiguous()                        # [B, W-1, C] and stride(2)==1
-                    .transpose(1, 2)                     # [B, C, W-1] and stride(1)==1
-                )
-
-            result = causal_conv1d_fn(
-                x=x,
-                weight=rearrange(self.weight, "d 1 w -> d w"),
-                bias=self.bias,
-                activation=self.activation,
-                seq_idx=seq_idx,
-                initial_states=initial_state,
-                return_final_states=output_final_state,
-            )
-            y, final_state = result if output_final_state else (result, None)
-            y = rearrange(y, 'b d t -> b t d')
-            if output_final_state:
-                cache = x.new_zeros(N, D, W)
-                cache[:, :, -min(W-1, T):].copy_(final_state[:, :, -min(W-1, T):])
-            if residual is not None:
-                y.add_(residual)
-
-            return y, cache
+        return causal_conv1d(
+            x=x,
+            weight=rearrange(self.weight, "d 1 w -> d w"),
+            bias=self.bias,
+            residual=residual,
+            initial_state=cache,
+            output_final_state=output_final_state,
+            activation=self.activation,
+            backend=self.backend,
+            cu_seqlens=cu_seqlens,
+            **kwargs
+        )
 
     def step(
         self,
