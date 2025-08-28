@@ -239,7 +239,7 @@ def test_parallel_selective_decode(
         ]
     ]
 )
-def test_parallel_compressive_decode(
+def test_parallel_compressive(
     B: int,
     T: int,
     Tq: int,
@@ -494,7 +494,7 @@ def test_parallel_decode(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
 )
-def test_parallel_varlen_decoding(
+def test_parallel_varlen_decode(
     H: int,
     HQ: int,
     D: int,
@@ -504,9 +504,7 @@ def test_parallel_varlen_decoding(
     q_lens,
     dtype: torch.dtype,
 ):
-    torch.manual_seed(0)
-    device = "cuda"
-    dtype = torch.float16
+    torch.manual_seed(42)
 
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
@@ -560,5 +558,99 @@ def test_parallel_varlen_decoding(
     )
 
     assert_close('outputs: full vs naive', ref, o_full, 0.005)
+    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
+    assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'block_size', 'cu_seqlens', 'q_lens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-block_size{}-cu_seqlens{}-q_lens{}-{}".format(*test))
+        for test in [
+            (1, 16, 64, 32, [0, 15], [1,], torch.float16),
+            (1, 16, 64, 16, [0, 15, 205, 550, 800], [3, 15, 30, 8], torch.float16),
+            (2, 32, 64, 32, [0, 256, 500, 1000], [1, 15, 4], torch.float16),
+            (2, 32, 100, 32, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float16),
+        ]
+    ]
+)
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
+)
+def test_parallel_compressive_varlen(
+    H: int,
+    HQ: int,
+    D: int,
+    block_size: int,
+    cu_seqlens,
+    q_lens,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+    # seq-first required for inputs with variable lengths
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+
+    scale = 1.0 / (D ** 0.5)
+    k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
+
+    seq_indices = prepare_token_indices(cu_seqlens)
+
+    o_full, lse_full = parallel_nsa_compression(
+        q=q,
+        k=k_cmp,
+        v=v_cmp,
+        TK=T,
+        block_size=block_size,
+        scale=scale,
+        cu_seqlens=(cu_seqlens, cu_seqlens),
+    )
+    o_full.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    o_naive, lse_naive = naive_nsa_cmp(
+        q=q,
+        k_cmp=k_cmp,
+        v_cmp=v_cmp,
+        block_size=block_size,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        seq_indices=seq_indices
+    )
+    o_naive.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    assert_close('outputs: full vs naive', o_naive, o_full, 0.005)
+    assert_close('lse: full vs naive', torch.where(lse_naive == float('-inf'), 0, lse_naive), lse_full, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+
+    q_short = build_partial_varlen(q, cu_seqlens, q_lens)
+    cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).to(device)
+
+    o_short_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
+    lse_short_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens)
+
+    o_short, lse_short = parallel_nsa_compression(
+        q_short,
+        k_cmp, v_cmp,
+        T,
+        block_size,
+        scale,
+        cu_seqlens=(cu_seqlens_q, cu_seqlens),
+    )
+
     assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
     assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)

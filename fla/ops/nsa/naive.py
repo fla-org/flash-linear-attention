@@ -6,9 +6,10 @@ from typing import Optional, Union, Tuple
 
 import torch
 from einops import repeat
-from torch.nn.attention.flex_attention import create_block_mask
+from torch.nn.attention.flex_attention import create_block_mask, and_masks
 from torch.nn.attention.flex_attention import flex_attention
 from fla.ops.utils.pooling import mean_pooling
+from fla.ops.utils import prepare_token_indices, prepare_chunk_offsets
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -124,13 +125,26 @@ def naive_nsa_sel(
 
     return o.to(dtype)
 
-def naive_nsa_cmp(q, k_cmp, v_cmp, block_size, scale, cu_seqlens=None):
-    assert cu_seqlens is None, "Not implemented yet"
+def naive_nsa_cmp(q, k_cmp, v_cmp, block_size, scale, cu_seqlens=None, seq_indices=None):
+    if seq_indices is not None:
+        kv_cu_seqlens = prepare_chunk_offsets(cu_seqlens, block_size)
+        kv_indices = prepare_token_indices(kv_cu_seqlens)
+        q_b, q_i = seq_indices[:, 0], seq_indices[:, 1]
+        kv_b, kv_i = kv_indices[:, 0], kv_indices[:, 1]
 
-    @torch.compile
-    def cmp_mask(b, h, q_idx, kv_idx):
-        return q_idx >= (kv_idx + 1) * block_size - 1
+        @torch.compile
+        def varlen_mask(b, h, q_idx, kv_idx):
+            return q_b[q_idx] == kv_b[kv_idx]
 
+        @torch.compile
+        def shifted_varlen_mask(b, h, q_idx, kv_idx):
+            return q_i[q_idx] >= (kv_i[kv_idx] + 1) * block_size - 1
+
+        cmp_mask = and_masks(varlen_mask, shifted_varlen_mask)
+    else:
+        @torch.compile
+        def cmp_mask(b, h, q_idx, kv_idx):
+            return q_idx >= (kv_idx + 1) * block_size - 1
     B, H, TQ, TKV = q.shape[0], k_cmp.shape[1], q.shape[1], k_cmp.shape[1]
     block_mask = create_block_mask(cmp_mask, B, H, TQ, TKV)
 
