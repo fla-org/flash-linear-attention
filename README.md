@@ -29,6 +29,7 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 
 ## News
 
+- **$\texttt{[2025-08]}$:** 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
 - **$\texttt{[2025-07]}$:** 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
 - **$\texttt{[2025-07]}$:** 🛣️ Added PaTH Attention to fla ([paper](https://arxiv.org/abs/2505.16381)).
 - **$\texttt{[2025-06]}$:** 🎉 Added MesaNet to fla ([paper](https://arxiv.org/abs/2506.05233)).
@@ -80,6 +81,7 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 | 2025 |         | MesaNet        | [MesaNet: Sequence Modeling by Locally Optimal Test-Time Training](https://arxiv.org/abs/2506.05233)                                          |                                                                                                 |       [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/mesa_net.py)       |
 | 2025 |         | Comba          | [Comba: Improving Bilinear RNNs with Closed-loop Control](https://arxiv.org/abs/2506.02475)                                                   | [official](https://github.com/AwesomeSeq/Comba-triton)                                          |        [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/comba.py)         |
 | 2025 |         | PaTH           | [PaTH Attention: Position Encoding via Accumulating Householder Transformations](https://arxiv.org/abs/2505.16381)                            |                                                                                                 |      [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/path_attn.py)       |
+| 2025 |         | MoM            | [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685)                                                    | [official](https://github.com/OpenSparseLLMs/MoM)                                               |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/mom.py)          |
 
 ## Installation
 
