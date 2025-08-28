@@ -525,7 +525,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
             cu_seqlens=ctx.cu_seqlens,
             token_indices=ctx.token_indices
         )
-        return dq.to(q), dk.to(k), dv.to(v), None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), None, None, None, None
 
 
 def parallel_nsa_compression(
