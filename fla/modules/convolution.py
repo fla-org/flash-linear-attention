@@ -522,6 +522,77 @@ def causal_conv1d_bwd(
     return dx.view(shape), dw, db, dr, dh0
 
 
+@triton.heuristics({
+    'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+})
+@triton.jit
+def causal_conv1d_states_fwd_kernel(
+    x,
+    initial_state,
+    final_state,
+    cu_seqlens,
+    T,
+    D,
+    W,
+    BD: tl.constexpr,
+    BW: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_d, i_n = tl.program_id(0), tl.program_id(1)
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n), tl.load(cu_seqlens + i_n + 1)
+        T = eos - bos
+    else:
+        bos, eos = i_n * T, i_n * T + T
+
+    o_t = eos - BW + tl.arange(0, BW)
+    o_d = i_d * BD + tl.arange(0, BD)
+    o_w = W - BW + tl.arange(0, BW)
+    m_t = (o_t >= tl.maximum(bos, eos - W))
+    m_d = o_d < D
+    m_w = (o_w >= 0) & (o_w < W)
+
+    b_x = tl.load(x + o_t * D + o_d[:, None], mask=(m_t & m_d[:, None]), other=0)
+    if USE_INITIAL_STATE:
+        if T < BW:
+            o_c = W - (BW - T) + tl.arange(0, BW)
+            m_c = (o_c >= 0) & (o_c < W)
+            b_cache = tl.load(initial_state + i_n * D*W + o_d[:, None] * W + o_c, mask=m_d[:, None] & m_c, other=0)
+            b_x += b_cache
+
+    tl.store(final_state + i_n * D*W + o_d[:, None] * W + o_w, b_x, mask=m_d[:, None] & m_w)
+
+
+@input_guard
+def causal_conv1d_update_states(
+    x: torch.Tensor,
+    state_len: int,
+    initial_state: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    B, T, D, W = *x.shape, state_len
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+
+    final_state = torch.empty(N, D, W, dtype=x.dtype, device=x.device)
+    BD = min(triton.next_power_of_2(D), 256)
+    BW = triton.next_power_of_2(W)
+    grid = (triton.cdiv(D, BD), N)
+    causal_conv1d_states_fwd_kernel[grid](
+        x=x,
+        initial_state=initial_state,
+        final_state=final_state,
+        cu_seqlens=cu_seqlens,
+        T=T,
+        D=D,
+        W=W,
+        BW=BW,
+        BD=BD
+    )
+    return final_state
+
+
 @input_guard
 def causal_conv1d_update(
     x: torch.Tensor,
@@ -669,7 +740,7 @@ def causal_conv1d(
         )
         return y, final_state
 
-    B, T, D, W = *x.shape, weight.shape[-1]
+    B, _, D, W = *x.shape, weight.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     x = rearrange(x, 'b t d -> b d t')
 
@@ -689,10 +760,11 @@ def causal_conv1d(
     # if activation is not None:
     #     y = ACT2FN[activation](x)
 
-    if initial_state is not None:
+    cache, initial_state = initial_state, None
+    if cache is not None:
         # To make causal-conv1d happy
         initial_state = (
-            initial_state[:, :, -(W-1):]   # [N, D, W-1]
+            cache[:, :, -(W-1):]   # [N, D, W-1]
             .transpose(1, 2).contiguous()  # [N, W-1, D] and stride(2)==1
             .transpose(1, 2)               # [N, D, W-1] and stride(1)==1
         )
@@ -710,105 +782,11 @@ def causal_conv1d(
     y = rearrange(y, 'b d t -> b t d')
     if output_final_state:
         cache = x.new_zeros(N, D, W)
-        cache[:, :, -min(W-1, T):].copy_(final_state[:, :, -min(W-1, T):])
-        final_state = cache
+        cache[:, :, -W+1:].copy_(final_state[:, :, -W+1:])
     if residual is not None:
         y.add_(residual)
 
-    return y, final_state
-
-
-def fft_conv(u, k, dropout_mask, gelu=True, k_rev=None):
-    seqlen = u.shape[-1]
-    fft_size = 2 * seqlen
-    k_f = torch.fft.rfft(k, n=fft_size) / fft_size
-    if k_rev is not None:
-        k_rev_f = torch.fft.rfft(k_rev, n=fft_size) / fft_size
-        k_f = k_f + k_rev_f.conj()
-    u_f = torch.fft.rfft(u.to(dtype=k.dtype), n=fft_size)
-
-    if len(u.shape) > 3:
-        k_f = k_f.unsqueeze(1)
-    y = torch.fft.irfft(u_f * k_f, n=fft_size, norm="forward")[..., :seqlen]
-
-    out = y + u
-    if gelu:
-        out = F.gelu(out)
-    if dropout_mask is not None:
-        return (out * rearrange(dropout_mask, "b H -> b H 1")).to(dtype=u.dtype)
-    else:
-        return out.to(dtype=u.dtype)
-
-
-@triton.heuristics({
-    'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
-})
-@triton.jit
-def causal_conv1d_states_fwd_kernel(
-    x,
-    initial_state,
-    final_state,
-    cu_seqlens,
-    T,
-    D,
-    W,
-    BD: tl.constexpr,
-    BW: tl.constexpr,
-    USE_INITIAL_STATE: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-):
-    i_d, i_n = tl.program_id(0), tl.program_id(1)
-    if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n), tl.load(cu_seqlens + i_n + 1)
-        T = eos - bos
-    else:
-        bos, eos = i_n * T, i_n * T + T
-
-    o_t = eos - BW + tl.arange(0, BW)
-    o_d = i_d * BD + tl.arange(0, BD)
-    o_w = W - BW + tl.arange(0, BW)
-    m_t = (o_t >= tl.maximum(bos, eos - W))
-    m_d = o_d < D
-    m_w = (o_w >= 0) & (o_w < W)
-
-    b_x = tl.load(x + o_t * D + o_d[:, None], mask=(m_t & m_d[:, None]), other=0)
-    if USE_INITIAL_STATE:
-        if T < BW:
-            o_c = W - (BW - T) + tl.arange(0, BW)
-            m_c = (o_c >= 0) & (o_c < W)
-            b_cache = tl.load(initial_state + i_n * D*W + o_d[:, None] * W + o_c, mask=m_d[:, None] & m_c, other=0)
-            b_x += b_cache
-
-    tl.store(final_state + i_n * D*W + o_d[:, None] * W + o_w, b_x, mask=m_d[:, None] & m_w)
-
-
-@input_guard
-def causal_conv1d_update_states(
-    x: torch.Tensor,
-    state_len: int,
-    initial_state: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    B, T, D, W = *x.shape, state_len
-    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
-
-    final_state = torch.empty(N, D, W, dtype=x.dtype, device=x.device)
-    BD = min(triton.next_power_of_2(D), 256)
-    BW = triton.next_power_of_2(W)
-    grid = (triton.cdiv(D, BD), N)
-    causal_conv1d_states_fwd_kernel[grid](
-        x=x,
-        initial_state=initial_state,
-        final_state=final_state,
-        cu_seqlens=cu_seqlens,
-        T=T,
-        D=D,
-        W=W,
-        BW=BW,
-        BD=BD
-    )
-    return final_state
+    return y, cache
 
 
 class ShortConvolution(nn.Conv1d):
@@ -1004,6 +982,28 @@ class ShortConvolution(nn.Conv1d):
     @property
     def state_size(self) -> int:
         return self.hidden_size * self.kernel_size
+
+
+def fft_conv(u, k, dropout_mask, gelu=True, k_rev=None):
+    seqlen = u.shape[-1]
+    fft_size = 2 * seqlen
+    k_f = torch.fft.rfft(k, n=fft_size) / fft_size
+    if k_rev is not None:
+        k_rev_f = torch.fft.rfft(k_rev, n=fft_size) / fft_size
+        k_f = k_f + k_rev_f.conj()
+    u_f = torch.fft.rfft(u.to(dtype=k.dtype), n=fft_size)
+
+    if len(u.shape) > 3:
+        k_f = k_f.unsqueeze(1)
+    y = torch.fft.irfft(u_f * k_f, n=fft_size, norm="forward")[..., :seqlen]
+
+    out = y + u
+    if gelu:
+        out = F.gelu(out)
+    if dropout_mask is not None:
+        return (out * rearrange(dropout_mask, "b H -> b H 1")).to(dtype=u.dtype)
+    else:
+        return out.to(dtype=u.dtype)
 
 
 class LongConvolution(nn.Module):
