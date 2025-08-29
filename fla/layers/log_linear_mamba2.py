@@ -7,22 +7,12 @@ from einops import rearrange
 from transformers.activations import ACT2FN
 from transformers.utils import logging
 
-from fla.layers.mamba2 import (
-    apply_mask_to_padding_states,
-    causal_conv1d_fn,
-    causal_conv1d_update,
-    is_fast_path_available,
-)
+from fla.layers.mamba2 import apply_mask_to_padding_states, causal_conv1d_fn, causal_conv1d_update, is_fast_path_available
 from fla.modules.layernorm_gated import RMSNormGated, rmsnorm_fn
-from fla.ops.log_linear_attn.chunk import (
-    LogLinearAttentionState,
-    chunk_log_linear_attn,
-)
+from fla.ops.log_linear_attn.chunk import LogLinearAttentionState, chunk_log_linear_attn
 
 if TYPE_CHECKING:
-    from fla.models.log_linear_mamba2.modeling_log_linear_mamba2 import (
-        LogLinearMamba2Cache,
-    )
+    from fla.models.log_linear_mamba2.modeling_log_linear_mamba2 import LogLinearMamba2Cache
 
 logger = logging.get_logger(__name__)
 
@@ -60,8 +50,6 @@ def hmamba_chunk_scan_combined(
     return_final_states: bool = False,
 ):
     if z is not None:
-        raise NotImplementedError
-    if initial_states is not None:
         raise NotImplementedError
     if seq_idx is not None:
         raise NotImplementedError

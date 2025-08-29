@@ -11,7 +11,6 @@ class LogLinearMamba2Config(Mamba2Config):
         chunk_size: int = 64,
         **kwargs,
     ):
-        print("LogLinearMamba2Config init", residual_in_fp32, chunk_size)
         super().__init__(
             residual_in_fp32=residual_in_fp32,
             chunk_size=chunk_size,

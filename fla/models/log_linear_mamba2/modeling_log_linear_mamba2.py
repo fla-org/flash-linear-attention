@@ -2,7 +2,6 @@ import math
 import warnings
 from typing import Optional, Tuple, Union
 
-import click
 import torch
 from torch import nn
 from transformers.generation import GenerationMixin
@@ -53,11 +52,8 @@ class LogLinearMamba2Cache(Mamba2Cache):
     ) -> torch.Tensor:
         if new_conv_state.dtype != self.conv_states[layer_idx].dtype:
             warnings.warn(
-                click.style(
-                    f"`new_conv_state.dtype` = {new_conv_state.dtype} -> "
-                    f"{self.conv_states[layer_idx].dtype}",
-                    fg="blue",
-                )
+                f"`new_conv_state.dtype` ({new_conv_state.dtype}) does not match the cache's dtype "
+                f"({self.conv_states[layer_idx].dtype}), casting."
             )
             new_conv_state = new_conv_state.to(dtype=self.conv_states[layer_idx].dtype)
 
