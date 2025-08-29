@@ -548,7 +548,7 @@ def parallel_nsa_bwd_kernel_dkv(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
-
+@contiguous
 def parallel_nsa_topk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -564,10 +564,6 @@ def parallel_nsa_topk(
 
     assert k.shape[0] == q.shape[0] and k.shape[-1] == q.shape[-1], "The last dimension of k and q must match"
     assert lse is None or lse.shape == (B, TQ, HQ), "The shape of lse must be (B, TQ, HQ)"
-    assert q.is_contiguous()
-    assert k.is_contiguous()
-    assert lse is None or lse.is_contiguous()
-    assert isinstance(block_counts, int) or block_counts.is_contiguous()
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):
@@ -577,8 +573,6 @@ def parallel_nsa_topk(
         token_indices_q = prepare_token_indices(cu_seqlens_q)
     else:
         cu_seqlens_q = cu_seqlens_k = token_indices_q = None
-    assert cu_seqlens_q is None or cu_seqlens_q.is_contiguous()
-    assert cu_seqlens_k is None or cu_seqlens_k.is_contiguous()
 
     G = HQ // H
     # the number of selected blocks for each token
@@ -616,7 +610,7 @@ def parallel_nsa_topk(
     )
     return block_indices
 
-
+@contiguous
 def parallel_nsa_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -630,12 +624,6 @@ def parallel_nsa_fwd(
     token_indices_q: Optional[torch.LongTensor] = None,
 ):
     B, T_kv, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
-    assert block_indices.is_contiguous()
-    assert q.is_contiguous()
-    assert k.is_contiguous()
-    assert v.is_contiguous()
-    if isinstance(block_counts, torch.Tensor):
-        assert block_counts.is_contiguous()
     _, T_q, HQ, _ = q.shape
     G = HQ // H
     BS = block_size
@@ -867,7 +855,7 @@ class ParallelNSAFunction(torch.autograd.Function):
         )
         return dq.to(q), dk.to(k), dv.to(v), None, None, None, None, None, None, None, None
 
-
+@contiguous
 def parallel_nsa(
     q: torch.Tensor,
     k: torch.Tensor,

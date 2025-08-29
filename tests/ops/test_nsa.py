@@ -200,9 +200,7 @@ def test_parallel_selective_decode(
     )
 
     o_short, lse_short = parallel_nsa_fwd(
-        q[:, -Tq:].contiguous(),      # only the last T_q queries
-        k, v,
-        block_indices[:, -Tq:].contiguous(),
+        q[:, -Tq:], k, v, block_indices[:, -Tq:],
         S,
         block_size,
         scale,
@@ -298,11 +296,7 @@ def test_parallel_compressive(
     assert_close('dv', ref_dv, tri_dv, 0.005)
 
     o_short, lse_short = parallel_nsa_compression(
-        q[:, -Tq:].contiguous(),      # only the last T_q queries
-        k_cmp, v_cmp,
-        T,
-        block_size,
-        scale,
+        q[:, -Tq:], k_cmp, v_cmp, T, block_size, scale,
     )
 
     assert_close(
@@ -360,7 +354,7 @@ def test_parallel_topk_decode(
             block_size=block_size,
             scale=scale,
         )
-        lse_full = torch.where(lse_full == float('-inf'), 0, lse_full).contiguous()
+        lse_full = torch.where(lse_full == float('-inf'), 0, lse_full)
     else:
         lse_full = None
 
@@ -410,9 +404,9 @@ def test_parallel_topk_decode(
               f"({len(indices) / free_block_indices_naive.numel():.2f}), seemingly due to numerical issues.")
 
     block_indices_short = parallel_nsa_topk(
-        q=q[:, -Tq:].contiguous(),
+        q=q[:, -Tq:],
         k=k_cmp,
-        lse=lse_full[:, -Tq:].contiguous() if lse_full is not None else None,
+        lse=lse_full[:, -Tq:] if lse_full is not None else None,
         TK=T,
         block_counts=S,
         block_size=block_size,
@@ -466,11 +460,7 @@ def test_parallel_decode(
                           block_counts=S, block_size=block_size, scale=scale, window_size=window_size)
 
     o_short = parallel_nsa(
-        q[:, -Tq:].contiguous(),      # only the last T_q queries
-        k, v,
-        g_cmp[:, -Tq:].contiguous(),
-        g_slc[:, -Tq:].contiguous(),
-        g_swa[:, -Tq:].contiguous(),
+        q[:, -Tq:], k, v, g_cmp[:, -Tq:], g_slc[:, -Tq:], g_swa[:, -Tq:],
         block_counts=S,
         block_size=block_size,
         scale=scale,
@@ -708,7 +698,7 @@ def test_parallel_topk_varlen(
             cu_seqlens=cu_seqlens,
             seq_indices=seq_indices
         )
-        lse_full = torch.where(lse_full == float('-inf'), 0, lse_full).contiguous()
+        lse_full = torch.where(lse_full == float('-inf'), 0, lse_full)
     else:
         lse_full = None
 
