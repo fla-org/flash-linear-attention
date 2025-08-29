@@ -1850,7 +1850,7 @@ def chunk_log_linear_attn(
     v: torch.Tensor,
     g: torch.Tensor,
     level_scales: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: Optional[LogLinearAttentionState] = None,
     output_final_state: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1866,7 +1866,7 @@ def chunk_log_linear_attn(
             Forget gates of shape `[B, T, H]`.
         level_scales (torch.Tensor):
             Scales for each level of shape `[B, T, H, L]`.
-        initial_state (Optional[torch.Tensor]):
+        initial_state (Optional[LogLinearAttentionState]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
