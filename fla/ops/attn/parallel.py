@@ -537,20 +537,20 @@ def parallel_attn_bwd(
     if check_shared_mem('hopper'):
         BT = 128
         BS = 64
-        BK = triton.next_power_of_2(K)
-        BV = triton.next_power_of_2(V)
+        BK = max(triton.next_power_of_2(K), 16)
+        BV = max(triton.next_power_of_2(V), 16)
         num_warps = 8
     elif check_shared_mem('ampere'):
         BS = 32
-        BK = triton.next_power_of_2(K)
-        BV = triton.next_power_of_2(V)
+        BK = max(triton.next_power_of_2(K), 16)
+        BV = max(triton.next_power_of_2(V), 16)
         BT = 128 if K <= 64 else 64
         num_warps = 4
     else:
         BT = 64
         BS = 32
-        BK = triton.next_power_of_2(K)
-        BV = min(triton.next_power_of_2(V), 64)
+        BK = max(triton.next_power_of_2(K), 16)
+        BV = min(max(triton.next_power_of_2(V), 16), 64)
         num_warps = 2
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None

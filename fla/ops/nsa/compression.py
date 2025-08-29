@@ -385,8 +385,8 @@ def parallel_nsa_compression_bwd(
     H = k.shape[2]
     G = HQ // H
     BC = BS = block_size
-    BK = triton.next_power_of_2(K)
-    BV = min(128, triton.next_power_of_2(v.shape[-1]))
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
     NV = triton.cdiv(V, BV)
     if cu_seqlens is not None:
         chunk_indices, chunk_offsets = prepare_chunk_indices(cu_seqlens, BS), prepare_chunk_offsets(cu_seqlens, BS)

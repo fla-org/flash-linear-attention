@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -12,16 +13,18 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
-from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.abc import ABCAttention
+from fla.layers import MomAttention
 from fla.layers.attn import Attention
-from fla.models.abc.configuration_abc import ABCConfig
+from fla.models.mom.configuration_mom import MomConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules import GatedMLP as ABCMLP
+from fla.modules import GatedMLP as MomMLP
 from fla.modules import RMSNorm
-from fla.modules.l2warp import l2_warp
+
+if TYPE_CHECKING:
+    from transformers.processing_utils import Unpack
+
 
 try:
     from transformers.modeling_layers import GradientCheckpointingLayer
@@ -30,50 +33,128 @@ except ImportError:
 
 logger = logging.get_logger(__name__)
 
-if TYPE_CHECKING:
-    from transformers.processing_utils import Unpack
+
+def load_balancing_loss_func(
+    gate_logits: Union[torch.Tensor, tuple[torch.Tensor], None],
+    num_experts: Optional[int] = None,
+    top_k=2,
+    attention_mask: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, int]:
+    r"""
+    Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
+
+    See Switch Transformer (https://huggingface.co/papers/2101.03961) for more details. This function implements the loss
+    function presented in equations (4) - (6) of the paper. It aims at penalizing cases where the routing between
+    experts is too unbalanced.
+
+    Args:
+        gate_logits:
+            Logits from the `gate`, should be a tuple of model.config.num_hidden_layers tensors of
+            shape [batch_size X sequence_length, num_experts].
+        num_experts:
+            Number of experts
+        top_k:
+            The number of experts to route per-token, can be also interpreted as the `top-k` routing
+            parameter.
+        attention_mask (`torch.Tensor`, *optional*):
+            The attention_mask used in forward function
+            shape [batch_size X sequence_length] if not None.
+
+    Returns:
+        The auxiliary loss.
+    """
+    if gate_logits is None or not isinstance(gate_logits, tuple):
+        return 0
+
+    if isinstance(gate_logits, tuple):
+        compute_device = gate_logits[0].device
+        concatenated_gate_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0)
+
+    routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
+
+    _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
+
+    expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
+
+    if attention_mask is None:
+        # Compute the percentage of tokens routed to each experts
+        tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
+
+        # Compute the average probability of routing to these experts
+        router_prob_per_expert = torch.mean(routing_weights, dim=0)
+    else:
+        batch_size, sequence_length = attention_mask.shape
+        num_hidden_layers = concatenated_gate_logits.shape[0] // (batch_size * sequence_length)
+
+        # Compute the mask that masks all padding tokens as 0 with the same shape of expert_mask
+        expert_attention_mask = (
+            attention_mask[None, :, :, None, None]
+            .expand((num_hidden_layers, batch_size, sequence_length, top_k, num_experts))
+            .reshape(-1, top_k, num_experts)
+            .to(compute_device)
+        )
+
+        # Compute the percentage of tokens routed to each experts
+        tokens_per_expert = torch.sum(expert_mask.float() * expert_attention_mask, dim=0) / torch.sum(
+            expert_attention_mask, dim=0
+        )
+
+        # Compute the mask that masks all padding tokens as 0 with the same shape of tokens_per_expert
+        router_per_expert_attention_mask = (
+            attention_mask[None, :, :, None]
+            .expand((num_hidden_layers, batch_size, sequence_length, num_experts))
+            .reshape(-1, num_experts)
+            .to(compute_device)
+        )
+
+        # Compute the average probability of routing to these experts
+        router_prob_per_expert = torch.sum(routing_weights * router_per_expert_attention_mask, dim=0) / torch.sum(
+            router_per_expert_attention_mask, dim=0
+        )
+
+    overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(0))
+    return overall_loss * num_experts
 
 
-class ABCBlock(GradientCheckpointingLayer):
+class MomBlock(GradientCheckpointingLayer):
 
-    def __init__(self, config: ABCConfig, layer_idx: int):
+    def __init__(self, config: MomConfig, layer_idx: int):
         super().__init__()
+        self.hidden_size = config.hidden_size
 
-        self.config = config
-        self.layer_idx = layer_idx
-
-        self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self.attn_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
         if config.attn is not None and layer_idx in config.attn['layers']:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
                 num_heads=config.attn['num_heads'],
                 num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
                 window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx
             )
         else:
-            self.attn = ABCAttention(
-                hidden_size=config.hidden_size,
-                expand_k=config.expand_k,
-                expand_v=config.expand_v,
-                num_heads=config.num_heads,
-                num_slots=config.num_slots,
-                use_short_conv=config.use_short_conv,
-                conv_size=config.conv_size,
-                gate_fn=config.hidden_act,
-                elementwise_affine=config.elementwise_affine,
-                norm_eps=config.norm_eps,
-                use_rope=config.use_rope,
-                clamp_min=config.clamp_min,
-                clamp_max=config.clamp_max,
-                fuse_norm=config.fuse_norm,
-                layer_idx=layer_idx
-            )
-        self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.mlp = ABCMLP(
+            if config.mom_backend == 'gated_deltanet':
+                self.attn = MomAttention(
+                    mode=config.attn_mode,
+                    hidden_size=config.hidden_size,
+                    expand_v=config.expand_v,
+                    head_dim=config.head_dim,
+                    num_heads=config.num_heads,
+                    use_output_gate=config.use_output_gate,
+                    use_short_conv=config.use_short_conv,
+                    conv_size=config.conv_size,
+                    norm_eps=config.norm_eps,
+                    layer_idx=layer_idx,
+                    num_memories=config.num_memories,
+                    topk=config.topk,
+                    capacity=config.capacity,
+                    shared_mem=config.shared_mem,
+                    single_kv_proj=config.single_kv_proj,
+                )
+            else:
+                raise NotImplementedError(f"The MoM backend {config.mom_backend} is not currently supported.")
+        self.mlp_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
+        self.mlp = MomMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -90,11 +171,10 @@ class ABCBlock(GradientCheckpointingLayer):
         output_attentions: Optional[bool] = False,
         **kwargs: Unpack[Dict]
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-
         residual = hidden_states
-
-        hidden_states = self.attn_norm(hidden_states)
-        hidden_states, attentions, past_key_values = self.attn(
+        if hasattr(self, 'attn_norm'):
+            hidden_states = self.attn_norm(hidden_states)
+        hidden_states, attentions, past_key_values, router_logits = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -102,27 +182,24 @@ class ABCBlock(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             **kwargs
         )
-        if self.config.fuse_norm:
+        if hasattr(self, 'mlp_norm'):
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
             hidden_states = residual + hidden_states
             residual = hidden_states
-            hidden_states = self.mlp_norm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states, **kwargs)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states, attentions, past_key_values)
+        outputs = (hidden_states, attentions, past_key_values, router_logits)
 
         return outputs
 
 
-class ABCPreTrainedModel(PreTrainedModel):
+class MomPreTrainedModel(PreTrainedModel):
 
-    config_class = ABCConfig
-    base_model_prefix = 'model'
+    config_class = MomConfig
     supports_gradient_checkpointing = True
-    _no_split_modules = ['ABCBlock']
-    _supports_cache_class = True
+    _no_split_modules = ['MomBlock']
 
     def __init__(self, *inputs, **kwargs):
         super().__init__(*inputs, **kwargs)
@@ -130,7 +207,7 @@ class ABCPreTrainedModel(PreTrainedModel):
     def _init_weights(
         self,
         module: nn.Module,
-        prenorm_residual_strategy: Optional[str] = None,
+        rescale_prenorm_residual: bool = False,
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, (nn.Linear, nn.Conv1d)):
@@ -141,46 +218,43 @@ class ABCPreTrainedModel(PreTrainedModel):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
         elif hasattr(module, 'reset_parameters'):
             module.reset_parameters()
 
-        if prenorm_residual_strategy is not None:
+        if rescale_prenorm_residual:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
             #   > A modified initialization which accounts for the accumulation on the residual path with model depth. Scale
             #   > the weights of residual layers at initialization by a factor of 1/√N where N is the # of residual layers.
             #   >   -- GPT-2 :: https://openai.com/blog/better-language-models/
             #
             # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
-            p = None
-            if hasattr(module, 'o_proj'):
-                p = module.o_proj.weight
-            elif hasattr(module, 'down_proj'):
-                p = module.down_proj.weight
-            if p is not None:
-                # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
-                # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
-                # We need to reinit p since this code could be called multiple times
-                # Having just p *= scale would repeatedly scale it down
-                if prenorm_residual_strategy == 'rescale':
-                    nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+            for name, p in module.named_parameters():
+                if name in ["o_proj.weight", "down_proj.weight"]:
+                    # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
+                    # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
+                    # We need to reinit p since this code could be called multiple times
+                    # Having just p *= scale would repeatedly scale it down
                     with torch.no_grad():
                         p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
-                elif prenorm_residual_strategy == 'zero':
-                    nn.init.zeros_(p)
-                else:
-                    raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
-class ABCModel(ABCPreTrainedModel):
+@dataclass
+class MomOutputWithPast(BaseModelOutputWithPast):
+    router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
 
-    def __init__(self, config: ABCConfig):
+
+class MomModel(MomPreTrainedModel):
+
+    def __init__(self, config: MomConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([ABCBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
+        self.layers = nn.ModuleList([MomBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
 
@@ -205,7 +279,7 @@ class ABCModel(ABCPreTrainedModel):
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
-            warnings.warn("`ABCModel` does not `output_attentions` now, setting it to `False`.")
+            warnings.warn("`MomModel` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -227,13 +301,15 @@ class ABCModel(ABCPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
+        all_router_logits = ()
+
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            hidden_states, attentions, past_key_values = layer(
+            hidden_states, attentions, past_key_values, router_logits = layer(
                 hidden_states,
-                attention_mask,
+                attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
@@ -242,6 +318,7 @@ class ABCModel(ABCPreTrainedModel):
 
             if output_attentions:
                 all_attns += (attentions,)
+            all_router_logits += (router_logits,)
 
         hidden_states = self.norm(hidden_states)
 
@@ -251,24 +328,33 @@ class ABCModel(ABCPreTrainedModel):
 
         if not return_dict:
             return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
-        return BaseModelOutputWithPast(
+        return MomOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
-            attentions=all_attns
+            attentions=all_attns,
+            router_logits=all_router_logits
         )
 
 
-class ABCForCausalLM(ABCPreTrainedModel, GenerationMixin):
+@dataclass
+class MomCausalLMOutputWithPast(CausalLMOutputWithPast):
+    aux_loss: Optional[torch.FloatTensor] = None
+    router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
+
+
+class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = ABCModel(config)
+        self.model = MomModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.criterion = None
+        self.num_memories = config.num_memories
+        self.topk = config.topk
+        self.aux_loss_scale = config.aux_loss_scale
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -306,7 +392,6 @@ class ABCForCausalLM(ABCPreTrainedModel, GenerationMixin):
             else:
                 raise exception
 
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor = None,
@@ -314,14 +399,14 @@ class ABCForCausalLM(ABCPreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         use_cache: bool = True,
-        logits_to_keep: Optional[int] = None,
+        num_logits_to_keep: Optional[int] = 0,
         **kwargs
     ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
+        # only last token for `inputs_ids` if the `past_key_values` is passed along.
+        if past_key_values is not None:
             input_ids = input_ids[:, -1:]
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and len(past_key_values) == 0:
+        if inputs_embeds is not None and past_key_values is None:
             model_inputs = {'inputs_embeds': inputs_embeds}
         else:
             # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
@@ -330,17 +415,17 @@ class ABCForCausalLM(ABCPreTrainedModel, GenerationMixin):
             # TODO: use `next_tokens` directly instead.
             model_inputs = {'input_ids': input_ids.contiguous()}
 
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
+        if num_logits_to_keep is not None:
+            model_inputs['num_logits_to_keep'] = num_logits_to_keep
 
         model_inputs.update({
             'past_key_values': past_key_values,
             'use_cache': use_cache,
             'attention_mask': attention_mask,
+            'num_logits_to_keep': num_logits_to_keep,
         })
         return model_inputs
 
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -352,7 +437,7 @@ class ABCForCausalLM(ABCPreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0,
+        num_logits_to_keep: Optional[int] = 0,
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -374,36 +459,51 @@ class ABCForCausalLM(ABCPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
+        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training
+        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -num_logits_to_keep:])
 
-        loss, logits = None, None
-        if not self.config.fuse_linear_cross_entropy or labels is None:
-            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
+        loss = None
+        aux_loss = None
         if labels is not None:
-            if getattr(self, 'criterion', None) is None:
-                if self.config.fuse_linear_cross_entropy:
-                    criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
-                elif self.config.fuse_cross_entropy:
-                    criterion = FusedCrossEntropyLoss(inplace_backward=True)
+            if self.config.fuse_cross_entropy:
+                if fuse_linear_and_cross_entropy:
+                    loss_fct = FusedLinearCrossEntropyLoss()
                 else:
-                    criterion = nn.CrossEntropyLoss()
+                    loss_fct = FusedCrossEntropyLoss(inplace_backward=True)
             else:
-                criterion = self.criterion
+                loss_fct = nn.CrossEntropyLoss()
+            # Enable model parallelism
             labels = labels.to(hidden_states.device)
-            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if self.config.fuse_linear_cross_entropy:
-                loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
+            labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], loss_fct.ignore_index)), 1)
+            if fuse_linear_and_cross_entropy:
+                loss = loss_fct(hidden_states.view(-1, self.config.hidden_size),
+                                labels.view(-1),
+                                self.lm_head.weight,
+                                self.lm_head.bias)
             else:
-                loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))
-                loss = l2_warp(loss, logits) if self.config.use_l2warp else loss
+                loss = loss_fct(logits.view(-1, self.config.vocab_size), labels.view(-1))
+
+            aux_loss = load_balancing_loss_func(
+                outputs.router_logits,
+                self.num_memories,
+                self.topk,
+                attention_mask,
+            )
+
+            # print(aux_loss)
+
+            loss += aux_loss.to(loss.device) * self.aux_loss_scale
 
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return MomCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            router_logits=outputs.router_logits,
+            aux_loss=aux_loss
         )

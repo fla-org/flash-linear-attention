@@ -145,8 +145,8 @@ def mesa_net_decoding_one_step(
     curr_h_kk = torch.empty_like(prev_h_kk)
     curr_h_kv = torch.empty_like(prev_h_kv)
 
-    BK = triton.next_power_of_2(K)
-    BV = triton.next_power_of_2(V)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
 
     assert BK <= 128 and BV <= 128, "BK and BV must be less than or equal to 128"
 

@@ -412,7 +412,7 @@ def fused_chunk_fwd(
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
-    BK = min(triton.next_power_of_2(K), 64)
+    BK = min(max(triton.next_power_of_2(K), 16), 64)
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     NK = triton.cdiv(K, BK)
 
@@ -459,8 +459,8 @@ def fused_chunk_bwd(
     B, T, H, K, V = *q.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BT = chunk_size
-    BK = min(triton.next_power_of_2(K), 64)
-    BV = min(triton.next_power_of_2(V), 64)
+    BK = min(max(triton.next_power_of_2(K), 16), 64)
+    BV = min(max(triton.next_power_of_2(V), 16), 64)
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
 
     dq = q.new_empty(NV, *q.shape, dtype=torch.float) if NV > 1 else torch.empty_like(q)

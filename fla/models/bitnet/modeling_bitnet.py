@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -26,6 +25,11 @@ from fla.modules.l2warp import l2_warp
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
+
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ImportError:
+    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 
@@ -71,7 +75,7 @@ class BitNetMLP(nn.Module):
         return self.down_proj(swiglu(gate, y))
 
 
-class BitNetBlock(nn.Module):
+class BitNetBlock(GradientCheckpointingLayer):
 
     def __init__(self, config: BitNetConfig, layer_idx: int):
         super().__init__()
@@ -250,13 +254,6 @@ class BitNetModel(BitNetPreTrainedModel):
         # embed positions
         hidden_states = inputs_embeds
 
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
-
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         next_cache = None
@@ -265,25 +262,14 @@ class BitNetModel(BitNetPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                    **kwargs
-                )
-            else:
-                layer_outputs = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    **kwargs
-                )
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                **kwargs
+            )
 
             hidden_states = layer_outputs[0]
 
@@ -410,13 +396,13 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
-        logits = None if fuse_linear_and_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
+
+        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
 
         loss = None
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
+                if self.config.fuse_linear_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
@@ -427,7 +413,7 @@ class BitNetForCausalLM(BitNetPreTrainedModel, GenerationMixin):
 
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
+            if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))

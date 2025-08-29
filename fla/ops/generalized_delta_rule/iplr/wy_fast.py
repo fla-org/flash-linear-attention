@@ -227,7 +227,7 @@ def prepare_wy_repr_fwd(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
-    BK = min(triton.next_power_of_2(K), 64)
+    BK = min(max(triton.next_power_of_2(K), 16), 64)
 
     A = torch.empty(B, T, H, BT, device=a.device, dtype=a.dtype)
     fwd_fn = prepare_wy_repr_fwd_kernel_chunk64 if BT == 64 else prepare_wy_repr_fwd_kernel_chunk32
@@ -270,8 +270,8 @@ def wu_fwd(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     CONST_TILING = 64 if check_shared_mem() else 32
-    BK = min(triton.next_power_of_2(K), CONST_TILING)
-    BV = min(triton.next_power_of_2(V), CONST_TILING)
+    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
+    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
     u = torch.empty_like(v)
     w = torch.empty_like(a)

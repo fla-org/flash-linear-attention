@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import torch
-import torch.utils.checkpoint
 from torch import nn
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
@@ -33,6 +32,12 @@ try:
     from torch.distributed.tensor import DTensor
 except (ImportError, AttributeError):
     DTensor = None
+
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ImportError:
+    from fla.models.modeling_layers import GradientCheckpointingLayer
+
 
 logger = logging.get_logger(__name__)
 
@@ -122,7 +127,8 @@ class Mamba2Cache:
         self.ssm_states.zero_()
 
 
-class Mamba2Block(nn.Module):
+class Mamba2Block(GradientCheckpointingLayer):
+
     def __init__(self, config, layer_idx):
         super().__init__()
         self.config = config
@@ -369,9 +375,6 @@ class Mamba2Model(Mamba2PreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            use_cache = False
-
         if use_cache:
             if cache_params is None:
                 cache_params = Mamba2Cache(
@@ -393,21 +396,12 @@ class Mamba2Model(Mamba2PreTrainedModel):
         hidden_states = inputs_embeds
         all_hidden_states = () if output_hidden_states else None
         for mixer_block in self.layers:
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    mixer_block.__call__,
-                    hidden_states,
-                    cache_params,
-                    cache_position,
-                    attention_mask,
-                )
-            else:
-                hidden_states = mixer_block(
-                    hidden_states,
-                    cache_params=cache_params,
-                    cache_position=cache_position,
-                    attention_mask=attention_mask,
-                )
+            hidden_states = mixer_block(
+                hidden_states,
+                cache_params=cache_params,
+                cache_position=cache_position,
+                attention_mask=attention_mask,
+            )
 
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -534,14 +528,13 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
             attention_mask=attention_mask,
         )
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
+        if not self.config.fuse_linear_cross_entropy or labels is None:
             logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
+                if self.config.fuse_linear_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
@@ -551,7 +544,7 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
                 criterion = self.criterion
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
+            if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))

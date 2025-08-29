@@ -244,8 +244,8 @@ def chunk_mesa_net_h_kv_bwd_intra_separate_fn(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    BK = triton.next_power_of_2(K)
-    BV = triton.next_power_of_2(V)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
     dq = torch.empty_like(q_star, dtype=torch.float32)
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)

@@ -539,8 +539,8 @@ def chunk_bwd_dv(
         CONST_TILING = 64
     else:
         CONST_TILING = 32
-    BK = min(triton.next_power_of_2(K), CONST_TILING)
-    BV = min(triton.next_power_of_2(V), CONST_TILING)
+    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
+    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
     if scale is None:
@@ -590,8 +590,8 @@ def chunk_bwd_dv_local(
         CONST_TILING = 64
     else:
         CONST_TILING = 32
-    BK = min(triton.next_power_of_2(K), CONST_TILING)
-    BV = min(triton.next_power_of_2(V), CONST_TILING)
+    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
+    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dv = torch.empty_like(do)
@@ -639,8 +639,8 @@ def chunk_bwd_dqkwg(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     CONST_TILING = 64 if check_shared_mem() else 32
-    BK = min(triton.next_power_of_2(K), CONST_TILING)
-    BV = min(triton.next_power_of_2(V), CONST_TILING)
+    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
+    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NK = triton.cdiv(K, BK)
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)

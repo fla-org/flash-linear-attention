@@ -83,7 +83,6 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
         return
     if warning or (FLA_CI_ENV and (error_rate < 0.01 or abs_atol <= 0.3)):
         if error_rate > ratio:
-            import warnings
             warnings.warn(msg)
     else:
         assert error_rate < ratio, msg
@@ -347,7 +346,6 @@ def check_pytorch_version(version_s: str = '2.4') -> bool:
 
 
 def _cpu_device_warning():
-    import warnings
     warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=1)
 
 

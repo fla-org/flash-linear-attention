@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -26,6 +25,12 @@ from fla.modules.token_shift import token_shift
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
+
+
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ImportError:
+    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 
@@ -90,7 +95,8 @@ class RWKV6FeedForward(nn.Module):
         return receptance.sigmoid() * value, state
 
 
-class RWKV6Block(nn.Module):
+class RWKV6Block(GradientCheckpointingLayer):
+
     def __init__(self, config: RWKV6Config, layer_idx: int):
         super().__init__()
 
@@ -293,37 +299,21 @@ class RWKV6Model(RWKV6PreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
-            use_cache = False
-
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    use_cache,
-                    output_attentions,
-                    cu_seqlens,
-                    **kwargs
-                )
-            else:
-                hidden_states, attentions, past_key_values = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    cu_seqlens=cu_seqlens,
-                    **kwargs
-                )
+            hidden_states, attentions, past_key_values = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                cu_seqlens=cu_seqlens,
+                **kwargs
+            )
 
             if output_attentions:
                 all_attns += (attentions,)
@@ -459,14 +449,13 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
-        fuse_linear_and_cross_entropy = self.config.fuse_cross_entropy and self.training and labels is not None
 
         loss, logits = None, None
-        if not fuse_linear_and_cross_entropy or labels is None:
+        if not self.config.fuse_linear_cross_entropy or labels is None:
             logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
-                if fuse_linear_and_cross_entropy:
+                if self.config.fuse_linear_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
                     criterion = FusedCrossEntropyLoss(inplace_backward=True)
@@ -476,7 +465,7 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
                 criterion = self.criterion
             labels = labels.to(hidden_states.device)
             labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], criterion.ignore_index)), 1)
-            if fuse_linear_and_cross_entropy:
+            if self.config.fuse_linear_cross_entropy:
                 loss = criterion(hidden_states, labels, self.lm_head.weight, self.lm_head.bias)
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))

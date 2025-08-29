@@ -689,8 +689,8 @@ def chunk_ttt_linear_fwd_h(
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
-    BK = triton.next_power_of_2(K)
-    BV = triton.next_power_of_2(V)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
@@ -750,8 +750,8 @@ def chunk_ttt_linear_fwd_o(
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK = triton.next_power_of_2(K)
-    BV = triton.next_power_of_2(V)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
     assert NK == 1, 'NK > 1 is not supported because it involves time-consuming synchronization'
@@ -803,8 +803,8 @@ def chunk_ttt_linear_bwd_h(
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
-    BK = triton.next_power_of_2(K)
-    BV = triton.next_power_of_2(V)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
     assert max(BK, BV) <= 128, "current kernel does not support head dimension larger than 128."
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
@@ -861,8 +861,8 @@ def chunk_ttt_linear_bwd_dv_local(
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
-    BK = min(triton.next_power_of_2(K), 128)
-    BV = min(triton.next_power_of_2(V), 128)
+    BK = min(max(triton.next_power_of_2(K), 16), 128)
+    BV = min(max(triton.next_power_of_2(V), 16), 128)
 
     dv = torch.empty_like(do)
     grid = (NT, B * H)
@@ -919,8 +919,8 @@ def chunk_ttt_linear_bwd_norm(
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
-    BK = triton.next_power_of_2(K)
-    BV = triton.next_power_of_2(V)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
     assert NK == 1, 'NK > 1 is not supported by TTT.'
@@ -1098,8 +1098,8 @@ def chunk_ttt_linear_bwd_dqke(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    BK = triton.next_power_of_2(K)
-    BV = min(triton.next_power_of_2(V), 64)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = min(max(triton.next_power_of_2(V), 16), 64)
     NK = triton.cdiv(K, BK)
     assert NK == 1, "NK > 1 is not supported."
 
