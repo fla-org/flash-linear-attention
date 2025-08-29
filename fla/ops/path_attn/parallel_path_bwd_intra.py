@@ -137,8 +137,9 @@ def parallel_path_bwd_intra_chunk_kernel(
 
     p_dq_new = tl.make_block_ptr(dq_new, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     tl.store(p_dq_new, b_dq.to(dq_new.dtype.element_ty), boundary_check=(0, 1))
+    mask = i_t * BT + tl.arange(0, BT) < T
     if USE_GATE:
-        tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dgq, sem='relaxed')
+        tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dgq, mask=mask, sem='relaxed')
 
 
 def parallel_path_bwd_intra_chunk_fn(

@@ -36,8 +36,9 @@ def parallel_path_bwd_dkv_kernel(
         bos, eos = i_n * T, i_n * T + T
         boh_large = i_n * tl.cdiv(T, S)
 
+
     # offset calculations
-    # q += (bos * HQ + i_hq) * K
+
     do += (bos * HQ + i_hq) * V
     dk += (bos * HQ + i_hq) * K
     dv += (bos * HQ + i_hq) * K
@@ -70,8 +71,8 @@ def parallel_path_bwd_dkv_kernel(
         b_g_cumsum_k = None
         b_dg_cumsum_k = None
 
-    b_dk = tl.zeros([BT, K], dtype=tl.float32)
-    b_dv = tl.zeros([BT, K], dtype=tl.float32)
+    b_dk = tl.zeros([BT, BK], dtype=tl.float32)
+    b_dv = tl.zeros([BT, BK], dtype=tl.float32)
 
     last_chunk_start = tl.floor(i_t*BT / S).to(tl.int32) * S
     idx_j = (tl.floor(i_t * BT / S).to(tl.int32) + 1).to(tl.int32)
@@ -108,14 +109,13 @@ def parallel_path_bwd_dkv_kernel(
     tl.store(p_dk, b_dk.to(dk.dtype.element_ty), boundary_check=(0, 1))
     mask = i_t * BT + tl.arange(0, BT) < T
     tl.atomic_add(
-        dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ * K + tl.arange(0, K)[None, :],
+        dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ * K + tl.arange(0, BK)[None, :],
         b_dv,
         mask=mask[:, None],
         sem='relaxed'
     )
-
     if USE_GATE:
-        tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_k, sem='relaxed')
+        tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_k, mask=mask, sem='relaxed')
 
 
 def parallel_path_bwd_dkv_fn(
