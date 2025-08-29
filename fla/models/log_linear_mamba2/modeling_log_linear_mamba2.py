@@ -53,7 +53,8 @@ class LogLinearMamba2Cache(Mamba2Cache):
         if new_conv_state.dtype != self.conv_states[layer_idx].dtype:
             warnings.warn(
                 f"`new_conv_state.dtype` ({new_conv_state.dtype}) does not match the cache's dtype "
-                f"({self.conv_states[layer_idx].dtype}), casting."
+                f"({self.conv_states[layer_idx].dtype}), casting.",
+                stacklevel=2
             )
             new_conv_state = new_conv_state.to(dtype=self.conv_states[layer_idx].dtype)
 
