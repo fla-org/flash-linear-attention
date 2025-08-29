@@ -11,7 +11,7 @@ import warnings
 from fla.ops.nsa.naive import naive_nsa, naive_nsa_sel, naive_nsa_cmp, naive_nsa_topk
 from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd, parallel_nsa_topk
 from fla.ops.nsa.compression import parallel_nsa_compression
-from fla.ops.utils import prepare_token_indices
+from fla.ops.utils import prepare_token_indices, prepare_chunk_offsets
 from fla.utils import assert_close, device
 from fla.ops.utils.pooling import mean_pooling
 
@@ -323,8 +323,8 @@ def test_parallel_compressive(
         for test in [
             (1, 1, 1, 1, 16, 64, 16, 32, 1.0, torch.float16, True),
             (3, 111, 15, 1, 32, 100, 16, 32, 1.0, torch.float16, False),
-            (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, torch.float16, True),
-            (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, torch.float16, False),
+            (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, torch.float32, True),
+            (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, torch.float32, False),
             (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, torch.float32, True) # Use FP32 to reduce numerical issues
         ]
     ]
@@ -398,12 +398,13 @@ def test_parallel_topk_decode(
             a_s[t_i // block_size + ((t_i + 1) % block_size == 0).int():] = float('-inf')
             a_sn = torch.softmax(a_s, dim=0)
             a_snm = a_sn.mean(-1)
-            a_lse = torch.log(torch.exp(a_s).sum(0))
+            m = a_s.max(dim=0, keepdim=True).values
+            a_lse = torch.log(torch.exp(a_s - m).sum(0)) + m.squeeze(0)
             if lse_full is not None:
                 k_lse = lse_full[b_i.item(), t_i.item(), h_i * (HQ // H): (h_i + 1) * (HQ // H)]
-                assert_close('lse vs naive', a_lse, k_lse, ratio=0.005)
+                assert_close('lse vs naive ' +  str(indices[idx]), a_lse, k_lse, ratio=0.005)
 
-            assert_close('block-score vs naive', a_snm[free_block_indices[b_i, t_i, h_i, s_i]],
+            assert_close('block-score vs naive ' +  str(indices[idx]), a_snm[free_block_indices[b_i, t_i, h_i, s_i]],
                          a_snm[free_block_indices_naive[b_i, t_i, h_i, s_i]], ratio=0.005)
         warnings.warn(f"Block indices mismatch: {len(indices)}/{block_indices.numel()} "
               f"({len(indices) / free_block_indices_naive.numel():.2f}), seemingly due to numerical issues.")
@@ -610,7 +611,7 @@ def test_parallel_compressive_varlen(
         TK=T,
         block_size=block_size,
         scale=scale,
-        cu_seqlens=(cu_seqlens, cu_seqlens),
+        cu_seqlens=cu_seqlens,
     )
     o_full.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
@@ -654,3 +655,135 @@ def test_parallel_compressive_varlen(
 
     assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
     assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
+
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'S', 'block_size', 'scale', 'cu_seqlens', 'q_lens', 'dtype', 'reuse_lse'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-scale{}-cu_seqlens{}-q_lens{}-{}-reuse_lse{}".format(*test))
+        for test in [
+            (1, 16, 64, 16, 32, 1.0, [0, 15], [1,], torch.float16, True),
+            (1, 16, 64, 8, 16, 0.1, [0, 15, 205, 550, 800], [3, 15, 30, 8], torch.float16, False),
+            (2, 32, 64, 16, 32, 1.0, [0, 256, 500, 1000], [1, 15, 4], torch.float32, True),
+            (2, 32, 100, 16, 32, 0.1, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float32, False),
+        ]
+    ]
+)
+def test_parallel_topk_varlen(
+    H: int,
+    HQ: int,
+    D: int,
+    S: int,
+    block_size: int,
+    scale: float,
+    cu_seqlens,
+    q_lens,
+    dtype: torch.dtype,
+    reuse_lse: bool,
+):
+    torch.manual_seed(42)
+
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+    # Use a wider range to reduce numerical issues, otherwise there will be too many mismatches due to close scores.
+    q = torch.rand((1, T, HQ, D), dtype=dtype, device=device) * 10 - 5
+    k = torch.rand((1, T, H, D), dtype=dtype, device=device) * 10 - 5
+    v = torch.rand((1, T, H, D), dtype=dtype, device=device) * 10 - 5
+
+    k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
+    seq_indices = prepare_token_indices(cu_seqlens)
+
+    kv_cu_seqlens = prepare_chunk_offsets(cu_seqlens, block_size)
+    kv_indices = prepare_token_indices(kv_cu_seqlens)
+
+    if reuse_lse:
+        # For positions not attending to any token, the log-sum-exp should be -inf; the kernel returns 0 instead, it is
+        # OK as those positions will not be used in the compressive attention anyway.
+        _, lse_full = naive_nsa_cmp(
+            q=q,
+            k_cmp=k_cmp,
+            v_cmp=v_cmp,
+            block_size=block_size,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            seq_indices=seq_indices
+        )
+        lse_full = torch.where(lse_full == float('-inf'), 0, lse_full).contiguous()
+    else:
+        lse_full = None
+
+    block_indices = parallel_nsa_topk(
+        q=q,
+        k=k_cmp,
+        TK=T,
+        lse=lse_full,
+        block_counts=S,
+        block_size=block_size,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+    )
+
+    block_indices_naive = naive_nsa_topk(
+        q, k_cmp, block_counts=S, block_size=block_size, scale=scale, cu_seqlens=cu_seqlens,
+    )
+
+    # Separate checks for forcefully selected blocks (0, -1, -2)
+    fixed_block_indices, free_block_indices = block_indices[:, :, :, :3], block_indices[:, :, :, 3:]
+    fixed_block_indices_naive, free_block_indices_naive = block_indices_naive[:, :, :, :3], block_indices_naive[:, :, :, 3:]
+
+    fixed_block_indices, _ = torch.sort(fixed_block_indices, dim=-1)
+    fixed_block_indices_naive, _ = torch.sort(fixed_block_indices_naive, dim=-1)
+
+    assert (fixed_block_indices == fixed_block_indices_naive).all(), \
+        "Different in forcefully selected block indices compared to naive"
+
+    if not (free_block_indices == free_block_indices_naive).all():
+        indices = torch.nonzero(free_block_indices != free_block_indices_naive, as_tuple=False)
+        for idx in range(indices.shape[0]):
+            _, t_i, h_i, s_i = indices[idx]
+            q_vals = q[0, t_i.item(), h_i * (HQ // H): (h_i + 1) * (HQ // H), :]
+
+            i_n = seq_indices[t_i.item(), 0]
+            t = seq_indices[t_i.item(), 1] # in-sequence index
+            bos_k = kv_cu_seqlens[i_n]
+            eos_k = kv_cu_seqlens[i_n + 1]
+
+            k_vals = k_cmp[0, bos_k: eos_k, h_i.item()]
+            a_s = torch.einsum('h k, s k -> s h', q_vals, k_vals) * scale
+            a_s[t // block_size + ((t + 1) % block_size == 0).int():] = float('-inf')
+            a_sn = torch.softmax(a_s, dim=0)
+            a_snm = a_sn.mean(-1)
+            m = a_s.max(dim=0, keepdim=True).values
+            a_lse = torch.log(torch.exp(a_s - m).sum(0)) + m.squeeze(0)
+            if lse_full is not None:
+                k_lse = lse_full[0, t_i.item(), h_i * (HQ // H): (h_i + 1) * (HQ // H)]
+                assert_close('block lse vs naive ' + str(indices[idx]), a_lse, k_lse, ratio=0.005)
+            assert_close('block-score vs naive ' +  str(indices[idx]), a_snm[free_block_indices[0, t_i, h_i, s_i]],
+                         a_snm[free_block_indices_naive[0, t_i, h_i, s_i]], ratio=0.005)
+        warnings.warn(f"Block indices mismatch: {len(indices)}/{block_indices.numel()} "
+              f"({len(indices) / free_block_indices_naive.numel():.2f}), seemingly due to numerical issues.")
+
+    q_short = build_partial_varlen(q, cu_seqlens, q_lens)
+    cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).to(device)
+
+    fixed_block_indices_short_ref = build_partial_varlen(fixed_block_indices, cu_seqlens, q_lens)
+    free_block_indices_short_ref = build_partial_varlen(free_block_indices, cu_seqlens, q_lens)
+    lse_short_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens) if lse_full is not None else None
+
+    block_indices_short = parallel_nsa_topk(
+        q=q_short,
+        k=k_cmp,
+        lse=lse_short_ref,
+        TK=T,
+        block_counts=S,
+        block_size=block_size,
+        scale=scale,
+        cu_seqlens=(cu_seqlens_q, cu_seqlens),
+    )
+
+    fixed_block_indices_short, free_block_indices_short = block_indices_short[:, :, :, :3], block_indices_short[:, :, :, 3:]
+    fixed_block_indices_short, _ = torch.sort(fixed_block_indices_short, dim=-1)
+    assert (fixed_block_indices_short == fixed_block_indices_short_ref).all(), \
+        "Different in forcefully selected block indices compared to full"
+    assert (free_block_indices_short == free_block_indices_short_ref).all(), \
+        "Different in free block indices compared to full"

@@ -166,107 +166,98 @@ def naive_nsa_topk(
     block_counts: Union[int, torch.Tensor],  # int or [B, T_q, Hkv]
     block_size: int,
     scale: float,
-    cu_seqlens: Optional[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]] = None,
+    cu_seqlens: Union[None, torch.Tensor, Tuple[torch.Tensor]] = None,
 ) -> torch.Tensor:
-    assert q.ndim == 4 and k_cmp.ndim == 4, "q:[B,Tq,Hq,D], k_cmp:[B,Tc,Hkv,D]"
-    B, Tq, Hq, D = q.shape
-    B2, Tc, Hkv, D2 = k_cmp.shape
-    assert B == B2 and D == D2, "Batch and depth must match between q and k_cmp"
-    device = q.device
-
-    # ---- 1) GQA logits: per-Q-head unnormalized scores ----
-    assert Hq % Hkv == 0
+    B, Tq, Hq, _ = q.shape
+    Hkv = k_cmp.shape[2]
     G = Hq // Hkv
-    qg = q.reshape(B, Tq, Hkv, G, D)                                        # [B,Tq,Hkv,G,D]
-    logits = torch.einsum('b t h g d, b s h d -> b t h g s', qg, k_cmp)     # [B,Tq,Hkv,G,Tc]
-    logits = logits * float(scale)
+    k_cmp = repeat(k_cmp, 'b t h d -> b t (h g) d', g=G)
 
-    # ---- 2) Block-causal + length masks on UNNORMALIZED logits ----
-    # Base causal: allow blocks whose *first* token position <= current query index
-    t = torch.arange(Tq, device=device).unsqueeze(1)                         # [Tq,1]
-    s = torch.arange(Tc, device=device).unsqueeze(0)                         # [1,Tc]
-    block_last_pos = (s + 1) * block_size - 1                                # [1,Tc]
-    base_allow = (block_last_pos <= t)                                       # [Tq,Tc]
-
-    # Current block indicator (independent of lengths)
-    i_qb = (t // block_size)                                                 # [Tq,1]
-    is_current_block = (s == i_qb) | (s == 0) | (s == i_qb - 1)              # [Tq,Tc]
-
-    # Per-sample valid lengths from cumulative seqlens
-    def _to_lens(x: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-        if x is None:
-            return None
-        assert x.ndim == 1 and x.numel() == B + 1, "cumulative lens must be [B+1]"
-        return (x[1:] - x[:-1]).to(torch.long)                               # [B]
-
-    if cu_seqlens is not None:
-        q_cu, k_cu = cu_seqlens
-
-        q_len = _to_lens(q_cu)                                               # tokens per sample [B] or None
-        k_len = _to_lens(k_cu)                                               # tokens per sample [B] or None
-        k_blocks_len = None
-        if k_len is not None:
-            k_blocks_len = (k_len + (block_size - 1)) // block_size          # ceil_div -> blocks per sample [B]
+    device = q.device
+    varlen = True
+    if cu_seqlens is None:
+        varlen = False
+        Tq = q.shape[1]
+        Tc = k_cmp.shape[1]
+        cu_q = torch.cat([
+            torch.arange(0, B * Tq, Tq), torch.tensor([B * Tq])
+        ])
+        cu_k = torch.cat([
+            torch.arange(0, B * Tc, Tc), torch.tensor([B * Tc])
+        ])
     else:
-        q_len = k_len = k_blocks_len = None
+        assert B == 1
+        if isinstance(cu_seqlens, tuple):
+            cu_q, cu_k = cu_seqlens
+        else:
+            cu_q = cu_k = cu_seqlens
+        cu_k = prepare_chunk_offsets(cu_k, block_size)
 
-    # Build [B,Tq,Tc] "allow" mask combining causal + per-sample lengths
-    allow = base_allow.unsqueeze(0).expand(B, -1, -1)                        # [B,Tq,Tc]
-    if q_len is not None:
-        q_valid = (torch.arange(Tq, device=device).view(1, Tq, 1) <
-                   q_len.view(B, 1, 1))                                      # [B,Tq,1]
-        allow = allow & q_valid
-    if k_blocks_len is not None:
-        k_valid = (torch.arange(Tc, device=device).view(1, 1, Tc) <
-                   k_blocks_len.view(B, 1, 1))                                # [B,1,Tc]
-        allow = allow & k_valid
-
-    # Apply mask to logits: disallowed blocks -> -inf
-    allow_exp = allow[:, :, None, None, :]                                   # [B,Tq,1,1,Tc]
-    logits = logits.masked_fill(~allow_exp, float('-inf'))
-    allow = allow | is_current_block[None, :, :]
-
-    # ---- 3) Per-Q-head softmax over blocks, then mean across G ----
-    probs_q = torch.softmax(logits, dim=-1)                                  # [B,Tq,Hkv,G,Tc]
-    probs_q = torch.nan_to_num(probs_q, nan=0.0)                              # rows with no valid blocks -> 0
-    scores = probs_q.mean(dim=3)                                             # [B,Tq,Hkv,Tc]
-
-    # ---- 4) Set the current block's normalized score to 1.0 (when allowed) ----
-    scores = torch.where(is_current_block[None, :, None, :], 1.0, scores)
-
-    # ---- 5) Top-k selection per [B, Tq, Hkv] ----
     if isinstance(block_counts, int):
         S = int(block_counts)
         assert S >= 0, "block_counts (int) must be >= 0"
-        desired_k = torch.full((B, Tq, Hkv), S, dtype=torch.long, device=device)
     elif torch.is_tensor(block_counts):
-        assert block_counts.shape == (B, Tq, Hkv)
-        desired_k = block_counts.to(device=device, dtype=torch.long)
-        S = int(torch.clamp(desired_k, min=0).max().item())
-    else:
-        raise TypeError("block_counts must be int or torch.Tensor")
+        S = int(block_counts.max().item())
+    result = torch.full((B, Tq, Hkv, S), -1, device=device, dtype=torch.long)
 
-    if S == 0:
-        return torch.empty(B, Tq, Hkv, 0, dtype=torch.long, device=device)
+    for i in range(len(cu_q) - 1):
+        if not varlen:
+            q_b, k_b = q[i], k_cmp[i]
+        else:
+            Tq = (cu_q[i+1] - cu_q[i]).item()
+            Tc = (cu_k[i+1] - cu_k[i]).item()
+            q_b, k_b = q[0][cu_q[i]:cu_q[i+1]], k_cmp[0][cu_k[i]:cu_k[i+1]]
 
-    _, topi = torch.topk(scores, k=min(S, Tc), dim=-1)                             # [B,Tq,Hkv,S]
+        logits = torch.einsum('t h d, s h d -> t h s', q_b, k_b) * scale  # [Tq, Hq, Tc]
+        logits = logits.reshape(Tq, Hkv, G, Tc)
+        t = torch.arange(Tq, device=device).unsqueeze(1)
+        s = torch.arange(Tc, device=device).unsqueeze(0)
+        block_last_pos = (s + 1) * block_size - 1
+        base_allow = (block_last_pos <= t) # [Tq,Tc]
 
-    # Validate selections against allow mask; pad with -1 where invalid or beyond quota
-    allow_kv = allow.unsqueeze(2).expand(B, Tq, Hkv, Tc)                      # [B,Tq,Hkv,Tc]
-    sel_allowed = torch.gather(allow_kv.long(), dim=-1, index=topi).bool()    # [B,Tq,Hkv,S]
+        i_qb = (t // block_size)                                                 # [Tq,1]
+        is_current_block = (s == i_qb) | (s == 0) | (s == i_qb - 1)              # [Tq,Tc]
+        logits = logits.masked_fill(~base_allow[:, None, None, :], float("-inf"))
+        allow = base_allow | is_current_block # [Tq,Tc]
 
-    idx = torch.arange(S, device=device).view(1, 1, 1, S)
-    within_quota = (idx < desired_k.unsqueeze(-1))[:, :, :, :Tc]                              # [B,Tq,Hkv,S]
+        probs_q = torch.softmax(logits, dim=-1)  # [Tq, Hkv, G, Tc]
+        probs_q = torch.nan_to_num(probs_q, nan=0.0)  # rows with no valid blocks -> 0
+        scores = probs_q.mean(dim=2)  # [Tq, Hkv, Tc]
+        scores = torch.where(is_current_block[:, None, :], 1.0, scores)
 
-    keep = sel_allowed & within_quota
-    out = torch.full_like(topi, fill_value=-1)                                # pad with -1
-    out = torch.where(keep, topi, out)
+        if isinstance(block_counts, int):
+            desired_k = torch.full((Tq, Hkv), S, dtype=torch.long, device=device)
+        elif torch.is_tensor(block_counts):
+            if varlen:
+                assert block_counts.shape == (1, Tq, Hkv)
+                desired_k = block_counts[0].to(device=device, dtype=torch.long)
+            else:
+                assert block_counts.shape == (B, Tq, Hkv)
+                desired_k = block_counts[i].to(device=device, dtype=torch.long)
+        else:
+            raise TypeError("block_counts must be int or torch.Tensor")
 
-    if S > Tc:
-        out = torch.cat((out, torch.full((B, Tq, Hkv, S - Tc), -1,
-                                         device=device, dtype=topi.dtype)), dim=-1)
+        _, topi = torch.topk(scores, k=min(S, Tc), dim=-1)                             # [Tq,Hkv,S]
 
-    return out
+        # Validate selections against allow mask; pad with -1 where invalid or beyond quota
+        allow_kv = allow[:, None, :].expand(Tq, Hkv, Tc)                      # [Tq,Hkv,Tc]
+        sel_allowed = torch.gather(allow_kv.long(), dim=-1, index=topi).bool()    # [Tq,Hkv,S]
+
+        idx = torch.arange(S, device=device).view(1, 1, S)
+        within_quota = (idx < desired_k.unsqueeze(-1))[:, :, :Tc]                              # [Tq,Hkv,S]
+
+        keep = sel_allowed & within_quota
+        out = torch.full_like(topi, fill_value=-1)                                # pad with -1
+        out = torch.where(keep, topi, out)
+
+        if S > Tc:
+            out = torch.cat((out, torch.full((Tq, Hkv, S - Tc), -1,
+                                             device=device, dtype=topi.dtype)), dim=-1)
+        if varlen:
+            result[0, cu_q[i]:cu_q[i+1]] = out
+        else:
+            result[i] = out
+    return result
 
 
 def naive_nsa(

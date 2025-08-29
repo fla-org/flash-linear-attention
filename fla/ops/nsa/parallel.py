@@ -27,7 +27,7 @@ except ImportError:
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens_q'] is not None
 })
 @triton.autotune(
     configs=[
@@ -43,12 +43,12 @@ def parallel_nsa_kernel_topk(
     lse,
     scale,
     block_indices,
-    cu_seqlens,
-    token_indices,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    token_indices_q,
     chunk_offsets,
-    Q_OFFSET,
     TQ,
-    TC,
+    TK,
     H: tl.constexpr,
     HQ: tl.constexpr,
     G: tl.constexpr,
@@ -63,15 +63,20 @@ def parallel_nsa_kernel_topk(
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int32)
+        bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int32), tl.load(cu_seqlens_q + i_n + 1).to(tl.int32)
+        bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int32), tl.load(cu_seqlens_k + i_n + 1).to(tl.int32)
+        TQ = eos_q - bos_q
+        TK = eos_k - bos_k
+        TC = tl.cdiv(TK, BS)
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
-        bos, eos = i_b * TQ, i_b * TQ + TQ
+        bos_q, eos_q = i_b * TQ, i_b * TQ + TQ
+        TC = tl.cdiv(TK, BS)
         boc = i_b * TC
     # boc is the start of the current sequence at [B, TC] dimensions
-    p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+    p_q = tl.make_block_ptr(q + (bos_q + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+    Q_OFFSET = TK - TQ
 
     # the Q block is kept in the shared memory throughout the whole kernel
     # [G, BK]
@@ -86,7 +91,7 @@ def parallel_nsa_kernel_topk(
     # 1. lse computation
     ################################
     if lse is not None:
-        b_lse = tl.load(lse + (bos + i_t) * HQ + i_h * G + tl.arange(0, G))
+        b_lse = tl.load(lse + (bos_q + i_t) * HQ + i_h * G + tl.arange(0, G))
     else:
         # max scores for the current block
         b_m = tl.full([G], float('-inf'), dtype=tl.float32)
@@ -160,7 +165,7 @@ def parallel_nsa_kernel_topk(
     m_top = tl.arange(0, BC // S) == 0
     b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BC // S, S]), 0)
 
-    p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
+    p_b = tl.make_block_ptr(block_indices + (bos_q + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
     tl.store(p_b, b_top.to(p_b.dtype.element_ty))
 
 
@@ -563,7 +568,17 @@ def parallel_nsa_topk(
     assert k.is_contiguous()
     assert lse is None or lse.is_contiguous()
     assert isinstance(block_counts, int) or block_counts.is_contiguous()
-    assert cu_seqlens is None or cu_seqlens.is_contiguous()
+
+    if cu_seqlens is not None:
+        if isinstance(cu_seqlens, tuple):
+            cu_seqlens_q, cu_seqlens_k = cu_seqlens
+        else:
+            cu_seqlens_q = cu_seqlens_k = cu_seqlens
+        token_indices_q = prepare_token_indices(cu_seqlens_q)
+    else:
+        cu_seqlens_q = cu_seqlens_k = token_indices_q = None
+    assert cu_seqlens_q is None or cu_seqlens_q.is_contiguous()
+    assert cu_seqlens_k is None or cu_seqlens_k.is_contiguous()
 
     G = HQ // H
     # the number of selected blocks for each token
@@ -575,8 +590,7 @@ def parallel_nsa_topk(
     assert BC >= 2 * S, f"BC ({BC}) must be greater than or equal to 2 * S ({S})"
 
     block_indices = torch.zeros(B, TQ, H, S, dtype=torch.int32, device=q.device)
-    token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
+    chunk_offsets = prepare_chunk_offsets(cu_seqlens_k, BS) if cu_seqlens_k is not None else None
     grid = (TQ, B * H)
     # the 1st and the last 2 blocks are always selected
     parallel_nsa_kernel_topk[grid](
@@ -585,12 +599,12 @@ def parallel_nsa_topk(
         lse=lse,
         scale=scale,
         block_indices=block_indices,
-        cu_seqlens=cu_seqlens,
-        token_indices=token_indices,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        token_indices_q=token_indices_q,
         chunk_offsets=chunk_offsets,
-        Q_OFFSET=TK - TQ,
         TQ=TQ,
-        TC=TC,
+        TK=TK,
         H=H,
         HQ=HQ,
         G=G,
