@@ -46,7 +46,9 @@ def parallel_nsa_kernel_topk(
     cu_seqlens,
     token_indices,
     chunk_offsets,
-    T,
+    Q_OFFSET,
+    TQ,
+    TC,
     H: tl.constexpr,
     HQ: tl.constexpr,
     G: tl.constexpr,
@@ -66,9 +68,9 @@ def parallel_nsa_kernel_topk(
         T = eos - bos
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
-        boc = i_b * tl.cdiv(T, BS)
-
+        bos, eos = i_b * TQ, i_b * TQ + TQ
+        boc = i_b * TC
+    # boc is the start of the current sequence at [B, TC] dimensions
     p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
 
     # the Q block is kept in the shared memory throughout the whole kernel
@@ -76,11 +78,10 @@ def parallel_nsa_kernel_topk(
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    # the number of compression representations in total
-    TC = tl.cdiv(T, BS)
     # the number of compression representations required to iterate over
-    # incomplete compression blocks are not included
-    NC = (i_t + 1) // BS
+    # incomplete compression blocks are not included; hence if i_t is the last token in a block, the block will be included
+    # Here we assume that q tokens are last TQ tokens
+    NC = (i_t + Q_OFFSET + 1) // BS
     ################################
     # 1. lse computation
     ################################
@@ -124,10 +125,11 @@ def parallel_nsa_kernel_topk(
     o_i = tl.zeros([BC], dtype=tl.int32)
     m_i = tl.arange(0, BC) < BC//2
 
-    IC = i_t // BS
-    for i_c in range(0, tl.cdiv(i_t + 1, BS), BC):
+    IC = (i_t + Q_OFFSET) // BS # Idx of the current query block
+    for i_c in range(0, IC + 1, BC): # +1, because the current block might be also included
         o_c = i_c + tl.arange(0, BC)
-
+        # Recall k: [B, TC, H, K], boc = i_b * TC
+        # we first shift to k[i_b, 0, i_h], and read a block of transposed keys from k[i_b, i_c, i_h]
         p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -135,10 +137,10 @@ def parallel_nsa_kernel_topk(
         b_s = tl.dot(b_q, b_k)
         b_s = tl.where(o_c < IC, b_s, float('-inf'))
         # [G, BC]
-        # the 1st and the last 2 blocks are always selected
+        # the 1st and the last 2 blocks are always selected, set normalized scores to 1.0
         b_p = tl.where((o_c == 0) | ((o_c == IC - 1) | (o_c == IC)), 1., exp(b_s - b_lse[:, None]))
         # the importance scores of the current block
-        # [BC]
+        # [BC], take the sum of attention scores over all heads within the current group (KV head)
         b_i, b_ip = tl.sum(b_p, 0), b_i
         # blocks with index < 0 will be skipped
         o_i, o_ip = tl.where(o_c <= IC, o_c, -1), o_i
@@ -155,8 +157,8 @@ def parallel_nsa_kernel_topk(
         else:
             b_i, o_i = _bitonic_merge(b_i, o_i.to(tl.int32), n_dims, True, n_dims)
 
-    m_top = tl.arange(0, BC//S) == 0
-    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BC//S, S]), 0)
+    m_top = tl.arange(0, BC // S) == 0
+    b_top = tl.sum(m_top[:, None] * tl.reshape(o_i, [BC // S, S]), 0)
 
     p_b = tl.make_block_ptr(block_indices + (bos + i_t) * H*S, (H*S,), (1,), (i_h * S,), (S,), (0,))
     tl.store(p_b, b_top.to(p_b.dtype.element_ty))
@@ -185,7 +187,9 @@ def parallel_nsa_fwd_kernel(
     block_counts,
     cu_seqlens,
     token_indices,
-    T,
+    Q_OFFSET,
+    TQ,
+    TK,
     H: tl.constexpr,
     HQ: tl.constexpr,
     G: tl.constexpr,
@@ -198,50 +202,98 @@ def parallel_nsa_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr
 ):
-    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2) # i_t: token, i_v: value dim, i_bh: batch * kv head
     i_b, i_h = i_bh // H, i_bh % H
+    # k: [B, TK, H, K], v: [B, TK, H, V], q: [B, TQ, HQ, K]
+    # block_indices: [B, TQ, H, S]
+    # G = HQ // H, number of groups of heads
+    # lse: [B, TQ, HQ]
 
     if IS_VARLEN:
+        # 2-d sequence indices denoting the cu_seqlens of tokens in each sequence
+        # for example, if the passed `cu_seqlens` is [0, 2, 6],
+        # then there are 2 and 4 tokens in the 1st and 2nd sequences respectively, and `token_indices` will be
+        # [[0, 0], [0, 1], [1, 0], [1, 1], [1, 2], [1, 3]]
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
+        # Then i_t becomes the token index inside the sequence, and i_n is the sequence index.
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        TQ = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = i_b * TK, i_b * TK + TK
+    # Then i_t is always the token_idx inside each sequence
+    # bos, eos are the token_idx for * flattened * tokens, of the current sequence
 
     k += (bos * H + i_h) * K
     v += (bos * H + i_h) * V
-    block_indices += (bos + i_t) * H*S + i_h * S
+    if IS_VARLEN:
+        blk_offset = (bos + i_t) * H * S + i_h * S
+    else:
+        blk_offset = (i_b * TQ + i_t) * H * S + i_h * S
+    block_indices += blk_offset
+
+    # k, v: shifted to the start of the current sequence at head i_h, i.e. k[i_b, 0, i_h]
+    # because bos is at the start of the current sequence at [B, T] dimensions
+    # bos + i_t is the index of the current token on [B, T] dimensions
+    # block_indices: shifted to block_indices[i_b, i_t, i_h]
 
     if USE_BLOCK_COUNTS:
-        NS = tl.load(block_counts + (bos + i_t) * H + i_h)
+        if IS_VARLEN:
+            NS = tl.load(block_counts + (bos + i_t) * H + i_h)
+        else:
+            NS = tl.load(block_counts + (i_b * TQ + i_t) * H + i_h)
     else:
         NS = S
 
-    p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+    # q: [B, TQ, HQ, K]
+    p_q = tl.make_block_ptr(
+        q + (i_b * TQ + i_t) * HQ * K,  # base
+        (HQ, K), (K, 1),               # full tensor shape & strides
+        (i_h * G, 0), (G, BK), (1, 0),
+    )
+    # Note that i_h is the head index in KV, which corresponds to G heads in Q starting from i_h * G
+    # p_q then reads the BK dimensions at the last dimension
     # the Q block is kept in the shared memory throughout the whole kernel
     # [G, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = tl.load(p_q, boundary_check=(0, 1)) # note that BK >= K, but there is boundary check
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_o = tl.make_block_ptr(o + (bos + i_t) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-    p_lse = lse + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
+    p_o = tl.make_block_ptr(
+        o + (i_b * TQ + i_t) * HQ * V,
+        (HQ, V), (V, 1),
+        (i_h * G, i_v * BV), (G, BV), (1, 0),
+    )
+    # Similar to p_q; but BV can be smaller than V, so it can be a sub-block of V
+    p_lse = lse + (i_b * TQ + i_t) * HQ + i_h * G + tl.arange(0, G)
+    # lse + (bos + i_t) * HQ is the start of the current sequence at head i_h
+    # i_h * G is the offset for the current head, and tl.arange(0, G) is the offset for the group of heads
+
     # [G, BV]
     b_o = tl.zeros([G, BV], dtype=tl.float32)
 
-    b_m = tl.full([G], float('-inf'), dtype=tl.float32)
-    b_acc = tl.zeros([G], dtype=tl.float32)
-    for i in range(NS):
-        i_s = tl.load(block_indices + i).to(tl.int32) * BS
-        if i_s <= i_t and i_s >= 0:
-            p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-            p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
-            # [BK, BS]
+    b_m = tl.full([G], float('-inf'), dtype=tl.float32) # running maximum
+    b_acc = tl.zeros([G], dtype=tl.float32) # sumexp
+    for i in range(NS): # number of blocks
+        i_s = tl.load(block_indices + i).to(tl.int32) * BS # i_s is the start token index of the current KV block
+        # Here we assume that q tokens are last TQ tokens
+        if i_s <= Q_OFFSET + i_t and i_s >= 0:
+            # Recall: k ([B, T, H, K]) already shifted to the start of the current sequence at head i_h, i.e. k[i_b, 0, i_h]
+            # k is loaded transponsed for the convenience of dot product
+            p_k = tl.make_block_ptr(k, (K, TK), (1, H*K), (0, i_s), (BK, BS), (0, 1))
+            p_v = tl.make_block_ptr(v, (TK, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
+            # [BK, BS], essentially read keys of all tokens in the block
             b_k = tl.load(p_k, boundary_check=(0, 1))
             # [BS, BV]
             b_v = tl.load(p_v, boundary_check=(0, 1))
-            # [G, BS]
+            # [G, BS], dot-product per head; recall b_q: [G, BK]
             b_s = tl.dot(b_q, b_k)
-            b_s = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s, float('-inf'))
+            # Ensure causal mask; note that i_t may be inside the current block
+            b_s = tl.where((Q_OFFSET + i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s, float('-inf'))
+
+            # Recall stable softmax:
+            # o_i = \sum_{j<=i} exp(s_j - m_i) * v_j
+            #     = exp(m_{i-1} - m_i) * o_{i-1} + exp(s_i - m_i) * v_i
+            # a_i = \sum_{j<=i} exp(s_j - m_i)
+            #     = exp(m_{i-1} - m_i) * a_{i-1} + exp(s_i - m_i)
 
             # [G]
             b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
@@ -249,16 +301,18 @@ def parallel_nsa_fwd_kernel(
             # [G, BS]
             b_p = exp(b_s - b_m[:, None])
             # [G]
-            b_acc = b_acc * b_r + tl.sum(b_p, 1)
-            # [G, BV]
+            b_acc = b_acc * b_r + tl.sum(b_p, 1) # summed over T dimension
+            # [G, BV]; note that b_p is fp32, while b_q may not
             b_o = b_o * b_r[:, None] + tl.dot(b_p.to(b_q.dtype), b_v)
 
-            b_mp = b_m
+
+    # o = o_n / a_n
+    # lse = log( exp(m_n) * a_n )
+
     b_o = b_o / b_acc[:, None]
     b_m += log(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_lse, b_m.to(p_lse.dtype.element_ty))
-
 
 @triton.heuristics({
     'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor)
@@ -493,14 +547,24 @@ def parallel_nsa_bwd_kernel_dkv(
 def parallel_nsa_topk(
     q: torch.Tensor,
     k: torch.Tensor,
-    lse: torch.Tensor,
+    TK: int,
+    lse: Optional[torch.Tensor],
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
     scale: float = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> torch.LongTensor:
-    B, T, HQ, K = q.shape
-    H = k.shape[2]
+    B, TQ, HQ, K = q.shape
+    _, TC, H, _ = k.shape
+
+    assert k.shape[0] == q.shape[0] and k.shape[-1] == q.shape[-1], "The last dimension of k and q must match"
+    assert lse is None or lse.shape == (B, TQ, HQ), "The shape of lse must be (B, TQ, HQ)"
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert lse is None or lse.is_contiguous()
+    assert isinstance(block_counts, int) or block_counts.is_contiguous()
+    assert cu_seqlens is None or cu_seqlens.is_contiguous()
+
     G = HQ // H
     # the number of selected blocks for each token
     S = block_counts if isinstance(block_counts, int) else block_counts.max().item()
@@ -510,10 +574,10 @@ def parallel_nsa_topk(
     BK = max(triton.next_power_of_2(K), 16)
     assert BC >= 2 * S, f"BC ({BC}) must be greater than or equal to 2 * S ({S})"
 
-    block_indices = torch.zeros(B, T, H, S, dtype=torch.int32, device=q.device)
+    block_indices = torch.zeros(B, TQ, H, S, dtype=torch.int32, device=q.device)
     token_indices = prepare_token_indices(cu_seqlens) if cu_seqlens is not None else None
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
-    grid = (T, B * H)
+    grid = (TQ, B * H)
     # the 1st and the last 2 blocks are always selected
     parallel_nsa_kernel_topk[grid](
         q=q,
@@ -524,7 +588,9 @@ def parallel_nsa_topk(
         cu_seqlens=cu_seqlens,
         token_indices=token_indices,
         chunk_offsets=chunk_offsets,
-        T=T,
+        Q_OFFSET=TK - TQ,
+        TQ=TQ,
+        TC=TC,
         H=H,
         HQ=HQ,
         G=G,
@@ -548,8 +614,14 @@ def parallel_nsa_fwd(
     cu_seqlens: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
 ):
-    B, T, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
-    HQ = q.shape[2]
+    B, T_kv, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
+    assert block_indices.is_contiguous()
+    assert q.is_contiguous()
+    assert k.is_contiguous()
+    assert v.is_contiguous()
+    if isinstance(block_counts, torch.Tensor):
+        assert block_counts.is_contiguous()
+    _, T_q, HQ, _ = q.shape
     G = HQ // H
     BS = block_size
     if check_shared_mem('hopper', q.device.index):
@@ -562,9 +634,9 @@ def parallel_nsa_fwd(
     NV = triton.cdiv(V, BV)
     assert NK == 1, "The key dimension can not be larger than 256"
 
-    grid = (T, NV, B * H)
-    o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
-    lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
+    grid = (T_q, NV, B * H)
+    o = torch.empty(B, T_q, HQ, V, dtype=v.dtype, device=q.device)
+    lse = torch.empty(B, T_q, HQ, dtype=torch.float, device=q.device)
 
     parallel_nsa_fwd_kernel[grid](
         q=q,
@@ -577,8 +649,10 @@ def parallel_nsa_fwd(
         block_counts=block_counts,
         cu_seqlens=cu_seqlens,
         token_indices=token_indices,
-        T=T,
-        H=H,
+        Q_OFFSET=T_kv - T_q,
+        TQ=T_q,
+        TK=T_kv,
+	    H=H,
         HQ=HQ,
         G=G,
         K=K,
@@ -787,25 +861,25 @@ def parallel_nsa(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]`.
+            queries of shape `[B, TQ, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g_cmp (torch.Tensor):
-            Gate score for compressed attention of shape `[B, T, HQ]`.
+            Gate score for compressed attention of shape `[B, TQ, HQ]`.
         g_slc (torch.Tensor):
-            Gate score for selected attention of shape `[B, T, HQ]`.
+            Gate score for selected attention of shape `[B, TQ, HQ]`.
         g_swa (torch.Tensor):
-            Gate score for sliding attentionof shape `[B, T, HQ]`.
+            Gate score for sliding attentionof shape `[B, TQ, HQ]`.
         block_indices (torch.LongTensor):
-            Block indices of shape `[B, T, H, S]`.
+            Block indices of shape `[B, TQ, H, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
             If `g_cmp` is provided, the passed `block_indices` will be ignored.
         block_counts (Optional[Union[torch.LongTensor, int]]):
             Number of selected blocks for each query.
-            If a tensor is provided, with shape `[B, T, H]`,
+            If a tensor is provided, with shape `[B, TQ, H]`,
             each query can select the same number of blocks.
             If not provided, it will default to 16.
         block_size (int):
@@ -837,6 +911,7 @@ def parallel_nsa(
             q=q,
             k=k_cmp,
             v=v_cmp,
+            TK=k.shape[1],
             block_size=block_size,
             scale=scale,
             cu_seqlens=cu_seqlens
@@ -847,6 +922,7 @@ def parallel_nsa(
             q=q,
             k=k_cmp,
             lse=lse_cmp,
+            TK=k.shape[1],
             block_counts=block_counts,
             block_size=block_size,
             scale=scale,

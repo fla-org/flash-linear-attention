@@ -34,7 +34,9 @@ def parallel_nsa_compression_fwd_kernel(
     cu_seqlens,
     token_indices,
     chunk_offsets,
-    T,
+    Q_OFFSET,
+    TQ,
+    TC,
     H: tl.constexpr,
     HQ: tl.constexpr,
     G: tl.constexpr,
@@ -52,11 +54,12 @@ def parallel_nsa_compression_fwd_kernel(
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        TQ = eos - bos
+        TC = tl.cdiv(TQ, BS)
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
-        boc = i_b * tl.cdiv(T, BS)
+        bos, eos = i_b * TQ, i_b * TQ + TQ
+        boc = i_b * TC
 
     p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
 
@@ -65,11 +68,10 @@ def parallel_nsa_compression_fwd_kernel(
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    # the number of compression representations in total
-    TC = tl.cdiv(T, BS)
     # the number of compression representations required to iterate over
     # incomplete compression blocks are not included
-    NC = (i_t + 1) // BS
+    # Here we assume that q tokens are last TQ tokens
+    NC = (i_t + Q_OFFSET + 1) // BS
 
     p_o = tl.make_block_ptr(o + (bos + i_t) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
     # [G, BV]
@@ -79,8 +81,9 @@ def parallel_nsa_compression_fwd_kernel(
     # lse = log(acc) + m
     b_acc = tl.zeros([G], dtype=tl.float32)
 
+
     for i_c in range(0, NC, BC):
-        o_c = i_c + tl.arange(0, BC)
+        o_c = i_c + tl.arange(0, BC) # block idx
 
         p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
         p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c, i_v * BV), (BC, BV), (1, 0))
@@ -90,6 +93,8 @@ def parallel_nsa_compression_fwd_kernel(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         # [G, BC]
         b_s = tl.dot(b_q, b_k)
+        # Causal mask; note that NC is the compressed-block idx of q_idx + 1,
+        # i.e. number of blocks that need to be attended to
         b_s = tl.where((o_c < NC)[None, :], b_s, float('-inf'))
 
         # [G]
@@ -99,11 +104,10 @@ def parallel_nsa_compression_fwd_kernel(
         b_p = exp(b_s - b_m[:, None])
         # [G]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
-
         # [G, BV]
         b_o = b_o * b_r[:, None] + tl.dot(b_p.to(b_q.dtype), b_v)
 
-        b_mp = b_m
+        # b_mp = b_m
     if NC == 0:
         b_lse = tl.zeros([G], dtype=tl.float32)
     else:
@@ -320,12 +324,15 @@ def parallel_nsa_compression_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    TK: int,
     block_size: int,
     scale: float,
     cu_seqlens: Optional[torch.LongTensor] = None,
     token_indices: Optional[torch.LongTensor] = None,
 ):
-    B, T, HQ, K, V = *q.shape, v.shape[-1]
+    B, TQ, HQ, K, V = *q.shape, v.shape[-1]
+
+    TC = k.shape[1]  # number of compression blocks
     H = k.shape[2]
     G = HQ // H
     BC = BS = block_size
@@ -341,9 +348,9 @@ def parallel_nsa_compression_fwd(
 
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
 
-    grid = (T, NV, B * H)
-    o = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
-    lse = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
+    grid = (TQ, NV, B * H)
+    o = torch.empty(B, TQ, HQ, V, dtype=v.dtype, device=q.device)
+    lse = torch.empty(B, TQ, HQ, dtype=torch.float, device=q.device)
 
     parallel_nsa_compression_fwd_kernel[grid](
         q=q,
@@ -355,7 +362,9 @@ def parallel_nsa_compression_fwd(
         cu_seqlens=cu_seqlens,
         token_indices=token_indices,
         chunk_offsets=chunk_offsets,
-        T=T,
+        TQ=TQ,
+        TC=TC,
+        Q_OFFSET=TK - TQ,
         H=H,
         HQ=HQ,
         G=G,
@@ -367,6 +376,7 @@ def parallel_nsa_compression_fwd(
         BV=BV,
     )
     return o, lse
+
 
 
 def parallel_nsa_compression_bwd(
@@ -468,6 +478,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
         q,
         k,
         v,
+        TK,
         block_size,
         scale,
         cu_seqlens
@@ -484,6 +495,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
             q=q,
             k=k,
             v=v,
+            TK=TK,
             block_size=block_size,
             scale=scale,
             cu_seqlens=cu_seqlens,
@@ -520,6 +532,7 @@ def parallel_nsa_compression(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    TK: int,
     block_size: int = 64,
     scale: float = None,
     cu_seqlens: Optional[torch.LongTensor] = None
@@ -530,6 +543,7 @@ def parallel_nsa_compression(
         q,
         k,
         v,
+        TK,
         block_size,
         scale,
         cu_seqlens
