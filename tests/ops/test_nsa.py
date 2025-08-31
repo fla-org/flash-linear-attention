@@ -420,17 +420,19 @@ def test_parallel_topk_decode(
     assert (free_block_indices_short == free_block_indices[:, -Tq:]).all(), \
         "Different in free block indices compared to full"
 
+# Numerical issues are intensified by discrete block selection; hence we need to use FP32 and/or to reuse block indices
 @pytest.mark.parametrize(
-    ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'window_size', 'dtype'),
+    ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'window_size', 'dtype', 'reuse_index'),
     [
-        pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-{}-reuse_index{}".format(*test))
         for test in [
-            (1, 1, 1, 1, 16, 64, 16, 32, 1.0, 0, torch.float16),
-            (3, 111, 15, 1, 32, 100, 16, 32, 1.0, 128, torch.float16),
-            (3, 1024, 256, 1, 32, 100, 16, 32, 1.0, 128, torch.float16),
-            (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, 128, torch.float16),
-            (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, 0, torch.float16),
-            (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, 512, torch.float16)
+            (1, 1, 1, 1, 16, 64, 16, 32, 1.0, 0, torch.float16, False),
+            (3, 111, 15, 1, 32, 100, 16, 32, 1.0, 128, torch.float16, False),
+            (3, 1024, 280, 1, 32, 100, 16, 32, 1.0, 0, torch.float32, False),
+            (4, 1024, 256, 1, 32, 100, 16, 32, 1.0, 16, torch.float16, True),
+            (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, 128, torch.float16, True),
+            (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, 0, torch.float32, False),
+            (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, 512, torch.float16, True)
         ]
     ]
 )
@@ -446,21 +448,49 @@ def test_parallel_decode(
     scale: float,
     window_size: int,
     dtype: torch.dtype,
+    reuse_index: bool
 ):
     torch.manual_seed(42)
 
-    q = torch.rand((B, T, HQ, D), dtype=dtype, device=device) * 3 - 2
-    k = torch.rand((B, T, H, D), dtype=dtype, device=device) * 3 - 2
-    v = torch.rand((B, T, H, D), dtype=dtype, device=device) * 3 - 2
+    q = (torch.rand((B, T, HQ, D), dtype=dtype, device=device) * 3 - 2).requires_grad_(True)
+    k = (torch.rand((B, T, H, D), dtype=dtype, device=device) * 3 - 2).requires_grad_(True)
+    v = (torch.rand((B, T, H, D), dtype=dtype, device=device) * 3 - 2).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
 
     g = torch.randn((B, T, HQ, 3), dtype=dtype, device=device)
     g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
 
-    o_full = parallel_nsa(q, k, v, g_cmp, g_slc, g_swa,
+    if reuse_index:
+        o_naive, block_indices = naive_nsa(
+            q, k, v, g_cmp, g_slc, g_swa,
+            block_counts=S, block_size=block_size, scale=scale, window_size=window_size, return_block_indices=True)
+    else:
+        o_naive = naive_nsa(
+            q, k, v, g_cmp, g_slc, g_swa,
+            block_counts=S, block_size=block_size, scale=scale, window_size=window_size)
+        block_indices = None
+
+    o_naive.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    o_full = parallel_nsa(q, k, v, g_cmp, g_slc, g_swa, block_indices=block_indices,
                           block_counts=S, block_size=block_size, scale=scale, window_size=window_size)
+    o_full.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+
+    assert_close('full vs naive', o_full, o_naive, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
 
     o_short = parallel_nsa(
         q[:, -Tq:], k, v, g_cmp[:, -Tq:], g_slc[:, -Tq:], g_swa[:, -Tq:],
+        block_indices=block_indices[:, -Tq:] if reuse_index else None,
         block_counts=S,
         block_size=block_size,
         scale=scale,
@@ -485,7 +515,7 @@ def test_parallel_decode(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
 )
-def test_parallel_varlen_decode(
+def test_parallel_selective_varlen_decode(
     H: int,
     HQ: int,
     D: int,
@@ -592,8 +622,6 @@ def test_parallel_compressive_varlen(
     scale = 1.0 / (D ** 0.5)
     k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
 
-    seq_indices = prepare_token_indices(cu_seqlens)
-
     o_full, lse_full = parallel_nsa_compression(
         q=q,
         k=k_cmp,
@@ -615,7 +643,6 @@ def test_parallel_compressive_varlen(
         block_size=block_size,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        seq_indices=seq_indices
     )
     o_naive.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -695,8 +722,7 @@ def test_parallel_topk_varlen(
             v_cmp=v_cmp,
             block_size=block_size,
             scale=scale,
-            cu_seqlens=cu_seqlens,
-            seq_indices=seq_indices
+            cu_seqlens=cu_seqlens
         )
         lse_full = torch.where(lse_full == float('-inf'), 0, lse_full)
     else:
@@ -777,3 +803,91 @@ def test_parallel_topk_varlen(
         "Different in forcefully selected block indices compared to full"
     assert (free_block_indices_short == free_block_indices_short_ref).all(), \
         "Different in free block indices compared to full"
+
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'S', 'block_size', 'scale', 'window_size', 'cu_seqlens', 'q_lens', 'dtype', 'reuse_index'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-cu_seqlens{}-q_lens{}-{}-reuse_index{}".format(*test))
+        for test in [
+            (1, 16, 64, 16, 32, 0.1, 128, [0, 15], [1,], torch.float16, False),
+            (1, 16, 64, 8, 16, 1.0, 32, [0, 15, 205, 550, 800], [3, 15, 30, 8], torch.float16, False),
+            (2, 32, 64, 16, 32, 0.1, 64, [0, 256, 500, 1000], [1, 15, 4], torch.float16, False),
+            (2, 32, 100, 16, 32, 1.0, 0, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float32, False),
+            (2, 32, 100, 16, 32, 1.0, 64, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float16, True),
+        ]
+    ]
+)
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
+)
+def test_parallel_varlen_decode(
+    H: int,
+    HQ: int,
+    D: int,
+    S: int,
+    block_size: int,
+    scale: float,
+    window_size: int,
+    cu_seqlens,
+    q_lens,
+    dtype: torch.dtype,
+    reuse_index: bool,
+):
+    torch.manual_seed(42)
+
+    T = cu_seqlens[-1]
+    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+
+    q = (torch.rand((1, T, HQ, D), dtype=dtype, device=device) * 3 - 2).requires_grad_(True)
+    k = (torch.rand((1, T, H, D), dtype=dtype, device=device) * 3 - 2).requires_grad_(True)
+    v = (torch.rand((1, T, H, D), dtype=dtype, device=device) * 3 - 2).requires_grad_(True)
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+
+    g = torch.randn((1, T, HQ, 3), dtype=dtype, device=device)
+    g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
+
+    if reuse_index:
+        o_naive, block_indices = naive_nsa(
+            q, k, v, g_cmp, g_slc, g_swa, block_counts=S, block_size=block_size,
+            scale=scale, window_size=window_size, cu_seqlens=cu_seqlens, return_block_indices=True)
+    else:
+        o_naive = naive_nsa(
+            q, k, v, g_cmp, g_slc, g_swa, block_counts=S, block_size=block_size,
+            scale=scale, window_size=window_size, cu_seqlens=cu_seqlens)
+        block_indices = None
+
+    o_naive.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    o_full = parallel_nsa(
+        q, k, v, g_cmp, g_slc, g_swa, block_indices=block_indices, block_counts=S, block_size=block_size,
+        scale=scale, window_size=window_size, cu_seqlens=cu_seqlens)
+    o_full.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+
+    assert_close('full vs naive', o_full, o_naive, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+
+    q_short = build_partial_varlen(q, cu_seqlens, q_lens)
+    g_short = build_partial_varlen(g, cu_seqlens, q_lens)
+    g_cmp, g_slc, g_swa = g_short.sigmoid().unbind(-1)
+    cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).int().to(device)
+
+    if block_indices is not None:
+        block_indices = build_partial_varlen(block_indices, cu_seqlens, q_lens)
+
+    o_short_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
+
+    o_short = parallel_nsa(
+        q_short, k, v, g_cmp, g_slc, g_swa, block_indices=block_indices, block_counts=S, block_size=block_size,
+        scale=scale, window_size=window_size, cu_seqlens=(cu_seqlens_q, cu_seqlens),)
+
+    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)

@@ -935,18 +935,19 @@ def parallel_nsa(
             scale=scale,
             cu_seqlens=cu_seqlens
         )
-        if block_indices is not None:
-            warnings.warn("`block_indices` will be ignored when `g_cmp` is provided")
-        block_indices = parallel_nsa_topk(
-            q=q,
-            k=k_cmp,
-            lse=lse_cmp,
-            TK=k.shape[1],
-            block_counts=block_counts,
-            block_size=block_size,
-            scale=scale,
-            cu_seqlens=cu_seqlens
-        )
+        if block_indices is None:
+            block_indices = parallel_nsa_topk(
+                q=q,
+                k=k_cmp,
+                lse=lse_cmp,
+                TK=k.shape[1],
+                block_counts=block_counts,
+                block_size=block_size,
+                scale=scale,
+                cu_seqlens=cu_seqlens
+            )
+        else:
+            warnings.warn("`block_indices` computed from compression is overridden")
     o = o_slc = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, scale, cu_seqlens)
     if g_slc is not None:
         o = o_slc * g_slc.unsqueeze(-1)

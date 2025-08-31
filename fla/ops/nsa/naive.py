@@ -125,8 +125,9 @@ def naive_nsa_sel(
 
     return o.to(dtype)
 
-def naive_nsa_cmp(q, k_cmp, v_cmp, block_size, scale, cu_seqlens=None, seq_indices=None):
-    if seq_indices is not None:
+def naive_nsa_cmp(q, k_cmp, v_cmp, block_size, scale, cu_seqlens=None):
+    if cu_seqlens is not None:
+        seq_indices = prepare_token_indices(cu_seqlens)
         kv_cu_seqlens = prepare_chunk_offsets(cu_seqlens, block_size)
         kv_indices = prepare_token_indices(kv_cu_seqlens)
         q_b, q_i = seq_indices[:, 0], seq_indices[:, 1]
@@ -272,8 +273,9 @@ def naive_nsa(
     block_size: int = 64,
     window_size: int = 0,
     scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> torch.Tensor:
+    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor]] = None,
+    return_block_indices: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.LongTensor]]:
     r"""
     Args:
         q (torch.Tensor):
@@ -305,9 +307,10 @@ def naive_nsa(
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        cu_seqlens (torch.LongTensor):
+        cu_seqlens (torch.LongTensor or Tuple[torch.LongTensor]):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+            When a tuple is provided, it should contain two tensors: `(cu_seqlens_q, cu_seqlens_k)`.
 
     Returns:
         o (torch.Tensor):
@@ -319,6 +322,14 @@ def naive_nsa(
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
+
+    if cu_seqlens is not None:
+        if isinstance(cu_seqlens, tuple):
+            cu_seqlens_q, cu_seqlens_k = cu_seqlens
+        else:
+            cu_seqlens_q = cu_seqlens_k = cu_seqlens
+    else:
+        cu_seqlens_q = cu_seqlens_k = None
 
     k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
     o_cmp, lse_cmp = None, None
@@ -348,13 +359,12 @@ def naive_nsa(
         o = torch.addcmul(o, o_cmp, g_cmp.unsqueeze(-1))
     if window_size > 0:
         if cu_seqlens is not None:
-            max_seqlen = q.shape[1]
             o_swa = flash_attn_varlen_func(
                 q.squeeze(0), k.squeeze(0), v.squeeze(0),
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=q.shape[1],
+                max_seqlen_k=k.shape[1],
                 causal=True,
                 window_size=(window_size-1, 0)
             ).unsqueeze(0)
@@ -365,4 +375,7 @@ def naive_nsa(
                 window_size=(window_size-1, 0)
             )
         o = torch.addcmul(o, o_swa, g_swa.unsqueeze(-1))
-    return o
+    if return_block_indices:
+        return o, block_indices
+    else:
+        return o
