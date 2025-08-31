@@ -6,21 +6,40 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_GATE': lambda args: args['g_cumsum'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def parallel_path_bwd_dkv_kernel(
-    q, k, v, g_cumsum,
-    hc_whole, scale, L, D,
-    dk, dv, do, dg_cumsum,
-    cu_seqlens, indices, split_offsets,
+    q,
+    k,
+    v,
+    g_cumsum,
+    hc_whole,
+    scale,
+    L,
+    D,
+    dk,
+    dv,
+    do,
+    dg_cumsum,
+    cu_seqlens,
+    indices,
+    split_offsets,
     T,
-    G: tl.constexpr, HQ: tl.constexpr, H: tl.constexpr,
-    K: tl.constexpr, V: tl.constexpr,
-    BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr,
-    BV: tl.constexpr, S: tl.constexpr,
-    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr, NUM_BLOCKS: tl.constexpr
+    G: tl.constexpr,
+    HQ: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    S: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    USE_GATE: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -37,7 +56,7 @@ def parallel_path_bwd_dkv_kernel(
         boh_large = i_n * tl.cdiv(T, S)
 
     # offset calculations
-    # q += (bos * HQ + i_hq) * K
+
     do += (bos * HQ + i_hq) * V
     dk += (bos * HQ + i_hq) * K
     dv += (bos * HQ + i_hq) * K
@@ -70,8 +89,8 @@ def parallel_path_bwd_dkv_kernel(
         b_g_cumsum_k = None
         b_dg_cumsum_k = None
 
-    b_dk = tl.zeros([BT, K], dtype=tl.float32)
-    b_dv = tl.zeros([BT, K], dtype=tl.float32)
+    b_dk = tl.zeros([BT, BK], dtype=tl.float32)
+    b_dv = tl.zeros([BT, BK], dtype=tl.float32)
 
     last_chunk_start = tl.floor(i_t*BT / S).to(tl.int32) * S
     idx_j = (tl.floor(i_t * BT / S).to(tl.int32) + 1).to(tl.int32)
@@ -108,14 +127,13 @@ def parallel_path_bwd_dkv_kernel(
     tl.store(p_dk, b_dk.to(dk.dtype.element_ty), boundary_check=(0, 1))
     mask = i_t * BT + tl.arange(0, BT) < T
     tl.atomic_add(
-        dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ * K + tl.arange(0, K)[None, :],
+        dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ * K + tl.arange(0, BK)[None, :],
         b_dv,
         mask=mask[:, None],
         sem='relaxed'
     )
-
     if USE_GATE:
-        tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_k, sem='relaxed')
+        tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_k, mask=mask, sem='relaxed')
 
 
 def parallel_path_bwd_dkv_fn(
@@ -139,13 +157,32 @@ def parallel_path_bwd_dkv_fn(
     dk = torch.empty(B, T, HQ, K, dtype=torch.float32, device=q.device)
 
     parallel_path_bwd_dkv_kernel[(NT, B*HQ)](
-        q=q, k=k, v=v, g_cumsum=g_cumsum,
-        hc_whole=hc_whole, scale=scale, L=L, D=D,
-        dk=dk, dv=dv, do=do, dg_cumsum=dg_cumsum,
-        cu_seqlens=cu_seqlens, indices=indices, split_offsets=split_offsets,
-        T=T, S=S, BT=BT, BS=BS,
-        G=G, HQ=HQ, H=H, K=K, V=V,
-        BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
+        q=q,
+        k=k,
+        v=v,
+        g_cumsum=g_cumsum,
+        hc_whole=hc_whole,
+        scale=scale,
+        L=L,
+        D=D,
+        dk=dk,
+        dv=dv,
+        do=do,
+        dg_cumsum=dg_cumsum,
+        cu_seqlens=cu_seqlens,
+        indices=indices,
+        split_offsets=split_offsets,
+        T=T,
+        S=S,
+        BT=BT,
+        BS=BS,
+        G=G,
+        HQ=HQ,
+        H=H,
+        K=K,
+        V=V,
+        BK=triton.next_power_of_2(K),
+        BV=triton.next_power_of_2(V),
         num_warps=8 if (BT == 128 and K == 128) else 4,
         NUM_BLOCKS=num_blocks
     )
