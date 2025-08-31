@@ -117,7 +117,7 @@ def naive_nsa_sel(
             # [S*BS, HQ, -1]
             k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, Tk-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
             # [S*BS, HQ]
-            attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill(i_i > i_q, float('-inf')).softmax(0)
+            attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill(torch.logical_or(i_i > i_q, i_i < 0), float('-inf')).softmax(0)
             if not varlen:
                 o[i, i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
             else:

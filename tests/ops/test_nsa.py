@@ -18,7 +18,7 @@ from fla.ops.utils.pooling import mean_pooling
 os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
 def build_block_indices(B, T, H, S, block_size, seq_indices=None):
-    block_indices = torch.full((B, T, H, S), T, dtype=torch.long, device=device)
+    block_indices = torch.full((B, T, H, S), -1, dtype=torch.long, device=device)
     for b in range(B):
         for i in range(T):
             if seq_indices is None:
