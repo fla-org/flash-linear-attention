@@ -17,7 +17,7 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5",
-    "transformers>=4.45.0",
+    "transformers>=4.53.0",
     "datasets>=3.3.0",
     "einops",
     "pytest",

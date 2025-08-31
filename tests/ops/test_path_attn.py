@@ -138,9 +138,10 @@ def test_parallel(
     [
         pytest.param(*test, id="H{}-HQ{}-D{}-use_forget_gate{}-cu_seqlens{}-{}".format(*test))
         for test in [
-            (2, 4, 128, False, [0, 15, 69, 211, 300, 1200, 1222, 1849, 2000], torch.float16),
-            (2, 4, 64, True, [0, 100, 300, 1000, 1989, 2000], torch.float16),
-            (2, 4, 64, False, [0, 15, 69, 211, 300, 1200, 1222, 1849, 2000], torch.float16),
+            (2, 4, 128, False, [0, 15, 333, 2048], torch.float16),
+            (2, 4, 128, True, [0, 15, 333, 2048], torch.float16),
+            (2, 4, 64, True, [0, 841, 889, 4096], torch.float16),
+            (2, 4, 64, False, [0, 841, 889, 4096], torch.float16),
         ]
     ]
 )

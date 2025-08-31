@@ -111,3 +111,8 @@ def prepare_chunk_offsets(
     chunk_size: int
 ) -> torch.LongTensor:
     return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]).cumsum(-1)
+
+
+@tensor_cache
+def get_max_num_splits(cu_seqlens: torch.LongTensor, chunk_size: int) -> int:
+    return triton.cdiv(int(max(prepare_lens(cu_seqlens))), chunk_size)

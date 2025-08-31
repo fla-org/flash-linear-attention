@@ -1,4 +1,5 @@
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -6,6 +7,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+from einops import reduce
 
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.op import safe_exp
@@ -661,11 +663,9 @@ def chunkwise_fwd_kernel(
         tl.store(new_offsets + i_n, (offset // BT) * BT + T)
 
 
-@triton.heuristics(
-    {
-        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
-)
+@triton.heuristics({
+    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+})
 @triton.jit(do_not_specialize=["T"])
 def copy_input_kernel(
     q,
@@ -907,6 +907,530 @@ def copy_last_chunk_kernel(
         tl.store(p_l_prev, tl.load(p_l, boundary_check=(0,)), boundary_check=(0,))
 
 
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.autotune(
+    configs=[
+        triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
+        for BK in [32, 64, 128]
+        for num_warps in [4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=["H", "K", "V"],
+    restore_value=["dh", "dg_last"],
+)
+@triton.jit(do_not_specialize=["T"])
+def chunkwise_bwd_kernel_dhg(
+    do,
+    q,
+    g,
+    l,
+    h_l,
+    dh,
+    dg_last,
+    ell,
+    T,
+    cu_seqlens,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    L: tl.constexpr,
+    BT: tl.constexpr,
+    BK: tl.constexpr,
+    NT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    # parallel over batches and heads
+    i_k = tl.program_id(0)
+    i_nh = tl.program_id(1)
+    i_n, i_h = i_nh // H, i_nh % H
+
+    if IS_VARLEN:
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T = eos - bos
+    else:
+        bos, eos = i_n * T, i_n * T + T
+
+    b_dh = tl.zeros([BK, V], dtype=tl.float32)
+
+    num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
+
+    for i_t in range(tl.cdiv(T, BT) - 1, -1, -1):
+        p_dh = tl.make_block_ptr(
+            dh + ((i_n * NT + i_t) * H + i_h) * K * V,
+            (K, V),
+            (V, 1),
+            (i_k * BK, 0),
+            (BK, V),
+            (1, 0),
+        )
+        b_dh_old = tl.load(p_dh, boundary_check=(0, 1))
+
+        if (i_t & (1 << ell)) == 0:  # store the chunk
+            tl.store(
+                p_dh, b_dh.to(p_dh.dtype.element_ty) + b_dh_old, boundary_check=(0, 1)
+            )
+            # if you are about the transition to compute, reset to zeros
+            if i_t > 0 and ((i_t - 1) & (1 << ell)) > 0:
+                b_dh = tl.zeros([BK, V], dtype=tl.float32)
+        if i_t & (1 << ell):
+            p_h = tl.make_block_ptr(
+                h_l + ((i_n * NT + i_t) * H + i_h) * K * V,
+                (K, V),
+                (V, 1),
+                (i_k * BK, 0),
+                (BK, V),
+                (1, 0),
+            )
+
+            b_h = tl.load(p_h, boundary_check=(0, 1))
+            p_dg_last = dg_last + i_n * NT * H + i_t * H + i_h
+            tl.atomic_add(p_dg_last, tl.sum(b_h * (b_dh + b_dh_old)))
+        last_idx = min((i_t + 1) * BT, T) - 1
+        b_g_last = tl.exp(tl.load(g + bos * H + last_idx * H + i_h))
+        b_dh *= b_g_last
+        if i_t & (1 << ell):  # compute this chunk
+            p_g = tl.make_block_ptr(
+                g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+            )
+            p_q = tl.make_block_ptr(
+                q + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
+            )
+            p_do = tl.make_block_ptr(
+                do + (bos * H + i_h) * V,
+                (T, V),
+                (H * V, 1),
+                (i_t * BT, 0),
+                (BT, V),
+                (1, 0),
+            )
+            p_l = tl.make_block_ptr(
+                l + (bos * H + i_h) * L + num_intra_levels + ell,
+                (T,),
+                (H * L,),
+                (i_t * BT,),
+                (BT,),
+                (0,),
+            )
+            b_l = tl.load(p_l, boundary_check=(0,))
+            b_g = tl.load(p_g, boundary_check=(0,))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = (b_q * (tl.exp(b_g) * b_l)[None, :]).to(b_q.dtype)
+            b_do = tl.load(p_do, boundary_check=(0, 1))
+
+            b_s = tl.dot(b_q, b_do).to(b_q.dtype)
+            b_dh += b_s
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=["H", "K", "V"],
+    restore_value=["dq", "dg"],
+)
+@triton.jit(do_not_specialize=["T"])
+def chunkwise_bwd_kernel_hdqgl(
+    do,
+    q,
+    k,
+    v,
+    g,
+    l,
+    h_l,
+    dq,
+    dg,
+    dl,
+    ell,
+    T,
+    cu_seqlens,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    L: tl.constexpr,
+    BT: tl.constexpr,
+    NT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    # parallel over batches and heads
+    i_nh = tl.program_id(0)
+    i_n, i_h = i_nh // H, i_nh % H
+
+    if IS_VARLEN:
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T = eos - bos
+    else:
+        bos, eos = i_n * T, i_n * T + T
+
+    b_h = tl.zeros([V, K], dtype=tl.float32)
+
+    num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
+
+    for i_t in range(tl.cdiv(T, BT)):
+        p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        if i_t & (1 << ell):  # compute and store derivatives
+            p_do = tl.make_block_ptr(
+                do + (bos * H + i_h) * V,
+                (T, V),
+                (H * V, 1),
+                (i_t * BT, 0),
+                (BT, V),
+                (1, 0),
+            )
+            p_q = tl.make_block_ptr(
+                q + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+            )
+            p_l = tl.make_block_ptr(
+                l + (bos * H + i_h) * L + num_intra_levels + ell,
+                (T,),
+                (H * L,),
+                (i_t * BT,),
+                (BT,),
+                (0,),
+            )
+            p_dq = tl.make_block_ptr(
+                dq + (bos * H + i_h) * K,
+                (T, K),
+                (H * K, 1),
+                (i_t * BT, 0),
+                (BT, K),
+                (1, 0),
+            )
+            p_dg = tl.make_block_ptr(
+                dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+            )
+            p_dl = tl.make_block_ptr(
+                dl + (bos * H + i_h) * L + num_intra_levels + ell,
+                (T,),
+                (H * L,),
+                (i_t * BT,),
+                (BT,),
+                (0,),
+            )
+            p_h = tl.make_block_ptr(
+                h_l + ((i_n * NT + i_t) * H + i_h) * K * V,
+                (V, K),
+                (1, V),
+                (0, 0),
+                (V, K),
+                (0, 1),
+            )
+
+            b_do = tl.load(p_do, boundary_check=(0, 1))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_g = tl.load(p_g, boundary_check=(0,))
+            b_l = tl.load(p_l, boundary_check=(0,))
+
+            b_dlq = tl.exp(b_g)[:, None] * tl.dot(b_do, b_h.to(b_do.dtype))
+
+            b_dl = tl.sum(b_dlq * b_q, axis=1)
+            b_dg = b_l * b_dl
+
+            tl.store(p_h, b_h, boundary_check=(0, 1))
+            b_dq_old = tl.load(p_dq, boundary_check=(0, 1))
+            tl.store(
+                p_dq,
+                (b_l[:, None] * b_dlq).to(p_dq.dtype.element_ty) + b_dq_old,
+                boundary_check=(0, 1),
+            )
+            tl.store(p_dl, b_dl.to(p_dl.dtype.element_ty), boundary_check=(0,))
+            b_dg_old = tl.load(p_dg, boundary_check=(0,))
+            tl.store(
+                p_dg, b_dg.to(p_dg.dtype.element_ty) + b_dg_old, boundary_check=(0,)
+            )
+            if ((i_t + 1) & (1 << ell)) == 0:
+                b_h = tl.zeros([V, K], dtype=tl.float32)
+
+        last_idx = min((i_t + 1) * BT, T) - 1
+        b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
+        b_h *= tl.exp(b_g_last)
+        if (i_t & (1 << ell)) == 0:  # update the state
+            p_k = tl.make_block_ptr(
+                k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+            )
+            p_v = tl.make_block_ptr(
+                v + (bos * H + i_h) * V,
+                (V, T),
+                (1, H * V),
+                (0, i_t * BT),
+                (V, BT),
+                (0, 1),
+            )
+            b_g = tl.load(p_g, boundary_check=(0,))
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_k = (b_k * tl.exp(b_g_last - b_g)[:, None]).to(b_k.dtype)
+            b_h += tl.dot(b_v, b_k)
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=["H", "K", "V"],
+    restore_value=["dk", "dg", "dg_last"],
+)
+@triton.jit(do_not_specialize=["T"])
+def chunkwise_bwd_kernel_dkg(
+    dh,
+    k,
+    v,
+    g,
+    dg_last,
+    dk,
+    dg,
+    cu_seqlens,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    L: tl.constexpr,
+    BT: tl.constexpr,
+    NT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_t, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_h = i_nh // H, i_nh % H
+
+    if IS_VARLEN:
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T = eos - bos
+    else:
+        bos, eos = i_n * T, i_n * T + T
+
+    o_i = tl.arange(0, BT)
+
+    p_dh = tl.make_block_ptr(
+        dh + ((i_n * NT + i_t) * H + i_h) * K * V,
+        (V, K),
+        (1, V),
+        (0, 0),
+        (V, K),
+        (0, 1),
+    )
+    p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_k = tl.make_block_ptr(k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0))
+    p_v = tl.make_block_ptr(
+        v + (bos * H + i_h) * V,
+        (T, V),
+        (H * V, 1),
+        (i_t * BT, 0),
+        (BT, V),
+        (1, 0),
+    )
+    p_dk = tl.make_block_ptr(
+        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+    )
+    p_dg = tl.make_block_ptr(dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+
+    b_dh = tl.load(p_dh, boundary_check=(0, 1))
+    b_g = tl.load(p_g, boundary_check=(0,))
+    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_k = tl.load(p_k, boundary_check=(0, 1))
+    last_idx = min((i_t + 1) * BT, T) - 1
+    b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
+    p_dg_last = dg_last + i_n * NT * H + i_t * H + i_h
+    b_dg_last = tl.load(p_dg_last)
+
+    b_dg_last *= tl.exp(b_g_last)
+    b_dk = safe_exp(b_g_last - b_g)[:, None] * tl.dot(b_v, b_dh).to(b_v.dtype)
+    b_dg = tl.load(p_dg, boundary_check=(0,))
+    b_dg -= tl.sum(b_k * b_dk, axis=1)
+    b_dg_last += tl.sum(b_dk * b_k)
+
+    b_dg = tl.where(o_i < BT - 1, b_dg, b_dg + b_dg_last)
+
+    tl.store(p_dg, b_dg, boundary_check=(0,))
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=["H", "K", "V"],
+    restore_value=["dv"],
+)
+@triton.jit(do_not_specialize=["T"])
+def chunkwise_bwd_kernel_dv(
+    dh,
+    k,
+    g,
+    dv,
+    T,
+    cu_seqlens,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    L: tl.constexpr,
+    BT: tl.constexpr,
+    NT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_t, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_h = i_nh // H, i_nh % H
+
+    if IS_VARLEN:
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T = eos - bos
+    else:
+        bos, eos = i_n * T, i_n * T + T
+
+    p_dh = tl.make_block_ptr(
+        dh + ((i_n * NT + i_t) * H + i_h) * K * V,
+        (K, V),
+        (V, 1),
+        (0, 0),
+        (K, V),
+        (1, 0),
+    )
+    p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_k = tl.make_block_ptr(k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0))
+    p_dv = tl.make_block_ptr(
+        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+    )
+
+    last_idx = min((i_t + 1) * BT, T) - 1
+    b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
+
+    b_dh = tl.load(p_dh, boundary_check=(0, 1))
+    b_g = tl.load(p_g, boundary_check=(0,))
+    b_k = tl.load(p_k, boundary_check=(0, 1))
+    b_dv = safe_exp(-b_g + b_g_last)[:, None] * tl.dot(b_k, b_dh).to(b_k.dtype)
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=["H", "K", "V"],
+    restore_value=["dl", "dq", "dk", "dv", "dg"],
+)
+@triton.jit(do_not_specialize=["T"])
+def chunkwise_bwd_kernel_diag(
+    do,
+    q,
+    k,
+    v,
+    g,
+    l,
+    llut,
+    mask,
+    dq,
+    dk,
+    dv,
+    dg,
+    dl,
+    cu_seqlens,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    L: tl.constexpr,
+    BT: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    p_llut = tl.make_block_ptr(llut, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
+    b_llut = tl.load(p_llut, boundary_check=(0, 1))
+    i_t, i_nh = tl.program_id(0), tl.program_id(1)
+    i_n, i_h = i_nh // H, i_nh % H
+
+    if IS_VARLEN:
+        bos, eos = (
+            tl.load(cu_seqlens + i_n).to(tl.int32),
+            tl.load(cu_seqlens + i_n + 1).to(tl.int32),
+        )
+        T = eos - bos
+    else:
+        bos, eos = i_n * T, i_n * T + T
+
+    o_i = tl.arange(0, BT)
+    i_idx = o_i[:, None]  # BT x 1
+    j_idx = o_i[None, :]  # 1 x BT
+
+    b_h_ptrs = l + ((bos + i_t * BT + i_idx) * H + i_h) * L + b_llut
+    b_h = tl.load(b_h_ptrs, mask=i_idx >= j_idx)
+
+    p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_q = tl.make_block_ptr(q + bos * K, (K, T), (1, K), (0, i_t * BT), (K, BT), (0, 1))
+    p_k = tl.make_block_ptr(k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0))
+    p_v = tl.make_block_ptr(
+        v + (bos * H + i_h) * V, (V, T), (1, H * V), (0, i_t * BT), (V, BT), (0, 1)
+    )
+    p_do = tl.make_block_ptr(
+        do + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+    )
+    p_dg = tl.make_block_ptr(dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_dq = tl.make_block_ptr(
+        dq + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+    )
+    p_dk = tl.make_block_ptr(
+        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+    )
+    p_dv = tl.make_block_ptr(
+        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+    )
+
+    b_g = tl.load(p_g, boundary_check=(0,))
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_k = tl.load(p_k, boundary_check=(0, 1))
+    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_do = tl.load(p_do, boundary_check=(0, 1))
+    b_dq = tl.load(p_dq, boundary_check=(0, 1))
+    b_dk = tl.load(p_dk, boundary_check=(0, 1))
+    b_dv = tl.load(p_dv, boundary_check=(0, 1))
+    b_dg = tl.load(p_dg, boundary_check=(0,))
+
+    b_s = (tl.dot(b_k, b_q)).to(b_q.dtype)
+    b_a = safe_exp(b_g[:, None] - b_g[None, :])
+    b_dv += tl.dot((b_s * tl.trans(b_a * b_h)).to(b_do.dtype), b_do)
+    b_ds = tl.dot(b_do, b_v) * b_a
+    b_dl = b_ds * tl.trans(b_s)
+    b_dg += tl.sum(b_dl * b_h, axis=1)
+    b_dg -= tl.sum(b_dl * b_h, axis=0)
+    b_ds = (b_ds * b_h).to(b_k.dtype)
+    b_dq += tl.dot(b_ds, b_k)
+    b_dk += tl.trans(tl.dot(b_q, b_ds))
+
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
+
+    num_intra_levels = (tl.log2(float(BT))).to(tl.int32) + 1
+
+    for i in range(num_intra_levels):
+        p_mask = tl.make_block_ptr(mask + i * (BT * BT), (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
+        b_mask = tl.load(p_mask, boundary_check=(0, 1))
+        dl_i = tl.sum(tl.where(b_mask == 1, b_dl, 0), axis=1)
+        p_dl_i = tl.make_block_ptr(dl + (bos * H + i_h) * L + i, (T,), (H * L,), (i_t * BT,), (BT,), (0,))
+        tl.store(p_dl_i, dl_i, boundary_check=(0,))
+
+
 def construct_binary_level_mask(level, T):
     if level == 0:
         return torch.diag(torch.ones(T, dtype=torch.bool))
@@ -937,6 +1461,14 @@ def level_lut(BT, device):
     return lut
 
 
+def masks(BT, device):
+    masks = []
+    for level in range(0, ceil_log(BT, 2) + 1):
+        mask = construct_binary_level_mask(level, BT).to(device).to(torch.int32)
+        masks.append(mask)
+    return torch.stack(masks)
+
+
 def ceil_div(x: int, y: int) -> int:
     return math.ceil(x / y)
 
@@ -953,10 +1485,11 @@ class LogLinearAttentionState:
     k_prev: torch.Tensor
     v_prev: torch.Tensor
     g_prev: torch.Tensor
-    l_prev: torch.Tensor
+    level_scales_prev: torch.Tensor
 
 
 class ChunkLogLinearAttentionFunction(torch.autograd.Function):
+
     @staticmethod
     @input_guard
     @autocast_custom_fwd
@@ -985,6 +1518,10 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         if K % BLOCK_K != 0:
             raise ValueError(f"State dimension must be divisible by {BLOCK_K}.")
+
+        if triton.__version__ > "3.2.0":
+            warnings.warn("Triton>3.2.0 detected, which is known to have worse performance. "
+                          "For optimal performance, it is recommended to install Triton==3.2.0 (if possible).")
 
         BT = 64  # chunk size
 
@@ -1043,7 +1580,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 k_prev=initial_state.k_prev,
                 v_prev=initial_state.v_prev,
                 g_prev=initial_state.g_prev,
-                l_prev=initial_state.l_prev,
+                level_scales_prev=initial_state.level_scales_prev,
                 q_new=q_new,
                 k_new=k_new,
                 v_new=v_new,
@@ -1071,9 +1608,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         )
 
         new_offsets = torch.zeros((B,), dtype=torch.int32, device=v.device)
-        g = chunk_local_cumsum(
-            g, BT, offsets=None, head_first=None, cu_seqlens=cu_seqlens
-        )
+        g = chunk_local_cumsum(g, chunk_size=BT, cu_seqlens=cu_seqlens)
 
         def grid(meta):
             return (triton.cdiv(K, meta["BK"]), B * H)
@@ -1081,13 +1616,15 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         l_in = h0.shape[1] if initial_state is not None else None
         l_out = ht.shape[1] if output_final_state else None
 
+        ctx.llut = level_lut(BT, v.device)
+
         chunkwise_fwd_kernel[grid](
             q=q,
             k=k,
             v=v,
             g=g,
             level_scales=level_scales,
-            llut=level_lut(BT, v.device),
+            llut=ctx.llut,
             o=o,
             h0=h0,
             ht=ht,
@@ -1105,6 +1642,9 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
             MIN_LEVEL=0,
             MAX_LEVEL=MAX_LEVEL,
         )
+
+        ctx.save_for_backward(q, k, v, g, level_scales, initial_state, cu_seqlens)
+        ctx.chunk_size = BT
 
         if output_final_state:
             q_prev = torch.zeros((B, BT, G, K), dtype=q.dtype, device=q.device)
@@ -1151,9 +1691,156 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht):
-        raise NotImplementedError(
-            "Backward pass is not implemented for log-linear attention."
+        if triton.__version__ < "3.1.0":
+            raise ValueError("Triton>=3.1.0 is required")
+
+        q, k, v, g, level_scales, initial_state, cu_seqlens = ctx.saved_tensors
+        chunk_size = ctx.chunk_size
+        llut = ctx.llut
+        mask = masks(chunk_size, v.device)
+
+        if initial_state is not None:
+            raise NotImplementedError(
+                "Backward pass is not implemented for log-linear attention with a prefilled kernel."
+            )
+
+        B, T, G, K = k.shape
+        assert G == 1, "Multi-head attention is not supported"
+        _, _, H, V = v.shape
+        _, _, _, L = level_scales.shape
+        BT = chunk_size
+        if cu_seqlens is not None:
+            NT = max(
+                [
+                    ceil_div(cu_seqlens[i + 1] - cu_seqlens[i], BT)
+                    for i in range(len(cu_seqlens) - 1)
+                ]
+            )
+        else:
+            NT = ceil_div(T, BT)
+
+        if cu_seqlens is not None:
+            B = len(cu_seqlens) - 1
+
+        dh = torch.zeros((B, NT, H, K, V), dtype=v.dtype, device=v.device)
+        dq = torch.zeros((B if cu_seqlens is None else 1, T, H, K), dtype=v.dtype, device=v.device)
+        dk = torch.zeros((B if cu_seqlens is None else 1, T, H, K), dtype=v.dtype, device=v.device)
+        dv = torch.zeros_like(v)
+        dg = torch.zeros(g.shape, dtype=torch.float, device=v.device)
+        dl = torch.zeros(level_scales.shape, dtype=torch.float, device=v.device)
+        h_l = torch.zeros((B, NT, H, K, V), dtype=torch.float, device=v.device)
+        dg_last = torch.zeros((B, NT, H), dtype=torch.float, device=v.device)
+
+        grid = (B * H,)
+
+        def grid_f(meta):
+            return (triton.cdiv(K, meta["BK"]), B * H)
+
+        grid_t = (NT, B * H)
+
+        num_inter_chunk_levels = ceil_log(NT, 2)
+        for ell in range(num_inter_chunk_levels - 1, -1, -1):
+            chunkwise_bwd_kernel_hdqgl[grid](
+                do=do,
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                l=level_scales,
+                h_l=h_l,
+                dq=dq,
+                dg=dg,
+                dl=dl,
+                cu_seqlens=cu_seqlens,
+                ell=ell,
+                T=T,
+                H=H,
+                K=K,
+                V=V,
+                L=L,
+                BT=BT,
+                NT=NT,
+            )
+            chunkwise_bwd_kernel_dhg[grid_f](
+                do=do,
+                q=q,
+                g=g,
+                l=level_scales,
+                h_l=h_l,
+                dh=dh,
+                dg_last=dg_last,
+                cu_seqlens=cu_seqlens,
+                ell=ell,
+                T=T,
+                H=H,
+                K=K,
+                V=V,
+                L=L,
+                BT=BT,
+                NT=NT,
+            )
+
+        chunkwise_bwd_kernel_dkg[grid_t](
+            dh=dh,
+            k=k,
+            v=v,
+            g=g,
+            dg_last=dg_last,
+            dk=dk,
+            dg=dg,
+            cu_seqlens=cu_seqlens,
+            T=T,
+            H=H,
+            K=K,
+            V=V,
+            L=L,
+            BT=BT,
+            NT=NT,
         )
+
+        chunkwise_bwd_kernel_dv[grid_t](
+            dh=dh,
+            k=k,
+            g=g,
+            dv=dv,
+            cu_seqlens=cu_seqlens,
+            T=T,
+            H=H,
+            K=K,
+            V=V,
+            L=L,
+            BT=BT,
+            NT=NT,
+        )
+
+        chunkwise_bwd_kernel_diag[grid_t](
+            do=do,
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            l=level_scales,
+            llut=llut,
+            mask=mask,
+            dq=dq,
+            dk=dk,
+            dv=dv,
+            dg=dg,
+            dl=dl,
+            cu_seqlens=cu_seqlens,
+            T=T,
+            H=H,
+            K=K,
+            V=V,
+            L=L,
+            BT=BT,
+        )
+
+        dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens).to(g.dtype)
+
+        dq = reduce(dq, "b t (g h) k -> b t g k", "sum", g=G, h=H // G)
+        dk = reduce(dk, "b t (g h) k -> b t g k", "sum", g=G, h=H // G)
+        return dq, dk, dv, dg, dl, None, None, None
 
 
 @torch.compiler.disable

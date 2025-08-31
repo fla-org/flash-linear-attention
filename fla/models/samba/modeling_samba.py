@@ -25,10 +25,17 @@ from fla.modules.l2warp import l2_warp
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
+
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ImportError:
+    from fla.models.modeling_layers import GradientCheckpointingLayer
+
 logger = logging.get_logger(__name__)
 
 
-class SambaBlock(nn.Module):
+class SambaBlock(GradientCheckpointingLayer):
+
     def __init__(self, config, layer_idx):
         super().__init__()
 
@@ -247,9 +254,6 @@ class SambaModel(SambaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            use_cache = False
-
         if cache_params is None and use_cache:
             cache_params = MambaCache(
                 self.config, inputs_embeds.size(0), device=inputs_embeds.device, dtype=inputs_embeds.dtype
@@ -258,19 +262,11 @@ class SambaModel(SambaPreTrainedModel):
         hidden_states = inputs_embeds
         all_hidden_states = () if output_hidden_states else None
         for mixer_block in self.layers:
-            if self.gradient_checkpointing and self.training:
-                hidden_states = self._gradient_checkpointing_func(
-                    mixer_block.__call__,
-                    hidden_states,
-                    cache_params,
-                    **kwargs
-                )
-            else:
-                hidden_states = mixer_block(
-                    hidden_states,
-                    cache_params=cache_params,
-                    **kwargs
-                )
+            hidden_states = mixer_block(
+                hidden_states,
+                cache_params=cache_params,
+                **kwargs
+            )
 
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)

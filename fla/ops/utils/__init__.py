@@ -16,7 +16,8 @@ from .index import (
     prepare_lens_from_mask,
     prepare_position_ids,
     prepare_sequence_ids,
-    prepare_token_indices
+    prepare_token_indices,
+    get_max_num_splits
 )
 from .logsumexp import logsumexp_fwd
 from .matmul import addmm, matmul
@@ -49,4 +50,5 @@ __all__ = [
     'softmax_bwd',
     'softmax_fwd',
     'solve_tril',
+    'get_max_num_splits'
 ]
