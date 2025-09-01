@@ -124,6 +124,10 @@ def causal_conv1d_fwd_kernel(
 
     if ACTIVATION == 'swish' or ACTIVATION == 'silu':
         b_y = b_y * tl.sigmoid(b_y)
+    elif ACTIVATION == 'relu':
+        b_y = tl.maximum(b_y, 0)
+    elif ACTIVATION == 'relu2':
+        b_y = tl.where(b_y > 0, b_y * b_y, 0)
 
     if HAS_RESIDUAL:
         p_residual = tl.make_block_ptr(residual + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
@@ -214,6 +218,14 @@ def causal_conv1d_bwd_kernel(
                 b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                 b_ys = tl.sigmoid(b_y)
                 b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
+            elif ACTIVATION == 'relu':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_dy = tl.where(b_y > 0, b_dy, 0)
+            elif ACTIVATION == 'relu2':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_dy = tl.where(b_y > 0, b_dy * 2 * b_y, 0)
             b_wdy = b_dy
             if HAS_WEIGHT:
                 # [BT, BD]
@@ -235,6 +247,14 @@ def causal_conv1d_bwd_kernel(
                 b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                 b_ys = tl.sigmoid(b_y)
                 b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
+            elif ACTIVATION == 'relu':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_dy = tl.where(b_y > 0, b_dy, 0)
+            elif ACTIVATION == 'relu2':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_dy = tl.where(b_y > 0, b_dy * 2 * b_y, 0)
             b_wdy = b_dy
             if HAS_WEIGHT:
                 # [BT, BD]
@@ -256,6 +276,14 @@ def causal_conv1d_bwd_kernel(
                 b_y_shift = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
                 b_ys = tl.sigmoid(b_y_shift)
                 b_dy_shift = b_dy_shift * b_ys * (1 + b_y_shift * (1 - b_ys))
+            elif ACTIVATION == 'relu':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y_shift = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_dy_shift = tl.where(b_y_shift > 0, b_dy_shift, 0)
+            elif ACTIVATION == 'relu2':
+                p_y = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+                b_y_shift = tl.load(p_y, boundary_check=(0, 1)).to(tl.float32)
+                b_dy_shift = tl.where(b_y_shift > 0, b_dy_shift * 2 * b_y_shift, 0)
             if HAS_WEIGHT:
                 # gradient comes from x：sum_t dy[t+i_w] * x[t]
                 b_dw = tl.sum(b_dy_shift * b_x, 0)
@@ -271,6 +299,14 @@ def causal_conv1d_bwd_kernel(
                                            mask=(mask_head_rows[:, None] & m_d[None, :]), other=0.0).to(tl.float32)
                         b_ys_head = tl.sigmoid(b_y_head)
                         b_dy_head = b_dy_head * b_ys_head * (1 + b_y_head * (1 - b_ys_head))
+                    elif ACTIVATION == 'relu':
+                        b_y_head = tl.load(y + bos * D + o_t[:, None] * D + o_d,
+                                           mask=(mask_head_rows[:, None] & m_d[None, :]), other=0.0).to(tl.float32)
+                        b_dy_head = tl.where(b_y_head > 0, b_dy_head, 0)
+                    elif ACTIVATION == 'relu2':
+                        b_y_head = tl.load(y + bos * D + o_t[:, None] * D + o_d,
+                                           mask=(mask_head_rows[:, None] & m_d[None, :]), other=0.0).to(tl.float32)
+                        b_dy_head = tl.where(b_y_head > 0, b_dy_head * 2 * b_y_head, 0)
                     o_c = W - i_w + o_t
                     # index 0 is padding 0
                     mask_c = (mask_head_rows & (o_c >= 1) & (o_c < W))
@@ -293,6 +329,14 @@ def causal_conv1d_bwd_kernel(
                 b_y0 = tl.load(p_y0, boundary_check=(0, 1)).to(tl.float32)
                 b_ys0 = tl.sigmoid(b_y0)
                 b_dy0 = b_dy0 * b_ys0 * (1 + b_y0 * (1 - b_ys0))
+            elif ACTIVATION == 'relu':
+                p_y0 = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+                b_y0 = tl.load(p_y0, boundary_check=(0, 1)).to(tl.float32)
+                b_dy0 = tl.where(b_y0 > 0, b_dy0, 0)
+            elif ACTIVATION == 'relu2':
+                p_y0 = tl.make_block_ptr(y + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+                b_y0 = tl.load(p_y0, boundary_check=(0, 1)).to(tl.float32)
+                b_dy0 = tl.where(b_y0 > 0, b_dy0 * 2 * b_y0, 0)
             # index 0 is padding 0, skip calculation
             for i_w in tl.static_range(1, W):
                 m_rows = (o_t < i_w)
@@ -385,6 +429,10 @@ def causal_conv1d_update_kernel(
 
     if ACTIVATION == 'swish' or ACTIVATION == 'silu':
         b_y = b_y * tl.sigmoid(b_y)
+    elif ACTIVATION == 'relu':
+        b_y = tl.maximum(b_y, 0)
+    elif ACTIVATION == 'relu2':
+        b_y = tl.where(b_y > 0, b_y * b_y, 0)
 
     if HAS_RESIDUAL:
         b_y += tl.load(residual + i_n * D + o_d, mask=m_d, other=0)
@@ -715,6 +763,7 @@ def causal_conv1d(
             Whether to output the final state of shape [N, D, W]. Default: `False`.
         activation (Optional[str]):
             Activations applied to output, only `swish`/`silu` or `None` (i.e., no activation) are supported.
+            `relu`/`relu2` are supported in Triton backend
             Default: `None`.
         backend (Optional[str]):
             Specifies the backend to use for the convolution operation. Supported values are `'cuda'` and `'triton'`.
@@ -819,10 +868,6 @@ class ShortConvolution(nn.Conv1d):
         self.hidden_size = hidden_size
         self.activation = None
 
-        if activation is not None:
-            assert activation in ['silu', 'swish'], f"Activation `{activation}` not supported yet."
-            self.activation = activation
-
         if 'use_fast_conv1d' in kwargs:
             warnings.warn(
                 "The `use_fast_conv1d` parameter is deprecated and will be ignored. "
@@ -840,6 +885,13 @@ class ShortConvolution(nn.Conv1d):
                     "Consider installing `causal_conv1d` to enable the CUDA backend."
                 )
                 self.backend = 'triton'
+
+        if activation is not None:
+            if backend == 'cuda':
+                assert activation in ['silu', 'swish'], f"Activation `{activation}` not supported yet."
+            elif backend == 'triton':
+                assert activation in ['silu', 'swish', 'relu', 'relu2'], f"Activation `{activation}` not supported yet."
+            self.activation = activation
 
     def extra_repr(self):
         s = ('{in_channels}, {out_channels}, kernel_size={kernel_size}'

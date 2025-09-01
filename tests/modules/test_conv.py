@@ -32,8 +32,8 @@ def causal_conv1d_ref_torch(
 
     out: (batch, dim, seqlen)
     """
-    if activation not in [None, "silu", "swish"]:
-        raise NotImplementedError("activation must be None, silu, or swish")
+    if activation not in [None, "silu", "swish", "relu", "relu2"]:
+        raise NotImplementedError("activation must be None, silu, swish, relu or relu2")
     dtype_in = x.dtype
     x = x.to(weight.dtype)
     seqlen = x.shape[-1]
@@ -52,7 +52,13 @@ def causal_conv1d_ref_torch(
             final_states_out.copy_(final_states)
         else:
             final_states_out = final_states
-    out = (out if activation is None else F.silu(out)).to(dtype=dtype_in)
+    if activation in ["silu", "swish"]:
+        out = F.silu(out)
+    elif activation == "relu":
+        out = F.relu(out)
+    elif activation == "relu2":
+        out = F.relu(out) ** 2
+    out = out.to(dtype=dtype_in)
     return out if not output_final_state else (out, final_states_out)
 
 
@@ -103,8 +109,8 @@ def causal_conv1d_update_ref_torch(x, conv_state, weight, bias=None, activation=
         for test in [
             (2, 64, 128, 3, "swish", True, True, torch.float32),
             (2, 128, 128, 4, "swish", False, True, torch.float32),
-            (2, 64, 128, 3, "swish", True, False, torch.float32),
-            (2, 128, 128, 4, "swish", False, False, torch.float32),
+            (2, 64, 128, 3, "relu", True, False, torch.float32),
+            (2, 128, 128, 4, "relu2", False, False, torch.float32),
             (2, 500, 1024, 3, None, True, True, torch.float32),
             (2, 1024, 1024, 4, None, False, True, torch.float32),
             (2, 64, 128, 3, None, True, False, torch.float16),
@@ -171,8 +177,8 @@ def test_conv(
         pytest.param(*test, id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test))
         for test in [
             (4, 500, 128, 3, "swish", True, True, torch.float32),
-            (4, 1024, 200, 4, "swish", False, True, torch.float32),
-            (4, 500, 128, 3, None, True, False, torch.float16),
+            (4, 1024, 200, 4, "relu", False, True, torch.float32),
+            (4, 500, 128, 3, "relu2", True, False, torch.float16),
             (4, 1024, 1024, 4, None, False, False, torch.float16),
         ]
     ]
@@ -245,8 +251,8 @@ def test_conv_varlen(
         for test in [
             (2, 64, 128, 3, "swish", True, True, torch.float32),
             (2, 128, 128, 4, "swish", False, True, torch.float32),
-            (2, 64, 128, 3, "swish", True, False, torch.float32),
-            (2, 128, 128, 4, "swish", False, False, torch.float32),
+            (2, 64, 128, 3, "relu", True, False, torch.float32),
+            (2, 128, 128, 4, "relu2", False, False, torch.float32),
             (2, 500, 1024, 3, None, True, True, torch.float32),
             (2, 1024, 1024, 4, None, False, True, torch.float32),
             (2, 64, 128, 3, None, True, False, torch.float16),
@@ -309,8 +315,8 @@ def test_conv_decoding(
         for test in [
             (2, 64, 128, 3, "swish", True, True, torch.float32, 'triton'),
             (2, 128, 128, 4, "swish", False, True, torch.float32, 'triton'),
-            (2, 64, 128, 3, "swish", True, False, torch.float32, 'triton'),
-            (2, 128, 128, 4, "swish", False, False, torch.float32, 'triton'),
+            (2, 64, 128, 3, "relu", True, False, torch.float32, 'triton'),
+            (2, 128, 128, 4, "relu2", False, False, torch.float32, 'triton'),
             (2, 500, 1024, 3, None, True, True, torch.float32, 'triton'),
             (2, 1024, 1024, 4, None, False, True, torch.float32, 'triton'),
             (2, 64, 128, 3, None, True, False, torch.float16, 'triton'),
@@ -635,8 +641,8 @@ def test_mixed_backend(
             (2, 64, 100, 3, True, True, "swish", torch.float32),
             (2, 128, 128, 4, True, True, "swish", torch.float32),
             (3, 128, 128, 4, True, True, "swish", torch.float32),
-            (3, 128, 256, 4, True, True, "swish", torch.float32),
-            (3, 128, 512, 4, True, True, "swish", torch.float32),
+            (3, 128, 256, 4, True, True, "relu", torch.float32),
+            (3, 128, 512, 4, True, True, "relu2", torch.float32),
             (2, 128, 1024, 4, True, True, "swish", torch.float32),
             (2, 128, 2048, 3, True, True, "swish", torch.float32),
             (2, 128, 4096, 4, True, True, "swish", torch.float32),
@@ -673,7 +679,7 @@ def test_conv_cache_backward(
         )
         out = out.transpose(1, 2)
         if residual is not None:
-            out += residual
+            out = out + residual
         return out, cache_out
 
     def triton_func(x, weight, bias, residual, cache):
