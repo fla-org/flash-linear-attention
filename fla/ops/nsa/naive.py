@@ -2,14 +2,14 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 from einops import repeat
-from torch.nn.attention.flex_attention import create_block_mask, and_masks
-from torch.nn.attention.flex_attention import flex_attention
+from torch.nn.attention.flex_attention import and_masks, create_block_mask, flex_attention
+
+from fla.ops.utils import prepare_chunk_offsets, prepare_token_indices
 from fla.ops.utils.pooling import mean_pooling
-from fla.ops.utils import prepare_token_indices, prepare_chunk_offsets
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -20,6 +20,7 @@ except ImportError:
     )
     flash_attn_func = None
 
+
 def naive_nsa_sel(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -27,7 +28,7 @@ def naive_nsa_sel(
     block_indices: torch.LongTensor,
     block_size: int = 64,
     scale: Optional[float] = None,
-    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor]] = None,
+    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None,
     head_first: bool = False
 ) -> torch.Tensor:
     r"""
@@ -47,7 +48,7 @@ def naive_nsa_sel(
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        cu_seqlens (torch.LongTensor or Tuple[torch.LongTensor]):
+        cu_seqlens (torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor] or None):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
             When a tuple is provided, it should contain two tensors: `(cu_seqlens_q, cu_seqlens_k)`.
@@ -88,10 +89,10 @@ def naive_nsa_sel(
         Tq = Tk = q.shape[1]
         cu_q = torch.cat([
             block_indices.new_tensor(range(0, B * Tq, Tq)), block_indices.new_tensor([B * Tq])
-        ])
+        ]).to(device=q.device)
         cu_k = torch.cat([
             block_indices.new_tensor(range(0, B * Tk, Tk)), block_indices.new_tensor([B * Tk])
-        ])
+        ]).to(device=q.device)
     else:
         if isinstance(cu_seqlens, tuple):
             cu_q, cu_k = cu_seqlens
@@ -104,8 +105,9 @@ def naive_nsa_sel(
         else:
             Tq = cu_q[i+1] - cu_q[i]
             Tk = cu_k[i+1] - cu_k[i]
-            q_b, k_b, v_b, i_b = q[0][cu_q[i]:cu_q[i+1]], k[0][cu_k[i]:cu_k[i+1]], v[0][cu_k[i]:cu_k[i+1]], block_indices[0][cu_q[i]:cu_q[i+1]]
-
+            q_b, k_b, v_b, i_b = (q[0][cu_q[i]:cu_q[i+1]], k[0][cu_k[i]:cu_k[i+1]],
+                                  v[0][cu_k[i]:cu_k[i+1]], block_indices[0][cu_q[i]:cu_q[i+1]])
+        assert Tq == Tk, "TQ != TK case is not supported in naive_nsa_sel"
         i_b = i_b.unsqueeze(-1) * BS + i_b.new_tensor(range(BS))
         # [T, S*BS, HQ]
         i_b = i_b.view(Tq, block_indices.shape[2], -1).transpose(1, 2)
@@ -115,15 +117,18 @@ def naive_nsa_sel(
             # [S*BS, HQ]
             i_i = i_b[i_q]
             # [S*BS, HQ, -1]
-            k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, Tk-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
+            k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, Tk-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])),
+                           (k_b, v_b))
             # [S*BS, HQ]
-            attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill(torch.logical_or(i_i > i_q, i_i < 0), float('-inf')).softmax(0)
+            attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill(
+                torch.logical_or(i_i > i_q, i_i < 0), float('-inf')).softmax(0)
             if not varlen:
                 o[i, i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
             else:
                 o[0][cu_q[i] + i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
 
     return o.to(dtype)
+
 
 def naive_nsa_cmp(q, k_cmp, v_cmp, block_size, scale, cu_seqlens=None):
     if cu_seqlens is not None:
@@ -167,7 +172,7 @@ def naive_nsa_topk(
     block_counts: Union[int, torch.Tensor],  # int or [B, T_q, Hkv]
     block_size: int,
     scale: float,
-    cu_seqlens: Union[None, torch.Tensor, Tuple[torch.Tensor]] = None,
+    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None,
 ) -> torch.Tensor:
     B, Tq, Hq, _ = q.shape
     Hkv = k_cmp.shape[2]
@@ -214,12 +219,12 @@ def naive_nsa_topk(
         t = torch.arange(Tq, device=device).unsqueeze(1)
         s = torch.arange(Tc, device=device).unsqueeze(0)
         block_last_pos = (s + 1) * block_size - 1
-        base_allow = (block_last_pos <= t) # [Tq,Tc]
+        base_allow = (block_last_pos <= t)  # [Tq,Tc]
 
         i_qb = (t // block_size)                                                 # [Tq,1]
         is_current_block = (s == i_qb) | (s == 0) | (s == i_qb - 1)              # [Tq,Tc]
         logits = logits.masked_fill(~base_allow[:, None, None, :], float("-inf"))
-        allow = base_allow | is_current_block # [Tq,Tc]
+        allow = base_allow | is_current_block  # [Tq,Tc]
 
         probs_q = torch.softmax(logits, dim=-1)  # [Tq, Hkv, G, Tc]
         probs_q = torch.nan_to_num(probs_q, nan=0.0)  # rows with no valid blocks -> 0
@@ -273,7 +278,7 @@ def naive_nsa(
     block_size: int = 64,
     window_size: int = 0,
     scale: Optional[float] = None,
-    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor]] = None,
+    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None,
     return_block_indices: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.LongTensor]]:
     r"""
@@ -307,7 +312,7 @@ def naive_nsa(
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        cu_seqlens (torch.LongTensor or Tuple[torch.LongTensor]):
+        cu_seqlens (torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor] or None):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
             When a tuple is provided, it should contain two tensors: `(cu_seqlens_q, cu_seqlens_k)`.

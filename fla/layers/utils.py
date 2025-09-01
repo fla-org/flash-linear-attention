@@ -99,7 +99,7 @@ def get_unpad_data(
 
 
 def unpad_input(
-    q: Union[torch.Tensor, Tuple[torch.Tensor]],
+    q: Union[torch.Tensor, Tuple[torch.Tensor, ...]],
     states: Tuple[torch.Tensor],
     attention_mask: torch.Tensor,
     q_len: int,
@@ -133,11 +133,11 @@ def unpad_input(
             Shape: [1, total_source_length, ...] if `keepdim=True` else [total_source_length, ...].
         indices_q (`torch.Tensor`):
             The indices of non-masked tokens from the flattened input target sequence.
-        (cu_seqlens_q, cu_seqlens_k) (`Tuple[int]`):
+        (cu_seqlens_q, cu_seqlens_k) (`Tuple[torch.LongTensor, torch.LongTensor]`):
             The cumulative sequence lengths for the target (query) and source (key, value),
             used to index into ragged (unpadded) tensors.
             `cu_seqlens` shape is [batch_size + 1].
-        (max_seqlen_in_batch_q, max_seqlen_in_batch_k) (`Tuple[int]`):
+        (max_seqlen_in_batch_q, max_seqlen_in_batch_k) (`Tuple[int, int]`):
             Maximum sequence length in batch (`max_seqlen_in_batch_q` for the target sequence
             i.e. query, `max_seqlen_in_batch_k` for the source sequence i.e. key/value).
     """

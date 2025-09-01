@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import torch
 import triton
@@ -84,9 +84,8 @@ def parallel_nsa_compression_fwd_kernel(
     # lse = log(acc) + m
     b_acc = tl.zeros([G], dtype=tl.float32)
 
-
     for i_c in range(0, NC, BC):
-        o_c = i_c + tl.arange(0, BC) # block idx
+        o_c = i_c + tl.arange(0, BC)  # block idx
 
         p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
         p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c, i_v * BV), (BC, BV), (1, 0))
@@ -380,7 +379,6 @@ def parallel_nsa_compression_fwd(
     return o, lse
 
 
-
 def parallel_nsa_compression_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -512,6 +510,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
             token_indices_q=token_indices_q
         )
         ctx.save_for_backward(q, k, v, o, lse)
+        # Use cu_seqlens of q in backward, as cu_seqlens for q & k are different only for inference
         ctx.cu_seqlens = cu_seqlens_q
         ctx.token_indices = token_indices_q
         ctx.block_size = block_size
@@ -545,7 +544,7 @@ def parallel_nsa_compression(
     TK: int,
     block_size: int = 64,
     scale: float = None,
-    cu_seqlens: Optional[torch.LongTensor] = None
+    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None
 ):
     if scale is None:
         scale = k.shape[-1] ** -0.5

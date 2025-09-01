@@ -2,7 +2,7 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import triton
@@ -130,8 +130,8 @@ def parallel_nsa_kernel_topk(
     o_i = tl.zeros([BC], dtype=tl.int32)
     m_i = tl.arange(0, BC) < BC//2
 
-    IC = (i_t + Q_OFFSET) // BS # Idx of the current query block
-    for i_c in range(0, IC + 1, BC): # +1, because the current block might be also included
+    IC = (i_t + Q_OFFSET) // BS  # Idx of the current query block
+    for i_c in range(0, IC + 1, BC):  # +1, because the current block might be also included
         o_c = i_c + tl.arange(0, BC)
         # Recall k: [B, TC, H, K], boc = i_b * TC
         # we first shift to k[i_b, 0, i_h], and read a block of transposed keys from k[i_b, i_c, i_h]
@@ -207,7 +207,7 @@ def parallel_nsa_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_BLOCK_COUNTS: tl.constexpr
 ):
-    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2) # i_t: token, i_v: value dim, i_bh: batch * kv head
+    i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)  # i_t: token, i_v: value dim, i_bh: batch * kv head
     i_b, i_h = i_bh // H, i_bh % H
     # k: [B, TK, H, K], v: [B, TK, H, V], q: [B, TQ, HQ, K]
     # block_indices: [B, TQ, H, S]
@@ -259,7 +259,7 @@ def parallel_nsa_fwd_kernel(
     # p_q then reads the BK dimensions at the last dimension
     # the Q block is kept in the shared memory throughout the whole kernel
     # [G, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1)) # note that BK >= K, but there is boundary check
+    b_q = tl.load(p_q, boundary_check=(0, 1))  # note that BK >= K, but there is boundary check
     b_q = (b_q * scale).to(b_q.dtype)
 
     p_o = tl.make_block_ptr(
@@ -275,10 +275,10 @@ def parallel_nsa_fwd_kernel(
     # [G, BV]
     b_o = tl.zeros([G, BV], dtype=tl.float32)
 
-    b_m = tl.full([G], float('-inf'), dtype=tl.float32) # running maximum
-    b_acc = tl.zeros([G], dtype=tl.float32) # sumexp
-    for i in range(NS): # number of blocks
-        i_s = tl.load(block_indices + i).to(tl.int32) * BS # i_s is the start token index of the current KV block
+    b_m = tl.full([G], float('-inf'), dtype=tl.float32)  # running maximum
+    b_acc = tl.zeros([G], dtype=tl.float32)  # sumexp
+    for i in range(NS):  # number of blocks
+        i_s = tl.load(block_indices + i).to(tl.int32) * BS  # i_s is the start token index of the current KV block
         # Here we assume that q tokens are last TQ tokens
         if i_s <= Q_OFFSET + i_t and i_s >= 0:
             # Recall: k ([B, T, H, K]) already shifted to the start of the current sequence at head i_h, i.e. k[i_b, 0, i_h]
@@ -306,10 +306,9 @@ def parallel_nsa_fwd_kernel(
             # [G, BS]
             b_p = exp(b_s - b_m[:, None])
             # [G]
-            b_acc = b_acc * b_r + tl.sum(b_p, 1) # summed over T dimension
+            b_acc = b_acc * b_r + tl.sum(b_p, 1)  # summed over T dimension
             # [G, BV]; note that b_p is fp32, while b_q may not
             b_o = b_o * b_r[:, None] + tl.dot(b_p.to(b_q.dtype), b_v)
-
 
     # o = o_n / a_n
     # lse = log( exp(m_n) * a_n )
@@ -318,6 +317,7 @@ def parallel_nsa_fwd_kernel(
     b_m += log(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_lse, b_m.to(p_lse.dtype.element_ty))
+
 
 @triton.heuristics({
     'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor)
@@ -548,6 +548,7 @@ def parallel_nsa_bwd_kernel_dkv(
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
+
 @contiguous
 def parallel_nsa_topk(
     q: torch.Tensor,
@@ -557,7 +558,7 @@ def parallel_nsa_topk(
     block_counts: Union[torch.LongTensor, int],
     block_size: int = 64,
     scale: float = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None,
 ) -> torch.LongTensor:
     B, TQ, HQ, K = q.shape
     _, TC, H, _ = k.shape
@@ -610,6 +611,7 @@ def parallel_nsa_topk(
     )
     return block_indices
 
+
 @contiguous
 def parallel_nsa_fwd(
     q: torch.Tensor,
@@ -655,7 +657,7 @@ def parallel_nsa_fwd(
         token_indices_q=token_indices_q,
         TQ=T_q,
         TK=T_kv,
-	    H=H,
+        H=H,
         HQ=HQ,
         G=G,
         K=K,
@@ -855,6 +857,7 @@ class ParallelNSAFunction(torch.autograd.Function):
         )
         return dq.to(q), dk.to(k), dv.to(v), None, None, None, None, None, None, None, None
 
+
 @contiguous
 def parallel_nsa(
     q: torch.Tensor,
@@ -868,7 +871,7 @@ def parallel_nsa(
     block_size: int = 64,
     window_size: int = 0,
     scale: Optional[float] = None,
-    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor]] = None,
+    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None,
 ) -> torch.Tensor:
     r"""
     Args:
@@ -888,7 +891,7 @@ def parallel_nsa(
         block_indices (torch.LongTensor):
             Block indices of shape `[B, TQ, H, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
-            If `g_cmp` is provided, the passed `block_indices` will be ignored.
+            Will override the computed block indices from compression if provided.
         block_counts (Optional[Union[torch.LongTensor, int]]):
             Number of selected blocks for each query.
             If a tensor is provided, with shape `[B, TQ, H]`,
@@ -901,9 +904,10 @@ def parallel_nsa(
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        cu_seqlens (torch.LongTensor):
+        cu_seqlens (torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor] or None):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+            When a tuple is provided, it should contain two tensors: `(cu_seqlens_q, cu_seqlens_k)`.
 
     Returns:
         o (torch.Tensor):

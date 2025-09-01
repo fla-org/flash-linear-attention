@@ -10,10 +10,10 @@ import torch.nn as nn
 from einops import rearrange
 from transformers.utils import logging
 
+from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RotaryEmbedding
 from fla.ops.nsa.parallel import parallel_nsa
 from fla.ops.utils.index import prepare_lens_from_mask
-from fla.layers.utils import pad_input, unpad_input
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache

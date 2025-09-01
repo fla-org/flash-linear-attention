@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 
 import os
+import warnings
 from typing import List
 
 import pytest
-import torch
-import triton
-import warnings
-
-from fla.ops.nsa.naive import naive_nsa, naive_nsa_sel, naive_nsa_cmp, naive_nsa_topk
-from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd, parallel_nsa_topk
-from fla.ops.nsa.compression import parallel_nsa_compression
-from fla.ops.utils import prepare_token_indices, prepare_chunk_offsets
-from fla.utils import assert_close, device
-from fla.ops.utils.pooling import mean_pooling
 
 os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+
+import torch  # noqa: E402
+import triton  # noqa: E402
+
+from fla.ops.nsa.compression import parallel_nsa_compression  # noqa: E402
+from fla.ops.nsa.naive import naive_nsa, naive_nsa_cmp, naive_nsa_sel, naive_nsa_topk  # noqa: E402
+from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd, parallel_nsa_topk  # noqa: E402
+from fla.ops.utils import prepare_chunk_offsets, prepare_token_indices  # noqa: E402
+from fla.ops.utils.pooling import mean_pooling  # noqa: E402
+from fla.utils import assert_close, device  # noqa: E402
+
 
 def build_block_indices(B, T, H, S, block_size, seq_indices=None):
     block_indices = torch.full((B, T, H, S), -1, dtype=torch.long, device=device)
@@ -31,9 +33,11 @@ def build_block_indices(B, T, H, S, block_size, seq_indices=None):
     block_indices = block_indices.sort(-1)[0]
     return block_indices
 
+
 def build_partial_varlen(x, cu_seqlens, q_lens):
     partial_x = torch.cat([x[:, cu_seqlens[i + 1] - q_lens[i]: cu_seqlens[i + 1]] for i in range(len(q_lens))], dim=1)
     return partial_x
+
 
 # Tests on individual ops are skipped as tests on the whole NSA function are added;
 # see `test_parallel_decode` and `test_parallel_decode_varlen`.
@@ -55,15 +59,15 @@ def build_partial_varlen(x, cu_seqlens, q_lens):
     ]
 )
 def test_parallel(
-    B: int,
-    T: int,
-    H: int,
-    HQ: int,
-    D: int,
-    S: int,
-    block_size: int,
-    scale: float,
-    dtype: torch.dtype,
+        B: int,
+        T: int,
+        H: int,
+        HQ: int,
+        D: int,
+        S: int,
+        block_size: int,
+        scale: float,
+        dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -91,6 +95,7 @@ def test_parallel(
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
 
+
 @pytest.mark.skipif(
     True,
     reason='Skipping redundant individual tests'
@@ -112,13 +117,13 @@ def test_parallel(
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_parallel_varlen(
-    H: int,
-    HQ: int,
-    D: int,
-    S: int,
-    block_size: int,
-    cu_seqlens: List[int],
-    dtype: torch.dtype,
+        H: int,
+        HQ: int,
+        D: int,
+        S: int,
+        block_size: int,
+        cu_seqlens: List[int],
+        dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -166,6 +171,7 @@ def test_parallel_varlen(
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
 
+
 @pytest.mark.skipif(
     True,
     reason='Skipping redundant individual tests'
@@ -184,16 +190,16 @@ def test_parallel_varlen(
     ]
 )
 def test_parallel_selective_decode(
-    B: int,
-    T: int,
-    Tq: int,
-    H: int,
-    HQ: int,
-    D: int,
-    S: int,
-    block_size: int,
-    scale: float,
-    dtype: torch.dtype,
+        B: int,
+        T: int,
+        Tq: int,
+        H: int,
+        HQ: int,
+        D: int,
+        S: int,
+        block_size: int,
+        scale: float,
+        dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -235,6 +241,7 @@ def test_parallel_selective_decode(
         lse_short, lse_full[:, -Tq:], 0.005
     )
 
+
 @pytest.mark.skipif(
     True,
     reason='Skipping redundant individual tests'
@@ -244,7 +251,8 @@ def test_parallel_selective_decode(
     [
         pytest.param(*test, id="B{}-T{}-Tq{}-H{}-HQ{}-D{}-block_size{}-scale{}-{}".format(*test))
         for test in [
-            # (1, 63, 1, 1, 16, 64, 32, 1.0, torch.float16), # Can't pass this as rel grad error bloats with short inputs. Numerical issue?
+            # Can't pass this as rel grad error bloats with short inputs. Numerical issue?
+            # (1, 63, 1, 1, 16, 64, 32, 1.0, torch.float16),
             (3, 111, 15, 1, 32, 100, 32, 1.0, torch.float16),
             (3, 1024, 3, 2, 32, 60, 32, 0.1, torch.float16),
             (3, 1024, 33, 2, 32, 128, 32, 0.1, torch.float16),
@@ -253,15 +261,15 @@ def test_parallel_selective_decode(
     ]
 )
 def test_parallel_compressive(
-    B: int,
-    T: int,
-    Tq: int,
-    H: int,
-    HQ: int,
-    D: int,
-    block_size: int,
-    scale: float,
-    dtype: torch.dtype,
+        B: int,
+        T: int,
+        Tq: int,
+        H: int,
+        HQ: int,
+        D: int,
+        block_size: int,
+        scale: float,
+        dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -324,6 +332,7 @@ def test_parallel_compressive(
         lse_short, lse_full[:, -Tq:], 0.005
     )
 
+
 @pytest.mark.skipif(
     True,
     reason='Skipping redundant individual tests'
@@ -337,22 +346,22 @@ def test_parallel_compressive(
             (3, 111, 15, 1, 32, 100, 16, 32, 1.0, torch.float16, False),
             (3, 1024, 3, 2, 32, 60, 16, 32, 0.1, torch.float32, True),
             (3, 1024, 33, 2, 32, 128, 16, 32, 0.1, torch.float32, False),
-            (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, torch.float32, True) # Use FP32 to reduce numerical issues
+            (4, 2048, 25, 2, 32, 64, 16, 32, 0.1, torch.float32, True)  # Use FP32 to reduce numerical issues
         ]
     ]
 )
 def test_parallel_topk_decode(
-    B: int,
-    T: int,
-    Tq: int,
-    H: int,
-    HQ: int,
-    D: int,
-    S: int,
-    block_size: int,
-    scale: float,
-    dtype: torch.dtype,
-    reuse_lse: bool,
+        B: int,
+        T: int,
+        Tq: int,
+        H: int,
+        HQ: int,
+        D: int,
+        S: int,
+        block_size: int,
+        scale: float,
+        dtype: torch.dtype,
+        reuse_lse: bool,
 ):
     torch.manual_seed(42)
     # Use a wider range to reduce numerical issues, otherwise there will be too many mismatches due to close scores.
@@ -392,7 +401,8 @@ def test_parallel_topk_decode(
 
     # Separate checks for forcefully selected blocks (0, -1, -2)
     fixed_block_indices, free_block_indices = block_indices[:, :, :, :3], block_indices[:, :, :, 3:]
-    fixed_block_indices_naive, free_block_indices_naive = block_indices_naive[:, :, :, :3], block_indices_naive[:, :, :, 3:]
+    fixed_block_indices_naive, free_block_indices_naive = (
+        block_indices_naive[:, :, :, :3], block_indices_naive[:, :, :, 3:])
 
     fixed_block_indices, _ = torch.sort(fixed_block_indices, dim=-1)
     fixed_block_indices_naive, _ = torch.sort(fixed_block_indices_naive, dim=-1)
@@ -414,12 +424,12 @@ def test_parallel_topk_decode(
             a_lse = torch.log(torch.exp(a_s - m).sum(0)) + m.squeeze(0)
             if lse_full is not None:
                 k_lse = lse_full[b_i.item(), t_i.item(), h_i * (HQ // H): (h_i + 1) * (HQ // H)]
-                assert_close('lse vs naive ' +  str(indices[idx]), a_lse, k_lse, ratio=0.005)
+                assert_close('lse vs naive ' + str(indices[idx]), a_lse, k_lse, ratio=0.005)
 
-            assert_close('block-score vs naive ' +  str(indices[idx]), a_snm[free_block_indices[b_i, t_i, h_i, s_i]],
+            assert_close('block-score vs naive ' + str(indices[idx]), a_snm[free_block_indices[b_i, t_i, h_i, s_i]],
                          a_snm[free_block_indices_naive[b_i, t_i, h_i, s_i]], ratio=0.005)
         warnings.warn(f"Block indices mismatch: {len(indices)}/{block_indices.numel()} "
-              f"({len(indices) / free_block_indices_naive.numel():.2f}), seemingly due to numerical issues.")
+                      f"({len(indices) / free_block_indices_naive.numel():.2f}), seemingly due to numerical issues.")
 
     block_indices_short = parallel_nsa_topk(
         q=q[:, -Tq:],
@@ -431,12 +441,14 @@ def test_parallel_topk_decode(
         scale=scale,
     )
 
-    fixed_block_indices_short, free_block_indices_short = block_indices_short[:, :, :, :3], block_indices_short[:, :, :, 3:]
+    fixed_block_indices_short, free_block_indices_short = (
+        block_indices_short[:, :, :, :3], block_indices_short[:, :, :, 3:])
     fixed_block_indices_short, _ = torch.sort(fixed_block_indices_short, dim=-1)
     assert (fixed_block_indices_short == fixed_block_indices[:, -Tq:]).all(), \
         "Different in forcefully selected block indices compared to full"
     assert (free_block_indices_short == free_block_indices[:, -Tq:]).all(), \
         "Different in free block indices compared to full"
+
 
 # Numerical issues are intensified by discrete block selection; hence we need to use FP32 and/or to reuse block indices
 @pytest.mark.parametrize(
@@ -455,18 +467,18 @@ def test_parallel_topk_decode(
     ]
 )
 def test_parallel_decode(
-    B: int,
-    T: int,
-    Tq: int,
-    H: int,
-    HQ: int,
-    D: int,
-    S: int,
-    block_size: int,
-    scale: float,
-    window_size: int,
-    dtype: torch.dtype,
-    reuse_index: bool
+        B: int,
+        T: int,
+        Tq: int,
+        H: int,
+        HQ: int,
+        D: int,
+        S: int,
+        block_size: int,
+        scale: float,
+        window_size: int,
+        dtype: torch.dtype,
+        reuse_index: bool
 ):
     torch.manual_seed(42)
 
@@ -500,7 +512,6 @@ def test_parallel_decode(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-
     assert_close('full vs naive', o_full, o_naive, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
@@ -517,6 +528,7 @@ def test_parallel_decode(
 
     assert_close('short vs full', o_short, o_full[:, -Tq:], 0.005)
 
+
 @pytest.mark.skipif(
     True,
     reason='Skipping redundant individual tests'
@@ -526,7 +538,7 @@ def test_parallel_decode(
     [
         pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-cu_seqlens{}-q_lens{}-{}".format(*test))
         for test in [
-            (1, 16, 64, 16, 32, [0, 15], [1,], torch.float16),
+            (1, 16, 64, 16, 32, [0, 15], [1, ], torch.float16),
             (1, 16, 64, 8, 16, [0, 15, 205, 550, 800], [3, 15, 30, 8], torch.float16),
             (2, 32, 64, 16, 32, [0, 256, 500, 1000], [1, 15, 4], torch.float16),
             (2, 32, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float16),
@@ -538,14 +550,14 @@ def test_parallel_decode(
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_parallel_selective_varlen_decode(
-    H: int,
-    HQ: int,
-    D: int,
-    S: int,
-    block_size: int,
-    cu_seqlens,
-    q_lens,
-    dtype: torch.dtype,
+        H: int,
+        HQ: int,
+        D: int,
+        S: int,
+        block_size: int,
+        cu_seqlens,
+        q_lens,
+        dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -596,13 +608,14 @@ def test_parallel_selective_varlen_decode(
         block_size,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens,
-        scale= 1.0 / (D ** 0.5),
+        scale=1.0 / (D ** 0.5),
         token_indices_q=token_indices_q
     )
 
     assert_close('outputs: full vs naive', ref, o_full, 0.005)
     assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
     assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
+
 
 @pytest.mark.skipif(
     True,
@@ -613,7 +626,7 @@ def test_parallel_selective_varlen_decode(
     [
         pytest.param(*test, id="H{}-HQ{}-D{}-block_size{}-cu_seqlens{}-q_lens{}-{}".format(*test))
         for test in [
-            (1, 16, 64, 32, [0, 15], [1,], torch.float16),
+            (1, 16, 64, 32, [0, 15], [1, ], torch.float16),
             (1, 16, 64, 16, [0, 15, 205, 550, 800], [3, 15, 30, 8], torch.float16),
             (2, 32, 64, 32, [0, 256, 500, 1000], [1, 15, 4], torch.float16),
             (2, 32, 100, 32, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float16),
@@ -625,13 +638,13 @@ def test_parallel_selective_varlen_decode(
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_parallel_compressive_varlen(
-    H: int,
-    HQ: int,
-    D: int,
-    block_size: int,
-    cu_seqlens,
-    q_lens,
-    dtype: torch.dtype,
+        H: int,
+        HQ: int,
+        D: int,
+        block_size: int,
+        cu_seqlens,
+        q_lens,
+        dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -698,6 +711,7 @@ def test_parallel_compressive_varlen(
     assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
     assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
 
+
 @pytest.mark.skipif(
     True,
     reason='Skipping redundant individual tests'
@@ -705,9 +719,10 @@ def test_parallel_compressive_varlen(
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'S', 'block_size', 'scale', 'cu_seqlens', 'q_lens', 'dtype', 'reuse_lse'),
     [
-        pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-scale{}-cu_seqlens{}-q_lens{}-{}-reuse_lse{}".format(*test))
+        pytest.param(*test,
+                     id="H{}-HQ{}-D{}-S{}-block_size{}-scale{}-cu_seqlens{}-q_lens{}-{}-reuse_lse{}".format(*test))
         for test in [
-            (1, 16, 64, 16, 32, 1.0, [0, 15], [1,], torch.float16, True),
+            (1, 16, 64, 16, 32, 1.0, [0, 15], [1, ], torch.float16, True),
             (1, 16, 64, 8, 16, 0.1, [0, 15, 205, 550, 800], [3, 15, 30, 8], torch.float16, False),
             (2, 32, 64, 16, 32, 1.0, [0, 256, 500, 1000], [1, 15, 4], torch.float32, True),
             (2, 32, 100, 16, 32, 0.1, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float32, False),
@@ -715,16 +730,16 @@ def test_parallel_compressive_varlen(
     ]
 )
 def test_parallel_topk_varlen(
-    H: int,
-    HQ: int,
-    D: int,
-    S: int,
-    block_size: int,
-    scale: float,
-    cu_seqlens,
-    q_lens,
-    dtype: torch.dtype,
-    reuse_lse: bool,
+        H: int,
+        HQ: int,
+        D: int,
+        S: int,
+        block_size: int,
+        scale: float,
+        cu_seqlens,
+        q_lens,
+        dtype: torch.dtype,
+        reuse_lse: bool,
 ):
     torch.manual_seed(42)
 
@@ -740,7 +755,6 @@ def test_parallel_topk_varlen(
     seq_indices = prepare_token_indices(cu_seqlens)
 
     kv_cu_seqlens = prepare_chunk_offsets(cu_seqlens, block_size)
-    kv_indices = prepare_token_indices(kv_cu_seqlens)
 
     if reuse_lse:
         # For positions not attending to any token, the log-sum-exp should be -inf; the kernel returns 0 instead, it is
@@ -774,7 +788,8 @@ def test_parallel_topk_varlen(
 
     # Separate checks for forcefully selected blocks (0, -1, -2)
     fixed_block_indices, free_block_indices = block_indices[:, :, :, :3], block_indices[:, :, :, 3:]
-    fixed_block_indices_naive, free_block_indices_naive = block_indices_naive[:, :, :, :3], block_indices_naive[:, :, :, 3:]
+    fixed_block_indices_naive, free_block_indices_naive = (
+        block_indices_naive[:, :, :, :3], block_indices_naive[:, :, :, 3:])
 
     fixed_block_indices, _ = torch.sort(fixed_block_indices, dim=-1)
     fixed_block_indices_naive, _ = torch.sort(fixed_block_indices_naive, dim=-1)
@@ -789,7 +804,7 @@ def test_parallel_topk_varlen(
             q_vals = q[0, t_i.item(), h_i * (HQ // H): (h_i + 1) * (HQ // H), :]
 
             i_n = seq_indices[t_i.item(), 0]
-            t = seq_indices[t_i.item(), 1] # in-sequence index
+            t = seq_indices[t_i.item(), 1]  # in-sequence index
             bos_k = kv_cu_seqlens[i_n]
             eos_k = kv_cu_seqlens[i_n + 1]
 
@@ -803,10 +818,11 @@ def test_parallel_topk_varlen(
             if lse_full is not None:
                 k_lse = lse_full[0, t_i.item(), h_i * (HQ // H): (h_i + 1) * (HQ // H)]
                 assert_close('block lse vs naive ' + str(indices[idx]), a_lse, k_lse, ratio=0.005)
-            assert_close('block-score vs naive ' +  str(indices[idx]), a_snm[free_block_indices[0, t_i, h_i, s_i]],
+            assert_close('block-score vs naive ' + str(indices[idx]),
+                         a_snm[free_block_indices[0, t_i, h_i, s_i]],
                          a_snm[free_block_indices_naive[0, t_i, h_i, s_i]], ratio=0.005)
         warnings.warn(f"Block indices mismatch: {len(indices)}/{block_indices.numel()} "
-              f"({len(indices) / free_block_indices_naive.numel():.2f}), seemingly due to numerical issues.")
+                      f"({len(indices) / free_block_indices_naive.numel():.2f}), seemingly due to numerical issues.")
 
     q_short = build_partial_varlen(q, cu_seqlens, q_lens)
     cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).to(device)
@@ -826,19 +842,26 @@ def test_parallel_topk_varlen(
         cu_seqlens=(cu_seqlens_q, cu_seqlens),
     )
 
-    fixed_block_indices_short, free_block_indices_short = block_indices_short[:, :, :, :3], block_indices_short[:, :, :, 3:]
+    fixed_block_indices_short, free_block_indices_short = (
+        block_indices_short[:, :, :, :3], block_indices_short[:, :, :, 3:])
     fixed_block_indices_short, _ = torch.sort(fixed_block_indices_short, dim=-1)
     assert (fixed_block_indices_short == fixed_block_indices_short_ref).all(), \
         "Different in forcefully selected block indices compared to full"
     assert (free_block_indices_short == free_block_indices_short_ref).all(), \
         "Different in free block indices compared to full"
 
+
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'S', 'block_size', 'scale', 'window_size', 'cu_seqlens', 'q_lens', 'dtype', 'reuse_index'),
     [
-        pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-cu_seqlens{}-q_lens{}-{}-reuse_index{}".format(*test))
+        pytest.param(
+            *test,
+            id=(
+                    "H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-cu_seqlens{}-q_lens{}-{}-reuse_index{}".format(*test)
+            ),
+        )
         for test in [
-            (1, 16, 64, 16, 32, 0.1, 128, [0, 15], [1,], torch.float16, False),
+            (1, 16, 64, 16, 32, 0.1, 128, [0, 15], [1, ], torch.float16, False),
             (1, 16, 64, 8, 16, 1.0, 32, [0, 15, 205, 550, 800], [3, 15, 30, 8], torch.float16, False),
             (2, 32, 64, 16, 32, 0.1, 64, [0, 256, 500, 1000], [1, 15, 4], torch.float16, False),
             (2, 32, 100, 16, 32, 1.0, 0, [0, 15, 100, 300, 1200, 2000], [5, 3, 1, 1, 128], torch.float32, False),
@@ -851,17 +874,17 @@ def test_parallel_topk_varlen(
     reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
 )
 def test_parallel_varlen_decode(
-    H: int,
-    HQ: int,
-    D: int,
-    S: int,
-    block_size: int,
-    scale: float,
-    window_size: int,
-    cu_seqlens,
-    q_lens,
-    dtype: torch.dtype,
-    reuse_index: bool,
+        H: int,
+        HQ: int,
+        D: int,
+        S: int,
+        block_size: int,
+        scale: float,
+        window_size: int,
+        cu_seqlens,
+        q_lens,
+        dtype: torch.dtype,
+        reuse_index: bool,
 ):
     torch.manual_seed(42)
 
@@ -899,7 +922,6 @@ def test_parallel_varlen_decode(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-
     assert_close('full vs naive', o_full, o_naive, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
@@ -917,6 +939,6 @@ def test_parallel_varlen_decode(
 
     o_short = parallel_nsa(
         q_short, k, v, g_cmp, g_slc, g_swa, block_indices=block_indices, block_counts=S, block_size=block_size,
-        scale=scale, window_size=window_size, cu_seqlens=(cu_seqlens_q, cu_seqlens),)
+        scale=scale, window_size=window_size, cu_seqlens=(cu_seqlens_q, cu_seqlens), )
 
     assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
