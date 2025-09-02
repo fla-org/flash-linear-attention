@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
 import torch
+import inspect
 import transformers
 from packaging import version
 from transformers.cache_utils import Cache as HFCacheBase
@@ -25,6 +26,14 @@ class FlashLinearLayer(CacheLayerMixin):
     def __init__(self):
         super().__init__()
         self.state = None
+
+    def lazy_initialization(self, key_states: torch.Tensor): 
+        self.state = {
+            "recurrent_state": None,
+            "attn_state": None,
+            "conv_state": None,
+            "ffn_state": None,
+        }
 
     def update(
         self,
@@ -245,7 +254,22 @@ class NewStyleCache(HFCacheBase):
     is_compileable = True
 
     def __init__(self, seen_tokens: int = 0, **kwargs):
-        super().__init__(layer_classes=FlashLinearLayer, **kwargs)
+        parent_init = super().__init__
+        sig = inspect.signature(parent_init)
+        param_names = list(sig.parameters.keys())
+
+        if 'layer_class_to_replicate' in param_names:
+            self.use_layer_class_to_replicate = True
+            super().__init__(layer_class_to_replicate=FlashLinearLayer, **kwargs)
+        elif 'layer_classes' in param_names:
+            self.use_layer_class_to_replicate = False
+            super().__init__(layer_classes=FlashLinearLayer, **kwargs)
+        else:
+            raise TypeError(
+                "FLA cache initialization failed: HFCacheBase.__init__ accepts neither "
+                "'layers' nor 'layer_classes'. This might be caused by an incompatible "
+                "transformers version. Please check your transformers>=4.36.0"
+            )
         self._seen_tokens = int(seen_tokens)
 
     def update(
@@ -257,8 +281,12 @@ class NewStyleCache(HFCacheBase):
         layer_idx: int = 0,
         offset: Optional[int] = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        self.append_new_layers(layer_idx)
+    ) -> Dict[str, Any]:            
+        if not self.use_layer_class_to_replicate:
+            self.append_new_layers(layer_idx)
+        else:
+            while len(self.layers) <= layer_idx:
+                self.layers.append(self.layer_class_to_replicate())
         if layer_idx == 0:
             self._seen_tokens += int(offset)
 
