@@ -81,18 +81,18 @@ def transform_q_fwd_fn(
     B, T, HQ, K = q.shape
     H = w1.shape[-2]
     G = HQ // H
-    indices_BT = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices_BT)
-    grid = (NT, B * HQ)
+    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
+
     num_blocks = triton.cdiv(T, S) if cu_seqlens is None else get_max_num_splits(cu_seqlens, S)
-    q_new = torch.empty(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
-    transform_q_fwd_kernel[grid](
+    q_new = torch.zeros(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
+    transform_q_fwd_kernel[(NT, B * HQ)](
         q=q,
         q_new=q_new,
         w1=w1,
         w2=w2,
         cu_seqlens=cu_seqlens,
-        indices=indices_BT,
+        indices=indices,
         T=T,
         K=K,
         BK=triton.next_power_of_2(K),

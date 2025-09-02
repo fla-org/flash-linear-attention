@@ -21,7 +21,7 @@ from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recur
 from .log_linear_attn import chunk_log_linear_attn
 from .mesa_net import chunk_mesa_net
 from .nsa import parallel_nsa
-from .path_attn import parallel_path_attention
+from .path_attn import parallel_path_attn
 from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
@@ -45,7 +45,7 @@ __all__ = [
     'chunk_log_linear_attn',
     'chunk_mesa_net',
     'parallel_nsa',
-    'parallel_path_attention',
+    'parallel_path_attn',
     'chunk_retention', 'fused_chunk_retention', 'fused_recurrent_retention', 'parallel_retention',
     'chunk_rwkv6', 'fused_recurrent_rwkv6',
     'chunk_rwkv7', 'fused_recurrent_rwkv7',
