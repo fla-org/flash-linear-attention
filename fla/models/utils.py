@@ -27,7 +27,7 @@ class FlashLinearLayer(CacheLayerMixin):
         super().__init__()
         self.state = None
 
-    def lazy_initialization(self, key_states: torch.Tensor): 
+    def lazy_initialization(self, key_states: torch.Tensor):
         self.state = {
             "recurrent_state": None,
             "attn_state": None,
@@ -281,7 +281,7 @@ class FLACache(HFCacheBase):
         layer_idx: int = 0,
         offset: Optional[int] = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:            
+    ) -> Dict[str, Any]:
         if not self.use_layer_class_to_replicate:
             self.append_new_layers(layer_idx)
         else:
