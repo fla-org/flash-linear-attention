@@ -105,40 +105,97 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
         )
 
         k_new_large, hc_suffix, hc_whole = chunk_cumprod_householder_fwd_fn(
-            k=k_new, w1=w, w2=h, S=S, BT=BS, cu_seqlens=cu_seqlens
+            k=k_new,
+            w1=w,
+            w2=h,
+            S=S,
+            BT=BS,
+            cu_seqlens=cu_seqlens
         )
 
         q_new_large = transform_q_fwd_fn(q=q_new, w1=w, w2=h, cu_seqlens=cu_seqlens, BT=BT, BS=BS, S=S)
 
-        dk, dv, dg_cumsum3 = parallel_path_bwd_dkv_fn(
-            q=q_new_large, k=k_new_large, v=v, g_cumsum=g_cumsum, do=do, dv=dv, dg_cumsum=dg_cumsum,
-            hc_whole=hc_whole, scale=ctx.scale, L=L, D=delta,
+        dk, dv, _ = parallel_path_bwd_dkv_fn(
+            q=q_new_large,
+            k=k_new_large,
+            v=v,
+            g_cumsum=g_cumsum,
+            do=do,
+            dv=dv,
+            dg_cumsum=dg_cumsum,
+            hc_whole=hc_whole,
+            scale=ctx.scale,
             cu_seqlens=cu_seqlens,
-            S=S, BT=BT, BS=BS
+            L=L,
+            D=delta,
+            S=S,
+            BT=BT,
+            BS=BS
         )
         dq, dhc_whole, dg_cumsum = parallel_path_bwd_dq_fn(
-            q=q_new_large, k=k_new_large, v=v, g_cumsum=g_cumsum, do=do, dg_cumsum=dg_cumsum,
-            k_new=k_new, w1=w, w2=h,
-            hc_whole=hc_whole, scale=ctx.scale, L=L, D=delta,
+            q=q_new_large,
+            k=k_new_large,
+            v=v,
+            g_cumsum=g_cumsum,
+            do=do,
+            dg_cumsum=dg_cumsum,
+            hc_whole=hc_whole,
+            scale=ctx.scale,
             cu_seqlens=cu_seqlens,
-            S=S, BT=BT, BS=BS
+            L=L,
+            D=delta,
+            S=S,
+            BT=BT,
+            BS=BS
         )
         dw1, dw2, dk = chunk_cumprod_householder_bwd_fn(
-            w1=w, w2=h,
-            k=k_new, dk=dk, hc_suffix=hc_suffix, dhc_whole=dhc_whole,
-            cu_seqlens=cu_seqlens, S=S, BT=BS
+            w1=w,
+            w2=h,
+            k=k_new,
+            dk=dk,
+            hc_suffix=hc_suffix,
+            dhc_whole=dhc_whole,
+            cu_seqlens=cu_seqlens,
+            S=S,
+            BT=BS
         )
         dq, dk, dv, dw1, dw2, dg_cumsum = parallel_path_bwd_intra_chunk_fn(
-            q=q_new, k=k_new, v=v, g_cumsum=g_cumsum, w1=w, w2=h,
-            L=L, D=delta, scale=ctx.scale, dw1=dw1, dw2=dw2,
-            dq=dq, dk=dk, dv=dv, do=do, dg_cumsum=dg_cumsum,
+            q=q_new,
+            k=k_new,
+            v=v,
+            g_cumsum=g_cumsum,
+            w1=w,
+            w2=h,
+            L=L,
+            D=delta,
+            scale=ctx.scale,
+            dw1=dw1,
+            dw2=dw2,
+            dq=dq,
+            dk=dk,
+            dv=dv,
+            do=do,
+            dg_cumsum=dg_cumsum,
             cu_seqlens=cu_seqlens,
-            S=S, BT=BS
+            S=S,
+            BT=BS
         )
         dq, dk, dbeta, dw = intra_chunk_preprocess_bwd_fn(
-            q=q, k=k, w=w, beta=beta,
-            dq=dq, dk=dk, dw1=dw1, dw2=dw2, dA_local=dA_local,
-            A=A, L=L, D=delta, do=do, scale=ctx.scale, cu_seqlens=cu_seqlens
+            q=q,
+            k=k,
+            w=w,
+            beta=beta,
+            dq=dq,
+            dk=dk,
+            dw1=dw1,
+            dw2=dw2,
+            dA_local=dA_local,
+            A=A,
+            L=L,
+            D=delta,
+            do=do,
+            scale=ctx.scale,
+            cu_seqlens=cu_seqlens
         )
         G = q.shape[-2] // k.shape[-2]
         if G > 1:
@@ -156,7 +213,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
-def parallel_path_attention(
+def parallel_path_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -189,15 +246,13 @@ def parallel_path_attention(
             consistent with the FlashAttention API.
         use_cache (bool):
             Whether to transform and cache the key values for decoding. Default: `False`.
+
     Returns:
         o (torch.Tensor):
             output of shape `[B, T, HQ, V]`
         k_cache (torch.Tensor):
             k_cache of shape `[B, T, H, K]`
     """
-    # if q.shape[-1] > 64 and check_shared_mem('hopper') is False:
-    # assert False, "Head dimension 128 only supported on Hopper or later. Stay tuned for Ampere support!"
-
     if scale is None:
         scale = k.shape[-1]**-0.5
     assert q.shape[-1] in [16, 32, 64, 128], "only support head_dim in [16, 32, 64, 128] for now. Stay tuned!"
@@ -210,3 +265,6 @@ def parallel_path_attention(
     assert q.shape[-2] % k.shape[-2] == 0, 'the number of query heads should be divisible by the number of key heads'
     o, k_cache = ParallelPATHAttentionFunction.apply(q, k, v, w, beta, g, scale, cu_seqlens, use_cache)
     return o, k_cache
+
+
+parallel_path_attention = parallel_path_attn

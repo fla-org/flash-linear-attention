@@ -2,25 +2,41 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils import prepare_chunk_indices
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_GATE': lambda args: args['g_cumsum'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def parallel_path_fwd_kernel(
-    q, k, v, o, o_new, g_cumsum, w1, w2, scale, L, L_new, M,
-    offsets, indices, chunk_offsets,
+    q,
+    k,
+    v,
+    o,
+    o_new,
+    g_cumsum,
+    w1,
+    w2,
+    scale,
+    L,
+    L_new,
+    M,
+    cu_seqlens,
+    indices,
     T,
-    G: tl.constexpr, HQ: tl.constexpr, H: tl.constexpr,
-    K: tl.constexpr, V: tl.constexpr,
-    BT: tl.constexpr, BS: tl.constexpr,
+    G: tl.constexpr,
+    HQ: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    USE_GATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_GATE: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -28,7 +44,7 @@ def parallel_path_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         i_n = i_b
@@ -125,16 +141,26 @@ def parallel_path_fwd_kernel(
 
 
 def parallel_path_fwd_fn(
-    q, k, v, o, g_cumsum, w1, w2, scale, L, M,
-    cu_seqlens, BT, BS,
+    q,
+    k,
+    v,
+    o,
+    g_cumsum,
+    w1,
+    w2,
+    scale,
+    L,
+    M,
+    cu_seqlens,
+    BT,
+    BS,
 ):
     B, T, HQ, K = q.shape
     V = v.shape[-1]
     H = k.shape[-2]
     G = HQ // H
-    indices_BT = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices_BT)
+    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B * HQ)
     o_new = torch.empty_like(o, dtype=v.dtype)
     L_new = torch.empty_like(L)
@@ -149,9 +175,8 @@ def parallel_path_fwd_fn(
         w2=w2,
         g_cumsum=g_cumsum,
         scale=scale,
-        chunk_offsets=chunk_offsets,
-        offsets=cu_seqlens,
-        indices=indices_BT,
+        cu_seqlens=cu_seqlens,
+        indices=indices,
         L=L,
         L_new=L_new,
         M=M,
