@@ -80,12 +80,12 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         b_h4 = tl.zeros([64, BV], dtype=tl.float32)
 
     # calculate offset
-    h += (boh * H + i_h) * K*V
-    v += (bos * H + i_h) * V
-    k += (bos * H + i_h) * K
-    w += (bos * H + i_h) * K
+    h += ((boh * H + i_h) * K*V).to(tl.int64)
+    v += ((bos * H + i_h) * V).to(tl.int64)
+    k += ((bos * H + i_h) * K).to(tl.int64)
+    w += ((bos * H + i_h) * K).to(tl.int64)
     if SAVE_NEW_VALUE:
-        v_new += (bos * H + i_h) * V
+        v_new += ((bos * H + i_h) * V).to(tl.int64)
     stride_v = H*V
     stride_h = H*K*V
     stride_k = H*K
@@ -275,15 +275,15 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         b_dh4 = tl.zeros([64, BV], dtype=tl.float32)
 
     # calculate offset
-    q += (bos * H + i_h) * K
-    k += (bos * H + i_h) * K
-    w += (bos * H + i_h) * K
-    do += (bos * H + i_h) * V
-    dv += (bos * H + i_h) * V
-    dv2 += (bos * H + i_h) * V
-    dh += (boh * H + i_h) * K*V
+    q += ((bos * H + i_h) * K).to(tl.int64)
+    k += ((bos * H + i_h) * K).to(tl.int64)
+    w += ((bos * H + i_h) * K).to(tl.int64)
+    do += ((bos * H + i_h) * V).to(tl.int64)
+    dv += ((bos * H + i_h) * V).to(tl.int64)
+    dv2 += ((bos * H + i_h) * V).to(tl.int64)
+    dh += ((boh * H + i_h) * K*V).to(tl.int64)
     if USE_GK:
-        gk += (bos * H + i_h) * K
+        gk += ((bos * H + i_h) * K).to(tl.int64)
 
     stride_v = H*V
     stride_h = H*K*V
