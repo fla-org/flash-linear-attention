@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict, List, Optional, Union
 
 import torch
-import inspect
 import transformers
 from packaging import version
 from transformers.cache_utils import Cache as HFCacheBase
