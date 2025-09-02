@@ -28,12 +28,7 @@ class FlashLinearLayer(CacheLayerMixin):
         self.state = None
 
     def lazy_initialization(self, key_states: torch.Tensor):
-        self.state = {
-            "recurrent_state": None,
-            "attn_state": None,
-            "conv_state": None,
-            "ffn_state": None,
-        }
+        self.state = None
 
     def update(
         self,
