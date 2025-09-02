@@ -102,7 +102,7 @@ class FlashLinearLayer(CacheLayerMixin):
         return 0, 0
 
 
-class LegacyCache(HFCacheBase):
+class LegacyFLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
@@ -114,7 +114,7 @@ class LegacyCache(HFCacheBase):
     def __init__(
         self,
         seen_tokens: int = 0
-    ) -> LegacyCache:
+    ) -> LegacyFLACache:
         super().__init__()
 
         self.states: List[Dict[str, Any]] = []
@@ -234,7 +234,7 @@ class LegacyCache(HFCacheBase):
         cls,
         past_key_values: Optional[tuple] = None,
         seen_tokens: int = 0
-    ) -> LegacyCache:
+    ) -> LegacyFLACache:
         """Converts a cache in the legacy cache format into an equivalent `Cache`."""
 
         cache = cls(seen_tokens)
@@ -244,7 +244,7 @@ class LegacyCache(HFCacheBase):
         return cache
 
 
-class NewStyleCache(HFCacheBase):
+class FLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
@@ -335,7 +335,7 @@ class NewStyleCache(HFCacheBase):
         past_key_values: Optional[tuple[Dict[str, Any], ...]] = None,
         seen_tokens: int = 0,
         **kwargs,
-    ) -> NewStyleCache:
+    ) -> FLACache:
         cache = cls(seen_tokens=seen_tokens, **kwargs)
         if isinstance(past_key_values, (list, tuple)):
             for i, st in enumerate(past_key_values):
@@ -345,10 +345,10 @@ class NewStyleCache(HFCacheBase):
 
 
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
-    class Cache(NewStyleCache):
+    class Cache(FLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens, **kwargs)
 else:
-    class Cache(LegacyCache):
+    class Cache(LegacyFLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens)
