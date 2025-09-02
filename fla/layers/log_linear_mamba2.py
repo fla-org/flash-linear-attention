@@ -76,10 +76,10 @@ def hmamba_chunk_scan_combined(
         dt = torch.nn.functional.softplus(dt)
     if dt_limit != (0.0, float("inf")):
         dt = torch.clamp(dt, min=dt_limit[0], max=dt_limit[1])
-    x = x * rearrange(dt, "b l h -> b l h 1")
+    x = (x * rearrange(dt, "b l h -> b l h 1")).to(x.dtype)
     A = rearrange(A, "h -> 1 1 h") * dt
 
-    L = torch.nn.functional.softplus(rearrange(L, "h ell -> 1 1 h ell") * dl)
+    L = torch.nn.functional.softplus(rearrange(L, "h ell -> 1 1 h ell") * dl).to(L.dtype)
 
     y, state = chunk_log_linear_attn(
         q=C,

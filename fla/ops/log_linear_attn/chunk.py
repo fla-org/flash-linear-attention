@@ -1730,6 +1730,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         dl = torch.zeros(level_scales.shape, dtype=torch.float, device=v.device)
         h_l = torch.zeros((B, NT, H, K, V), dtype=torch.float, device=v.device)
         dg_last = torch.zeros((B, NT, H), dtype=torch.float, device=v.device)
+        do = do.to(v.dtype)
 
         grid = (B * H,)
 
