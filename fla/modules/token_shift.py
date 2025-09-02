@@ -106,7 +106,7 @@ def token_shift_fwd_kernel_short(
     else:
         cache_offset = i_b * D + o_d  # i_b is batch index
 
-    if IS_DECODE:
+    if IS_DECODE and USE_INITIAL_STATE:
         b_cache = tl.load(cache + cache_offset, mask=m_d)
         delta = b_cache - b_x
         tl.store(y + base_offset, delta, mask=m_d)
