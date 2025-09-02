@@ -267,7 +267,7 @@ class FLACache(HFCacheBase):
         else:
             raise TypeError(
                 "FLA cache initialization failed: HFCacheBase.__init__ accepts neither "
-                "'layers' nor 'layer_classes'. This might be caused by an incompatible "
+                "'layer_class_to_replicate' nor 'layer_classes'. This might be caused by an incompatible "
                 "transformers version. Please check your transformers>=4.36.0"
             )
         self._seen_tokens = int(seen_tokens)
