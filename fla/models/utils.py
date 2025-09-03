@@ -84,13 +84,18 @@ class FlashLinearLayer(CacheLayerMixin):
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
 
-        _device_tensor = (
-            recurrent_state or
-            (attn_state[0] if attn_state else None) or
-            conv_state or
-            ffn_state
-        )
-        self.device = _device_tensor.device
+        _device_tensor = None
+        if recurrent_state is not None:
+            _device_tensor = recurrent_state
+        elif attn_state is not None:
+            _device_tensor = attn_state[0]
+        elif conv_state is not None:
+            _device_tensor = conv_state
+        elif ffn_state is not None:
+            _device_tensor = ffn_state
+
+        if _device_tensor is not None:
+            self.device = _device_tensor.device
 
         return self.state
 
