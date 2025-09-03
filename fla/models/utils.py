@@ -84,6 +84,14 @@ class FlashLinearLayer(CacheLayerMixin):
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
 
+        _device_tensor = (
+            recurrent_state or
+            (attn_state[0] if attn_state else None) or
+            conv_state or
+            ffn_state
+        )
+        self.device = _device_tensor.device
+
         return self.state
 
     def get_seq_length(self, cache_position=None) -> int:
@@ -95,6 +103,40 @@ class FlashLinearLayer(CacheLayerMixin):
 
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
         return 0, 0
+
+    def offload(self):
+        if self.state is None:
+            return
+
+        def to_cpu(x):
+            return x.to("cpu", non_blocking=True) if isinstance(x, torch.Tensor) else x
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+            v = self.state.get(k, None)
+            if v is None:
+                continue
+            if isinstance(v, (tuple, list)):
+                self.state[k] = tuple(to_cpu(t) for t in v)
+            else:
+                self.state[k] = to_cpu(v)
+
+    def prefetch(self):
+        if self.state is None:
+            return
+        dev = self.device
+
+        def to_dev(x):
+            return x.to(dev, non_blocking=True) if isinstance(x, torch.Tensor) else x
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+            v = self.state.get(k, None)
+            if v is None:
+                continue
+            if isinstance(v, (tuple, list)):
+                self.state[k] = tuple(to_dev(t) for t in v)
+            else:
+                self.state[k] = to_dev(v)
+
+    def reset(self):
+        pass
 
 
 class LegacyFLACache(HFCacheBase):
