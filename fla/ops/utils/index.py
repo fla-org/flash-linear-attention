@@ -45,11 +45,19 @@ def prepare_lens_from_mask(mask: torch.BoolTensor) -> torch.LongTensor:
 
 
 @tensor_cache
+def prepare_cu_seqlens_from_lens(
+    lens: torch.LongTensor,
+    dtype: Optional[torch.dtype] = torch.int32
+) -> torch.LongTensor:
+    return F.pad(lens.cumsum(dim=0, dtype=dtype), (1, 0))
+
+
+@tensor_cache
 def prepare_cu_seqlens_from_mask(
     mask: torch.BoolTensor,
     dtype: Optional[torch.dtype] = torch.int32
 ) -> torch.LongTensor:
-    return F.pad(prepare_lens_from_mask(mask).cumsum(dim=0, dtype=dtype), (1, 0))
+    return prepare_cu_seqlens_from_lens(prepare_lens_from_mask(mask), dtype)
 
 
 @tensor_cache

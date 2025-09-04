@@ -9,15 +9,16 @@ from .cumsum import (
     chunk_local_cumsum_vector
 )
 from .index import (
+    get_max_num_splits,
     prepare_chunk_indices,
     prepare_chunk_offsets,
+    prepare_cu_seqlens_from_lens,
     prepare_cu_seqlens_from_mask,
     prepare_lens,
     prepare_lens_from_mask,
     prepare_position_ids,
     prepare_sequence_ids,
-    prepare_token_indices,
-    get_max_num_splits
+    prepare_token_indices
 )
 from .logsumexp import logsumexp_fwd
 from .matmul import addmm, matmul
@@ -37,6 +38,7 @@ __all__ = [
     'unpack_sequence',
     'prepare_chunk_indices',
     'prepare_chunk_offsets',
+    'prepare_cu_seqlens_from_lens',
     'prepare_cu_seqlens_from_mask',
     'prepare_lens',
     'prepare_lens_from_mask',
