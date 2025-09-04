@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -24,6 +25,9 @@ class FlashLinearLayer(CacheLayerMixin):
 
     def __init__(self):
         super().__init__()
+        self.state = None
+
+    def lazy_initialization(self, key_states: torch.Tensor):
         self.state = None
 
     def update(
@@ -80,6 +84,19 @@ class FlashLinearLayer(CacheLayerMixin):
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
 
+        _device_tensor = None
+        if recurrent_state is not None:
+            _device_tensor = recurrent_state
+        elif attn_state is not None:
+            _device_tensor = attn_state[0]
+        elif conv_state is not None:
+            _device_tensor = conv_state
+        elif ffn_state is not None:
+            _device_tensor = ffn_state
+
+        if _device_tensor is not None:
+            self.device = _device_tensor.device
+
         return self.state
 
     def get_seq_length(self, cache_position=None) -> int:
@@ -92,8 +109,42 @@ class FlashLinearLayer(CacheLayerMixin):
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
         return 0, 0
 
+    def offload(self):
+        if self.state is None:
+            return
 
-class LegacyCache(HFCacheBase):
+        def to_cpu(x):
+            return x.to("cpu", non_blocking=True) if isinstance(x, torch.Tensor) else x
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+            v = self.state.get(k, None)
+            if v is None:
+                continue
+            if isinstance(v, (tuple, list)):
+                self.state[k] = tuple(to_cpu(t) for t in v)
+            else:
+                self.state[k] = to_cpu(v)
+
+    def prefetch(self):
+        if self.state is None:
+            return
+        dev = self.device
+
+        def to_dev(x):
+            return x.to(dev, non_blocking=True) if isinstance(x, torch.Tensor) else x
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+            v = self.state.get(k, None)
+            if v is None:
+                continue
+            if isinstance(v, (tuple, list)):
+                self.state[k] = tuple(to_dev(t) for t in v)
+            else:
+                self.state[k] = to_dev(v)
+
+    def reset(self):
+        pass
+
+
+class LegacyFLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
@@ -105,7 +156,7 @@ class LegacyCache(HFCacheBase):
     def __init__(
         self,
         seen_tokens: int = 0
-    ) -> LegacyCache:
+    ) -> LegacyFLACache:
         super().__init__()
 
         self.states: List[Dict[str, Any]] = []
@@ -225,7 +276,7 @@ class LegacyCache(HFCacheBase):
         cls,
         past_key_values: Optional[tuple] = None,
         seen_tokens: int = 0
-    ) -> LegacyCache:
+    ) -> LegacyFLACache:
         """Converts a cache in the legacy cache format into an equivalent `Cache`."""
 
         cache = cls(seen_tokens)
@@ -235,7 +286,7 @@ class LegacyCache(HFCacheBase):
         return cache
 
 
-class NewStyleCache(HFCacheBase):
+class FLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
@@ -245,7 +296,22 @@ class NewStyleCache(HFCacheBase):
     is_compileable = True
 
     def __init__(self, seen_tokens: int = 0, **kwargs):
-        super().__init__(layer_classes=FlashLinearLayer, **kwargs)
+        parent_init = super().__init__
+        sig = inspect.signature(parent_init)
+        param_names = list(sig.parameters.keys())
+
+        if 'layer_class_to_replicate' in param_names:
+            self.use_layer_class_to_replicate = True
+            super().__init__(layer_class_to_replicate=FlashLinearLayer, **kwargs)
+        elif 'layer_classes' in param_names:
+            self.use_layer_class_to_replicate = False
+            super().__init__(layer_classes=FlashLinearLayer, **kwargs)
+        else:
+            raise TypeError(
+                "FLA cache initialization failed: HFCacheBase.__init__ accepts neither "
+                "'layer_class_to_replicate' nor 'layer_classes'. This might be caused by an incompatible "
+                "transformers version. Please check your transformers>=4.36.0"
+            )
         self._seen_tokens = int(seen_tokens)
 
     def update(
@@ -258,7 +324,11 @@ class NewStyleCache(HFCacheBase):
         offset: Optional[int] = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        self.append_new_layers(layer_idx)
+        if not self.use_layer_class_to_replicate:
+            self.append_new_layers(layer_idx)
+        else:
+            while len(self.layers) <= layer_idx:
+                self.layers.append(self.layer_class_to_replicate())
         if layer_idx == 0:
             self._seen_tokens += int(offset)
 
@@ -307,7 +377,7 @@ class NewStyleCache(HFCacheBase):
         past_key_values: Optional[tuple[Dict[str, Any], ...]] = None,
         seen_tokens: int = 0,
         **kwargs,
-    ) -> NewStyleCache:
+    ) -> FLACache:
         cache = cls(seen_tokens=seen_tokens, **kwargs)
         if isinstance(past_key_values, (list, tuple)):
             for i, st in enumerate(past_key_values):
@@ -317,10 +387,10 @@ class NewStyleCache(HFCacheBase):
 
 
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
-    class Cache(NewStyleCache):
+    class Cache(FLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens, **kwargs)
 else:
-    class Cache(LegacyCache):
+    class Cache(LegacyFLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens)
