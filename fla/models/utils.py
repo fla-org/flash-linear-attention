@@ -19,7 +19,7 @@ else:
     CacheLayerMixin = object
 
 
-class FlashLinearLayer(CacheLayerMixin):
+class FLALayer(CacheLayerMixin):
     is_compileable = True
     is_sliding = False
 
@@ -84,18 +84,12 @@ class FlashLinearLayer(CacheLayerMixin):
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
 
-        _device_tensor = None
-        if recurrent_state is not None:
-            _device_tensor = recurrent_state
-        elif attn_state is not None:
-            _device_tensor = attn_state[0]
-        elif conv_state is not None:
-            _device_tensor = conv_state
-        elif ffn_state is not None:
-            _device_tensor = ffn_state
-
-        if _device_tensor is not None:
-            self.device = _device_tensor.device
+        if not hasattr(self, 'device'):
+            self.device = 'cpu'
+        for state in (recurrent_state, attn_state, conv_state, ffn_state):
+            if state is not None:
+                self.device = state.device if isinstance(state, torch.Tensor) else state[0].device
+                break
 
         return self.state
 
@@ -127,10 +121,9 @@ class FlashLinearLayer(CacheLayerMixin):
     def prefetch(self):
         if self.state is None:
             return
-        dev = self.device
 
         def to_dev(x):
-            return x.to(dev, non_blocking=True) if isinstance(x, torch.Tensor) else x
+            return x.to(self.device, non_blocking=True) if isinstance(x, torch.Tensor) else x
         for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
             v = self.state.get(k, None)
             if v is None:
@@ -302,10 +295,10 @@ class FLACache(HFCacheBase):
 
         if 'layer_class_to_replicate' in param_names:
             self.use_layer_class_to_replicate = True
-            super().__init__(layer_class_to_replicate=FlashLinearLayer, **kwargs)
+            super().__init__(layer_class_to_replicate=FLALayer, **kwargs)
         elif 'layer_classes' in param_names:
             self.use_layer_class_to_replicate = False
-            super().__init__(layer_classes=FlashLinearLayer, **kwargs)
+            super().__init__(layer_classes=FLALayer, **kwargs)
         else:
             raise TypeError(
                 "FLA cache initialization failed: HFCacheBase.__init__ accepts neither "
