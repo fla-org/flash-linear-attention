@@ -147,7 +147,6 @@ class GDN2(nn.Module):
         self.v_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
 
         if use_short_conv:
-            self.conv_size = conv_size
             self.q_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
@@ -167,13 +166,12 @@ class GDN2(nn.Module):
                 activation='silu'
             )
 
-        self.A = nn.Parameter(torch.log(torch.empty(self.key_dim, dtype=torch.float32).uniform_(0, 16)))
+        self.A = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)))
         self.f_proj = nn.Sequential(
             nn.Linear(hidden_size, self.head_v_dim, bias=False),
             nn.Linear(self.head_v_dim, self.key_dim, bias=True)
         )
-
-        self.b_proj = nn.Linear(hidden_size, self.num_v_heads, bias=False)
+        self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
 
         if use_output_gate:
             self.g_proj = nn.Sequential(
@@ -243,11 +241,12 @@ class GDN2(nn.Module):
             k = F.silu(self.k_proj(hidden_states))
             v = F.silu(self.v_proj(hidden_states))
 
-        g = -self.A.float().exp() * F.softplus(self.f_proj(hidden_states).float())
+        g = self.f_proj(hidden_states)
+        g = -self.A.float().exp().unsqueeze(-1) * F.softplus(rearrange(g, '... (h d) -> ... h d', d=self.head_k_dim).float())
         beta = self.b_proj(hidden_states).sigmoid()
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
-        v, g = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_v_dim), (v, g))
+        v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 
         if self.num_v_heads > self.num_heads:
             q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
@@ -294,8 +293,7 @@ class GDN2(nn.Module):
             )
 
         if self.use_output_gate:
-            g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
-            o = self.o_norm(o, g)
+            o = self.o_norm(o, rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim))
         else:
             o = self.o_norm(o)
         o = rearrange(o, 'b t h d -> b t (h d)')

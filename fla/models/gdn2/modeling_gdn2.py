@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -130,25 +129,19 @@ class GDN2PreTrainedModel(PreTrainedModel):
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, GDN2) and next(module.parameters()).device.type != 'meta':
-            if self.config.decay_type == 'mamba':
-                with torch.no_grad():
-                    module.A.copy_(
-                        nn.init.uniform_(
-                            module.A[:module.num_heads], a=0, b=16
-                        ).unsqueeze(-1).repeat(1, module.head_k_dim).view(-1).log()
-                    )
-
-                    dt = torch.exp(
-                        nn.init.uniform_(module.f_proj[1].bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001)
-                    ).clamp(min=1e-4)
-                    inv_dt = dt + torch.log(-torch.expm1(-dt))
-                    module.f_proj[1].bias.copy_(inv_dt)
-                    module.f_proj[1].bias._hf_initialized = True
+            with torch.no_grad():
+                module.A.copy_(nn.init.uniform_(module.A, a=1, b=16).log())
+                dt = torch.exp(
+                    nn.init.uniform_(module.f_proj[1].bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001)
+                ).clamp(min=1e-4)
+                inv_dt = dt + torch.log(-torch.expm1(-dt))
+                module.f_proj[1].bias.copy_(inv_dt)
+                module.f_proj[1].bias._is_hf_initialized = True
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
+            if module.bias is not None and not getattr(module.bias, '_is_hf_initialized', False):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
