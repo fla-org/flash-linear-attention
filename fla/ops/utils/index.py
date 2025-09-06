@@ -61,6 +61,13 @@ def prepare_cu_seqlens_from_mask(
 
 
 @tensor_cache
+def prepare_lens_from_cu_seqlens(
+    cu_seqlens: torch.LongTensor,
+) -> torch.LongTensor:
+    return cu_seqlens[1:] - cu_seqlens[:-1]
+
+
+@tensor_cache
 def prepare_split_cu_seqlens(
     batch_size: int,
     seq_len: int,

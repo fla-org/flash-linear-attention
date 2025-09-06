@@ -17,6 +17,7 @@ from .hgrn import HGRNAttention
 from .hgrn2 import HGRN2Attention
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
+from .log_linear_mamba2 import LogLinearMamba2
 from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mesa_net import MesaNet
@@ -47,6 +48,7 @@ __all__ = [
     'HGRN2Attention',
     'LightNetAttention',
     'LinearAttention',
+    'LogLinearMamba2',
     'Mamba',
     'Mamba2',
     'MesaNet',

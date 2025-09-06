@@ -18,6 +18,7 @@ from fla.models.hgrn import HGRNConfig, HGRNForCausalLM, HGRNModel
 from fla.models.hgrn2 import HGRN2Config, HGRN2ForCausalLM, HGRN2Model
 from fla.models.lightnet import LightNetConfig, LightNetForCausalLM, LightNetModel
 from fla.models.linear_attn import LinearAttentionConfig, LinearAttentionForCausalLM, LinearAttentionModel
+from fla.models.log_linear_mamba2 import LogLinearMamba2Config, LogLinearMamba2ForCausalLM, LogLinearMamba2Model
 from fla.models.mamba import MambaConfig, MambaForCausalLM, MambaModel
 from fla.models.mamba2 import Mamba2Config, Mamba2ForCausalLM, Mamba2Model
 from fla.models.mesa_net import MesaNetConfig, MesaNetForCausalLM, MesaNetModel
@@ -47,6 +48,7 @@ __all__ = [
     'HGRN2Config', 'HGRN2ForCausalLM', 'HGRN2Model',
     'LightNetConfig', 'LightNetForCausalLM', 'LightNetModel',
     'LinearAttentionConfig', 'LinearAttentionForCausalLM', 'LinearAttentionModel',
+    'LogLinearMamba2Config', 'LogLinearMamba2ForCausalLM', 'LogLinearMamba2Model',
     'MambaConfig', 'MambaForCausalLM', 'MambaModel',
     'Mamba2Config', 'Mamba2ForCausalLM', 'Mamba2Model',
     'MesaNetConfig', 'MesaNetForCausalLM', 'MesaNetModel',
