@@ -21,16 +21,6 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-@torch.compile
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
-@torch.compile
-def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
-
-
 class GDN2(nn.Module):
     """
     The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
