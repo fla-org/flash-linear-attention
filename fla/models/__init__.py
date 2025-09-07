@@ -38,6 +38,7 @@ __all__ = [
     'BitNetConfig', 'BitNetForCausalLM', 'BitNetModel',
     'CombaConfig', 'CombaForCausalLM', 'CombaModel',
     'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
+    'DeltaFormerConfig', 'DeltaFormerForCausalLM', 'DeltaFormerModel',
     'ForgettingTransformerConfig', 'ForgettingTransformerForCausalLM', 'ForgettingTransformerModel',
     'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
     'GatedDeltaProductConfig', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
@@ -61,5 +62,4 @@ __all__ = [
     'RWKV7Config', 'RWKV7ForCausalLM', 'RWKV7Model',
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
-    'DeltaFormerConfig', 'DeltaFormerForCausalLM', 'DeltaFormerModel',
 ]

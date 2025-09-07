@@ -6,6 +6,7 @@ from fla.layers import (
     BasedLinearAttention,
     BitAttention,
     Comba,
+    DeltaFormerAttention,
     DeltaNet,
     GatedDeltaNet,
     GatedDeltaProduct,
@@ -85,6 +86,7 @@ __all__ = [
     'BitAttention', 'BitNetForCausalLM', 'BitNetModel',
     'Comba', 'CombaForCausalLM', 'CombaModel',
     'DeltaNet', 'DeltaNetForCausalLM', 'DeltaNetModel',
+    'DeltaFormerAttention', 'DeltaFormerForCausalLM', 'DeltaFormerModel',
     'GatedDeltaNet', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
     'GatedDeltaProduct', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
     'GatedLinearAttention', 'GLAForCausalLM', 'GLAModel',
@@ -104,7 +106,6 @@ __all__ = [
     'RodimusAttention', 'RodimusForCausalLM', 'RodimusModel',
     'RWKV6Attention', 'RWKV6ForCausalLM', 'RWKV6Model',
     'RWKV7Attention', 'RWKV7ForCausalLM', 'RWKV7Model',
-    'DeltaFormerForCausalLM', 'DeltaFormerModel',
 ]
 
-__version__ = '0.3.1'
+__version__ = '0.3.2'

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Dict, Optional
 
 from transformers.configuration_utils import PretrainedConfig
@@ -41,7 +42,6 @@ class DeltaFormerConfig(PretrainedConfig):
         vocab_size: int = 32000,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
-        use_return_dict: bool = True,
         **kwargs
     ):
         self.hidden_size = hidden_size
@@ -70,10 +70,17 @@ class DeltaFormerConfig(PretrainedConfig):
 
         self.output_attentions = output_attentions
         self.output_hidden_states = output_hidden_states
-        self.use_return_dict = use_return_dict
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
-            raise ValueError("`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.")
+            raise ValueError(
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
+            )
+        if fuse_linear_cross_entropy:
+            warnings.warn(
+                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
+                "at the potential cost of reduced precision. "
+                "If you observe issues like loss divergence, consider disabling this setting."
+            )
 
         if attn is not None:
             if not isinstance(attn, Dict):

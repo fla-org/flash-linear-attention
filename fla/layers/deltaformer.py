@@ -83,7 +83,7 @@ class DeltaFormerAttention(nn.Module):
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
-        self.beta_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
+        self.b_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         if qk_norm:
@@ -112,7 +112,7 @@ class DeltaFormerAttention(nn.Module):
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
-        beta = rearrange(self.beta_proj(hidden_states), 'b t h -> b h t')
+        beta = rearrange(self.b_proj(hidden_states), 'b t h -> b h t')
 
         if self.num_kv_groups > 1:
             k = repeat(k, 'b t h d -> b t (h g) d', g=self.num_kv_groups)
