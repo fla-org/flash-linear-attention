@@ -160,7 +160,14 @@ def delta_flash_attn_compileable(
 
 
 def _config_delta_flash_attn():
-    return [triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=3, num_warps=8) for BC in [128] for BT in [64]]
+    # Provide multiple tile sizes so Triton can select variants that fit device shared memory
+    return [
+        triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
+        for BC in [128, 64]
+        for BT in [64, 32]
+        for ns in [3, 2]
+        for nw in [8, 4]
+    ]
 
 
 @triton.autotune(configs=_config_delta_flash_attn(), key=['C', 'D'])
@@ -321,7 +328,14 @@ def flash_attn_kernel(
 
 
 def _config_backward_u_chunk():
-    return [triton.Config({'BLOCK_C': 128, 'BLOCK_T': 64}, num_stages=3, num_warps=8)]
+    # Add smaller tile sizes and fewer stages to reduce shared memory usage on constrained GPUs
+    return [
+        triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
+        for BC in [128, 64]
+        for BT in [64, 32]
+        for ns in [3, 2]
+        for nw in [8, 4]
+    ]
 
 
 @triton.autotune(configs=_config_backward_u_chunk(), key=['C', 'D'])
@@ -428,7 +442,14 @@ def backward_u_chunk_kernel(
 
 
 def _config_backward_p_row_sum():
-    return [triton.Config({'BLOCK_C': 128, 'BLOCK_T': 64}, num_stages=4, num_warps=8)]
+    # Broaden autotune space to include smaller tiles / fewer stages
+    return [
+        triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
+        for BC in [128, 64]
+        for BT in [64, 32]
+        for ns in [4, 3, 2]
+        for nw in [8, 4]
+    ]
 
 
 @triton.autotune(configs=_config_backward_p_row_sum(), key=['T', 'D'])
@@ -539,7 +560,13 @@ def backward_p_row_sum_kernel(
 
 
 def _config_backward_k():
-    return [triton.Config({'BLOCK_C': 64}, num_stages=4, num_warps=4)]
+    # Allow a smaller column tile as fallback
+    return [
+        triton.Config({'BLOCK_C': BC}, num_stages=ns, num_warps=nw)
+        for BC in [64, 32]
+        for ns in [4, 3]
+        for nw in [4]
+    ]
 
 
 @triton.autotune(configs=_config_backward_k(), key=['T', 'D'])
