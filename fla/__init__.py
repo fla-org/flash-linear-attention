@@ -34,6 +34,8 @@ from fla.models import (
     BitNetModel,
     CombaForCausalLM,
     CombaModel,
+    DeltaFormerForCausalLM,
+    DeltaFormerModel,
     DeltaNetForCausalLM,
     DeltaNetModel,
     GatedDeltaNetForCausalLM,
@@ -102,6 +104,7 @@ __all__ = [
     'RodimusAttention', 'RodimusForCausalLM', 'RodimusModel',
     'RWKV6Attention', 'RWKV6ForCausalLM', 'RWKV6Model',
     'RWKV7Attention', 'RWKV7ForCausalLM', 'RWKV7Model',
+    'DeltaFormerForCausalLM', 'DeltaFormerModel',
 ]
 
 __version__ = '0.3.1'

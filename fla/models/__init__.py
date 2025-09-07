@@ -4,6 +4,7 @@ from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
 from fla.models.comba import CombaConfig, CombaForCausalLM, CombaModel
 from fla.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
+from fla.models.deltaformer import DeltaFormerConfig, DeltaFormerForCausalLM, DeltaFormerModel
 from fla.models.forgetting_transformer import (
     ForgettingTransformerConfig,
     ForgettingTransformerForCausalLM,
@@ -60,4 +61,5 @@ __all__ = [
     'RWKV7Config', 'RWKV7ForCausalLM', 'RWKV7Model',
     'SambaConfig', 'SambaForCausalLM', 'SambaModel',
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
+    'DeltaFormerConfig', 'DeltaFormerForCausalLM', 'DeltaFormerModel',
 ]

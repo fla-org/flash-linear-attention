@@ -7,6 +7,7 @@ from .based import BasedLinearAttention
 from .bitattn import BitAttention
 from .comba import Comba
 from .delta_net import DeltaNet
+from .deltaformer import DeltaFormerAttention
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
@@ -60,4 +61,5 @@ __all__ = [
     'RWKV6Attention',
     'RWKV7Attention',
     'SlidingWindowSharedKeyAttention',
+    'DeltaFormerAttention',
 ]
