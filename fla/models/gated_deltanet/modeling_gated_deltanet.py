@@ -23,11 +23,6 @@ from fla.modules import GatedMLP as GatedDeltaNetMLP
 from fla.modules import RMSNorm
 from fla.modules.l2warp import l2_warp
 
-try:
-    from torch.distributed.tensor import DTensor
-except (ImportError, AttributeError):
-    DTensor = None
-
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
@@ -134,38 +129,17 @@ class GatedDeltaNetPreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: Optional[str] = None,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, GatedDeltaNet):
-
-            # --- A_log ---
-            A = torch.empty(module.num_v_heads, dtype=torch.float32).uniform_(0, 16)
+        if isinstance(module, GatedDeltaNet) and next(module.parameters()).device.type != 'meta':
             with torch.no_grad():
-                if not isinstance(module.A_log, DTensor):
-                    module.A_log.copy_(torch.log(A))
-                else:
-                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
-            module.A_log._no_weight_decay = True
-
-            # --- dt_bias ---
-            # hard coded for now
-            dt_min = 0.001
-            dt_max = 0.1
-            dt_init_floor = 1e-4
-            dt = torch.exp(
-                torch.rand(module.num_v_heads) * (math.log(dt_max) - math.log(dt_min))
-                + math.log(dt_min)
-            )
-            dt = torch.clamp(dt, min=dt_init_floor)
-            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-            inv_dt = dt + torch.log(-torch.expm1(-dt))
-            with torch.no_grad():
-                if not isinstance(module.dt_bias, DTensor):
-                    module.dt_bias.copy_(inv_dt)
-                else:
-                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
-            # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
-            # name.endswith("bias") in param_grouping.py
-            module.dt_bias._no_weight_decay = True
-            module.dt_bias._no_reinit = True
+                module.A_log.copy_(nn.init.uniform_(module.A_log, a=0, b=16).log())
+                module.A_log._no_weight_decay = True
+                dt = torch.exp(
+                    nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001)
+                ).clamp(min=1e-4)
+                # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                inv_dt = dt + torch.log(-torch.expm1(-dt))
+                module.dt_bias.copy_(inv_dt)
+                module.dt_bias._no_weight_decay = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
