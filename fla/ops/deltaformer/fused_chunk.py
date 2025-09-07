@@ -121,7 +121,7 @@ def backward_qk(
         B, T, D,
         fa_scale, qk_scale
     )
-    return grad_q, grad_k, row_dot_sum
+    return grad_q, grad_k, row_dot_sum  # row_dot_sum is the gradient w.r.t. the per-row beta scaling
 
 
 def delta_flash_attn_compileable(
