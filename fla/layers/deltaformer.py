@@ -10,7 +10,7 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from transformers.utils import logging
 
-from fla.layers.utils import pad_input, unpad_input
+from fla.layers.utils import get_unpad_data, pad_input, unpad_input
 from fla.modules import RMSNorm
 from fla.ops.deltaformer import delta_pre_attn
 
@@ -121,27 +121,87 @@ class DeltaFormerAttention(nn.Module):
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
 
-        if attention_mask is not None:
-            # Use varlen FlashAttention path. Pre-attention currently supports fixed length only → fallback by padding.
-            q_full = q
-            k_full = k
-            v_full = v
-            beta_full = beta
+        cache_has_content = past_key_values is not None and past_key_values.get_seq_length(self.layer_idx) > 0
+
+        if not cache_has_content or q_len > 1:
+            # Prefill: compute U for current block
+            if attention_mask is not None:
+                _, cu_seqlens_k, _ = get_unpad_data(attention_mask)
+                u = delta_pre_attn(
+                    rearrange(q, 'b t h d -> b h t d'),
+                    rearrange(k, 'b t h d -> b h t d'),
+                    rearrange(v, 'b t h d -> b h t d'),
+                    beta,
+                    cu_seqlens=cu_seqlens_k,
+                )
+            else:
+                u = delta_pre_attn(
+                    rearrange(q, 'b t h d -> b h t d'),
+                    rearrange(k, 'b t h d -> b h t d'),
+                    rearrange(v, 'b t h d -> b h t d'),
+                    beta,
+                )
+            u = rearrange(u, 'b h t d -> b t h d')
+
+            k_eff, u_eff = k, u
+            if use_cache and past_key_values is not None:
+                k_flat = k.flatten(-2, -1)
+                u_flat = u.flatten(-2, -1)
+                k_cached_flat, u_cached_flat = past_key_values.update(
+                    attn_state=(k_flat, u_flat),
+                    layer_idx=self.layer_idx,
+                    offset=q_len,
+                )['attn_state']
+                if cache_has_content:
+                    k_eff = rearrange(k_cached_flat, 'b t (h d) -> b t h d', h=self.num_kv_heads * self.num_kv_groups)
+                    u_eff = rearrange(u_cached_flat, 'b t (h d) -> b t h d', h=self.num_heads)
         else:
-            q_full, k_full, v_full, beta_full = q, k, v, beta
+            state = past_key_values[self.layer_idx]
+            k_cached_flat, u_cached_flat = state['attn_state']
+            T_prev = k_cached_flat.shape[1]
+            k_prev = rearrange(k_cached_flat, 'b t (h d) -> b t h d', h=self.num_kv_heads * self.num_kv_groups)
+            u_prev = rearrange(u_cached_flat, 'b t (h d) -> b t h d', h=self.num_heads)
 
-        # Compute u via DeltaFormer pre-attention (fixed-length kernel).
-        u = delta_pre_attn(
-            rearrange(q_full, 'b t h d -> b h t d'),
-            rearrange(k_full, 'b t h d -> b h t d'),
-            rearrange(v_full, 'b t h d -> b h t d'),
-            beta_full,
-        )
-        u = rearrange(u, 'b h t d -> b t h d')
+            if attention_mask is not None:
+                attn_mask_prev = attention_mask[:, :T_prev]
+                q_padded, (k_padded_prev, u_padded_prev), indices_q, cu_seqlens, max_seq_lens = unpad_input(
+                    q,
+                    (k_prev, u_prev),
+                    attn_mask_prev,
+                    q_len,
+                )
+                cu_seqlens_q, cu_seqlens_k = cu_seqlens
+                max_seqlen_q, max_seqlen_k = max_seq_lens
+                s = flash_attn_varlen_func(
+                    q_padded, k_padded_prev, u_padded_prev,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    causal=False,
+                    window_size=(-1, -1)
+                )
+                s = pad_input(s, indices_q, batch_size, q_len)
+            else:
+                s = flash_attn_func(q, k_prev, u_prev, causal=False, window_size=(-1, -1))
 
-        # Second stage: standard FlashAttention but using u as values
+            u_cur = v - rearrange(beta, 'b h t -> b t h 1') * s
+            k_eff = torch.cat([k_prev, k], dim=1)
+            u_eff = torch.cat([u_prev, u_cur], dim=1)
+
+            past_key_values.update(
+                attn_state=(k_eff.flatten(-2, -1), u_eff.flatten(-2, -1)),
+                layer_idx=self.layer_idx,
+                offset=q_len,
+            )
+
         if attention_mask is not None:
-            q_padded, (k_padded, u_padded), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, u), attention_mask, q_len)
+            q_padded, (k_padded, u_padded), indices_q, cu_seqlens, max_seq_lens = unpad_input(
+                q,
+                (k_eff, u_eff),
+                attention_mask,
+                q_len,
+            )
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
             o = flash_attn_varlen_func(
@@ -155,7 +215,7 @@ class DeltaFormerAttention(nn.Module):
             )
             o = pad_input(o, indices_q, batch_size, q_len)
         else:
-            o = flash_attn_func(q, k, u, causal=True, window_size=(-1, -1))
+            o = flash_attn_func(q, k_eff, u_eff, causal=True, window_size=(-1, -1))
 
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)

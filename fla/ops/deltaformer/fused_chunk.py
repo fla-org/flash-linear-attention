@@ -19,7 +19,9 @@ def forward(
     v: torch.Tensor,
     u: torch.Tensor,
     qk_scale: float,
-    beta: torch.Tensor
+    beta: torch.Tensor,
+    row_start: int,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ):
     B, C, D = q.size()
     _B, T, _D = k.size()
@@ -27,7 +29,7 @@ def forward(
     assert B == _B and D == _D and B == __B and __C == C
     w = torch.empty(B, C, C, device=q.device, dtype=q.dtype)
     lse = torch.empty(B, C, device=q.device, dtype=torch.float)
-    delta_flash_attn_compileable(q, k, v, u, w, lse, qk_scale, beta)
+    delta_flash_attn_compileable(q, k, v, u, w, lse, qk_scale, beta, row_start, cu_seqlens)
     return w, lse
 
 
@@ -37,7 +39,9 @@ def backward_u_chunk(
     lse: torch.Tensor,
     grad_v: torch.Tensor,
     fa_scale: float,
-    beta: torch.Tensor
+    beta: torch.Tensor,
+    cu_seqlens: Optional[torch.Tensor] = None,
+    row_start: int = 0,
 ):
     B, C, D = q.size()
     _B, T, _D = k.size()
@@ -59,7 +63,9 @@ def backward_u_chunk(
         lse.stride(0), lse.stride(1),
         beta,
         beta.stride(0), beta.stride(1),
-        B, T, C, D, fa_scale
+        B, T, C, D, fa_scale,
+        row_start=row_start,
+        cu_seqlens=cu_seqlens
     )
     return grad_u
 
@@ -72,7 +78,9 @@ def backward_qk(
     grad_v: torch.Tensor,
     qk_scale: float,
     fa_scale: float,
-    beta: torch.Tensor
+    beta: torch.Tensor,
+    cu_seqlens: Optional[torch.Tensor] = None,
+    row_start: int = 0,
 ):
     B, T, D = k.size()
     row_dot_sum = torch.empty_like(lse)
@@ -94,7 +102,9 @@ def backward_qk(
         lse,
         lse.stride(0), lse.stride(1),
         B, T, D,
-        fa_scale
+        fa_scale,
+        row_start=row_start,
+        cu_seqlens=cu_seqlens
     )
     grad_k = torch.empty_like(k)
     grad_q = torch.empty_like(q)
@@ -119,7 +129,9 @@ def backward_qk(
         row_dot_sum,
         row_dot_sum.stride(0), row_dot_sum.stride(1),
         B, T, D,
-        fa_scale, qk_scale
+        fa_scale, qk_scale,
+        row_start=row_start,
+        cu_seqlens=cu_seqlens
     )
     return grad_q, grad_k, row_dot_sum  # row_dot_sum is the gradient w.r.t. the per-row beta scaling
 
@@ -132,7 +144,9 @@ def delta_flash_attn_compileable(
     w: torch.Tensor,
     lse: torch.Tensor,
     qk_scale: float,
-    beta: torch.Tensor
+    beta: torch.Tensor,
+    row_start: int,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ) -> None:
     B, C, D = q.size()
     _B, T, _D = k.size()
@@ -155,12 +169,13 @@ def delta_flash_attn_compileable(
         lse.stride(0),
         beta,
         beta.stride(0),
-        B, T, C, D, qk_scale
+        B, T, C, D, qk_scale,
+        row_start=row_start,
+        cu_seqlens=cu_seqlens
     )
 
 
 def _config_delta_flash_attn():
-    # Provide multiple tile sizes so Triton can select variants that fit device shared memory
     return [
         triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
         for BC in [128, 64]
@@ -171,6 +186,9 @@ def _config_delta_flash_attn():
 
 
 @triton.autotune(configs=_config_delta_flash_attn(), key=['C', 'D'])
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
 @triton.jit
 def flash_attn_kernel(
     q_ptr,
@@ -203,6 +221,9 @@ def flash_attn_kernel(
     qk_scale: float,
     BLOCK_C: tl.constexpr,
     BLOCK_T: tl.constexpr,
+    row_start: tl.constexpr,
+    cu_seqlens,
+    IS_VARLEN: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -210,8 +231,22 @@ def flash_attn_kernel(
     rowid_block = tl.arange(0, BLOCK_C) + pid_c * BLOCK_C
     colid_block = tl.arange(0, BLOCK_T)
 
-    rowmax = tl.zeros([BLOCK_C], dtype=tl.float32) - float('inf')
-    rowsum = tl.zeros([BLOCK_C], dtype=tl.float32) + 1
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + pid_b).to(tl.int32)
+        eos = tl.load(cu_seqlens + pid_b + 1).to(tl.int32)
+        T_local = eos - bos
+        local_row_start = row_start - bos
+    else:
+        bos = pid_b * T
+        eos = bos + T
+        T_local = T
+        local_row_start = row_start
+
+    cb_local = tl.maximum(0, tl.minimum(C, T_local - local_row_start))
+    valid_row = rowid_block < cb_local
+
+    rowmax = tl.full([BLOCK_C], -float('inf'), dtype=tl.float32)
+    rowsum = tl.full([BLOCK_C], 1, dtype=tl.float32)
     acc = tl.zeros([BLOCK_C, D], dtype=tl.float32)
 
     q_blk_ptr = tl.make_block_ptr(
@@ -224,10 +259,13 @@ def flash_attn_kernel(
     )
     q = tl.load(q_blk_ptr, boundary_check=(0,))
 
-    for kv_i in range(0, T, BLOCK_T):
+    k_base = k_ptr + pid_b * stride_kh + (bos if IS_VARLEN else 0) * stride_kt
+    u_base = u_ptr + pid_b * stride_uh + (bos if IS_VARLEN else 0) * stride_ut
+
+    for kv_i in range(0, T_local, BLOCK_T):
         k_blk_ptr = tl.make_block_ptr(
-            base=k_ptr + pid_b * stride_kh,
-            shape=(D, T),
+            base=k_base,
+            shape=(D, T_local),
             strides=(stride_kd, stride_kt),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_T),
@@ -236,8 +274,8 @@ def flash_attn_kernel(
         k = tl.load(k_blk_ptr, boundary_check=(1,))
         qk = tl.dot(q, k) * qk_scale
 
-        if kv_i >= T - C:
-            mask = (T - C - kv_i + rowid_block[:, None] - colid_block[None, :] < 1)
+        if kv_i >= local_row_start:
+            mask = (local_row_start - kv_i + rowid_block[:, None] - colid_block[None, :] < 1)
             qk = tl.where(mask, -1e6, qk)
 
         rowmax_i = tl.maximum(rowmax, tl.max(qk, axis=1))
@@ -250,10 +288,10 @@ def flash_attn_kernel(
         acc = acc * alpha[:, None]
         rowmax = rowmax_i
 
-        if kv_i < T - C:
+        if kv_i < local_row_start:
             u_blk_ptr = tl.make_block_ptr(
-                base=u_ptr + pid_b * stride_uh,
-                shape=(T, D),
+                base=u_base,
+                shape=(T_local, D),
                 strides=(stride_ut, stride_ud),
                 offsets=(kv_i, 0),
                 block_shape=(BLOCK_T, D),
@@ -264,7 +302,7 @@ def flash_attn_kernel(
 
     lse = rowmax + tl.math.log2(rowsum)
     lse_block_ptr = lse_ptr + stride_lse_r * pid_b + rowid_block
-    lse_mask = rowid_block < C
+    lse_mask = valid_row
     tl.store(lse_block_ptr, lse, mask=lse_mask)
 
     v_ptr = tl.make_block_ptr(
@@ -277,7 +315,7 @@ def flash_attn_kernel(
     )
     acc = acc / rowsum[:, None]
 
-    beta_ptr = tl.make_block_ptr(
+    beta_blk_ptr = tl.make_block_ptr(
         base=beta_ptr + pid_b * beta_stride_r,
         shape=(C,),
         strides=(1,),
@@ -285,25 +323,25 @@ def flash_attn_kernel(
         block_shape=(BLOCK_C,),
         order=(0,)
     )
-    beta = tl.load(beta_ptr, boundary_check=(0,))
+    beta = tl.load(beta_blk_ptr, boundary_check=(0,))
     acc = acc * beta[:, None]
 
     v = tl.load(v_ptr, boundary_check=(0,))
     u = v - acc.to(v_ptr.dtype.element_ty)
     u_block_ptr = tl.make_block_ptr(
-        base=u_ptr + pid_b * stride_uh,
-        shape=(T, D),
+        base=u_base,
+        shape=(T_local, D),
         strides=(stride_ut, stride_ud),
-        offsets=(T - C + pid_c * BLOCK_C, 0),
+        offsets=(local_row_start + pid_c * BLOCK_C, 0),
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
     tl.store(u_block_ptr, u, boundary_check=(0, 1))
 
-    for kv_i in range(T - C, T, BLOCK_T):
+    for kv_i in range(local_row_start, T_local, BLOCK_T):
         k_blk_ptr = tl.make_block_ptr(
-            base=k_ptr + pid_b * stride_kh,
-            shape=(D, T),
+            base=k_base,
+            shape=(D, T_local),
             strides=(stride_kd, stride_kt),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_T),
@@ -312,7 +350,7 @@ def flash_attn_kernel(
         k = tl.load(k_blk_ptr, boundary_check=(1,))
         qk = tl.dot(q, k) * qk_scale
 
-        mask = (T - C - kv_i + rowid_block[:, None] - colid_block[None, :] < 1)
+        mask = (local_row_start - kv_i + rowid_block[:, None] - colid_block[None, :] < 1)
         qk -= rowmax[:, None]
         p = tl.math.exp2(qk) / rowsum[:, None]
         p = tl.where(mask, 0, p)
@@ -320,7 +358,7 @@ def flash_attn_kernel(
             base=w_ptr + pid_b * stride_wh,
             shape=(C, C),
             strides=(stride_wc, 1),
-            offsets=(pid_c * BLOCK_C, kv_i - (T - C)),
+            offsets=(pid_c * BLOCK_C, kv_i - local_row_start),
             block_shape=(BLOCK_C, BLOCK_T),
             order=(1, 0)
         )
@@ -328,7 +366,6 @@ def flash_attn_kernel(
 
 
 def _config_backward_u_chunk():
-    # Add smaller tile sizes and fewer stages to reduce shared memory usage on constrained GPUs
     return [
         triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
         for BC in [128, 64]
@@ -339,6 +376,9 @@ def _config_backward_u_chunk():
 
 
 @triton.autotune(configs=_config_backward_u_chunk(), key=['C', 'D'])
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
 @triton.jit
 def backward_u_chunk_kernel(
     o_ptr,
@@ -368,11 +408,25 @@ def backward_u_chunk_kernel(
     C,
     D: tl.constexpr,
     fa_scale,
+    row_start: tl.constexpr,
+    cu_seqlens,
+    IS_VARLEN: tl.constexpr,
     BLOCK_C: tl.constexpr,
     BLOCK_T: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
+
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + pid_b).to(tl.int32)
+        eos = tl.load(cu_seqlens + pid_b + 1).to(tl.int32)
+        local_row_start = row_start - bos
+        tail_start = local_row_start + C
+        T_local = tl.maximum(0, eos - bos - tail_start)
+    else:
+        T_local = T
+
+    local_row_start = row_start
 
     acc = tl.zeros([BLOCK_C, D], dtype=tl.float32)
 
@@ -386,10 +440,10 @@ def backward_u_chunk_kernel(
     )
     q = tl.load(q_blk_ptr)
 
-    for kv_i in range(0, T, BLOCK_T):
+    for kv_i in range(0, T_local, BLOCK_T):
         k_blk_ptr = tl.make_block_ptr(
             base=k_ptr + pid_b * stride_kh,
-            shape=(D, T),
+            shape=(D, T_local),
             strides=(stride_kd, stride_kt),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_T),
@@ -400,7 +454,7 @@ def backward_u_chunk_kernel(
 
         lse_blk_ptr = tl.make_block_ptr(
             base=lse_ptr + pid_b * stride_lse_h,
-            shape=(T,),
+            shape=(T_local,),
             strides=(stride_lse_t,),
             offsets=(kv_i,),
             block_shape=(BLOCK_T,),
@@ -409,7 +463,7 @@ def backward_u_chunk_kernel(
         lse = tl.load(lse_blk_ptr)
         beta_blk_ptr = tl.make_block_ptr(
             base=beta_ptr + pid_b * stride_beta_h,
-            shape=(T,),
+            shape=(T_local,),
             strides=(stride_beta_t,),
             offsets=(kv_i,),
             block_shape=(BLOCK_T,),
@@ -421,7 +475,7 @@ def backward_u_chunk_kernel(
 
         v_blk_ptr = tl.make_block_ptr(
             base=v_ptr + pid_b * stride_vh,
-            shape=(T, D),
+            shape=(T_local, D),
             strides=(stride_vt, stride_vd),
             offsets=(kv_i, 0),
             block_shape=(BLOCK_T, D),
@@ -442,7 +496,6 @@ def backward_u_chunk_kernel(
 
 
 def _config_backward_p_row_sum():
-    # Broaden autotune space to include smaller tiles / fewer stages
     return [
         triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
         for BC in [128, 64]
@@ -453,6 +506,9 @@ def _config_backward_p_row_sum():
 
 
 @triton.autotune(configs=_config_backward_p_row_sum(), key=['T', 'D'])
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
 @triton.jit
 def backward_p_row_sum_kernel(
     row_dot_ptr,
@@ -481,6 +537,9 @@ def backward_p_row_sum_kernel(
     T,
     D: tl.constexpr,
     fa_scale,
+    row_start: tl.constexpr,
+    cu_seqlens,
+    IS_VARLEN: tl.constexpr,
     BLOCK_C: tl.constexpr,
     BLOCK_T: tl.constexpr,
 ):
@@ -492,9 +551,20 @@ def backward_p_row_sum_kernel(
 
     acc = tl.zeros([BLOCK_C], dtype=tl.float32)
 
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + pid_b).to(tl.int32)
+        eos = tl.load(cu_seqlens + pid_b + 1).to(tl.int32)
+        T_local = eos - bos
+        local_row_start = row_start - bos
+    else:
+        bos = pid_b * T
+        eos = bos + T
+        T_local = T
+        local_row_start = row_start
+
     k_row_blk_ptr = tl.make_block_ptr(
-        base=q_ptr + pid_b * stride_qh,
-        shape=(T, D),
+        base=q_ptr + pid_b * stride_qh + (bos if IS_VARLEN else 0) * stride_qt,
+        shape=(T_local, D),
         strides=(stride_qt, stride_qd),
         offsets=(pid_c * BLOCK_C, 0),
         block_shape=(BLOCK_C, D),
@@ -503,18 +573,18 @@ def backward_p_row_sum_kernel(
     k_row = tl.load(k_row_blk_ptr)
     lse_blk_ptr = tl.make_block_ptr(
         base=lse_ptr + pid_b * stride_lse_h,
-        shape=(T,),
+        shape=(T_local,),
         strides=(stride_lse_t,),
-        offsets=(pid_c * BLOCK_C,),
+        offsets=(local_row_start + pid_c * BLOCK_C,),
         block_shape=(BLOCK_C,),
         order=(0,),
     )
     lse = tl.load(lse_blk_ptr)
     grad_v_blk_ptr = tl.make_block_ptr(
-        base=grad_v_ptr + pid_b * stride_grad_vh,
-        shape=(T, D),
+        base=grad_v_ptr + pid_b * stride_grad_vh + (bos if IS_VARLEN else 0) * stride_grad_vt,
+        shape=(T_local, D),
         strides=(stride_grad_vt, stride_grad_vd),
-        offsets=(pid_c * BLOCK_C, 0),
+        offsets=(local_row_start + pid_c * BLOCK_C, 0),
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
@@ -522,8 +592,8 @@ def backward_p_row_sum_kernel(
 
     for kv_i in range(0, (pid_c + 1) * BLOCK_C, BLOCK_T):
         k_blk_ptr = tl.make_block_ptr(
-            base=k_ptr + pid_b * stride_kh,
-            shape=(D, T),
+            base=k_ptr + pid_b * stride_kh + (bos if IS_VARLEN else 0) * stride_kt,
+            shape=(D, T_local),
             strides=(stride_kd, stride_kt),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_T),
@@ -534,8 +604,8 @@ def backward_p_row_sum_kernel(
         p = tl.math.exp2(qk - lse[:, None])
 
         u_blk_ptr = tl.make_block_ptr(
-            base=u_ptr + pid_b * stride_uh,
-            shape=(D, T),
+            base=u_ptr + pid_b * stride_uh + (bos if IS_VARLEN else 0) * stride_ut,
+            shape=(D, T_local),
             strides=(stride_ud, stride_ut),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_T),
@@ -550,7 +620,7 @@ def backward_p_row_sum_kernel(
         acc += tl.sum(p * dp, axis=1)
     row_dot_block_ptr = tl.make_block_ptr(
         base=row_dot_ptr + pid_b * stride_row_dot_h,
-        shape=(T,),
+        shape=(T_local,),
         strides=(stride_row_dot_t,),
         offsets=(pid_c * BLOCK_C,),
         block_shape=(BLOCK_C,),
@@ -560,7 +630,6 @@ def backward_p_row_sum_kernel(
 
 
 def _config_backward_k():
-    # Allow a smaller column tile as fallback
     return [
         triton.Config({'BLOCK_C': BC}, num_stages=ns, num_warps=nw)
         for BC in [64, 32]
@@ -570,6 +639,9 @@ def _config_backward_k():
 
 
 @triton.autotune(configs=_config_backward_k(), key=['T', 'D'])
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
 @triton.jit
 def backward_qk_kernel(
     grad_q_ptr,
@@ -611,16 +683,30 @@ def backward_qk_kernel(
     fa_scale: tl.constexpr,
     qk_scale: tl.constexpr,
     BLOCK_C: tl.constexpr,
+    row_start: tl.constexpr,
+    cu_seqlens,
+    IS_VARLEN: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
     block_i = tl.arange(0, BLOCK_C)
 
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + pid_b).to(tl.int32)
+        eos = tl.load(cu_seqlens + pid_b + 1).to(tl.int32)
+        T_local = eos - bos
+        local_row_start = row_start - bos
+    else:
+        bos = pid_b * T
+        eos = bos + T
+        T_local = T
+        local_row_start = row_start
+
     acc = tl.zeros([BLOCK_C, D], dtype=tl.float32)
 
     k_row_blk_ptr = tl.make_block_ptr(
-        base=q_ptr + pid_b * stride_qh,
-        shape=(T, D),
+        base=q_ptr + pid_b * stride_qh + (bos if IS_VARLEN else 0) * stride_qt,
+        shape=(T_local, D),
         strides=(stride_qt, stride_qd),
         offsets=(pid_c * BLOCK_C, 0),
         block_shape=(BLOCK_C, D),
@@ -629,34 +715,34 @@ def backward_qk_kernel(
     k_row = tl.load(k_row_blk_ptr)
     lse_blk_ptr = tl.make_block_ptr(
         base=lse_ptr + pid_b * stride_lse_h,
-        shape=(T,),
+        shape=(T_local,),
         strides=(stride_lse_t,),
-        offsets=(pid_c * BLOCK_C,),
+        offsets=(local_row_start + pid_c * BLOCK_C,),
         block_shape=(BLOCK_C,),
         order=(0,),
     )
     lse = tl.load(lse_blk_ptr)
     beta_blk_ptr = tl.make_block_ptr(
         base=beta_ptr + pid_b * stride_beta_h,
-        shape=(T,),
+        shape=(T_local,),
         strides=(stride_beta_t,),
-        offsets=(pid_c * BLOCK_C,),
+        offsets=(local_row_start + pid_c * BLOCK_C,),
         block_shape=(BLOCK_C,),
         order=(0,),
     )
     beta = tl.load(beta_blk_ptr)
     grad_v_blk_ptr = tl.make_block_ptr(
-        base=grad_v_ptr + pid_b * stride_grad_vh,
-        shape=(T, D),
+        base=grad_v_ptr + pid_b * stride_grad_vh + (bos if IS_VARLEN else 0) * stride_grad_vt,
+        shape=(T_local, D),
         strides=(stride_grad_vt, stride_grad_vd),
-        offsets=(pid_c * BLOCK_C, 0),
+        offsets=(local_row_start + pid_c * BLOCK_C, 0),
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
     grad_v_row = -tl.load(grad_v_blk_ptr)
     row_dot_blk_ptr = tl.make_block_ptr(
         base=row_dot_ptr + pid_b * stride_row_dot_h,
-        shape=(T,),
+        shape=(T_local,),
         strides=(stride_row_dot_t,),
         offsets=(pid_c * BLOCK_C,),
         block_shape=(BLOCK_C,),
@@ -666,8 +752,8 @@ def backward_qk_kernel(
 
     for kv_i in range(0, pid_c * BLOCK_C, BLOCK_C):
         k_blk_ptr = tl.make_block_ptr(
-            base=k_ptr + pid_b * stride_kh,
-            shape=(D, T),
+            base=k_ptr + pid_b * stride_kh + (bos if IS_VARLEN else 0) * stride_kt,
+            shape=(D, T_local),
             strides=(stride_kd, stride_kt),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_C),
@@ -678,8 +764,8 @@ def backward_qk_kernel(
         p = tl.math.exp2(qk - lse[:, None]) * beta[:, None]
 
         u_blk_ptr = tl.make_block_ptr(
-            base=u_ptr + pid_b * stride_uh,
-            shape=(D, T),
+            base=u_ptr + pid_b * stride_uh + (bos if IS_VARLEN else 0) * stride_ut,
+            shape=(D, T_local),
             strides=(stride_ud, stride_ut),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_C),
@@ -692,8 +778,8 @@ def backward_qk_kernel(
         acc = tl.dot(da.to(k.dtype), k, acc)
 
     k_row_blk_ptr = tl.make_block_ptr(
-        base=k_ptr + pid_b * stride_kh,
-        shape=(T, D),
+        base=k_ptr + pid_b * stride_kh + (bos if IS_VARLEN else 0) * stride_kt,
+        shape=(T_local, D),
         strides=(stride_kt, stride_kd),
         offsets=(pid_c * BLOCK_C, 0),
         block_shape=(BLOCK_C, D),
@@ -703,8 +789,8 @@ def backward_qk_kernel(
     qk = tl.dot(k_row, tl.trans(k_row_true, 1, 0)) * fa_scale
     p = tl.math.exp2(qk - lse[:, None]) * beta[:, None]
     u_blk_ptr = tl.make_block_ptr(
-        base=u_ptr + pid_b * stride_uh,
-        shape=(D, T),
+        base=u_ptr + pid_b * stride_uh + (bos if IS_VARLEN else 0) * stride_ut,
+        shape=(D, T_local),
         strides=(stride_ud, stride_ut),
         offsets=(0, pid_c * BLOCK_C),
         block_shape=(D, BLOCK_C),
@@ -735,10 +821,10 @@ def backward_qk_kernel(
     acc = tl.dot(daat.to(k_row.dtype), k_row)
     k_row = k_row_true
     nu = -tl.trans(ut, 1, 0)
-    for kv_i in range((pid_c + 1) * BLOCK_C, T, BLOCK_C):
+    for kv_i in range((pid_c + 1) * BLOCK_C, T_local, BLOCK_C):
         k_blk_ptr = tl.make_block_ptr(
-            base=q_ptr + pid_b * stride_qh,
-            shape=(D, T),
+            base=q_ptr + pid_b * stride_qh + (bos if IS_VARLEN else 0) * stride_qt,
+            shape=(D, T_local),
             strides=(stride_qd, stride_qt),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_C),
@@ -747,7 +833,7 @@ def backward_qk_kernel(
         kt = tl.load(k_blk_ptr)
         lse_blk_ptr = tl.make_block_ptr(
             base=lse_ptr + pid_b * stride_lse_h,
-            shape=(T,),
+            shape=(T_local,),
             strides=(stride_lse_t,),
             offsets=(kv_i,),
             block_shape=(BLOCK_C,),
@@ -756,7 +842,7 @@ def backward_qk_kernel(
         lse = tl.load(lse_blk_ptr)
         beta_blk_ptr = tl.make_block_ptr(
             base=beta_ptr + pid_b * stride_beta_h,
-            shape=(T,),
+            shape=(T_local,),
             strides=(stride_beta_t,),
             offsets=(kv_i,),
             block_shape=(BLOCK_C,),
@@ -767,8 +853,8 @@ def backward_qk_kernel(
         p = tl.math.exp2(qk - lse[None, :]) * beta[None, :]
 
         grad_vt_blk_ptr = tl.make_block_ptr(
-            base=grad_v_ptr + pid_b * stride_grad_vh,
-            shape=(D, T),
+            base=grad_v_ptr + pid_b * stride_grad_vh + (bos if IS_VARLEN else 0) * stride_grad_vt,
+            shape=(D, T_local),
             strides=(stride_grad_vd, stride_grad_vt),
             offsets=(0, kv_i),
             block_shape=(D, BLOCK_C),
@@ -777,7 +863,7 @@ def backward_qk_kernel(
         grad_vt = tl.load(grad_vt_blk_ptr)
         row_dot_blk_ptr = tl.make_block_ptr(
             base=row_dot_ptr + pid_b * stride_row_dot_h,
-            shape=(T,),
+            shape=(T_local,),
             strides=(stride_row_dot_t,),
             offsets=(kv_i,),
             block_shape=(BLOCK_C,),
@@ -801,11 +887,6 @@ def backward_qk_kernel(
     tl.store(grad_k_blk_ptr, acc.to(grad_k_ptr.dtype.element_ty))
 
 
-# ===================================================================================
-# Autograd wrapper and user-facing API (migrated from preattn.py)
-# ===================================================================================
-
-
 class _DeltaPreAttnFunction(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -814,14 +895,16 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         ko: torch.Tensor,
         vo: torch.Tensor,
         betao: Optional[torch.Tensor] = None,
-        C: int = BLOCK_SIZE_C
+        C: int = BLOCK_SIZE_C,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ):
-        u, ws, lses = _DeltaPreAttnFunction._forward_impl(qo, ko, vo, betao, C, need_aux=True)
+        u, ws, lses = _DeltaPreAttnFunction._forward_impl(qo, ko, vo, betao, C, need_aux=True, cu_seqlens=cu_seqlens)
         BS, NH, T, _ = ko.size()
         saved_beta = betao if betao is not None else torch.ones(BS, NH, T, device=ko.device, dtype=ko.dtype)
         ctx.save_for_backward(qo, ko, vo, u, ws, lses, saved_beta)
         ctx.C = C
         ctx.beta_is_none = betao is None
+        ctx.cu_seqlens = cu_seqlens
         return u
 
     @staticmethod
@@ -830,35 +913,78 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         grad_u: torch.Tensor
     ):
         qo, ko, vo, u, ws, lses, betao = ctx.saved_tensors
+        C = ctx.C
+        BS, NH, T_max, D = ko.size()
+        cu_seqlens = ctx.cu_seqlens
+
+        qk_scale = 1.0 / math.sqrt(D)
+        fa_scale = qk_scale / math.log(2)
+
+        grad_qo = torch.zeros_like(qo)
+        grad_ko = torch.zeros_like(ko)
+        grad_vo = torch.zeros_like(vo)
+        grad_beta_full = torch.zeros_like(betao) if not ctx.beta_is_none else None
+
         q = qo.flatten(0, 1)
         k = ko.flatten(0, 1)
         v = vo.flatten(0, 1)
         beta = betao.flatten(0, 1)
         grad_o = grad_u.flatten(0, 1)
 
-        C = ctx.C
-        BS, NH, T, D = ko.size()
+        cu_flat = None
+        if cu_seqlens is not None:
+            lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+            lens = lens.unsqueeze(1).repeat(1, NH).reshape(-1)
+            cu_flat = torch.empty(lens.numel() + 1, dtype=torch.int32, device=cu_seqlens.device)
+            cu_flat[0] = 0
+            torch.cumsum(lens, dim=0, out=cu_flat[1:])
+
         grad_v = torch.empty_like(v)
+        num_chunks = (T_max + C - 1) // C
+        for chunk_idx in range(num_chunks - 1, -1, -1):
+            i = chunk_idx * C
+            cb = min(C, T_max - i)
+            do = grad_o[:, i:i + cb, :]
+            if i + cb < T_max:
+                qi = k[:, i:i + cb, :]
+                ki = q[:, i + cb:, :]
+                lse_slice = lses[:, i + cb:]
+                beta_single = beta[:, i + cb:]
+                du = backward_u_chunk(
+                    qi,
+                    ki,
+                    lse_slice,
+                    grad_v[:, i + cb:, :],
+                    fa_scale,
+                    beta_single,
+                    cu_seqlens=cu_flat,
+                    row_start=i,
+                )
+                do = do - du
+            w_block = ws[chunk_idx][:, :cb, :cb]
+            du = invcum.backward_x(do, w_block)
+            grad_v[:, i:i + cb, :].copy_(du)
 
-        qk_scale = 1.0 / math.sqrt(D)
-        fa_scale = qk_scale / math.log(2)
-        for i in range(T - C, -1, -C):
-            do = grad_o[:, i:i + C, :]
-            if i < T - C:
-                qi = k[:, i:i + C, :]
-                ki = q[:, i + C:, :]
-                lse = lses[:, i + C:]
-                beta_single = beta[:, i + C:]
-                du = backward_u_chunk(qi, ki, lse, grad_v[:, i + C:, :], fa_scale, beta_single)
-                do = grad_o[:, i:i + C, :] - du
-            else:
-                do = grad_o[:, i:i + C, :]
-            du = invcum.backward_x(do, ws[i // C])
-            grad_v[:, i:i + C, :].copy_(du)
+        gq, gk, gbeta = backward_qk(
+            q,
+            k,
+            u.flatten(0, 1),
+            lses,
+            grad_v,
+            qk_scale,
+            fa_scale,
+            beta,
+            cu_seqlens=cu_flat,
+            row_start=0,
+        )
+        grad_qo.copy_(gq.view_as(qo))
+        grad_ko.copy_(gk.view_as(ko))
+        grad_vo.copy_(grad_v.view_as(vo))
+        if not ctx.beta_is_none:
+            grad_beta_full.copy_(gbeta.view_as(betao))
 
-        grad_q, grad_k, grad_beta = backward_qk(q, k, u.flatten(0, 1), lses, grad_v, qk_scale, fa_scale, beta)
-        grad_beta_out = None if ctx.beta_is_none else grad_beta.view_as(betao)
-        return grad_q.view_as(ko), grad_k.view_as(ko), grad_v.view_as(vo), grad_beta_out, None
+        grad_beta_out = None if ctx.beta_is_none else grad_beta_full
+        return grad_qo, grad_ko, grad_vo, grad_beta_out, None, None
 
     @staticmethod
     def _forward_impl(
@@ -868,37 +994,49 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         betao: Optional[torch.Tensor],
         C: int,
         need_aux: bool,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        BS, NH, T, D = ko.size()
+        BS, NH, T_max, D = ko.size()
+        qk_scale = 1.0 / math.sqrt(D)
+        fa_scale = qk_scale / math.log(2)
+
         q = qo.flatten(0, 1)
         k = ko.flatten(0, 1)
         v = vo.flatten(0, 1)
         if betao is None:
-            beta = torch.ones(BS, NH, T, device=k.device, dtype=k.dtype)
+            beta = torch.ones(BS, NH, T_max, device=k.device, dtype=k.dtype)
         else:
             beta = betao
         beta = beta.flatten(0, 1)
 
-        u = torch.empty_like(v)
-        qk_scale = 1.0 / math.sqrt(D)
-        fa_scale = qk_scale / math.log(2)
-        ws = torch.empty(T // C, BS * NH, C, C, device=k.device, dtype=k.dtype) if need_aux else None
-        lses = torch.empty(BS * NH, T, device=k.device, dtype=torch.float) if need_aux else None
+        cu_flat = None
+        if cu_seqlens is not None:
+            lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+            lens = lens.unsqueeze(1).repeat(1, NH).reshape(-1)
+            cu_flat = torch.empty(lens.numel() + 1, dtype=torch.int32, device=cu_seqlens.device)
+            cu_flat[0] = 0
+            torch.cumsum(lens, dim=0, out=cu_flat[1:])
 
-        for i in range(0, T, C):
-            qi = q[:, i:i + C, :]
-            ki = k[:, :i + C, :]
-            vi = v[:, i:i + C, :]
-            ui_prev = u[:, :i + C, :]
-            betai = beta[:, i:i + C]
-            w, lse_chunk = forward(qi, ki, vi, ui_prev, fa_scale, betai)
+        u_flat = torch.empty_like(v)
+        num_chunks = (T_max + C - 1) // C
+        if need_aux:
+            ws = torch.empty(num_chunks, BS * NH, C, C, device=k.device, dtype=k.dtype)
+            lses = torch.empty(BS * NH, T_max, device=k.device, dtype=torch.float)
+
+        for chunk_idx in range(num_chunks):
+            i = chunk_idx * C
+            cb = min(C, T_max - i)
+            qi = q[:, i:i + cb, :]
+            vi = v[:, i:i + cb, :]
+            betai = beta[:, i:i + cb]
+            w, lse_chunk = forward(qi, k, vi, u_flat, fa_scale, betai, row_start=i, cu_seqlens=cu_flat)
             w = w * betai.unsqueeze(-1)
             if need_aux:
-                ws[i // C].copy_(w)
-                lses[:, i:i + C].copy_(lse_chunk)
-            invcum.forward_inplace(u[:, i:i + C, :], w)
+                ws[chunk_idx, :, :cb, :cb].copy_(w)
+                lses[:, i:i + cb].copy_(lse_chunk)
+            invcum.forward_inplace(u_flat[:, i:i + cb, :], w[:, :cb, :cb])
 
-        u = u.view(BS, NH, T, D)
+        u = u_flat.view(BS, NH, T_max, D)
         return u, ws, lses
 
 
@@ -907,7 +1045,8 @@ def delta_pre_attn(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: Optional[torch.Tensor] = None,
-    C: int = BLOCK_SIZE_C
+    C: int = BLOCK_SIZE_C,
+    cu_seqlens: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Fixed-length DeltaFormer pre-attention. Computes u given q, k, v, beta.
@@ -916,8 +1055,8 @@ def delta_pre_attn(
     Returns u with shape [B, H, T, D]
     """
     if k.requires_grad or q.requires_grad or v.requires_grad or (beta is not None and beta.requires_grad):
-        return _DeltaPreAttnFunction.apply(q, k, v, beta, C)
-    u, _, _ = _DeltaPreAttnFunction._forward_impl(q, k, v, beta, C, need_aux=False)
+        return _DeltaPreAttnFunction.apply(q, k, v, beta, C, cu_seqlens)
+    u, _, _ = _DeltaPreAttnFunction._forward_impl(q, k, v, beta, C, need_aux=False, cu_seqlens=cu_seqlens)
     return u
 
 
