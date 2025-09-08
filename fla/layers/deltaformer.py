@@ -155,6 +155,7 @@ class DeltaFormerAttention(nn.Module):
                     rearrange(k, 'b t h d -> b h t d'),
                     rearrange(v, 'b t h d -> b h t d'),
                     beta,
+                    cu_seqlens=cu_seqlens_rope,
                 )
             u = rearrange(u, 'b h t d -> b t h d')
 
@@ -230,7 +231,18 @@ class DeltaFormerAttention(nn.Module):
             )
             o = pad_input(o, indices_q, batch_size, q_len)
         else:
-            o = flash_attn_func(q, k_eff, u_eff, causal=True, window_size=(-1, -1))
+            if cu_seqlens_rope is not None:
+                o = flash_attn_varlen_func(
+                    q.squeeze(0), k_eff.squeeze(0), u_eff.squeeze(0),
+                    cu_seqlens_q=cu_seqlens_rope,
+                    cu_seqlens_k=cu_seqlens_rope,
+                    max_seqlen_q=max_seqlen,
+                    max_seqlen_k=max_seqlen,
+                    causal=True,
+                    window_size=(-1, -1)
+                ).unsqueeze(0)
+            else:
+                o = flash_attn_func(q, k_eff, u_eff, causal=True, window_size=(-1, -1))
 
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
