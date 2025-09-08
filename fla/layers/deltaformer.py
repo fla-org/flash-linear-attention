@@ -150,14 +150,35 @@ class DeltaFormerAttention(nn.Module):
                     cu_seqlens=cu_seqlens_k,
                 )
             else:
-                u = delta_pre_attn(
-                    rearrange(k, 'b t h d -> b h t d'),  # KK similarity: use k as query
-                    rearrange(k, 'b t h d -> b h t d'),
-                    rearrange(v, 'b t h d -> b h t d'),
-                    beta,
-                    cu_seqlens=cu_seqlens_rope,
-                )
-            u = rearrange(u, 'b h t d -> b t h d')
+                if cu_seqlens_rope is not None:
+                    lens = (cu_seqlens_rope[1:] - cu_seqlens_rope[:-1]).tolist()
+                    assert sum(lens) == q_len and q.shape[0] == 1, "cu_seqlens must cover the flattened sequence"
+                    u_slices = []
+                    start = 0
+                    for L in lens:
+                        end = start + int(L)
+                        k_b = k[:, start:end, :, :]
+                        v_b = v[:, start:end, :, :]
+                        beta_b = beta[:, :, start:end]
+                        u_b = delta_pre_attn(
+                            rearrange(k_b, 'b t h d -> b h t d'),
+                            rearrange(k_b, 'b t h d -> b h t d'),
+                            rearrange(v_b, 'b t h d -> b h t d'),
+                            beta_b,
+                        )
+                        u_slices.append(rearrange(u_b, 'b h t d -> b t h d'))
+                        start = end
+                    u = torch.cat(u_slices, dim=1)
+                else:
+                    u = delta_pre_attn(
+                        rearrange(k, 'b t h d -> b h t d'),  # KK similarity: use k as query
+                        rearrange(k, 'b t h d -> b h t d'),
+                        rearrange(v, 'b t h d -> b h t d'),
+                        beta,
+                    )
+            # If u is [B,H,T,D], rearrange; otherwise already [B,T,H,D]
+            if u.dim() == 4 and u.shape[1] == self.num_kv_heads:
+                u = rearrange(u, 'b h t d -> b t h d')
 
             k_eff, u_eff = k, u
             if use_cache and past_key_values is not None:
@@ -206,7 +227,7 @@ class DeltaFormerAttention(nn.Module):
             u_eff = torch.cat([u_prev, u_cur], dim=1)
 
             past_key_values.update(
-                attn_state=(k_eff.flatten(-2, -1), u_eff.flatten(-2, -1)),
+                attn_state=(k.flatten(-2, -1), u_cur.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
                 offset=q_len,
             )
