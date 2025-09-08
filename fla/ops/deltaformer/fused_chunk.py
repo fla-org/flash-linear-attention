@@ -962,7 +962,7 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
                 )
                 do = do - du
             w_block = ws[chunk_idx][:, :cb, :cb]
-            du = invcum.backward_x(do, w_block)
+            du = invcum.solve_unit_upper_triangular_system(do, w_block)
             grad_v[:, i:i + cb, :].copy_(du)
 
         gq, gk, gbeta = backward_qk(
@@ -1034,7 +1034,7 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
             if need_aux:
                 ws[chunk_idx, :, :cb, :cb].copy_(w)
                 lses[:, i:i + cb].copy_(lse_chunk)
-            invcum.forward_inplace(u_flat[:, i:i + cb, :], w[:, :cb, :cb])
+            invcum.solve_unit_lower_triangular_system_inplace(u_flat[:, i:i + cb, :], w[:, :cb, :cb])
 
         u = u_flat.view(BS, NH, T_max, D)
         return u, ws, lses

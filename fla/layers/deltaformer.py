@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 from transformers.utils import logging
 
 from fla.layers.utils import get_unpad_data, pad_input, unpad_input
-from fla.modules import RMSNorm
+from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.deltaformer import delta_pre_attn
+from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -64,6 +65,8 @@ class DeltaFormerAttention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         layer_idx: int | None = None,
+        rope_theta: float = 10000.,
+        max_position_embeddings: Optional[int] = None,
     ):
         super().__init__()
 
@@ -76,6 +79,8 @@ class DeltaFormerAttention(nn.Module):
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
         self.layer_idx = layer_idx
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
 
         if flash_attn_func is None:
             raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
@@ -83,12 +88,14 @@ class DeltaFormerAttention(nn.Module):
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
-        self.b_proj = nn.Linear(self.hidden_size, self.num_heads, bias=True)
+        self.b_proj = nn.Linear(self.hidden_size, self.num_kv_heads, bias=True)
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
+
+        self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
     def forward(
         self,
@@ -114,12 +121,20 @@ class DeltaFormerAttention(nn.Module):
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         beta = rearrange(self.b_proj(hidden_states), 'b t h -> b h t')
 
-        if self.num_kv_groups > 1:
-            k = repeat(k, 'b t h d -> b t (h g) d', g=self.num_kv_groups)
-            v = repeat(v, 'b t h d -> b t (h g) d', g=self.num_kv_groups)
-
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
+
+        seqlen_offset, max_seqlen = 0, q_len
+        if past_key_values is not None:
+            seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
+            max_seqlen = q_len + seqlen_offset
+            if attention_mask is not None:
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
+                max_seqlen = q_len + max(seqlen_offset)
+        if self.max_position_embeddings is not None:
+            max_seqlen = max(max_seqlen, self.max_position_embeddings)
+        cu_seqlens_rope = kwargs.get('cu_seqlens', None)
+        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens_rope)
 
         cache_has_content = past_key_values is not None and past_key_values.get_seq_length(self.layer_idx) > 0
 
@@ -128,7 +143,7 @@ class DeltaFormerAttention(nn.Module):
             if attention_mask is not None:
                 _, cu_seqlens_k, _ = get_unpad_data(attention_mask)
                 u = delta_pre_attn(
-                    rearrange(q, 'b t h d -> b h t d'),
+                    rearrange(k, 'b t h d -> b h t d'),  # KK similarity: use k as query
                     rearrange(k, 'b t h d -> b h t d'),
                     rearrange(v, 'b t h d -> b h t d'),
                     beta,
@@ -136,7 +151,7 @@ class DeltaFormerAttention(nn.Module):
                 )
             else:
                 u = delta_pre_attn(
-                    rearrange(q, 'b t h d -> b h t d'),
+                    rearrange(k, 'b t h d -> b h t d'),  # KK similarity: use k as query
                     rearrange(k, 'b t h d -> b h t d'),
                     rearrange(v, 'b t h d -> b h t d'),
                     beta,
@@ -153,19 +168,19 @@ class DeltaFormerAttention(nn.Module):
                     offset=q_len,
                 )['attn_state']
                 if cache_has_content:
-                    k_eff = rearrange(k_cached_flat, 'b t (h d) -> b t h d', h=self.num_kv_heads * self.num_kv_groups)
-                    u_eff = rearrange(u_cached_flat, 'b t (h d) -> b t h d', h=self.num_heads)
+                    k_eff = rearrange(k_cached_flat, 'b t (h d) -> b t h d', h=self.num_kv_heads)
+                    u_eff = rearrange(u_cached_flat, 'b t (h d) -> b t h d', h=self.num_kv_heads)
         else:
             state = past_key_values[self.layer_idx]
             k_cached_flat, u_cached_flat = state['attn_state']
             T_prev = k_cached_flat.shape[1]
-            k_prev = rearrange(k_cached_flat, 'b t (h d) -> b t h d', h=self.num_kv_heads * self.num_kv_groups)
-            u_prev = rearrange(u_cached_flat, 'b t (h d) -> b t h d', h=self.num_heads)
+            k_prev = rearrange(k_cached_flat, 'b t (h d) -> b t h d', h=self.num_kv_heads)
+            u_prev = rearrange(u_cached_flat, 'b t (h d) -> b t h d', h=self.num_kv_heads)
 
             if attention_mask is not None:
                 attn_mask_prev = attention_mask[:, :T_prev]
                 q_padded, (k_padded_prev, u_padded_prev), indices_q, cu_seqlens, max_seq_lens = unpad_input(
-                    q,
+                    k,
                     (k_prev, u_prev),
                     attn_mask_prev,
                     q_len,
@@ -183,7 +198,7 @@ class DeltaFormerAttention(nn.Module):
                 )
                 s = pad_input(s, indices_q, batch_size, q_len)
             else:
-                s = flash_attn_func(q, k_prev, u_prev, causal=False, window_size=(-1, -1))
+                s = flash_attn_func(k, k_prev, u_prev, causal=False, window_size=(-1, -1))
 
             u_cur = v - rearrange(beta, 'b h t -> b t h 1') * s
             k_eff = torch.cat([k_prev, k], dim=1)
