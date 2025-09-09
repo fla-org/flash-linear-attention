@@ -29,6 +29,8 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 
 ## News
 
+- **$\texttt{[2025-09]}$:** 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next.
+Check out [the PR](https://github.com/huggingface/transformers/pull/40771) and [their blog post](https://qwenlm.github.io/blog/qwen3_next/) for more infos!
 - **$\texttt{[2025-08]}$:** 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
 - **$\texttt{[2025-08]}$:** 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
 - **$\texttt{[2025-07]}$:** 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
