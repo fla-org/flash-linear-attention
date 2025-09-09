@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -17,7 +16,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.multiscale_retention import MultiScaleRetention
 from fla.models.retnet.configuration_retnet import RetNetConfig
-from fla.models.utils import Cache
+from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as RetNetMLP
 from fla.modules import RMSNorm
@@ -264,7 +263,7 @@ class RetNetModel(RetNetPreTrainedModel):
         )
 
 
-class RetNetForCausalLM(RetNetPreTrainedModel, GenerationMixin):
+class RetNetForCausalLM(RetNetPreTrainedModel, FLAGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -311,41 +310,6 @@ class RetNetForCausalLM(RetNetPreTrainedModel, GenerationMixin):
                 )
             else:
                 raise exception
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor = None,
-        past_key_values: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = True,
-        logits_to_keep: Optional[int] = None,
-        **kwargs: Unpack[Dict]
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is passed along.
-        if past_key_values is not None:
-            input_ids = input_ids[:, -1:]
-
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and len(past_key_values) == 0:
-            model_inputs = {'inputs_embeds': inputs_embeds}
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            # Ref: https://github.com/huggingface/transformers/pull/29114
-            # TODO: use `next_tokens` directly instead.
-            model_inputs = {'input_ids': input_ids.contiguous()}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'past_key_values': past_key_values,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-        })
-        return model_inputs
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(

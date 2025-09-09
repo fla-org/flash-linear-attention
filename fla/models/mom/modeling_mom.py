@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -17,7 +16,7 @@ from transformers.utils import logging
 from fla.layers import MomAttention
 from fla.layers.attn import Attention
 from fla.models.mom.configuration_mom import MomConfig
-from fla.models.utils import Cache
+from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as MomMLP
 from fla.modules import RMSNorm
@@ -343,7 +342,7 @@ class MomCausalLMOutputWithPast(CausalLMOutputWithPast):
     router_logits: Optional[Tuple[torch.FloatTensor, ...]] = None
 
 
-class MomForCausalLM(MomPreTrainedModel, GenerationMixin):
+class MomForCausalLM(MomPreTrainedModel, FLAGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
