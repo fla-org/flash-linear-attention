@@ -72,6 +72,10 @@ def create_pyproject_toml(package_dir, name, version, dependencies, extras=None)
 
     deps_content = ', '.join(f'"{dep}"' for dep in dependencies)
 
+    # Create description text
+    desc_text = ('Core operations for flash-linear-attention' if name == 'fla-core'
+                 else 'Fast linear attention models and layers')
+
     content = f"""[build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -79,7 +83,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "{name}"
 version = "{version}"
-description = "{'Core operations for flash-linear-attention' if name == 'fla-core' else 'Fast linear attention models and layers'}"
+description = "{desc_text}"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [{deps_content}]
@@ -94,12 +98,13 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
     with open(package_dir / 'pyproject.toml', 'w') as f:
         f.write(content)
 
+
 def build_split_packages():
     """Build split packages with proper dependency management."""
     # Get script directory and find files relative to it
     script_dir = Path(__file__).parent
     root_dir = script_dir.parent
-    
+
     # Get current version
     init_file = root_dir / 'fla' / '__init__.py'
     with open(init_file) as f:
@@ -176,7 +181,7 @@ from .models import *
     # Create build script
     build_script = output_dir / 'build.sh'
     with open(build_script, 'w') as f:
-        f.write(f"""#!/bin/bash
+        f.write("""#!/bin/bash
 # Build both packages
 
 echo "Building fla-core..."
@@ -196,34 +201,34 @@ echo "Build complete! Packages in dist/"
     print(f"✅ fla-core dependencies: {len(core_deps)} packages")
     print(f"✅ flash-linear-attention dependencies: {len(ext_deps)} packages")
     print(f"✅ Version: {version}")
-    
+
     return output_dir, version
 
 
 def build_packages(dist_dir):
     """Build wheels and source distributions for both packages."""
     print("Building packages...")
-    
+
     # Build fla-core (both wheel and sdist)
     print("Building fla-core packages...")
     result = subprocess.run([
         'python', '-m', 'build', str(dist_dir / 'fla-core')
     ])
-    
+
     if result.returncode != 0:
         print("Failed to build fla-core packages")
         return False
-    
+
     # Build flash-linear-attention (both wheel and sdist)
     print("Building flash-linear-attention packages...")
     result = subprocess.run([
         'python', '-m', 'build', str(dist_dir / 'flash-linear-attention')
     ])
-    
+
     if result.returncode != 0:
         print("Failed to build flash-linear-attention packages")
         return False
-    
+
     print("✅ Packages built successfully")
     return True
 
@@ -233,24 +238,24 @@ def copy_packages_to_output(dist_dir, version):
     # Get script directory (relative to this file)
     script_dir = Path(__file__).parent
     root_dir = script_dir.parent
-    
+
     # Create output directory (relative to root)
     output_dir = root_dir / 'dist-packages'
     output_dir.mkdir(exist_ok=True)
-    
+
     # Find wheels and source distributions
     core_wheels = list((dist_dir / 'fla-core' / 'dist').glob('*.whl'))
     core_sdist = list((dist_dir / 'fla-core' / 'dist').glob('*.tar.gz'))
     ext_wheels = list((dist_dir / 'flash-linear-attention' / 'dist').glob('*.whl'))
     ext_sdist = list((dist_dir / 'flash-linear-attention' / 'dist').glob('*.tar.gz'))
-    
+
     if not core_wheels:
         print("No fla-core wheel found")
         return False
     if not ext_wheels:
         print("No flash-linear-attention wheel found")
         return False
-    
+
     # Copy all packages to output directory
     all_packages = core_wheels + core_sdist + ext_wheels + ext_sdist
     for package in all_packages:
@@ -258,37 +263,35 @@ def copy_packages_to_output(dist_dir, version):
         shutil.copy2(package, target)
         package_type = "wheel" if package.suffix == '.whl' else "source"
         print(f"📦 Copied {package_type} package {package.name} to {output_dir}")
-    
+
     print(f"\n✅ All packages copied to: {output_dir}")
-    print(f"You can install wheels with:")
-    print(f"  pip install dist-packages/*.whl")
+    print("You can install wheels with:")
+    print("  pip install dist-packages/*.whl")
     print(f"Source distributions are also available in: {output_dir}")
-    
+
     return True
 
 
 def main():
     """Build split packages and copy to target directory."""
-    # Get script directory (relative to this file)
-    script_dir = Path(__file__).parent
-    
+
     print("Building split packages...")
-    
+
     # Build the split packages
     dist_dir, version = build_split_packages()
-    
-    print(f"\nTo build packages manually:")
+
+    print("\nTo build packages manually:")
     print(f"cd {dist_dir}")
-    print(f"./build.sh")
-    
+    print("./build.sh")
+
     # Build packages (wheels and source distributions)
     if not build_packages(dist_dir):
         return 1
-    
+
     # Copy packages to output directory
     if not copy_packages_to_output(dist_dir, version):
         return 1
-    
+
     return 0
 
 
