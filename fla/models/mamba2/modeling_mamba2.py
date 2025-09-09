@@ -18,13 +18,13 @@ from typing import Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mamba2 import Mamba2
 from fla.models.mamba2.configuration_mamba2 import Mamba2Config
+from fla.models.utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
 
@@ -421,7 +421,7 @@ class Mamba2Model(Mamba2PreTrainedModel):
         )
 
 
-class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
+class Mamba2ForCausalLM(Mamba2PreTrainedModel, FLAGenerationMixin):
     _tied_weights_keys = []
 
     def __init__(self, config):
@@ -444,55 +444,6 @@ class Mamba2ForCausalLM(Mamba2PreTrainedModel, GenerationMixin):
 
     def set_input_embeddings(self, new_embeddings):
         return self.backbone.set_input_embeddings(new_embeddings)
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        inputs_embeds=None,
-        use_cache=None,
-        cache_params: Optional[Mamba2Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        logits_to_keep: Optional[int] = None,
-        **kwargs,
-    ):
-        if use_cache:
-            # `cache_position` should have been initialized in `generate`
-            if cache_position is None:
-                raise ValueError(
-                    "`cache_position` should not be None as it should have been initialized in "
-                    "`model.generate`, you are responsible for passing in a valid `cache_position` if "
-                    "you are calling `prepare_inputs_for_generation` directly with `use_cache=True`"
-                )
-            if cache_position[0] > 0:
-                input_ids = input_ids[:, -1][..., None]
-
-                if attention_mask is not None:
-                    attention_mask = None
-            else:
-                # we initialize the `cache_position` to full size of `conv_states` at prefill stage
-                # considering padding will be applied when input length is shorter, and truncation
-                # will be applied when it is longer, so it will be equivalent to always have it match
-                # the length of `cache_params.conv_states`, which is `config.conv_kernel`
-                cache_position = torch.arange(0, self.config.conv_kernel, device=input_ids.device)
-
-        if inputs_embeds is not None and cache_params is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'attention_mask': attention_mask,
-            'cache_params': cache_params,
-            'use_cache': use_cache,
-            'cache_position': cache_position,
-            'logits_to_keep': logits_to_keep
-        })
-        return model_inputs
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
