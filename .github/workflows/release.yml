@@ -25,5 +25,6 @@ jobs:
         TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
         TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
       run: |
+        pip install -U build
         python scripts/build_packages.py
         twine upload dist-packages/*
