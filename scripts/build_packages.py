@@ -186,6 +186,7 @@ from .models import *
 
 echo "Building fla-core..."
 cd fla-core
+pip install -U build
 python -m build
 
 echo "Building flash-linear-attention..."
