@@ -34,7 +34,7 @@ def extract_dependencies():
                       isinstance(keyword.value, ast.Dict)):
                     for key_node, val_node in zip(keyword.value.keys, keyword.value.values):
                         if (isinstance(key_node, ast.Constant) and
-                                isinstance(key_node.value, str) and
+                            isinstance(key_node.value, str) and
                                 isinstance(val_node, (ast.List, ast.Tuple))):
                             key = key_node.value
                             values = [
@@ -152,6 +152,12 @@ from .modules import *
 from .utils import *
 """)
 
+    # Copy ancillary files (README.md, LICENSE) to core package
+    for fname in ("README.md", "LICENSE"):
+        src = root_dir / fname
+        if src.exists():
+            shutil.copy(src, core_dir / fname)
+
     # Create fla-core configs
     create_pyproject_toml(core_dir, 'fla-core', version, core_deps)
 
@@ -166,21 +172,14 @@ from .utils import *
     shutil.copytree(root_dir / 'fla' / 'models', fla_ext / 'models')
     shutil.copytree(root_dir / 'fla' / 'layers', fla_ext / 'layers')
 
-    # Create flash-linear-attention __init__.py
-    with open(fla_ext / '__init__.py', 'w') as f:
-        f.write(f"""__path__ = __import__('pkgutil').extend_path(__path__, __name__)
-__version__ = '{version}'
+    # Intentionally do NOT create fla/__init__.py in the extension package.
+    # The top-level package is provided by fla-core (namespace via pkgutil).
 
-try:
-    import fla
-    if getattr(fla, '__version__', None) != __version__:
-        raise ImportError(f"fla-core version {{fla.__version__}} != {{__version__}}")
-except (ImportError, AttributeError) as e:
-    raise ImportError(f"fla-core {{__version__}} is required") from e
-
-from .layers import *
-from .models import *
-""")
+    # Copy ancillary files (README.md, LICENSE) to extension package
+    for fname in ("README.md", "LICENSE"):
+        src = root_dir / fname
+        if src.exists():
+            shutil.copy(src, ext_dir / fname)
 
     # Create extension configs
     create_pyproject_toml(ext_dir, 'flash-linear-attention', version, ext_deps, extras)
