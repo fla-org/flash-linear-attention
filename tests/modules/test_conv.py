@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
-from fla.utils import assert_close, device
+from fla.utils import assert_close, device, is_intel
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -557,6 +557,10 @@ def test_conv_decoding_with_cache(
             (2, 128, 128, 4, False, False, "swish", torch.float32)
         ]
     ]
+)
+@pytest.mark.skipif(
+    is_intel,
+    reason="no need to test intel platform"
 )
 @torch.no_grad
 def test_mixed_backend(
