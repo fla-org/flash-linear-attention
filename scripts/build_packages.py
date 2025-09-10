@@ -153,12 +153,10 @@ def build_split_packages():
 
     # Create fla-core __init__.py
     with open(fla_core / '__init__.py', 'w') as f:
-        f.write(f"""__path__ = __import__('pkgutil').extend_path(__path__, __name__)
-__version__ = '{version}'
+        f.write(f"""# -*- coding: utf-8 -*-
 
-from .ops import *
-from .modules import *
-from .utils import *
+__path__ = __import__('pkgutil').extend_path(__path__, __name__)
+__version__ = '{version}'
 """)
 
     # Copy ancillary files (README.md, LICENSE) to core package
