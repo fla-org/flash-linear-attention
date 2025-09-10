@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils.op import exp2
 from fla.utils import check_shared_mem
 
 
@@ -12,14 +13,30 @@ from fla.utils import check_shared_mem
 })
 @triton.jit(do_not_specialize=['T'])
 def parallel_path_bwd_dq_kernel(
-    q, k, v, g_cumsum,
-    hc_whole, scale, L, D,
-    dq, do, dhc_whole, dg_cumsum,
-    cu_seqlens, indices, split_offsets,  # varlen specific
+    q,
+    k,
+    v,
+    g_cumsum,
+    hc_whole,
+    scale,
+    L,
+    D,
+    dq,
+    do,
+    dhc_whole,
+    dg_cumsum,
+    cu_seqlens,
+    indices,
+    split_offsets,  # varlen specific
     T,
-    G: tl.constexpr, HQ: tl.constexpr, H: tl.constexpr,
-    K: tl.constexpr, V: tl.constexpr,
-    BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr,
+    G: tl.constexpr,
+    HQ: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+    BK: tl.constexpr,
     BV: tl.constexpr,
     S: tl.constexpr,  # aka larger chunk size
     NUM_BLOCKS: tl.constexpr,
@@ -38,12 +55,13 @@ def parallel_path_bwd_dq_kernel(
     else:
         bos, eos = i_n * T, i_n * T + T
         boh_large = i_n * tl.cdiv(T, S)
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
 
-    # offset calculations
-    dq += (bos * HQ + i_hq) * K
     k += (bos * H + i_h) * K  # GQA when H!=HQ
     v += (bos * H + i_h) * V  # GQA when H!=HQ
     do += (bos * HQ + i_hq) * V
+    dq += (bos * HQ + i_hq) * K
     hc_whole += (boh_large * H + i_h) * K * K
     dhc_whole += (boh_large * HQ + i_hq) * K * K
     L += (bos * HQ + i_hq)
@@ -61,25 +79,24 @@ def parallel_path_bwd_dq_kernel(
     p_do = tl.make_block_ptr(do, (T, V), (HQ*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     b_do = tl.load(p_do, boundary_check=(0, 1))
 
-    p_l = tl.make_block_ptr(L, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-    p_d = tl.make_block_ptr(D, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-    b_l = tl.load(p_l, boundary_check=(0, ))
-    b_delta = tl.load(p_d, boundary_check=(0, ))
+    p_l = tl.make_block_ptr(L, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+    p_d = tl.make_block_ptr(D, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+    b_l = tl.load(p_l, boundary_check=(0,))
+    b_delta = tl.load(p_d, boundary_check=(0,))
 
     if USE_GATE:
-        b_g_cumsum_q = tl.zeros([BT,], dtype=tl.float32)
-        p_g_cumsum_q = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
-        b_g_cumsum_q += tl.load(p_g_cumsum_q, boundary_check=(0, ))
+        p_g_cumsum_q = tl.make_block_ptr(g_cumsum, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
+        b_g_cumsum_q = tl.load(p_g_cumsum_q, boundary_check=(0,)).to(tl.float32)
         b_dg_cumsum_q = tl.zeros([BT,], dtype=tl.float32)
     else:
         b_g_cumsum_q = None
         b_dg_cumsum_q = None
 
-    curr_end = (tl.floor(i_t * BT / S).to(tl.int32) * S).to(tl.int32)
+    curr_end = ((i_t * BT // S) * S).to(tl.int32)
     b_dq = tl.zeros([BT, K], dtype=tl.float32)
 
     for offset_outer in range(0, curr_end, S):
-        idx_j = (offset_outer // S)
+        idx_j = offset_outer // S
         p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K),
                                 (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -96,15 +113,15 @@ def parallel_path_bwd_dq_kernel(
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_A = tl.dot(b_q, tl.trans(b_k).to(b_q.dtype))
             if USE_GATE:
-                p_g_cumsum_k = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (offset, ), (BS, ), (0, ))
-                b_g_cumsum_k = tl.load(p_g_cumsum_k, boundary_check=(0, ))
+                p_g_cumsum_k = tl.make_block_ptr(g_cumsum, (T,), (HQ,), (offset,), (BS,), (0,))
+                b_g_cumsum_k = tl.load(p_g_cumsum_k, boundary_check=(0,)).to(tl.float32)
                 b_A = b_A + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
-                b_A = tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], b_A, float("-inf"))  # avoid nan
-            b_A_softmax = tl.math.exp2(b_A * sm_scale - b_l[:, None])
+            b_A = exp2(b_A * sm_scale - b_l[:, None])
+            b_A = tl.where(m_t[:, None], b_A, 0)
             p_v = tl.make_block_ptr(v, (V, T), (1, V*H), (0, offset), (BK, BS), (0, 1))
             b_v = tl.load(p_v, boundary_check=(0, 1))
             b_dp = tl.dot(b_do, b_v.to(b_do.dtype))
-            b_dA = ((b_dp - b_delta[:, None]) * b_A_softmax * scale)
+            b_dA = (b_dp - b_delta[:, None]) * b_A * scale
             b_dq += tl.dot(b_dA.to(b_k.dtype), b_k)
             if USE_GATE:
                 b_dg_cumsum_q += tl.sum(b_dA, axis=1)
@@ -112,20 +129,29 @@ def parallel_path_bwd_dq_kernel(
     p_dq = tl.make_block_ptr(dq, (T, K), (K * HQ, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     tl.store(p_dq, b_dq.to(dq.dtype.element_ty), boundary_check=(0, 1))
     if USE_GATE:
-        tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_q, sem='relaxed')
+        tl.atomic_add(dg_cumsum + o_t * HQ, b_dg_cumsum_q, mask=m_t, sem='relaxed')
 
 
 def parallel_path_bwd_dq_fn(
-    q, k, v, g_cumsum, do, dg_cumsum,
-    k_new, w1, w2,
-    hc_whole, scale, L, D,
+    q,
+    k,
+    v,
+    g_cumsum,
+    do,
+    dg_cumsum,
+    hc_whole,
+    scale,
+    L,
+    D,
     cu_seqlens,
-    S, BT, BS,
+    S,
+    BT,
+    BS,
 ):
     B, T, num_blocks, HQ, K = q.shape
-    V = v.shape[-1]
-    H = k.shape[-2]
+    H, V = v.shape[-2:]
     G = HQ // H
+    BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
 
     indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
@@ -134,22 +160,41 @@ def parallel_path_bwd_dq_fn(
     # should be NS
     if cu_seqlens is not None:
         assert split_offsets[-1] == hc_whole.shape[0]
-    dq = torch.empty(B, T, HQ, K, dtype=torch.float32, device=q.device)  # for later reduction use
+    dq = torch.empty(B, T, HQ, K, dtype=torch.float32, device=q.device)
 
     # [NS, HQ, K, K] instead of [NS, H, K, K]
     # atomic add must be initialized to 0
     dhc_whole = torch.zeros(hc_whole.shape[0], HQ, K, K, dtype=torch.float32, device=q.device)
 
     parallel_path_bwd_dq_kernel[(NT, B*HQ)](
-        q=q, k=k, v=v, g_cumsum=g_cumsum,
-        hc_whole=hc_whole, scale=scale, L=L, D=D,
-        dq=dq, do=do, dhc_whole=dhc_whole, dg_cumsum=dg_cumsum,
-        cu_seqlens=cu_seqlens, indices=indices, split_offsets=split_offsets,
-        T=T, S=S,  BT=BT, BS=BS,
-        G=G, HQ=HQ, H=H, K=K, V=V,
-        BK=triton.next_power_of_2(K), BV=triton.next_power_of_2(V),
-        num_warps=8 if (BT == 128 and K == 128) else 4,
+        q=q,
+        k=k,
+        v=v,
+        g_cumsum=g_cumsum,
+        hc_whole=hc_whole,
+        scale=scale,
+        L=L,
+        D=D,
+        dq=dq,
+        do=do,
+        dhc_whole=dhc_whole,
+        dg_cumsum=dg_cumsum,
+        cu_seqlens=cu_seqlens,
+        indices=indices,
+        split_offsets=split_offsets,
+        T=T,
+        S=S,
+        BT=BT,
+        BS=BS,
+        G=G,
+        HQ=HQ,
+        H=H,
+        K=K,
+        V=V,
+        BK=BK,
+        BV=BV,
         NUM_BLOCKS=num_blocks,
+        num_warps=8 if (BT == 128 and K == 128) else 4,
         num_stages=3 if check_shared_mem('ampere') else 2
     )
     return dq, dhc_whole, dg_cumsum

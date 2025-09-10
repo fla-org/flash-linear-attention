@@ -5,21 +5,29 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices, get_max_num_splits
+from fla.ops.utils import get_max_num_splits, prepare_chunk_indices
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def transform_q_fwd_kernel(
-    q, q_new, w1, w2,
-    offsets, indices,
+    q,
+    q_new,
+    w1,
+    w2,
+    cu_seqlens,
+    indices,
     T,
     S: tl.constexpr,
-    G: tl.constexpr, HQ: tl.constexpr, H: tl.constexpr,
+    G: tl.constexpr,
+    HQ: tl.constexpr,
+    H: tl.constexpr,
     K: tl.constexpr,
-    BT: tl.constexpr, BS: tl.constexpr, BK: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
+    BK: tl.constexpr,
     NUM_BLOCKS: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -29,7 +37,7 @@ def transform_q_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         i_n = i_b
@@ -62,24 +70,29 @@ def transform_q_fwd_kernel(
 
 
 def transform_q_fwd_fn(
-    q, w1, w2,
-    cu_seqlens, BT, BS, S
+    q,
+    w1,
+    w2,
+    cu_seqlens,
+    BT,
+    BS,
+    S
 ):
     B, T, HQ, K = q.shape
     H = w1.shape[-2]
     G = HQ // H
-    indices_BT = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices_BT)
-    grid = (NT, B * HQ)
+    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
+
     num_blocks = triton.cdiv(T, S) if cu_seqlens is None else get_max_num_splits(cu_seqlens, S)
-    q_new = torch.empty(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
-    transform_q_fwd_kernel[grid](
+    q_new = torch.zeros(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
+    transform_q_fwd_kernel[(NT, B * HQ)](
         q=q,
         q_new=q_new,
         w1=w1,
         w2=w2,
-        offsets=cu_seqlens,
-        indices=indices_BT,
+        cu_seqlens=cu_seqlens,
+        indices=indices,
         T=T,
         K=K,
         BK=triton.next_power_of_2(K),

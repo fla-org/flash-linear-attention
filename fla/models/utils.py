@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 import transformers
 from packaging import version
 from transformers.cache_utils import Cache as HFCacheBase
+from transformers.generation import GenerationMixin
+from transformers.utils.deprecation import deprecate_kwarg
 
 _TF_VERSION = transformers.__version__
 _NEED_NEW = "4.53.3"
+_IS_TRANSFORMERS_4_56_PLUS = version.parse(_TF_VERSION) >= version.parse("4.56.0")
 
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
     from transformers.cache_utils import CacheLayerMixin
@@ -18,12 +22,15 @@ else:
     CacheLayerMixin = object
 
 
-class FlashLinearLayer(CacheLayerMixin):
+class FLALayer(CacheLayerMixin):
     is_compileable = True
     is_sliding = False
 
     def __init__(self):
         super().__init__()
+        self.state = None
+
+    def lazy_initialization(self, key_states: torch.Tensor):
         self.state = None
 
     def update(
@@ -80,6 +87,13 @@ class FlashLinearLayer(CacheLayerMixin):
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
 
+        if not hasattr(self, 'device'):
+            self.device = 'cpu'
+        for state in (recurrent_state, attn_state, conv_state, ffn_state):
+            if state is not None:
+                self.device = state.device if isinstance(state, torch.Tensor) else state[0].device
+                break
+
         return self.state
 
     def get_seq_length(self, cache_position=None) -> int:
@@ -92,8 +106,41 @@ class FlashLinearLayer(CacheLayerMixin):
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
         return 0, 0
 
+    def offload(self):
+        if self.state is None:
+            return
 
-class LegacyCache(HFCacheBase):
+        def to_cpu(x):
+            return x.to("cpu", non_blocking=True) if isinstance(x, torch.Tensor) else x
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+            v = self.state.get(k, None)
+            if v is None:
+                continue
+            if isinstance(v, (tuple, list)):
+                self.state[k] = tuple(to_cpu(t) for t in v)
+            else:
+                self.state[k] = to_cpu(v)
+
+    def prefetch(self):
+        if self.state is None:
+            return
+
+        def to_dev(x):
+            return x.to(self.device, non_blocking=True) if isinstance(x, torch.Tensor) else x
+        for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
+            v = self.state.get(k, None)
+            if v is None:
+                continue
+            if isinstance(v, (tuple, list)):
+                self.state[k] = tuple(to_dev(t) for t in v)
+            else:
+                self.state[k] = to_dev(v)
+
+    def reset(self):
+        pass
+
+
+class LegacyFLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
@@ -105,7 +152,7 @@ class LegacyCache(HFCacheBase):
     def __init__(
         self,
         seen_tokens: int = 0
-    ) -> LegacyCache:
+    ) -> LegacyFLACache:
         super().__init__()
 
         self.states: List[Dict[str, Any]] = []
@@ -225,7 +272,7 @@ class LegacyCache(HFCacheBase):
         cls,
         past_key_values: Optional[tuple] = None,
         seen_tokens: int = 0
-    ) -> LegacyCache:
+    ) -> LegacyFLACache:
         """Converts a cache in the legacy cache format into an equivalent `Cache`."""
 
         cache = cls(seen_tokens)
@@ -235,7 +282,7 @@ class LegacyCache(HFCacheBase):
         return cache
 
 
-class NewStyleCache(HFCacheBase):
+class FLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
@@ -245,7 +292,22 @@ class NewStyleCache(HFCacheBase):
     is_compileable = True
 
     def __init__(self, seen_tokens: int = 0, **kwargs):
-        super().__init__(layer_classes=FlashLinearLayer, **kwargs)
+        parent_init = super().__init__
+        sig = inspect.signature(parent_init)
+        param_names = list(sig.parameters.keys())
+
+        if 'layer_class_to_replicate' in param_names:
+            self.use_layer_class_to_replicate = True
+            super().__init__(layer_class_to_replicate=FLALayer, **kwargs)
+        elif 'layer_classes' in param_names:
+            self.use_layer_class_to_replicate = False
+            super().__init__(layer_classes=FLALayer, **kwargs)
+        else:
+            raise TypeError(
+                "FLA cache initialization failed: HFCacheBase.__init__ accepts neither "
+                "'layer_class_to_replicate' nor 'layer_classes'. This might be caused by an incompatible "
+                "transformers version. Please check your transformers>=4.36.0"
+            )
         self._seen_tokens = int(seen_tokens)
 
     def update(
@@ -258,7 +320,11 @@ class NewStyleCache(HFCacheBase):
         offset: Optional[int] = 1,
         cache_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        self.append_new_layers(layer_idx)
+        if not self.use_layer_class_to_replicate:
+            self.append_new_layers(layer_idx)
+        else:
+            while len(self.layers) <= layer_idx:
+                self.layers.append(self.layer_class_to_replicate())
         if layer_idx == 0:
             self._seen_tokens += int(offset)
 
@@ -307,7 +373,7 @@ class NewStyleCache(HFCacheBase):
         past_key_values: Optional[tuple[Dict[str, Any], ...]] = None,
         seen_tokens: int = 0,
         **kwargs,
-    ) -> NewStyleCache:
+    ) -> FLACache:
         cache = cls(seen_tokens=seen_tokens, **kwargs)
         if isinstance(past_key_values, (list, tuple)):
             for i, st in enumerate(past_key_values):
@@ -316,11 +382,91 @@ class NewStyleCache(HFCacheBase):
         return cache
 
 
+class FLAGenerationMixin(GenerationMixin):
+    """
+    Flash Linear Attention Generation Mixin that provides version-compatible generation methods.
+    This mixin handles transformers library version differences, particularly for prepare_inputs_for_generation.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
+    def prepare_inputs_for_generation(
+        self,
+        input_ids: torch.LongTensor = None,
+        past_key_values: Optional[HFCacheBase] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        use_cache: bool = True,
+        logits_to_keep: Optional[int] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs
+    ):
+        # Use pre-computed version comparison for performance
+        if _IS_TRANSFORMERS_4_56_PLUS:
+            # For transformers 4.56.0+, use cache_position-based logic
+            model_inputs = {}
+
+            # Handle cache-dependent input preparation
+            if past_key_values is not None:
+                model_inputs["past_key_values"] = past_key_values
+
+                # Use the new cache-dependent input preparation method if available
+                if hasattr(self, '_cache_dependant_input_preparation') and cache_position is not None:
+                    inputs_embeds, input_ids = self._cache_dependant_input_preparation(
+                        input_ids, inputs_embeds, cache_position
+                    )
+                elif cache_position is not None:
+                    # Fallback: manually slice using cache_position
+                    if input_ids is not None and input_ids.shape[1] != cache_position.shape[0]:
+                        input_ids = input_ids[:, cache_position]
+                elif hasattr(past_key_values, '__len__') and len(past_key_values) > 0:
+                    # Ultimate fallback to old behavior
+                    input_ids = input_ids[:, -1:]
+
+            # Handle input format (similar to base class logic)
+            if inputs_embeds is not None and (cache_position is None or len(cache_position) == inputs_embeds.shape[1]):
+                model_inputs['inputs_embeds'] = inputs_embeds
+                model_inputs['input_ids'] = None
+            else:
+                model_inputs['input_ids'] = input_ids.contiguous() if input_ids is not None else None
+                model_inputs['inputs_embeds'] = None
+
+            model_inputs['cache_position'] = cache_position
+
+        else:
+            # For older transformers versions, use the original logic
+            model_inputs = {}
+            # only last token for `inputs_ids` if the `past_key_values` is not empty.
+            if past_key_values is not None and hasattr(past_key_values, '__len__') and len(past_key_values) > 0:
+                input_ids = input_ids[:, -1:]
+            # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+            if inputs_embeds is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:
+                model_inputs = {'inputs_embeds': inputs_embeds}
+            else:
+                # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
+                # recompiles graphs as the stride of the inputs is a guard.
+                # Ref: https://github.com/huggingface/transformers/pull/29114
+                # TODO: use `next_tokens` directly instead.
+                model_inputs = {'input_ids': input_ids.contiguous()}
+
+        if logits_to_keep is not None:
+            model_inputs['logits_to_keep'] = logits_to_keep
+
+        model_inputs.update({
+            'past_key_values': past_key_values,
+            'use_cache': use_cache,
+            'attention_mask': attention_mask,
+        })
+        return model_inputs
+
+
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
-    class Cache(NewStyleCache):
+    class Cache(FLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens, **kwargs)
 else:
-    class Cache(LegacyCache):
+    class Cache(LegacyFLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens)

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -7,7 +8,6 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint
 from einops import rearrange
 from transformers.utils import logging
 
@@ -15,7 +15,7 @@ from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, ShortConvolution
 from fla.modules.l2norm import l2_norm
 from fla.ops.attn.decoding import attn_decoding_one_step
-from fla.ops.path_attn.parallel import parallel_path_attention
+from fla.ops.path_attn.parallel import parallel_path_attn
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -121,7 +121,7 @@ class PaTHAttention(nn.Module):
             v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
             w = rearrange(w, '... (h d) -> ... h d', d=self.head_dim)
             w = l2_norm(w)
-            o, _ = parallel_path_attention(q=q, k=k, v=v, w=w, beta=beta, g=g, cu_seqlens=cu_seqlens)
+            o, _ = parallel_path_attn(q=q, k=k, v=v, w=w, beta=beta, g=g, cu_seqlens=cu_seqlens)
 
         # Prefilling or decoding
         else:
@@ -199,8 +199,8 @@ class PaTHAttention(nn.Module):
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
                 w = rearrange(w, '... (h d) -> ... h d', d=self.head_dim)
                 w = l2_norm(w)
-                o, k_cache = parallel_path_attention(q=q, k=k, v=v, w=w, beta=beta, g=g,
-                                                     cu_seqlens=cu_seqlens, use_cache=use_cache)
+                o, k_cache = parallel_path_attn(q=q, k=k, v=v, w=w, beta=beta, g=g,
+                                                cu_seqlens=cu_seqlens, use_cache=use_cache)
                 if use_cache:
                     k_cache = pad_input(k_cache.squeeze(0), indices_q, batch_size, q_len)
                     k_cache = rearrange(k_cache, '... h d -> ... (h d)')

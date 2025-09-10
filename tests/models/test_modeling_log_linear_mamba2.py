@@ -5,7 +5,7 @@ import os
 import pytest
 import torch
 
-from fla.models import Mamba2Config, Mamba2ForCausalLM
+from fla.models import LogLinearMamba2Config, LogLinearMamba2ForCausalLM
 from fla.utils import device
 
 
@@ -13,13 +13,13 @@ from fla.utils import device
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype', 'conv_backend'],
+    ['L', 'B', 'T', 'H', 'D', 'dtype', 'conv_backend'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}-conv-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}-conv-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, True, torch.bfloat16, 'cuda'),
-            (4, 4, 1024, 4, 64, False, torch.bfloat16, 'cuda'),
-            (4, 4, 1024, 4, 128, False, torch.bfloat16, 'cuda'),
+            (4, 4, 1024, 4, 64, torch.bfloat16, 'cuda'),
+            (4, 4, 1024, 4, 64, torch.bfloat16, 'triton'),
+            (4, 4, 1024, 4, 128, torch.bfloat16, 'cuda'),
         ]
     ]
 )
@@ -29,7 +29,6 @@ def test_modeling(
     T: int,
     H: int,
     D: int,
-    use_l2warp: bool,
     dtype: torch.dtype,
     conv_backend: str,
 ):
@@ -45,17 +44,16 @@ def test_modeling(
     expand = 2
     hidden_size = H * D // expand
 
-    config = Mamba2Config(
+    config = LogLinearMamba2Config(
         num_hidden_layers=L,
         hidden_size=hidden_size,
         expand=expand,
         num_heads=H,
         head_dim=D,
-        use_l2warp=use_l2warp,
-        vocab_size=1000  # dummy vocab size
+        vocab_size=1000,  # dummy vocab size
     )
 
-    model = Mamba2ForCausalLM(config).to(device=device, dtype=dtype)
+    model = LogLinearMamba2ForCausalLM(config).to(device=device, dtype=dtype)
     model.eval()
 
     # Create random input tensor
