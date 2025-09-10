@@ -25,7 +25,7 @@ def extract_dependencies():
         if isinstance(node, ast.Call) and getattr(node.func, 'id', '') == 'setup':
             for keyword in node.keywords:
                 if (keyword.arg == 'install_requires' and
-                    isinstance(keyword.value, (ast.List, ast.Tuple))):
+                        isinstance(keyword.value, (ast.List, ast.Tuple))):
                     all_deps.extend([
                         elt.value for elt in keyword.value.elts
                         if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
@@ -34,8 +34,8 @@ def extract_dependencies():
                       isinstance(keyword.value, ast.Dict)):
                     for key_node, val_node in zip(keyword.value.keys, keyword.value.values):
                         if (isinstance(key_node, ast.Constant) and
-                            isinstance(key_node.value, str) and
-                            isinstance(val_node, (ast.List, ast.Tuple))):
+                                isinstance(key_node.value, str) and
+                                isinstance(val_node, (ast.List, ast.Tuple))):
                             key = key_node.value
                             values = [
                                 elt.value for elt in val_node.elts
