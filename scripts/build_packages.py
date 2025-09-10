@@ -100,6 +100,15 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
 
     content += extras_content
 
+    # Add setuptools namespace package configuration for extension package
+    if name == 'flash-linear-attention':
+        content += """
+
+[tool.setuptools.packages.find]
+include = ["fla*"]
+namespaces = true
+"""
+
     with open(package_dir / 'pyproject.toml', 'w') as f:
         f.write(content)
 
@@ -308,7 +317,7 @@ def main():
     print("Building split packages...")
 
     # Build the split packages
-    dist_dir, version = build_split_packages()
+    dist_dir, _ = build_split_packages()
 
     print("\nTo build packages manually:")
     print(f"cd {dist_dir}")

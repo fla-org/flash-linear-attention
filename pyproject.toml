@@ -29,6 +29,7 @@ benchmark = ["matplotlib"]
 
 [project.urls]
 Homepage = "https://github.com/fla-org/flash-linear-attention"
+Repository = "https://github.com/fla-org/flash-linear-attention"
 
 [build-system]
 requires = ["setuptools>=45", "wheel"]
