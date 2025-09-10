@@ -1,45 +1,48 @@
 #!/usr/bin/env python3
 """Build split packages with proper dependency management and copy them to target directory."""
 
+import ast
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
 def extract_dependencies():
-    """Extract dependencies from current setup.py."""
+    """Extract dependencies from setup.py using AST."""
     # Get script directory and find setup.py in parent directory
     script_dir = Path(__file__).parent
     setup_py = script_dir.parent / 'setup.py'
 
-    with open(setup_py) as f:
-        content = f.read()
+    with open(setup_py, 'r', encoding='utf-8') as f:
+        tree = ast.parse(f.read(), filename=str(setup_py))
 
-    # Extract install_requires
-    match = re.search(r'install_requires=\[(.*?)\]', content, re.DOTALL)
-    if not match:
-        return [], {}
-
-    deps_str = match.group(1)
-
-    # Parse dependencies
     all_deps = []
-    for line in deps_str.split('\n'):
-        line = line.strip().strip("',")
-        if line and not line.startswith('#'):
-            all_deps.append(line)
-
-    # Extract extras_require
-    extras_match = re.search(r'extras_require=\{(.*?)\}', content, re.DOTALL)
     extras = {}
-    if extras_match:
-        extras_str = extras_match.group(1)
-        for line in extras_str.split('\n'):
-            if ':' in line and '[' in line:
-                key = line.split(':')[0].strip().strip("'")
-                values = re.findall(r"'(.*?)'", line)
-                extras[key] = values
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, 'id', '') == 'setup':
+            for keyword in node.keywords:
+                if (keyword.arg == 'install_requires' and
+                    isinstance(keyword.value, (ast.List, ast.Tuple))):
+                    all_deps.extend([
+                        elt.value for elt in keyword.value.elts
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                    ])
+                elif (keyword.arg == 'extras_require' and
+                      isinstance(keyword.value, ast.Dict)):
+                    for key_node, val_node in zip(keyword.value.keys, keyword.value.values):
+                        if (isinstance(key_node, ast.Constant) and
+                            isinstance(key_node.value, str) and
+                            isinstance(val_node, (ast.List, ast.Tuple))):
+                            key = key_node.value
+                            values = [
+                                elt.value for elt in val_node.elts
+                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                            ]
+                            extras[key] = values
+            break  # Assume only one setup() call
 
     return all_deps, extras
 
@@ -73,8 +76,10 @@ def create_pyproject_toml(package_dir, name, version, dependencies, extras=None)
     deps_content = ', '.join(f'"{dep}"' for dep in dependencies)
 
     # Create description text
-    desc_text = ('Core operations for flash-linear-attention' if name == 'fla-core'
-                 else 'Fast linear attention models and layers')
+    if name == 'fla-core':
+        desc_text = 'Core operations for flash-linear-attention'
+    else:
+        desc_text = 'Fast linear attention models and layers'
 
     content = f"""[build-system]
 requires = ["setuptools", "wheel"]
@@ -107,10 +112,12 @@ def build_split_packages():
 
     # Get current version
     init_file = root_dir / 'fla' / '__init__.py'
-    with open(init_file) as f:
+    with open(init_file, 'r', encoding='utf-8') as f:
         content = f.read()
-    version_match = re.search(r"^__version__\s*=\s*'(.*)'$", content, re.MULTILINE)
-    version = version_match.group(1) if version_match else '0.3.1'
+    version_match = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]\s*$", content, re.MULTILINE)
+    if not version_match:
+        raise RuntimeError(f"Could not find __version__ in {init_file}")
+    version = version_match.group(1)
 
     # Extract dependencies
     all_deps, extras = extract_dependencies()
@@ -212,29 +219,47 @@ def build_packages(dist_dir):
 
     # Build fla-core (both wheel and sdist)
     print("Building fla-core packages...")
-    result = subprocess.run([
-        'python', '-m', 'build', str(dist_dir / 'fla-core')
-    ])
-
-    if result.returncode != 0:
-        print("Failed to build fla-core packages")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "build", str(dist_dir / "fla-core")],
+            check=True,
+            timeout=1800,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print("Failed to build fla-core packages:")
+        print(e.stdout)
+        return False
+    except subprocess.TimeoutExpired:
+        print("Timed out building fla-core packages")
         return False
 
     # Build flash-linear-attention (both wheel and sdist)
     print("Building flash-linear-attention packages...")
-    result = subprocess.run([
-        'python', '-m', 'build', str(dist_dir / 'flash-linear-attention')
-    ])
-
-    if result.returncode != 0:
-        print("Failed to build flash-linear-attention packages")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "build", str(dist_dir / "flash-linear-attention")],
+            check=True,
+            timeout=1800,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print("Failed to build flash-linear-attention packages:")
+        print(e.stdout)
+        return False
+    except subprocess.TimeoutExpired:
+        print("Timed out building flash-linear-attention packages")
         return False
 
     print("✅ Packages built successfully")
     return True
 
 
-def copy_packages_to_output(dist_dir, version):
+def copy_packages_to_output(dist_dir):
     """Copy wheels and source distributions to output directory."""
     # Get script directory (relative to this file)
     script_dir = Path(__file__).parent
@@ -262,13 +287,18 @@ def copy_packages_to_output(dist_dir, version):
     for package in all_packages:
         target = output_dir / package.name
         shutil.copy2(package, target)
-        package_type = "wheel" if package.suffix == '.whl' else "source"
+        if package.suffix == ".whl":
+            package_type = "wheel"
+        elif package.suffixes[-2:] == [".tar", ".gz"]:
+            package_type = "sdist"
+        else:
+            package_type = "source"
         print(f"📦 Copied {package_type} package {package.name} to {output_dir}")
 
     print(f"\n✅ All packages copied to: {output_dir}")
     print("You can install wheels with:")
     print("  pip install dist-packages/*.whl")
-    print(f"Source distributions are also available in: {output_dir}")
+    print("Source distributions are also available in:", output_dir)
 
     return True
 
@@ -290,7 +320,7 @@ def main():
         return 1
 
     # Copy packages to output directory
-    if not copy_packages_to_output(dist_dir, version):
+    if not copy_packages_to_output(dist_dir):
         return 1
 
     return 0
