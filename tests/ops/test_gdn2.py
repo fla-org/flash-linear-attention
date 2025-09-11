@@ -136,21 +136,21 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype', 'tma'),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test)
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}-tma{}".format(*test)
         )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, False, torch.float16),
-            (2, 500, 3, 60, 1, 1, 0, False, torch.float16),
-            (2, 1000, 3, 64, 0.1, 1, 0.5, False, torch.float16),
-            (3, 1024, 4, 100, 1, 0.1, 0, False, torch.float16),
-            (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16),
-            (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16),
-            (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16),
-            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16)
+            (1, 63, 1, 64, 1, 1, 0, False, torch.float16, True),
+            (2, 500, 3, 60, 1, 1, 0, False, torch.float16, True),
+            (2, 1000, 3, 64, 0.1, 1, 0.5, False, torch.float16, False),
+            (3, 1024, 4, 100, 1, 0.1, 0, False, torch.float16, False),
+            (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16, True),
+            (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16, True),
+            (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16, False),
+            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16, True)
         ]
     ]
 )
@@ -164,9 +164,13 @@ def test_chunk(
     mask_p: float,
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
+    tma: bool
 ):
     torch.manual_seed(42)
-
+    if not tma:
+        os.environ['FLA_NO_USE_TMA'] = '1'
+    else:
+        os.environ['FLA_NO_USE_TMA'] = '0'
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
@@ -215,6 +219,7 @@ def test_chunk(
     assert_close('dg', ref_dg, tri_dg, 0.02)
     assert_close('db', ref_db, tri_db, 0.02)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
+    os.environ['FLA_NO_USE_TMA'] = '0'
 
 
 @pytest.mark.parametrize(
