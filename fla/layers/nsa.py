@@ -10,6 +10,7 @@ import torch.nn as nn
 from einops import rearrange
 from transformers.utils import logging
 
+from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RotaryEmbedding
 from fla.ops.nsa.parallel import parallel_nsa
 from fla.ops.utils.index import prepare_lens_from_mask
@@ -80,17 +81,16 @@ class NativeSparseAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        batch_size, seq_len, _ = hidden_states.size()
+        batch_size, q_len, _ = hidden_states.size()
 
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=3)
-        g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
 
         cu_seqlens = kwargs.get('cu_seqlens', None)
 
-        seqlen_offset, max_seqlen = 0, seq_len
+        seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
@@ -109,27 +109,46 @@ class NativeSparseAttention(nn.Module):
             k_cached, v_cached = past_key_values.update(
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
-                offset=seq_len,
-                cache_kwargs=dict(window_size=self.window_size)
+                offset=q_len,
             )['attn_state']
             if cache_has_content:
                 k, v = k_cached, v_cached
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        o = parallel_nsa(
-            q=q,
-            k=k,
-            v=v,
-            g_cmp=g_cmp,
-            g_slc=g_slc,
-            g_swa=g_swa,
-            block_size=self.block_size,
-            block_counts=self.block_counts,
-            window_size=self.window_size,
-            cu_seqlens=cu_seqlens,
-        )
-        o = o.reshape(batch_size, seq_len, -1)
+        if attention_mask is not None:
+            (q, g), (k, v), indices_q, cu_seqlens, max_seq_lens = unpad_input(
+                (q, g), (k, v), attention_mask, q_len, keepdim=True)
+            g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
+            o = parallel_nsa(
+                q=q,
+                k=k,
+                v=v,
+                g_cmp=g_cmp,
+                g_slc=g_slc,
+                g_swa=g_swa,
+                block_size=self.block_size,
+                block_counts=self.block_counts,
+                window_size=self.window_size,
+                cu_seqlens=cu_seqlens,
+            ).squeeze(0)
+            o = pad_input(o, indices_q, batch_size, q_len)
+        else:
+            g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
+            o = parallel_nsa(
+                q=q,
+                k=k,
+                v=v,
+                g_cmp=g_cmp,
+                g_slc=g_slc,
+                g_swa=g_swa,
+                block_size=self.block_size,
+                block_counts=self.block_counts,
+                window_size=self.window_size,
+                cu_seqlens=cu_seqlens,
+            )
+
+        o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
         if not output_attentions:
