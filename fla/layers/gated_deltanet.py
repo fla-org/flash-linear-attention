@@ -31,6 +31,9 @@ def elu_p1(x):
 def sum_norm(x):
     return (x / x.sum(-1, keepdim=True)).to(x)
 
+@torch.compile
+def preprocess_gate(A_log, a, dt_bias):
+    return -A_log.float().exp() * F.softplus(a.float() + dt_bias)
 
 class GatedDeltaNet(nn.Module):
     """
@@ -268,7 +271,7 @@ class GatedDeltaNet(nn.Module):
         if self.allow_neg_eigval:
             beta = beta * 2.
 
-        g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
+        g = preprocess_gate(self.A_log, self.a_proj(hidden_states), self.dt_bias)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
