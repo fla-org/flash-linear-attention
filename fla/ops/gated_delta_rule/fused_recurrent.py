@@ -54,6 +54,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
+
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -113,8 +114,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         if USE_GV:
             b_gv = tl.load(p_gv).to(tl.float32)
             b_h *= exp(b_gv[None, :])
+            b_k = b_beta * (b_k - tl.sum(b_h * b_v[None, :], 1))
+        else:
+            b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0))
 
-        b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0))
         b_h += b_k[:, None] * b_v
 
         # [BV]
@@ -156,10 +159,9 @@ def fused_recurrent_gated_delta_rule_fwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
+    BK = triton.next_power_of_2(K)
+    BV = min(8, triton.next_power_of_2(V)) if gv is None else triton.next_power_of_2(V)
     NV = triton.cdiv(V, BV)
-    num_stages = 3
-    num_warps = 1
 
     o = torch.empty_like(v)
     final_state = q.new_empty(N, HV, K, V, dtype=torch.float32) if output_final_state else None
@@ -187,10 +189,9 @@ def fused_recurrent_gated_delta_rule_fwd(
         BK=BK,
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim != v.ndim,
-        USE_Q_L2NORM=use_q_l2norm,
-        USE_K_L2NORM=use_k_l2norm,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        num_warps=1,
+        num_stages=3,
     )
     return o, final_state
 
