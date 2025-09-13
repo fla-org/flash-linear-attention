@@ -790,8 +790,31 @@ def causal_conv1d(
 
 
 class ShortConvolution(nn.Conv1d):
-    """
-    Simple wrapper around `nn.Conv1d` that accepts dimension last.
+    """Short convolution layer for efficient causal convolution operations.
+
+    This class implements a depthwise separable 1D convolution with causal padding,
+    designed for efficient sequence processing. It supports multiple backends (Triton/CUDA)
+    and optional activation functions.
+
+    Args:
+        hidden_size (int): Number of input/output channels (must be equal for depthwise conv)
+        kernel_size (int): Size of the convolution kernel
+        bias (bool, optional): Whether to include learnable bias. Defaults to False.
+        activation (Optional[str], optional): Activation function ('silu' or 'swish'). Defaults to 'silu'.
+        backend (Optional[str], optional): Backend implementation ('triton' or 'cuda'). Defaults to 'triton'.
+        device (Optional[torch.device], optional): Device to place the layer on. Defaults to None.
+        dtype (Optional[torch.dtype], optional): Data type for layer parameters. Defaults to None.
+        **kwargs: Additional keyword arguments (deprecated 'use_fast_conv1d' supported for compatibility)
+
+    Attributes:
+        hidden_size (int): Number of channels
+        activation (Optional[str]): Selected activation function
+        backend (str): Actual backend being used (may differ from input due to availability)
+
+    Note:
+        - Uses depthwise convolution (groups=hidden_size) for efficiency
+        - Applies causal padding (kernel_size-1) to ensure no future information leakage
+        - Falls back to Triton backend if CUDA backend is unavailable
     """
 
     def __init__(
@@ -800,7 +823,7 @@ class ShortConvolution(nn.Conv1d):
         kernel_size: int,
         bias: bool = False,
         activation: Optional[str] = 'silu',
-        backend: Optional[str] = 'cuda',
+        backend: Optional[str] = 'triton',
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         **kwargs,
