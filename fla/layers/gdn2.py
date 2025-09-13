@@ -14,6 +14,7 @@ from torch.nn import functional as F
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
+from fla.ops.gdn2.gate import fused_gdn2_gate
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -232,7 +233,7 @@ class GDN2(nn.Module):
             v = F.silu(self.v_proj(hidden_states))
 
         g = self.f_proj(hidden_states)
-        g = -self.A.float().exp().unsqueeze(-1) * F.softplus(rearrange(g, '... (h d) -> ... h d', d=self.head_k_dim).float())
+        g = fused_gdn2_gate(g, self.A, self.head_k_dim)
         beta = self.b_proj(hidden_states).sigmoid()
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
@@ -267,8 +268,7 @@ class GDN2(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                use_q_l2norm=True,
-                use_k_l2norm=True,
+                fused_recurrent_gdn2=True,
                 cu_seqlens=cu_seqlens,
             )
         else:

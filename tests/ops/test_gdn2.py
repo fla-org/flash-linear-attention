@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
+from fla.ops.gdn2.gate import fused_gdn2_gate, gdn2_gate_ref
 from fla.ops.gdn2.naive import naive_chunk_gdn2, naive_recurrent_gdn2
 from fla.utils import assert_close, device, is_intel_alchemist
 
@@ -307,3 +308,54 @@ def test_chunk_varlen(
     assert_close('dg', ref_dg, tri_dg, 0.015)
     assert_close('db', ref_db, tri_db, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        for test in [
+            (1, 2, 2, 12),
+            (1, 32, 2, 16),
+            (2, 64, 4, 32),
+            (4, 128, 8, 64),
+            (4, 128, 8, 128),
+        ]
+    ]
+)
+def test_gdn2_gate(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+):
+    """Test GDN2 gate forward and backward pass - reference vs Triton implementation"""
+    torch.manual_seed(42)
+
+    g = torch.randn(B, T, H * D, dtype=torch.float32)
+    # Ensure some values are > 20 to test the threshold logic in softplus
+    g = g * 30  # Scale up to get values > 20
+    A = torch.randn(H, dtype=torch.float32)
+    g, A = map(lambda x: x.to(device).requires_grad_(True), (g, A))
+
+    # Create gradient output
+    do = torch.randn_like(g).view(B, T, H, D)
+
+    # Reference implementation
+    ref = gdn2_gate_ref(g.clone(), A.clone(), D)
+    # Triton implementation
+    tri = fused_gdn2_gate(g.clone(), A.clone(), D)
+
+    # Backward pass
+    ((ref * do).sum()).backward(retain_graph=True)
+    ref_dg, ref_dA = g.grad, A.grad
+    g.grad = A.grad = None
+
+    ((tri * do).sum()).backward(retain_graph=True)
+    tri_dg, tri_dA = g.grad, A.grad
+    g.grad = A.grad = None
+
+    # Check forward and backward results
+    assert_close('o', ref, tri, 1e-4)
+    assert_close('dg', ref_dg, tri_dg, 1e-4)
+    assert_close('dA', ref_dA, tri_dA, 1e-4)
