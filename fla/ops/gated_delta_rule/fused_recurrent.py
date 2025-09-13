@@ -44,8 +44,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
-    USE_Q_L2NORM: tl.constexpr,
-    USE_K_L2NORM: tl.constexpr,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_BETA_HEADWISE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
@@ -92,9 +91,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
-        if USE_Q_L2NORM:
+        if USE_QK_L2NORM_IN_KERNEL:
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-        if USE_K_L2NORM:
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
         if IS_BETA_HEADWISE:
@@ -152,8 +150,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    use_q_l2norm: bool = False,
-    use_k_l2norm: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -212,8 +209,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         scale: float = None,
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
-        use_q_l2norm: bool = False,
-        use_k_l2norm: bool = False,
+        use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: Optional[torch.LongTensor] = None,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
@@ -227,8 +223,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            use_q_l2norm=use_q_l2norm,
-            use_k_l2norm=use_k_l2norm,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
         )
 
@@ -255,10 +250,8 @@ def fused_recurrent_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    use_q_l2norm: bool = False,
-    use_k_l2norm: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    **kwargs,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -286,9 +279,7 @@ def fused_recurrent_gated_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
-        use_q_l2norm (Optional[bool]):
-            Whether to use L2 normalization in the kernel. Default: `False`.
-        use_k_l2norm (Optional[bool]):
+        use_qk_l2norm_in_kernel (Optional[bool]):
             Whether to use L2 normalization in the kernel. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
@@ -329,10 +320,6 @@ def fused_recurrent_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
-    if 'use_qk_l2norm_in_kernel' in kwargs and (not use_q_l2norm and not use_k_l2norm):
-        use_q_l2norm = True
-        use_k_l2norm = True
-
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -360,8 +347,7 @@ def fused_recurrent_gated_delta_rule(
         scale,
         initial_state,
         output_final_state,
-        use_q_l2norm,
-        use_k_l2norm,
+        use_qk_l2norm_in_kernel,
         cu_seqlens,
     )
     return o, final_state
