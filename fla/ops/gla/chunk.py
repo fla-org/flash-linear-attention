@@ -10,12 +10,11 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp, make_tensor_descriptor
-from fla.utils import check_shared_mem, input_guard, is_tma_supported
+from fla.ops.utils.op import exp
+from fla.utils import check_shared_mem, input_guard
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
-TMA_AUTOTUNE_LIST = [True, False] if is_tma_supported else [False]
 
 
 @triton.heuristics({
@@ -23,11 +22,10 @@ TMA_AUTOTUNE_LIST = [True, False] if is_tma_supported else [False]
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK, 'USE_TMA': USE_TMA}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64]
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
-        for USE_TMA in TMA_AUTOTUNE_LIST
     ],
     key=["BC"]
 )
@@ -48,7 +46,6 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
     BK: tl.constexpr,
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_TMA: tl.constexpr
 ):
     i_t, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -70,49 +67,28 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
-        if not USE_TMA:
-            p_q = tl.make_block_ptr(q + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-            p_g = tl.make_block_ptr(g + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-            p_k = tl.make_block_ptr(k + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
-            p_gk = tl.make_block_ptr(g + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
-            p_gn = g + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
+        p_q = tl.make_block_ptr(q + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        p_g = tl.make_block_ptr(g + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
+        p_gk = tl.make_block_ptr(g + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
+        p_gn = g + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
 
-            # [BK,]
-            b_gn = tl.load(p_gn, mask=m_k, other=0)
-            # [BC, BK]
-            b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_g = tl.load(p_g, boundary_check=(0, 1))
-            b_qg = b_q * exp(b_g - b_gn[None, :]) * scale
-            # [BK, BC]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kg = b_k * exp(b_gn[:, None] - b_gk)
-        else:
-            desc_q = make_tensor_descriptor(q + (bos*H+i_h)*K, [T, K], [H*K, 1], [BC, BK])
-            desc_g = make_tensor_descriptor(g + (bos*H+i_h)*K, [T, K], [H*K, 1], [BC, BK])
-
-            p_gn = g + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
-            b_gn = tl.load(p_gn, mask=m_k, other=0)
-
-            b_q = desc_q.load([i_t * BT + i_i * BC, i_k * BK])
-            b_g = desc_g.load([i_t * BT + i_i * BC, i_k * BK])
-            b_qg = b_q * exp(b_g - b_gn[None, :]) * scale
-
-            p_k = tl.make_block_ptr(k + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
-            p_gk = tl.make_block_ptr(g + (bos*H+i_h)*K, (K, T), (1, H*K), (i_k * BK, i_t * BT + i_j * BC), (BK, BC), (0, 1))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kg = b_k * exp(b_gn[:, None] - b_gk)
+        # [BK,]
+        b_gn = tl.load(p_gn, mask=m_k, other=0)
+        # [BC, BK]
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_g = tl.load(p_g, boundary_check=(0, 1))
+        b_qg = b_q * exp(b_g - b_gn[None, :]) * scale
+        # [BK, BC]
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        b_kg = b_k * exp(b_gn[:, None] - b_gk)
 
         # [BC, BC] using tf32 to improve precision here.
         b_A += tl.dot(b_qg, b_kg)
 
-    if not USE_TMA:
-        p_A = tl.make_block_ptr(A + (bos*H + i_h)*BT, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
-        tl.store(p_A, b_A.to(A.dtype.element_ty), boundary_check=(0, 1))
-    else:
-        desc_A = make_tensor_descriptor(A + (bos*H + i_h)*BT, [T, BT], [H*BT, 1], [BC, BC])
-        desc_A.store([i_t * BT + i_i * BC, i_j * BC], b_A.to(desc_A.dtype))
+    p_A = tl.make_block_ptr(A + (bos*H + i_h)*BT, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
+    tl.store(p_A, b_A.to(A.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -120,10 +96,9 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'USE_TMA': USE_TMA}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3]
-        for USE_TMA in TMA_AUTOTUNE_LIST
     ],
     key=["BK", "BT"]
 )
@@ -142,8 +117,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BK: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    USE_TMA: tl.constexpr
+    IS_VARLEN: tl.constexpr
 ):
     i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -164,16 +138,10 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
     o_A = (bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * H*BT + i_h * BT + i_j * BC
 
-    if not USE_TMA:
-        p_q = tl.make_block_ptr(q + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
-        p_g = tl.make_block_ptr(g + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_g = tl.load(p_g, boundary_check=(0, 1))
-    else:
-        desc_q = make_tensor_descriptor(q + (bos * H + i_h) * K, [T, K], [H*K, 1], [BC, BK])
-        desc_g = make_tensor_descriptor(g + (bos * H + i_h) * K, [T, K], [H*K, 1], [BC, BK])
-        b_q = desc_q.load([i_t * BT + i_i * BC, 0])
-        b_g = desc_g.load([i_t * BT + i_i * BC, 0])
+    p_q = tl.make_block_ptr(q + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
+    p_g = tl.make_block_ptr(g + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_g = tl.load(p_g, boundary_check=(0, 1))
 
     p_k = k + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
     p_gk = g + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
@@ -194,9 +162,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'USE_TMA': USE_TMA}, num_warps=num_warps)
+        triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
-        for USE_TMA in TMA_AUTOTUNE_LIST
     ],
     key=['BC', 'BK']
 )
@@ -217,8 +184,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    USE_TMA: tl.constexpr,
+    IS_VARLEN: tl.constexpr
 ):
     i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -243,16 +209,10 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
 
     o_A = (i_k * all + bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * H*BC + i_h * BC
 
-    if not USE_TMA:
-        p_q = tl.make_block_ptr(q + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-        p_g = tl.make_block_ptr(g + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_g = tl.load(p_g, boundary_check=(0, 1))
-    else:
-        desc_q = make_tensor_descriptor(q + (bos * H + i_h) * K, [T, K], [H*K, 1], [BC, BK])
-        desc_g = make_tensor_descriptor(g + (bos * H + i_h) * K, [T, K], [H*K, 1], [BC, BK])
-        b_q = desc_q.load([i_t * BT + i_i * BC, i_k * BK])
-        b_g = desc_g.load([i_t * BT + i_i * BC, i_k * BK])
+    p_q = tl.make_block_ptr(q + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+    p_g = tl.make_block_ptr(g + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_g = tl.load(p_g, boundary_check=(0, 1))
 
     p_k = k + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
     p_gk = g + (bos + i_t * BT + i_j * BC) * H*K + i_h * K + o_k
@@ -399,10 +359,9 @@ def chunk_gla_fwd_kernel_o(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'USE_TMA': USE_TMA}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
-        for USE_TMA in TMA_AUTOTUNE_LIST
     ],
     key=['BK', 'NC', 'BT'],
 )
@@ -423,8 +382,7 @@ def chunk_gla_bwd_kernel_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    USE_TMA: tl.constexpr,
+    IS_VARLEN: tl.constexpr
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -441,32 +399,20 @@ def chunk_gla_bwd_kernel_intra(
     o_k = i_k * BK + tl.arange(0, BK)
     m_k = o_k < K
 
-    if not USE_TMA:
-        p_g = tl.make_block_ptr(g + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-        b_g = tl.load(p_g, boundary_check=(0, 1))
-    else:
-        desc_g = make_tensor_descriptor(g + (bos*H + i_h) * K, [T, K], [H*K, 1], [BC, BK])
-        b_g = desc_g.load([i_t * BT + i_i * BC, i_k * BK])
+    p_g = tl.make_block_ptr(g + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+    b_g = tl.load(p_g, boundary_check=(0, 1))
 
     b_dq = tl.zeros([BC, BK], dtype=tl.float32)
     if i_i > 0:
         p_gn = g + (bos + i_t * BT + i_i * BC) * H*K + i_h*K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(0, i_i):
-            if not USE_TMA:
-                p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k * BK), (BC, BK), (1, 0))
-                p_gk = tl.make_block_ptr(g+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k * BK), (BC, BK), (1, 0))
-                p_dA = tl.make_block_ptr(dA+(bos*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t*BT+i_i*BC, i_j * BC), (BC, BC), (1, 0))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
-                b_gk = tl.load(p_gk, boundary_check=(0, 1))
-                b_dA = tl.load(p_dA, boundary_check=(0, 1))
-            else:
-                desc_k = make_tensor_descriptor(k+(bos*H+i_h)*K, [T, K], [H*K, 1], [BC, BK])
-                desc_gk = make_tensor_descriptor(g+(bos*H+i_h)*K, [T, K], [H*K, 1], [BC, BK])
-                b_k = desc_k.load([i_t*BT+i_j*BC, i_k * BK])
-                b_gk = desc_gk.load([i_t*BT+i_j*BC, i_k * BK])
-                p_dA = tl.make_block_ptr(dA+(bos*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t*BT+i_i*BC, i_j * BC), (BC, BC), (1, 0))
-                b_dA = tl.load(p_dA, boundary_check=(0, 1))
+            p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k * BK), (BC, BK), (1, 0))
+            p_gk = tl.make_block_ptr(g+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k * BK), (BC, BK), (1, 0))
+            p_dA = tl.make_block_ptr(dA+(bos*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t*BT+i_i*BC, i_j * BC), (BC, BC), (1, 0))
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_gk = tl.load(p_gk, boundary_check=(0, 1))
+            b_dA = tl.load(p_dA, boundary_check=(0, 1))
             b_kg = (b_k * exp(b_gn[None, :] - b_gk))
             b_dq += tl.dot(b_dA, b_kg)
         b_dq *= exp(b_g - b_gn[None, :])
@@ -491,12 +437,9 @@ def chunk_gla_bwd_kernel_intra(
         b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp(b_g - b_gkj[None, :]), 0.)
         p_kj += H*K
         p_gkj += H*K
-    if not USE_TMA:
-        p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-        tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
-    else:
-        desc_dq = make_tensor_descriptor(dq + (bos*H + i_h) * K, [T, K], [H*K, 1], [BC, BK])
-        desc_dq.store([i_t * BT + i_i * BC, i_k * BK], b_dq.to(desc_dq.dtype))
+
+    p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
     tl.debug_barrier()
     b_dk = tl.zeros([BC, BK], dtype=tl.float32)
@@ -506,26 +449,18 @@ def chunk_gla_bwd_kernel_intra(
         p_gn = g + (bos + min(i_t * BT + i_i * BC + BC, T) - 1) * H*K + i_h * K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(i_i + 1, NC):
-            if not USE_TMA:
-                p_q = tl.make_block_ptr(q + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
-                p_gq = tl.make_block_ptr(g + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
-                p_dA = tl.make_block_ptr(dA + (bos*H+i_h)*BT, (BT, T), (1, H*BT), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_gq = tl.load(p_gq, boundary_check=(0, 1))
-                b_dA = tl.load(p_dA, boundary_check=(0, 1))
-            else:
-                desc_q = make_tensor_descriptor(q + (bos*H+i_h)*K, [T, K], [H*K, 1], [BC, BK])
-                desc_gq = make_tensor_descriptor(g + (bos*H+i_h)*K, [T, K], [H*K, 1], [BC, BK])
-                b_q = desc_q.load([i_t*BT+i_j*BC, i_k*BK])
-                b_gq = desc_gq.load([i_t*BT+i_j*BC, i_k*BK])
-                p_dA = tl.make_block_ptr(dA + (bos*H+i_h)*BT, (BT, T), (1, H*BT), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
-                b_dA = tl.load(p_dA, boundary_check=(0, 1))
+            p_q = tl.make_block_ptr(q + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
+            p_gq = tl.make_block_ptr(g + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
+            p_dA = tl.make_block_ptr(dA + (bos*H+i_h)*BT, (BT, T), (1, H*BT), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_gq = tl.load(p_gq, boundary_check=(0, 1))
+            b_dA = tl.load(p_dA, boundary_check=(0, 1))
 
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
-            if not USE_TMA:
-                b_gq = tl.load(p_gq, boundary_check=(0, 1))
-                b_dA = tl.load(p_dA, boundary_check=(0, 1))
+
+            b_gq = tl.load(p_gq, boundary_check=(0, 1))
+            b_dA = tl.load(p_dA, boundary_check=(0, 1))
             b_qg = b_q * tl.where(m_j[:, None], exp(b_gq - b_gn[None, :]), 0)
             b_dk += tl.dot(b_dA, b_qg)
         b_dk *= exp(b_gn[None, :] - b_g)
@@ -552,10 +487,9 @@ def chunk_gla_bwd_kernel_intra(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'USE_TMA': USE_TMA}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
-        for USE_TMA in TMA_AUTOTUNE_LIST
     ],
     key=['BV', 'BT'],
 )
@@ -573,7 +507,6 @@ def chunk_gla_bwd_kernel_dA(
     BT: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_TMA: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -586,29 +519,17 @@ def chunk_gla_bwd_kernel_dA(
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     for i_v in range(tl.cdiv(V, BV)):
-        if not USE_TMA:
-            p_do = tl.make_block_ptr(do + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (V, T), (1, H*V), (i_v * BV, i_t * BT), (BV, BT), (0, 1))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_do = tl.load(p_do, boundary_check=(0, 1))
-        else:
-            desc_do = make_tensor_descriptor(do + (bos*H + i_h) * V, [T, V], [H*V, 1], [BT, BV])
-            b_do = desc_do.load([i_t * BT, i_v * BV])
-            # v是转置访问，不能用TMA
-            p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (V, T), (1, H*V), (i_v * BV, i_t * BT), (BV, BT), (0, 1))
-            b_v = tl.load(p_v, boundary_check=(0, 1))
+        p_do = tl.make_block_ptr(do + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (V, T), (1, H*V), (i_v * BV, i_t * BT), (BV, BT), (0, 1))
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_do = tl.load(p_do, boundary_check=(0, 1))
+
         b_dA += tl.dot(b_do, b_v)
 
-    if not USE_TMA:
-        p_dA = tl.make_block_ptr(dA + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
-        b_dA = tl.where(m_s, b_dA * scale, 0.)
-        tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
-    else:
-        desc_dA = make_tensor_descriptor(dA + (bos * H + i_h) * BT, [T, BT], [H*BT, 1], [BT, BT])
-        m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
-        b_dA = tl.where(m_s, b_dA * scale, 0.)
-        desc_dA.store([i_t * BT, 0], b_dA.to(desc_dA.dtype))
+    p_dA = tl.make_block_ptr(dA + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
+    b_dA = tl.where(m_s, b_dA * scale, 0.)
+    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -616,12 +537,11 @@ def chunk_gla_bwd_kernel_dA(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK, 'BV': BV, 'USE_TMA': USE_TMA}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in BK_LIST
         for BV in BV_LIST
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
-        for USE_TMA in TMA_AUTOTUNE_LIST
     ],
     key=['BT'],
 )
@@ -642,8 +562,7 @@ def chunk_gla_bwd_kernel_dv(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    USE_TMA: tl.constexpr,
+    IS_VARLEN: tl.constexpr
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -658,25 +577,15 @@ def chunk_gla_bwd_kernel_dv(
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
 
-    if not USE_TMA:
-        p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
-        p_do = tl.make_block_ptr(do + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dv = tl.make_block_ptr(dv + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        b_A = tl.load(p_A, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1))
-    else:
-        p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
-        b_A = tl.load(p_A, boundary_check=(0, 1))
-        desc_do = make_tensor_descriptor(do + (bos * H + i_h) * V, [T, V], [H*V, 1], [BT, BV])
-        desc_dv = make_tensor_descriptor(dv + (bos * H + i_h) * V, [T, V], [H*V, 1], [BT, BV])
-        b_do = desc_do.load([i_t * BT, i_v * BV])
+    p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
+    p_do = tl.make_block_ptr(do + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    p_dv = tl.make_block_ptr(dv + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+    b_A = tl.load(p_A, boundary_check=(0, 1))
+    b_do = tl.load(p_do, boundary_check=(0, 1))
 
     b_A = tl.where(tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :], b_A, 0.)
     # (SY 09/17) important to disallow tf32 here to maintain a good precision.
-    if not USE_TMA:
-        b_dv = tl.dot(b_A, b_do.to(b_A.dtype), allow_tf32=False)
-    else:
-        b_dv = tl.dot(b_A, b_do.to(b_A.dtype), allow_tf32=False)
+    b_dv = tl.dot(b_A, b_do.to(b_A.dtype), allow_tf32=False)
 
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
@@ -687,17 +596,9 @@ def chunk_gla_bwd_kernel_dv(
         p_gn = g + (bos + min(i_t * BT + BT, T) - 1)*H*K + i_h * K + o_k
         p_dh = tl.make_block_ptr(dh + (i_tg * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
 
-        if not USE_TMA:
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_dh = tl.load(p_dh, boundary_check=(0, 1))
-        else:
-            desc_k = make_tensor_descriptor(k + (bos * H + i_h) * K, [T, K], [H*K, 1], [BT, BK])
-            desc_gk = make_tensor_descriptor(g + (bos * H + i_h) * K, [T, K], [H*K, 1], [BT, BK])
-            desc_dh = make_tensor_descriptor(dh + (i_tg * H + i_h) * K*V, [K, V], [V, 1], [BK, BV])
-            b_k = desc_k.load([i_t * BT, i_k * BK])
-            b_gk = desc_gk.load([i_t * BT, i_k * BK])
-            b_dh = desc_dh.load([i_k * BK, i_v * BV])
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        b_dh = tl.load(p_dh, boundary_check=(0, 1))
 
         b_gn = exp(tl.load(p_gn, mask=m_k, other=0)[None, :] - b_gk)
         b_k = (b_k * b_gn).to(b_k.dtype)
@@ -705,10 +606,7 @@ def chunk_gla_bwd_kernel_dv(
         # (SY 09/17) it is ok to have bf16 interchunk gradient contribution here
         b_dv += tl.dot(b_k, b_dh.to(b_k.dtype))
 
-    if not USE_TMA:
-        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-    else:
-        desc_dv.store([i_t * BT, i_v * BV], b_dv.to(desc_dv.dtype))
+    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -717,12 +615,11 @@ def chunk_gla_bwd_kernel_dv(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK, 'BV': BV, 'USE_TMA': USE_TMA}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in BK_LIST
         for BV in BV_LIST
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
-        for USE_TMA in TMA_AUTOTUNE_LIST
     ],
     key=['BT'],
 )
@@ -753,8 +650,7 @@ def chunk_gla_bwd_kernel_inter(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_W: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    USE_TMA: tl.constexpr,
+    IS_VARLEN: tl.constexpr
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -787,12 +683,8 @@ def chunk_gla_bwd_kernel_inter(
         dv += (bos * H + i_h) * V
     dg += (bos * H + i_h) * K
 
-    if not USE_TMA:
-        p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_gk = tl.load(p_gk, boundary_check=(0, 1))
-    else:
-        desc_gk = make_tensor_descriptor(g, [T, K], [H*K, 1], [BT, BK])
-        b_gk = desc_gk.load([i_t * BT, i_k * BK])
+    p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    b_gk = tl.load(p_gk, boundary_check=(0, 1))
     p_gn = g + (min(T, i_t * BT + BT) - 1) * H*K + o_k
     b_gn = tl.load(p_gn, mask=m_k, other=0)
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
@@ -801,26 +693,16 @@ def chunk_gla_bwd_kernel_inter(
     b_dgk = tl.zeros([BK,], dtype=tl.float32)
 
     for i_v in range(tl.cdiv(V, BV)):
-        if not USE_TMA:
-            p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            # [BT, BV]
-            b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_do = tl.load(p_do, boundary_check=(0, 1))
-            # [BV, BK]
-            b_h = tl.load(p_h, boundary_check=(0, 1))
-            b_dh = tl.load(p_dh, boundary_check=(0, 1))
-        else:
-            desc_v = make_tensor_descriptor(v, [T, V], [H*V, 1], [BT, BV])
-            desc_do = make_tensor_descriptor(do, [T, V], [H*V, 1], [BT, BV])
-            b_v = desc_v.load([i_t * BT, i_v * BV])
-            b_do = desc_do.load([i_t * BT, i_v * BV])
-            p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            b_h = tl.load(p_h, boundary_check=(0, 1))
-            b_dh = tl.load(p_dh, boundary_check=(0, 1))
+        p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+        p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+        # [BT, BV]
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_do = tl.load(p_do, boundary_check=(0, 1))
+        # [BV, BK]
+        b_h = tl.load(p_h, boundary_check=(0, 1))
+        b_dh = tl.load(p_dh, boundary_check=(0, 1))
 
         # [BK]
         b_dgk += tl.sum(b_h * b_dh, axis=0)
@@ -829,12 +711,8 @@ def chunk_gla_bwd_kernel_inter(
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
 
         if USE_W:
-            if not USE_TMA:
-                p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                b_dv = tl.load(p_dv, boundary_check=(0, 1))
-            else:
-                desc_dv = make_tensor_descriptor(dv, [T, V], [H*V, 1], [BT, BV])
-                b_dv = desc_dv.load([i_t * BT, i_v * BV])
+            p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            b_dv = tl.load(p_dv, boundary_check=(0, 1))
             b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
 
     if USE_W:
@@ -861,20 +739,12 @@ def chunk_gla_bwd_kernel_inter(
     # Buggy due to strange triton compiler issue.
     # m_s = tl.where(tl.arange(0, BT)[:, None] <= tl.arange(0, BT)[None, :], 1., 0.)
     # b_dg = tl.dot(m_s, b_dg, allow_tf32=False) + b_dgk[None, :]
-    if not USE_TMA:
-        p_dq = tl.make_block_ptr(dq2, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dk = tl.make_block_ptr(dk2, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dg = tl.make_block_ptr(dg, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
-    else:
-        desc_dq = make_tensor_descriptor(dq2, [T, K], [H*K, 1], [BT, BK])
-        desc_dk = make_tensor_descriptor(dk2, [T, K], [H*K, 1], [BT, BK])
-        desc_dg = make_tensor_descriptor(dg, [T, K], [H*K, 1], [BT, BK])
-        desc_dq.store([i_t * BT, i_k * BK], b_dq.to(desc_dq.dtype))
-        desc_dk.store([i_t * BT, i_k * BK], b_dk.to(desc_dk.dtype))
-        desc_dg.store([i_t * BT, i_k * BK], b_dg.to(desc_dg.dtype))
+    p_dq = tl.make_block_ptr(dq2, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_dk = tl.make_block_ptr(dk2, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_dg = tl.make_block_ptr(dg, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 
 
 def chunk_gla_fwd_intra_gk(

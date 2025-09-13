@@ -8,10 +8,8 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp, make_tensor_descriptor
-from fla.utils import is_tf32_supported, is_tma_supported
-
-TMA_AUTOTUNE_LIST = [True, False] if is_tma_supported else [False]
+from fla.ops.utils.op import exp
+from fla.utils import is_tf32_supported
 
 
 @triton.heuristics({
@@ -21,10 +19,9 @@ TMA_AUTOTUNE_LIST = [True, False] if is_tma_supported else [False]
 })
 @triton.autotune(
     configs=[
-        triton.Config({'USE_TMA': USE_TMA, 'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
-        for USE_TMA in TMA_AUTOTUNE_LIST
         for DOT_PRECISION in (["tf32x3", "ieee"] if is_tf32_supported else ["ieee"])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
@@ -53,7 +50,6 @@ def recompute_w_u_fwd_kernel(
     STORE_QG: tl.constexpr,
     STORE_KG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_TMA: tl.constexpr,
     DOT_PRECISION: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -67,12 +63,8 @@ def recompute_w_u_fwd_kernel(
     p_b = tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_b = tl.load(p_b, boundary_check=(0,))
 
-    if not USE_TMA:
-        p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-        b_A = tl.load(p_A, boundary_check=(0, 1))
-    else:
-        desc_A = make_tensor_descriptor(A + (bos*H + i_h) * BT, [T, BT], [H*BT, 1], [BT, BT])
-        b_A = desc_A.load([i_t * BT, 0])
+    p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    b_A = tl.load(p_A, boundary_check=(0, 1))
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -84,54 +76,29 @@ def recompute_w_u_fwd_kernel(
 
     for i_k in range(tl.cdiv(K, BK)):
         p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        if not USE_TMA:
-            p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_kb = b_k * b_b[:, None]
+        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_kb = b_k * b_b[:, None]
 
-            p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kb *= exp(b_gk)
-            if STORE_QG:
-                p_q = tl.make_block_ptr(q + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                p_qg = tl.make_block_ptr(qg + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                b_q = tl.load(p_q, boundary_check=(0, 1))
-                b_qg = b_q * exp(b_gk)
-                tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
-            if STORE_KG:
-                last_idx = min(i_t * BT + BT, T) - 1
+        p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        b_kb *= exp(b_gk)
+        if STORE_QG:
+            p_q = tl.make_block_ptr(q + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_qg = tl.make_block_ptr(qg + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_qg = b_q * exp(b_gk)
+            tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
+        if STORE_KG:
+            last_idx = min(i_t * BT + BT, T) - 1
 
-                o_k = i_k * BK + tl.arange(0, BK)
-                m_k = o_k < K
-                b_gn = tl.load(gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.)
-                b_kg = b_k * exp(b_gn - b_gk)
+            o_k = i_k * BK + tl.arange(0, BK)
+            m_k = o_k < K
+            b_gn = tl.load(gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.)
+            b_kg = b_k * exp(b_gn - b_gk)
 
-                p_kg = tl.make_block_ptr(kg + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-                tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
-        else:
-            desc_k = make_tensor_descriptor(k + (bos*H + i_h) * K, [T, K], [H*K, 1], [BT, BK])
-            b_k = desc_k.load([i_t * BT, i_k * BK])
-            b_kb = b_k * b_b[:, None]
-
-            desc_gk = make_tensor_descriptor(gk + (bos*H + i_h) * K, [T, K], [H*K, 1], [BT, BK])
-            b_gk = desc_gk.load([i_t * BT, i_k * BK])
-            b_kb *= exp(b_gk)
-            if STORE_QG:
-                desc_q = make_tensor_descriptor(q + (bos*H + i_h) * K, [T, K], [H*K, 1], [BT, BK])
-                desc_qg = make_tensor_descriptor(qg + (bos*H + i_h) * K, [T, K], [H*K, 1], [BT, BK])
-                b_q = desc_q.load([i_t * BT, i_k * BK])
-                b_qg = b_q * exp(b_gk)
-                desc_qg.store([i_t * BT, i_k * BK], b_qg.to(desc_qg.dtype))
-            if STORE_KG:
-                last_idx = min(i_t * BT + BT, T) - 1
-
-                o_k = i_k * BK + tl.arange(0, BK)
-                m_k = o_k < K
-                b_gn = tl.load(gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.)
-                b_kg = b_k * exp(b_gn - b_gk)
-
-                desc_kg = make_tensor_descriptor(kg + (bos * H + i_h) * K, [T, K], [H*K, 1], [BT, BK])
-                desc_kg.store([i_t * BT, i_k * BK], b_kg.to(desc_kg.dtype))
+            p_kg = tl.make_block_ptr(kg + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
 
         b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
