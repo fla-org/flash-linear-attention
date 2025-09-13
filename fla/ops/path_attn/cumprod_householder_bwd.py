@@ -78,7 +78,6 @@ def chunk_cumprod_householder_bwd_kernel(
         b_hc = tl.load(p_hc, boundary_check=(0, 1))
 
         b_dk_new = b_dk - tl.dot(b_dk.to(b_hc.dtype), b_hc)
-        p_dk_new = tl.make_block_ptr(dk_new, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
         tl.store(p_dk_new, b_dk_new.to(dk_new.dtype.element_ty), boundary_check=(0, 1))
 
         b_dh = b_dhc - tl.dot(tl.trans(b_hc), b_dhc.to(b_hc.dtype))
