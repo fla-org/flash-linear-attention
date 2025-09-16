@@ -95,8 +95,8 @@ def naive_chunk_gdn2(
         A = A.masked_fill(mask, 0)
         v_i = u_i - w_i @ S
         o[:, :, i] = (q_i * g_i.exp()) @ S + A @ v_i
-        S = S * g_i[:, :, -1:].exp()
-        S += ((g_i[:, :, -1:] - g_i).exp() * k_i).transpose(-1, -2) @ v_i
+        S = S * rearrange(g_i[:, :, -1].exp(), 'b h k -> b h k 1')
+        S += rearrange((g_i[:, :, -1:] - g_i).exp() * k_i, 'b h c k -> b h k c') @ v_i
     if not output_final_state:
         S = None
     return rearrange(o, 'b h n c d -> b (n c) h d').to(dtype), S

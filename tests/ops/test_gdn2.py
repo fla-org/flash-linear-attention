@@ -24,6 +24,7 @@ from fla.utils import assert_close, device, is_intel_alchemist
             (1, 64, 1, 64, 1, 1, torch.float),
             (2, 512, 3, 60, 1, 1, torch.float),
             (4, 1024, 4, 128, 0.1, 1, torch.float),
+            (4, 1024, 4, 128, 1, 10, torch.float),
         ]
     ]
 )
