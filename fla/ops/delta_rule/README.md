@@ -89,7 +89,7 @@ Substituting these compact forms back into the state update and output equations
 &= \mathbf{S}^0_{[t]} + \left(\mathbf{U}^\top -\mathbf{S}^0_{[t]} \mathbf{W}^\top\right) \mathbf{K} \\
 &= \mathbf{S}^0_{[t]} + \left(\mathbf{V}^\top - \mathbf{S}^0_{[t]} \mathbf{K}^\top\right) \mathbf{T}^\top \mathbf{K} \;\;\in\mathbb{R}^{d_v \times d_k} \\
 \mathbf{O}_{[t]} &= \mathbf{Q}_{[t]}\mathbf{S}_{[t+1]}^\top \\ &= \mathbf{Q}_{[t]} \left(\mathbf{S}^0_{[t]}\right)^\top + \left(\mathbf{Q}_{[t]} \mathbf{K}^{\top} \odot \mathbf{M}\right) \left(\mathbf{U} - \mathbf{W} \left(\mathbf{S}^0_{[t]}\right)^\top \right) \\
-&= \mathbf{Q}_{[t]} \left(\mathbf{S}^0_{[t]}\right)^\top + \left(\mathbf{Q}_{[t]} \mathbf{K}^{\top} \odot \mathbf{M}\right)\mathbf{T} \left(\mathbf{V} - \mathbf{K}(\mathbf{S}^0_{[t]})^\top)\right) \;\;\in \mathbb{R}^{C \times d_v}
+&= \mathbf{Q}_{[t]} \left(\mathbf{S}^0_{[t]}\right)^\top + \left(\mathbf{Q}_{[t]} \mathbf{K}^{\top} \odot \mathbf{M}\right)\mathbf{T} \left(\mathbf{V} - \mathbf{K}(\mathbf{S}^0_{[t]})^\top\right) \;\;\in \mathbb{R}^{C \times d_v}
 \end{aligned}
 \end{equation}
 ```
