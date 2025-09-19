@@ -4,41 +4,35 @@
 import torch
 
 
-def solve_unit_lower_triangular_system(rhs: torch.Tensor, lower_with_unit_diag: torch.Tensor) -> torch.Tensor:
-    """Solve L x = rhs where L is unit lower-triangular (diagonal assumed 1)."""
+def forward(u, w):
     return torch.linalg.solve_triangular(
-        lower_with_unit_diag.float(),
-        rhs.float(),
+        w.float(),
+        u.float(),
         upper=False,
         unitriangular=True
-    ).to(rhs.dtype)
+    ).to(u.dtype)
 
 
-def solve_unit_lower_triangular_system_inplace(rhs_out: torch.Tensor, lower_with_unit_diag: torch.Tensor) -> None:
-    rhs_out.copy_(solve_unit_lower_triangular_system(rhs_out, lower_with_unit_diag))
+def forward_inplace(u, w):
+    u.copy_(forward(u, w))
 
 
-def solve_unit_upper_triangular_system(rhs: torch.Tensor, lower_with_unit_diag: torch.Tensor) -> torch.Tensor:
-    """Solve U x = rhs where U = tril(lower_with_unit_diag, -1).H is unit upper-triangular."""
+def backward_x(do, w):
     return torch.linalg.solve_triangular(
-        lower_with_unit_diag.tril(-1).mH.float(),
-        rhs.float(),
+        w.tril(-1).mH.float(),
+        do.float(),
         upper=True,
         unitriangular=True
-    ).to(rhs.dtype)
+    ).to(do.dtype)
 
 
-def triangular_solve_backward(rhs_grad: torch.Tensor, lower_with_unit_diag: torch.Tensor, solution: torch.Tensor):
-    """Backward pass helper for unit lower-triangular solve.
-
-    Returns gradients wrt rhs (du) and strictly lower part of L (dw_lower_strict).
-    """
+def backward(do, w, x):
     du = torch.linalg.solve_triangular(
-        lower_with_unit_diag.tril(-1).mH.float(),
-        rhs_grad.float(),
+        w.tril(-1).mH.float(),
+        do.float(),
         upper=True,
         unitriangular=True
-    ).to(rhs_grad.dtype)
-    dw = torch.bmm(-du, solution.mH)
+    ).to(do.dtype)
+    dw = torch.bmm(-du, x.mH)
     dw = dw.tril(-1)
     return du, dw
