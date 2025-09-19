@@ -898,7 +898,8 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         C: int = BLOCK_SIZE_C,
         cu_seqlens: Optional[torch.Tensor] = None,
     ):
-        u, ws, lses = _DeltaPreAttnFunction._forward_impl(qo, ko, vo, betao, C, need_aux=True, cu_seqlens=cu_seqlens)
+        C = min(C, ko.size(2))
+        u, ws, lses = _DeltaPreAttnFunction._forward_impl(qo, ko, vo, betao, C, need_aux=True)
         BS, NH, T, _ = ko.size()
         saved_beta = betao if betao is not None else torch.ones(BS, NH, T, device=ko.device, dtype=ko.dtype)
         ctx.save_for_backward(qo, ko, vo, u, ws, lses, saved_beta)
@@ -996,10 +997,8 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         need_aux: bool,
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        BS, NH, T_max, D = ko.size()
-        qk_scale = 1.0 / math.sqrt(D)
-        fa_scale = qk_scale / math.log(2)
-
+        BS, NH, T, D = ko.size()
+        C = min(C, T)
         q = qo.flatten(0, 1)
         k = ko.flatten(0, 1)
         v = vo.flatten(0, 1)
@@ -1009,19 +1008,12 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
             beta = betao
         beta = beta.flatten(0, 1)
 
-        cu_flat = None
-        if cu_seqlens is not None:
-            lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
-            lens = lens.unsqueeze(1).repeat(1, NH).reshape(-1)
-            cu_flat = torch.empty(lens.numel() + 1, dtype=torch.int32, device=cu_seqlens.device)
-            cu_flat[0] = 0
-            torch.cumsum(lens, dim=0, out=cu_flat[1:])
-
-        u_flat = torch.empty_like(v)
-        num_chunks = (T_max + C - 1) // C
-        if need_aux:
-            ws = torch.empty(num_chunks, BS * NH, C, C, device=k.device, dtype=k.dtype)
-            lses = torch.empty(BS * NH, T_max, device=k.device, dtype=torch.float)
+        u = torch.empty_like(v)
+        qk_scale = 1.0 / math.sqrt(D)
+        fa_scale = qk_scale / math.log(2)
+        # ws = torch.empty(T // C, BS * NH, C, C, device=k.device, dtype=k.dtype) if need_aux else None
+        ws = torch.empty((T + C - 1) // C, BS * NH, C, C, device=k.device, dtype=k.dtype) if need_aux else None
+        lses = torch.empty(BS * NH, T, device=k.device, dtype=torch.float) if need_aux else None
 
         for chunk_idx in range(num_chunks):
             i = chunk_idx * C
@@ -1054,6 +1046,7 @@ def delta_pre_attn(
     beta: [B, H, T]
     Returns u with shape [B, H, T, D]
     """
+    C = min(C, k.size(2))
     if k.requires_grad or q.requires_grad or v.requires_grad or (beta is not None and beta.requires_grad):
         return _DeltaPreAttnFunction.apply(q, k, v, beta, C, cu_seqlens)
     u, _, _ = _DeltaPreAttnFunction._forward_impl(q, k, v, beta, C, need_aux=False, cu_seqlens=cu_seqlens)

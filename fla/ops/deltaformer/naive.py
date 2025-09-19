@@ -59,26 +59,35 @@ def delta_pre_attn_naive(
     assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "q,k,v must be [B,H,T,D]"
     B, H, T, D = q.shape
     assert k.shape == (B, H, T, D) and v.shape == (B, H, T, D)
+    # Compute in float32 for numerical stability/consistency with fused kernel
+    # (which accumulates in fp32), then cast results back at the end.
+    orig_dtype = q.dtype
+    qf = q.float()
+    kf = k.float()
+    vf = v.float()
     if beta is None:
-        beta = q.new_ones((B, H, T))
+        betaf = torch.ones((B, H, T), dtype=torch.float32, device=q.device)
     else:
         assert beta.shape == (B, H, T)
+        betaf = beta.float()
 
     qk_scale = 1.0 / math.sqrt(D)
-    # [B,H,T,T] = [B,H,T,D] @ [B,H,D,T]
-    scores = torch.matmul(q, k.transpose(-1, -2)) * qk_scale
-    probs = tril_softmax(scores, strict=True)  # [B,H,T,T], zeros where j>=i
+    scores = torch.matmul(qf, kf.transpose(-1, -2)) * qk_scale
+    probs = tril_softmax(scores, strict=True)  # [B,H,T,T] float32
 
-    u = torch.empty_like(v)
+    # Build u sequentially without creating views into a tensor we later modify
+    u_list = []  # each element is [B,H,D] float32
     for t in range(T):
         if t == 0:
-            u[:, :, t, :] = v[:, :, t, :]
+            u_t = vf[:, :, t, :]
         else:
             w = probs[:, :, t, :t]  # [B,H,t]
-            uprev = u[:, :, :t, :]  # [B,H,t,D]
-            weighted_sum = (w.unsqueeze(-1) * uprev).sum(dim=-2)  # [B,H,D]
-            u[:, :, t, :] = v[:, :, t, :] - beta[:, :, t].unsqueeze(-1) * weighted_sum
-    return u
+            u_prev = torch.stack(u_list, dim=-2)  # [B,H,t,D]
+            weighted_sum = (w.unsqueeze(-1) * u_prev).sum(dim=-2)  # [B,H,D]
+            u_t = vf[:, :, t, :] - betaf[:, :, t].unsqueeze(-1) * weighted_sum
+        u_list.append(u_t)
+    u = torch.stack(u_list, dim=2)
+    return u.to(orig_dtype)
 
 
 __all__ = [
