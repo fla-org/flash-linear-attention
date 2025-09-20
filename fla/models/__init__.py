@@ -4,6 +4,7 @@ from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
 from fla.models.comba import CombaConfig, CombaForCausalLM, CombaModel
 from fla.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
+from fla.models.deltaformer import DeltaFormerConfig, DeltaFormerForCausalLM, DeltaFormerModel
 from fla.models.forgetting_transformer import (
     ForgettingTransformerConfig,
     ForgettingTransformerForCausalLM,
@@ -37,6 +38,7 @@ __all__ = [
     'BitNetConfig', 'BitNetForCausalLM', 'BitNetModel',
     'CombaConfig', 'CombaForCausalLM', 'CombaModel',
     'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
+    'DeltaFormerConfig', 'DeltaFormerForCausalLM', 'DeltaFormerModel',
     'ForgettingTransformerConfig', 'ForgettingTransformerForCausalLM', 'ForgettingTransformerModel',
     'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
     'GatedDeltaProductConfig', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
