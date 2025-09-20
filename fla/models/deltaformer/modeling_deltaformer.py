@@ -47,6 +47,8 @@ class DeltaFormerBlock(GradientCheckpointingLayer):
             num_kv_heads=config.num_kv_heads,
             qkv_bias=config.qkv_bias,
             qk_norm=config.qk_norm,
+            rope_theta=config.rope_theta,
+            max_position_embeddings=config.rope_max_position_embeddings,
             layer_idx=layer_idx,
         )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)

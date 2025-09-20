@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 from transformers.utils import logging
 
-from fla.layers.utils import pad_input, unpad_input
-from fla.modules import RMSNorm
+from fla.layers.utils import get_unpad_data, pad_input, unpad_input
+from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.deltaformer import delta_pre_attn
+from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -38,7 +39,8 @@ class DeltaFormerAttention(nn.Module):
         - For variable-length inputs (padding masks), the pre-attention falls back to using the
           fixed-length path, while the second stage (softmax attention over U) uses FlashAttention's
           varlen path when an attention mask is provided.
-        - K/V grouping (GQA) is supported via `num_kv_heads` by repeating K/V groups.
+        - K/V grouping (GQA) is supported natively by FlashAttention via `num_kv_heads`.
+        - Uses K-K similarity in pre-attention instead of Q-K similarity for better performance.
 
     Args:
         hidden_size (int, Optional):
@@ -52,6 +54,10 @@ class DeltaFormerAttention(nn.Module):
             Whether to use bias for Q/K/V projections. Default: False.
         qk_norm (bool, Optional):
             Whether to apply per-head RMSNorm to Q and K before attention. Default: False.
+        rope_theta (float, Optional):
+            The base frequency for rotary position embedding. Default: 10000.
+        max_position_embeddings (int, Optional):
+            The maximum position embeddings. Default: None.
         layer_idx (int, Optional):
             The index of the layer (used for cache compatibility). Default: None.
     """
@@ -63,6 +69,8 @@ class DeltaFormerAttention(nn.Module):
         num_kv_heads: Optional[int] = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
+        rope_theta: float = 10000.,
+        max_position_embeddings: Optional[int] = None,
         layer_idx: int | None = None,
     ):
         super().__init__()
@@ -75,6 +83,8 @@ class DeltaFormerAttention(nn.Module):
         self.kv_dim = self.num_kv_heads * self.head_dim
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
 
         if flash_attn_func is None:
@@ -89,6 +99,8 @@ class DeltaFormerAttention(nn.Module):
         if qk_norm:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
+
+        self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
     def forward(
         self,
@@ -114,32 +126,60 @@ class DeltaFormerAttention(nn.Module):
         v = rearrange(self.v_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
         beta = rearrange(self.b_proj(hidden_states), 'b t h -> b h t')
 
-        if self.num_kv_groups > 1:
-            k = repeat(k, 'b t h d -> b t (h g) d', g=self.num_kv_groups)
-            v = repeat(v, 'b t h d -> b t (h g) d', g=self.num_kv_groups)
-
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
 
+        cu_seqlens_kw = kwargs.get('cu_seqlens', None)
+        seqlen_offset, max_seqlen = 0, q_len
+        if past_key_values is not None:
+            seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
+            max_seqlen = q_len + seqlen_offset
+
+            if attention_mask is not None:
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
+                max_seqlen = q_len + max(seqlen_offset)
+
+        if self.max_position_embeddings is not None:
+            max_seqlen = max(max_seqlen, self.max_position_embeddings)
+
+        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens_kw)
         if attention_mask is not None:
-            # Use varlen FlashAttention path. Pre-attention currently supports fixed length only → fallback by padding.
-            q_full = q
+            _, cu_seqlens, _ = get_unpad_data(attention_mask)
+            # q_full = q
             k_full = k
             v_full = v
             beta_full = beta
         else:
-            q_full, k_full, v_full, beta_full = q, k, v, beta
+            cu_seqlens = cu_seqlens_kw
+            # q_full, k_full, v_full, beta_full = q, k, v, beta
+            k_full, v_full, beta_full = k, v, beta
 
-        # Compute u via DeltaFormer pre-attention (fixed-length kernel).
-        u = delta_pre_attn(
-            rearrange(q_full, 'b t h d -> b h t d'),
-            rearrange(k_full, 'b t h d -> b h t d'),
-            rearrange(v_full, 'b t h d -> b h t d'),
-            beta_full,
-        )
+        if attention_mask is not None:
+            u = delta_pre_attn(
+                # kk similarity
+                rearrange(k_full, 'b t h d -> b h t d'),
+                rearrange(k_full, 'b t h d -> b h t d'),
+                rearrange(v_full, 'b t h d -> b h t d'),
+                beta_full,
+                cu_seqlens=cu_seqlens,
+            )
+        elif cu_seqlens is not None:
+            u = delta_pre_attn(
+                rearrange(k_full, 'b t h d -> b h t d'),
+                rearrange(k_full, 'b t h d -> b h t d'),
+                rearrange(v_full, 'b t h d -> b h t d'),
+                beta_full,
+                cu_seqlens=cu_seqlens,
+            )
+        else:
+            u = delta_pre_attn(
+                rearrange(k_full, 'b t h d -> b h t d'),
+                rearrange(k_full, 'b t h d -> b h t d'),
+                rearrange(v_full, 'b t h d -> b h t d'),
+                beta_full,
+            )
         u = rearrange(u, 'b h t d -> b t h d')
 
-        # Second stage: standard FlashAttention but using u as values
         if attention_mask is not None:
             q_padded, (k_padded, u_padded), indices_q, cu_seqlens, max_seq_lens = unpad_input(q, (k, u), attention_mask, q_len)
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
@@ -154,6 +194,17 @@ class DeltaFormerAttention(nn.Module):
                 window_size=(-1, -1)
             )
             o = pad_input(o, indices_q, batch_size, q_len)
+        elif cu_seqlens is not None:
+            max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+            o = flash_attn_varlen_func(
+                q.squeeze(0), k.squeeze(0), u.squeeze(0),
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=True,
+                window_size=(-1, -1)
+            ).unsqueeze(0)
         else:
             o = flash_attn_func(q, k, u, causal=True, window_size=(-1, -1))
 

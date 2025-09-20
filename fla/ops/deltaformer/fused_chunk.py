@@ -160,7 +160,6 @@ def delta_flash_attn_compileable(
 
 
 def _config_delta_flash_attn():
-    # Provide multiple tile sizes so Triton can select variants that fit device shared memory
     return [
         triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
         for BC in [128, 64]
@@ -328,7 +327,6 @@ def flash_attn_kernel(
 
 
 def _config_backward_u_chunk():
-    # Add smaller tile sizes and fewer stages to reduce shared memory usage on constrained GPUs
     return [
         triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
         for BC in [128, 64]
@@ -442,7 +440,6 @@ def backward_u_chunk_kernel(
 
 
 def _config_backward_p_row_sum():
-    # Broaden autotune space to include smaller tiles / fewer stages
     return [
         triton.Config({'BLOCK_C': BC, 'BLOCK_T': BT}, num_stages=ns, num_warps=nw)
         for BC in [128, 64]
@@ -560,7 +557,6 @@ def backward_p_row_sum_kernel(
 
 
 def _config_backward_k():
-    # Allow a smaller column tile as fallback
     return [
         triton.Config({'BLOCK_C': BC}, num_stages=ns, num_warps=nw)
         for BC in [64, 32]
@@ -801,11 +797,6 @@ def backward_qk_kernel(
     tl.store(grad_k_blk_ptr, acc.to(grad_k_ptr.dtype.element_ty))
 
 
-# ===================================================================================
-# Autograd wrapper and user-facing API (migrated from preattn.py)
-# ===================================================================================
-
-
 class _DeltaPreAttnFunction(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -814,14 +805,29 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         ko: torch.Tensor,
         vo: torch.Tensor,
         betao: Optional[torch.Tensor] = None,
-        C: int = BLOCK_SIZE_C
+        C: int = BLOCK_SIZE_C,
+        cu_seqlens: Optional[torch.LongTensor] = None
     ):
         C = min(C, ko.size(2))
+        ctx.C = C
+        ctx.cu_seqlens = cu_seqlens
+
+        if cu_seqlens is not None:
+            need_aux = qo.requires_grad or ko.requires_grad or vo.requires_grad or (betao is not None and betao.requires_grad)
+            u, ws, lses = _DeltaPreAttnFunction._forward_impl(qo, ko, vo, betao, C, need_aux=need_aux, cu_seqlens=cu_seqlens)
+            BS, NH, T_max, _ = ko.size()
+            saved_beta = betao if betao is not None else torch.ones(BS, NH, T_max, device=ko.device, dtype=ko.dtype)
+            ctx.beta_is_none = betao is None
+            if need_aux:
+                ctx.save_for_backward(qo, ko, vo, u, ws, lses, saved_beta)
+            else:
+                ctx.save_for_backward()
+            return u
+
         u, ws, lses = _DeltaPreAttnFunction._forward_impl(qo, ko, vo, betao, C, need_aux=True)
         BS, NH, T, _ = ko.size()
         saved_beta = betao if betao is not None else torch.ones(BS, NH, T, device=ko.device, dtype=ko.dtype)
         ctx.save_for_backward(qo, ko, vo, u, ws, lses, saved_beta)
-        ctx.C = C
         ctx.beta_is_none = betao is None
         return u
 
@@ -830,36 +836,122 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         ctx,
         grad_u: torch.Tensor
     ):
-        qo, ko, vo, u, ws, lses, betao = ctx.saved_tensors
-        q = qo.flatten(0, 1)
-        k = ko.flatten(0, 1)
-        v = vo.flatten(0, 1)
-        beta = betao.flatten(0, 1)
-        grad_o = grad_u.flatten(0, 1)
+        if getattr(ctx, 'cu_seqlens', None) is not None:
+            cu = ctx.cu_seqlens
+            qo, ko, vo, u_full, ws, lses, betao = ctx.saved_tensors
+            BS, NH, T_max, D = ko.size()
+            qk_scale = 1.0 / math.sqrt(D)
+            fa_scale = qk_scale / math.log(2)
 
+            dq = torch.zeros_like(qo)
+            dk = torch.zeros_like(ko)
+            dv = torch.zeros_like(vo)
+            dbeta = None if ctx.beta_is_none else torch.zeros_like(betao)
+
+            C = ctx.C
+            N = len(cu) - 1
+            chunk_bases = []
+            total = 0
+            lengths = []
+            for b in range(N):
+                L = int(cu[b + 1].item() - cu[b].item())
+                lengths.append(L)
+                chunk_bases.append(total)
+                if L > 0:
+                    total += (L + C - 1) // C
+
+            for b in range(N):
+                L = lengths[b]
+                if L == 0:
+                    continue
+                base = chunk_bases[b]
+                seq_start = int(cu[b].item())
+
+                seq_end = seq_start + L
+                q_seq = qo[0, :, seq_start:seq_end, :]
+                k_seq = ko[0, :, seq_start:seq_end, :]
+                u_seq = u_full[0, :, seq_start:seq_end, :]
+                beta_seq = betao[0, :, seq_start:seq_end]
+                lse_seq = lses[0, :, seq_start:seq_end]
+                go_seq = grad_u[0, :, seq_start:seq_end, :]
+
+                gv_seq = torch.zeros_like(u_seq)
+                start = ((L - 1) // C) * C
+                for i_local in range(start, -1, -C):
+                    Ci = min(C, L - i_local)
+                    i0 = i_local
+                    i1 = i_local + Ci
+                    do = go_seq[:, i0:i1, :]
+                    if i_local < L - C:
+                        qi = k_seq[:, i0:i1, :]
+                        ki = q_seq[:, i1:L, :]
+                        lse_tail = lse_seq[:, i1:L]
+                        beta_tail = beta_seq[:, i1:L]
+                        du_tail = backward_u_chunk(qi, ki, lse_tail, gv_seq[:, i1:L, :], fa_scale, beta_tail)
+                        do = do - du_tail
+                    Wpad = ws[base + (i_local // C)]
+                    W = Wpad[:, :Ci, :Ci]
+                    du_chunk = invcum.backward_x(do, W)
+                    gv_seq[:, i0:i1, :].copy_(du_chunk)
+
+                gq, gk, gbeta = backward_qk(q_seq, k_seq, u_seq, lse_seq, gv_seq, qk_scale, fa_scale, beta_seq)
+                dq[0, :, seq_start:seq_end, :].copy_(gq)
+                dk[0, :, seq_start:seq_end, :].copy_(gk)
+                dv[0, :, seq_start:seq_end, :].copy_(gv_seq)
+                if dbeta is not None:
+                    dbeta[0, :, seq_start:seq_end].copy_(gbeta)
+
+            return dq, dk, dv, dbeta, None, None
+        qo, ko, vo, u, ws, lses, betao = ctx.saved_tensors
         C = ctx.C
         BS, NH, T, D = ko.size()
-        grad_v = torch.empty_like(v)
+
+        grad_q = torch.zeros_like(qo)
+        grad_k = torch.zeros_like(ko)
+        grad_v = torch.zeros_like(vo)
+        grad_beta_out = None if ctx.beta_is_none else torch.zeros_like(betao)
 
         qk_scale = 1.0 / math.sqrt(D)
         fa_scale = qk_scale / math.log(2)
-        for i in range(T - C, -1, -C):
-            do = grad_o[:, i:i + C, :]
-            if i < T - C:
-                qi = k[:, i:i + C, :]
-                ki = q[:, i + C:, :]
-                lse = lses[:, i + C:]
-                beta_single = beta[:, i + C:]
-                du = backward_u_chunk(qi, ki, lse, grad_v[:, i + C:, :], fa_scale, beta_single)
-                do = grad_o[:, i:i + C, :] - du
-            else:
-                do = grad_o[:, i:i + C, :]
-            du = invcum.backward_x(do, ws[i // C])
-            grad_v[:, i:i + C, :].copy_(du)
 
-        grad_q, grad_k, grad_beta = backward_qk(q, k, u.flatten(0, 1), lses, grad_v, qk_scale, fa_scale, beta)
-        grad_beta_out = None if ctx.beta_is_none else grad_beta.view_as(betao)
-        return grad_q.view_as(ko), grad_k.view_as(ko), grad_v.view_as(vo), grad_beta_out, None
+        chunk_base = 0
+        for b in range(BS):
+            grad_v_seq = torch.empty(NH, T, D, device=ko.device, dtype=ko.dtype)
+            for i in range(T - C, -1, -C):
+                Ci = min(C, T - i)
+                do = grad_u[b, :, i:i + Ci, :]
+
+                if i < T - C:
+                    qi = ko[b, :, i:i + Ci, :]
+                    ki = qo[b, :, i + Ci:, :]
+                    lse = lses[b, :, i + Ci:]
+                    if not ctx.beta_is_none:
+                        beta_single = betao[b, :, i + Ci:]
+                    else:
+                        beta_single = torch.ones(NH, T - i - Ci, device=ko.device, dtype=ko.dtype)
+                    du = backward_u_chunk(qi, ki, lse, grad_v_seq[:, i + Ci:, :], fa_scale, beta_single)
+                    do = grad_u[b, :, i:i + Ci, :] - du
+
+                du = invcum.backward_x(do, ws[chunk_base + (i // C)])
+                grad_v_seq[:, i:i + Ci, :].copy_(du)
+
+            q_seq = qo[b]
+            k_seq = ko[b]
+            u_seq = u[b]
+            lse_seq = lses[b]
+            beta_seq = betao[b] if not ctx.beta_is_none else torch.ones(NH, T, device=ko.device, dtype=ko.dtype)
+
+            gq, gk, gbeta = backward_qk(q_seq, k_seq, u_seq, lse_seq, grad_v_seq, qk_scale, fa_scale, beta_seq)
+
+            grad_q[b].copy_(gq)
+            grad_k[b].copy_(gk)
+            grad_v[b].copy_(grad_v_seq)
+            if not ctx.beta_is_none:
+                grad_beta_out[b].copy_(gbeta)
+
+            chunk_base += (T + C - 1) // C
+
+        return grad_q, grad_k, grad_v, grad_beta_out, None, None
 
     @staticmethod
     def _forward_impl(
@@ -869,40 +961,113 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         betao: Optional[torch.Tensor],
         C: int,
         need_aux: bool,
+        cu_seqlens: Optional[torch.LongTensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        BS, NH, T, D = ko.size()
-        C = min(C, T)
-        q = qo.flatten(0, 1)
-        k = ko.flatten(0, 1)
-        v = vo.flatten(0, 1)
-        if betao is None:
-            beta = torch.ones(BS, NH, T, device=k.device, dtype=k.dtype)
-        else:
-            beta = betao
-        beta = beta.flatten(0, 1)
-
-        u = torch.empty_like(v)
+        BS, NH, T_max, D = ko.size()
+        C = min(C, T_max)
         qk_scale = 1.0 / math.sqrt(D)
         fa_scale = qk_scale / math.log(2)
-        # ws = torch.empty(T // C, BS * NH, C, C, device=k.device, dtype=k.dtype) if need_aux else None
-        ws = torch.empty((T + C - 1) // C, BS * NH, C, C, device=k.device, dtype=k.dtype) if need_aux else None
-        lses = torch.empty(BS * NH, T, device=k.device, dtype=torch.float) if need_aux else None
 
-        for i in range(0, T, C):
-            qi = q[:, i:i + C, :]
-            ki = k[:, :i + C, :]
-            vi = v[:, i:i + C, :]
-            ui_prev = u[:, :i + C, :]
-            betai = beta[:, i:i + C]
-            w, lse_chunk = forward(qi, ki, vi, ui_prev, fa_scale, betai)
-            w = w * betai.unsqueeze(-1)
+        if cu_seqlens is None:
+            if betao is None:
+                beta_full = torch.ones(BS, NH, T_max, device=ko.device, dtype=ko.dtype)
+            else:
+                beta_full = betao
+
+            u_full = torch.empty_like(vo)
             if need_aux:
-                ws[i // C].copy_(w)
-                lses[:, i:i + C].copy_(lse_chunk)
-            invcum.forward_inplace(u[:, i:i + C, :], w)
+                total_chunks = BS * ((T_max + C - 1) // C)
+                ws = torch.empty(total_chunks, NH, C, C, device=ko.device, dtype=ko.dtype)
+                lses = torch.empty(BS, NH, T_max, device=ko.device, dtype=torch.float)
+                chunk_base = 0
+            else:
+                ws = None
+                lses = None
+                chunk_base = 0
 
-        u = u.view(BS, NH, T, D)
-        return u, ws, lses
+            for b in range(BS):
+                for i in range(0, T_max, C):
+                    Ci = min(C, T_max - i)
+
+                    qi = qo[b, :, i:i + Ci, :]
+                    ki = ko[b, :, :i + Ci, :]
+                    vi = vo[b, :, i:i + Ci, :]
+                    ui_prev = u_full[b, :, :i + Ci, :]
+                    betai = beta_full[b, :, i:i + Ci]
+
+                    w, lse_chunk = forward(qi, ki, vi, ui_prev, fa_scale, betai)
+                    w = w * betai.unsqueeze(-1)
+                    if need_aux:
+                        wpad = torch.zeros(NH, C, C, device=ko.device, dtype=ko.dtype)
+                        wpad[:, :Ci, :Ci].copy_(w)
+                        ws[chunk_base + (i // C)].copy_(wpad)
+                        lses[b, :, i:i + Ci].copy_(lse_chunk)
+
+                    u_chunk_view = u_full[b, :, i:i + Ci, :]
+                    invcum.forward_inplace(u_chunk_view, w)
+
+                chunk_base += (T_max + C - 1) // C
+
+            return u_full, ws, lses
+
+        # Varlen path
+        N = len(cu_seqlens) - 1
+        assert cu_seqlens.dim() == 1 and cu_seqlens.size(0) == N + 1, "cu_seqlens must be [N+1]"
+        device = ko.device
+        dtype_k = ko.dtype
+        if betao is None:
+            beta_full = torch.ones(BS, NH, T_max, device=device, dtype=dtype_k)
+        else:
+            beta_full = betao
+
+        u_full = torch.empty_like(vo)
+        if need_aux:
+            total_chunks = sum((max(0, int(cu_seqlens[b + 1].item() - cu_seqlens[b].item())) + C - 1) // C
+                               for b in range(N))
+            ws = torch.empty(total_chunks, NH, C, C, device=device, dtype=dtype_k)
+            lses = torch.empty(BS, NH, T_max, device=device, dtype=torch.float)
+            chunk_base = 0
+        else:
+            ws = None
+            lses = None
+            chunk_base = 0
+
+        for b in range(N):
+            seq_start = int(cu_seqlens[b].item())
+            seq_end = int(cu_seqlens[b + 1].item())
+            L = max(0, seq_end - seq_start)
+            if L == 0:
+                continue
+
+            for i_local in range(0, L, C):
+                Ci = min(C, L - i_local)
+                li0 = i_local
+                li1 = i_local + Ci
+
+                abs_start = seq_start + li0
+                abs_end = seq_start + li1
+                abs_context_end = seq_start + li1
+
+                qi = qo[0, :, abs_start:abs_end, :]
+                ki = ko[0, :, seq_start:abs_context_end, :]
+                vi = vo[0, :, abs_start:abs_end, :]
+                ui_prev = u_full[0, :, seq_start:abs_context_end, :]
+                betai = beta_full[0, :, abs_start:abs_end]
+
+                w, lse_chunk = forward(qi, ki, vi, ui_prev, fa_scale, betai)
+                w = w * betai.unsqueeze(-1)
+                if need_aux:
+                    wpad = torch.zeros(NH, C, C, device=device, dtype=dtype_k)
+                    wpad[:, :Ci, :Ci].copy_(w)
+                    ws[chunk_base + (i_local // C)].copy_(wpad)
+                    lses[0, :, abs_start:abs_end].copy_(lse_chunk)
+
+                u_chunk_view = u_full[0, :, abs_start:abs_end, :]
+                invcum.forward_inplace(u_chunk_view, w)
+
+            chunk_base += (L + C - 1) // C
+
+        return u_full, ws, lses
 
 
 def delta_pre_attn(
@@ -910,18 +1075,27 @@ def delta_pre_attn(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: Optional[torch.Tensor] = None,
-    C: int = BLOCK_SIZE_C
+    C: int = BLOCK_SIZE_C,
+    cu_seqlens: Optional[torch.LongTensor] = None
 ) -> torch.Tensor:
     """
-    Fixed-length DeltaFormer pre-attention. Computes u given q, k, v, beta.
-    q,k,v: [B, H, T, D]
-    beta: [B, H, T]
-    Returns u with shape [B, H, T, D]
+    Fixed-length and varlen DeltaFormer pre-attention. Computes u given q, k, v, beta.
+
+    Fixed-length mode (cu_seqlens=None):
+        - q,k,v: [B, H, T, D]
+        - beta: [B, H, T]
+        - Returns: u with shape [B, H, T, D]
+
+    Varlen mode (cu_seqlens provided):
+        - q,k,v: [B, H, T_max, D] with padding on the right
+        - beta: [B, H, T_max] (or None, treated as ones)
+        - cu_seqlens: [B+1] cumulative true sequence lengths
+        - Returns: u with shape [B, H, T_max, D]; padded positions remain unused
     """
     C = min(C, k.size(2))
     if k.requires_grad or q.requires_grad or v.requires_grad or (beta is not None and beta.requires_grad):
-        return _DeltaPreAttnFunction.apply(q, k, v, beta, C)
-    u, _, _ = _DeltaPreAttnFunction._forward_impl(q, k, v, beta, C, need_aux=False)
+        return _DeltaPreAttnFunction.apply(q, k, v, beta, C, cu_seqlens)
+    u, _, _ = _DeltaPreAttnFunction._forward_impl(q, k, v, beta, C, need_aux=False, cu_seqlens=cu_seqlens)
     return u
 
 

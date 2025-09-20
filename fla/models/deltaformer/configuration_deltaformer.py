@@ -27,6 +27,8 @@ class DeltaFormerConfig(PretrainedConfig):
         norm_eps: float = 1e-6,
         qkv_bias: bool = False,
         qk_norm: bool = False,
+        rope_theta: float = 10000.,
+        rope_max_position_embeddings: Optional[int] = None,
         attn: Optional[Dict] = None,
         use_cache: bool = True,
         pad_token_id: Optional[int] = None,
@@ -57,6 +59,8 @@ class DeltaFormerConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
+        self.rope_theta = rope_theta
+        self.rope_max_position_embeddings = rope_max_position_embeddings
         self.attn = attn
         self.use_cache = use_cache
         self.initializer_range = initializer_range

@@ -59,8 +59,6 @@ def delta_pre_attn_naive(
     assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "q,k,v must be [B,H,T,D]"
     B, H, T, D = q.shape
     assert k.shape == (B, H, T, D) and v.shape == (B, H, T, D)
-    # Compute in float32 for numerical stability/consistency with fused kernel
-    # (which accumulates in fp32), then cast results back at the end.
     orig_dtype = q.dtype
     qf = q.float()
     kf = k.float()
@@ -75,8 +73,7 @@ def delta_pre_attn_naive(
     scores = torch.matmul(qf, kf.transpose(-1, -2)) * qk_scale
     probs = tril_softmax(scores, strict=True)  # [B,H,T,T] float32
 
-    # Build u sequentially without creating views into a tensor we later modify
-    u_list = []  # each element is [B,H,D] float32
+    u_list = []
     for t in range(T):
         if t == 0:
             u_t = vf[:, :, t, :]
