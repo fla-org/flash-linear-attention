@@ -231,6 +231,7 @@ def chunk_scaled_dot_kkt_fwd_kernel_intra_sub_intra(
         for num_stages in [2, 3, 4]
     ],
     key=['BK', 'NC', 'BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['B', 'T'])
 def chunk_scaled_dot_kkt_bwd_kernel_gk(

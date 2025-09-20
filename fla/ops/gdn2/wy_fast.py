@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import is_tf32_supported
+from fla.utils import autotune_cache_kwargs, is_tf32_supported
 
 
 @triton.heuristics({
@@ -25,6 +25,7 @@ from fla.utils import is_tf32_supported
         for DOT_PRECISION in (["tf32x3", "ieee"] if is_tf32_supported else ["ieee"])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def recompute_w_u_fwd_kernel(

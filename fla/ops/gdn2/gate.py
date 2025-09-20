@@ -9,7 +9,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.utils.op import log
-from fla.utils import input_guard, is_amd
+from fla.utils import autotune_cache_kwargs, input_guard, is_amd
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -126,7 +126,8 @@ def gdn2_gate_bwd_ref(
         for nw in NUM_WARPS_AUTOTUNE
         for ns in [2, 3]
     ],
-    key=['H', 'D']
+    key=['H', 'D'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def gdn2_gate_fwd_kernel(
@@ -185,7 +186,8 @@ def gdn2_gate_fwd_kernel(
         for nw in NUM_WARPS_AUTOTUNE
         for ns in [2, 3]
     ],
-    key=['H', 'D']
+    key=['H', 'D'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def gdn2_gate_bwd_kernel(
