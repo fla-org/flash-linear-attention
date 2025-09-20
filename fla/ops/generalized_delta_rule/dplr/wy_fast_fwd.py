@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import gather
-from fla.utils import is_gather_supported, use_cuda_graph
+from fla.utils import autotune_cache_kwargs, is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
@@ -22,6 +22,7 @@ from fla.utils import is_gather_supported, use_cuda_graph
     ],
     key=['BT'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk32(
@@ -67,6 +68,7 @@ def prepare_wy_repr_fwd_kernel_chunk32(
     ],
     key=['BC'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk64(
@@ -146,6 +148,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def wu_fwd_kernel(

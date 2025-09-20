@@ -10,7 +10,7 @@ import triton.language as tl
 from einops import rearrange, repeat
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard, is_amd
+from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard, is_amd
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
@@ -39,6 +39,7 @@ def rotary_embedding_ref(x, cos, sin, interleaved=False):
         for num_stages in [2, 3, 4]
     ],
     key=['B', 'H', 'D', 'INTERLEAVED'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def rotary_embedding_kernel(

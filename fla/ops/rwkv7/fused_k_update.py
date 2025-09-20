@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard, is_amd
+from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard, is_amd
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
@@ -24,7 +24,8 @@ def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Te
         for w in NUM_WARPS_AUTOTUNE
         for s in [1, 2, 3]
     ],
-    key=['BD']
+    key=['BD'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def k_update_fwd_kernel_short(
@@ -66,7 +67,8 @@ def k_update_fwd_kernel_short(
         for w in NUM_WARPS_AUTOTUNE
         for s in [1, 2, 3]
     ],
-    key=['BD', 'BT']
+    key=['BD', 'BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def k_update_fwd_kernel_long(
@@ -112,7 +114,8 @@ def k_update_fwd_kernel_long(
         for s in [1, 2, 3]
         for BT in [2, 4, 8]
     ],
-    key=['BD']
+    key=['BD'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def k_update_bwd_kernel_short(
@@ -163,7 +166,8 @@ def k_update_bwd_kernel_short(
         for w in NUM_WARPS_AUTOTUNE
         for s in [1, 2, 3]
     ],
-    key=['BD', 'BT']
+    key=['BD', 'BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def k_update_bwd_kernel_long(

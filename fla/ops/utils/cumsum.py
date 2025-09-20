@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import check_shared_mem, input_guard
+from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
@@ -22,7 +22,8 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['B', 'H', 'BT', 'IS_VARLEN', 'REVERSE']
+    key=['B', 'H', 'BT', 'IS_VARLEN', 'REVERSE'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_local_cumsum_scalar_kernel(
@@ -76,7 +77,8 @@ def chunk_local_cumsum_scalar_kernel(
         for BS in BS_LIST
         for num_warps in [2, 4, 8]
     ],
-    key=['B', 'H', 'S', 'BT', 'IS_VARLEN', 'REVERSE']
+    key=['B', 'H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_local_cumsum_vector_kernel(
@@ -136,7 +138,8 @@ def chunk_local_cumsum_vector_kernel(
         for num_warps in [2, 4, 8]
         for num_stages in [1, 2, 3, 4]
     ],
-    key=['B', 'H', 'IS_VARLEN', 'REVERSE']
+    key=['B', 'H', 'IS_VARLEN', 'REVERSE'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_global_cumsum_scalar_kernel(
@@ -195,7 +198,8 @@ def chunk_global_cumsum_scalar_kernel(
         for num_warps in [2, 4, 8]
         for num_stages in [1, 2, 3, 4]
     ],
-    key=['B', 'H', 'S', 'IS_VARLEN', 'REVERSE']
+    key=['B', 'H', 'S', 'IS_VARLEN', 'REVERSE'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_global_cumsum_vector_kernel(

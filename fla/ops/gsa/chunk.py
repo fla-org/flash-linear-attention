@@ -15,7 +15,7 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cumsum import chunk_local_cumsum
 from fla.ops.utils.op import exp
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -29,7 +29,8 @@ from fla.utils import input_guard
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_fwd_k_kernel_inter(
@@ -190,7 +191,8 @@ def chunk_gsa_fwd_k_kernel_intra(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=["BT"]
+    key=["BT"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_dA(
@@ -290,7 +292,8 @@ def chunk_gsa_bwd_k_kernel_dA(
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gsa_bwd_k_kernel_dqkvg(

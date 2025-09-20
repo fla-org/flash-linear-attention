@@ -24,7 +24,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 try:
     from torch.distributed.tensor import DTensor
@@ -184,6 +184,7 @@ class GroupNormRef(nn.Module):
         for num_warps in [2, 4, 8]
     ],
     key=['D', 'NB', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_fwd_kernel(
@@ -257,6 +258,7 @@ def layer_norm_fwd_kernel(
         for num_warps in [2, 4, 8, 16]
     ],
     key=['D', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_fwd_kernel1(
@@ -329,6 +331,7 @@ def layer_norm_fwd_kernel1(
         for num_warps in [2, 4, 8]
     ],
     key=['D', 'NB', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_bwd_kernel(
@@ -438,6 +441,7 @@ def layer_norm_bwd_kernel(
         for num_warps in [2, 4, 8]
     ],
     key=['D', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_bwd_kernel1(

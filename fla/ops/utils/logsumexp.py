@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -18,7 +19,8 @@ from fla.ops.utils.op import exp, log
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16, 32]
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def logsumexp_fwd_kernel(

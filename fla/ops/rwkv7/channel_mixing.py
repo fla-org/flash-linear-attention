@@ -4,7 +4,14 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_pytorch_version, input_guard, use_cuda_graph
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    check_pytorch_version,
+    input_guard,
+    use_cuda_graph
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +26,7 @@ if not check_pytorch_version('2.4'):
     ],
     key=['hidden_dim'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit
 def rwkv_seq_mix_kernel(
@@ -185,6 +193,7 @@ def relu_square_bwd_kernel(
     ],
     key=['hidden_dim'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit
 def rwkv_mix_bwd_kenel(

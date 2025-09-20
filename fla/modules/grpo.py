@@ -55,7 +55,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import input_guard, is_amd
+from fla.utils import autotune_cache_kwargs, input_guard, is_amd
 
 NUM_WARPS_AUTOTUNE = [4, 8, 16] if is_amd else [4, 8, 16, 32]
 
@@ -67,7 +67,8 @@ NUM_WARPS_AUTOTUNE = [4, 8, 16] if is_amd else [4, 8, 16, 32]
         for NUM_WARPS in NUM_WARPS_AUTOTUNE
         for NUM_STAGES in [1, 2, 4]
     ],
-    key=['B', 'N']
+    key=['B', 'N'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def grpo_fwd_kernel(
@@ -142,7 +143,8 @@ def grpo_fwd_kernel(
         for NUM_WARPS in [32]
         for NUM_STAGES in [4]
     ],
-    key=['B', 'N']
+    key=['B', 'N'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def grpo_bwd_kernel(

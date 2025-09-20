@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -24,6 +25,7 @@ from fla.ops.utils.op import exp
         for num_stages in [2, 3]
     ],
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_h_split(
@@ -143,6 +145,7 @@ def chunk_fwd_kernel_h_split(
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_h_reduction(
@@ -229,6 +232,7 @@ def chunk_fwd_kernel_h_reduction(
         for num_stages in [2, 3]
     ],
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dh_split(
@@ -347,6 +351,7 @@ def chunk_bwd_kernel_dh_split(
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dh_reduction(

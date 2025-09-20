@@ -10,7 +10,14 @@ import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import prepare_wy_repr_fwd
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, use_cuda_graph
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    check_shared_mem,
+    input_guard,
+    use_cuda_graph
+)
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 
@@ -27,6 +34,7 @@ BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
     ],
     key=['BT', 'BK', 'BV'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
@@ -111,6 +119,7 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
     ],
     key=['BT'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_generalized_iplr_delta_rule_fwd_kernel_o(

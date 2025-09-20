@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import is_amd
+from fla.utils import autotune_cache_kwargs, is_amd
 
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
@@ -18,7 +18,8 @@ NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
         triton.Config({}, num_warps=num_warps)
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def softmax_fwd_kernel(
@@ -44,7 +45,8 @@ def softmax_fwd_kernel(
         triton.Config({}, num_warps=num_warps)
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def softmax_bwd_kernel(

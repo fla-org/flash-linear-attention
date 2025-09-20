@@ -18,7 +18,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.layernorm import RMSNorm
-from fla.utils import get_multiprocessor_count, input_guard, is_amd, require_version
+from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard, is_amd, require_version
 
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
@@ -63,6 +63,7 @@ def weight_quant(w):
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_fwd_kernel_quant(
@@ -197,6 +198,7 @@ def layer_norm_fwd_quant(
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS"],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_bwd_kernel(

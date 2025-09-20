@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_amd
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard, is_amd
 
 try:
     from torch.distributed.tensor import DTensor
@@ -23,7 +23,8 @@ NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
         for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_fwd_kernel(
@@ -46,7 +47,8 @@ def sigmoid_fwd_kernel(
         for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_bwd_kernel(
@@ -101,7 +103,8 @@ sigmoid = SigmoidFunction.apply
         for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def logsigmoid_fwd_kernel(
@@ -129,7 +132,8 @@ def logsigmoid_fwd_kernel(
         for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def logsigmoid_bwd_kernel(
@@ -204,7 +208,8 @@ def logsigmoid(x: torch.Tensor, temperature: float = 1.) -> torch.Tensor:
         for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def swish_fwd_kernel(
@@ -228,7 +233,8 @@ def swish_fwd_kernel(
         for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def swish_bwd_kernel(
@@ -400,7 +406,8 @@ sqrelu = SquaredReLUFunction.apply
         for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def swiglu_fwd_kernel(
@@ -428,7 +435,8 @@ def swiglu_fwd_kernel(
         for bs in [512, 1024, 2048, 4096, 8192]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def swiglu_fwdbwd_kernel(

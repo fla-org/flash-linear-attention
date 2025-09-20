@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import check_shared_mem, is_nvidia_hopper
+from fla.utils import autotune_cache_kwargs, check_shared_mem, is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
@@ -22,7 +22,8 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16]
     ],
-    key=['BK']
+    key=['BK'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk32(
@@ -76,7 +77,8 @@ def prepare_wy_repr_fwd_kernel_chunk32(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16]
     ],
-    key=['BK']
+    key=['BK'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk64(
@@ -156,7 +158,8 @@ def prepare_wy_repr_fwd_kernel_chunk64(
         triton.Config({}, num_warps=num_warps)
         for num_warps in NUM_WARPS
     ],
-    key=['BT', 'BK', 'BV']
+    key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def wu_fwd_kernel(

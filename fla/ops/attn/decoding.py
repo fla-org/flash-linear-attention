@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
@@ -22,6 +22,7 @@ from fla.utils import check_shared_mem
         for num_stages in [2, 3, 4, 5]
     ],
     key=['H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def naive_attn_decoding_kernel(

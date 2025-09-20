@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -20,7 +20,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
         for BD in [16, 32, 64, 128]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def mean_pooling_fwd_kernel(
@@ -66,7 +67,8 @@ def mean_pooling_fwd_kernel(
         for BD in [16, 32, 64, 128]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def mean_pooling_bwd_kernel(

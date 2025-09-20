@@ -14,7 +14,7 @@ from fla.ops.nsa.utils import _bitonic_merge
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_lens, prepare_token_indices
 from fla.ops.utils.op import exp, log
 from fla.ops.utils.pooling import mean_pooling
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -35,6 +35,7 @@ except ImportError:
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def parallel_nsa_kernel_topk(
@@ -172,6 +173,7 @@ def parallel_nsa_kernel_topk(
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def parallel_nsa_fwd_kernel(
@@ -298,6 +300,7 @@ def parallel_nsa_kernel_mask(
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def parallel_nsa_bwd_kernel_dq(
@@ -406,6 +409,7 @@ def parallel_nsa_bwd_kernel_dq(
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def parallel_nsa_bwd_kernel_dkv(

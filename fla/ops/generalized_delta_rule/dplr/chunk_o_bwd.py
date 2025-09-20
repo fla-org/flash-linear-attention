@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, is_amd, use_cuda_graph
+from fla.utils import autotune_cache_kwargs, check_shared_mem, is_amd, use_cuda_graph
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
@@ -27,6 +27,7 @@ BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
     ],
     key=['BV', 'BT'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_kernel_dAu(
@@ -99,6 +100,7 @@ def chunk_dplr_bwd_kernel_dAu(
     ],
     key=['BT', 'BK', 'BV'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit
 def chunk_dplr_bwd_o_kernel(
@@ -228,6 +230,7 @@ def chunk_dplr_bwd_o_kernel(
     ],
     key=['BT'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit
 def chunk_dplr_bwd_kernel_dv(

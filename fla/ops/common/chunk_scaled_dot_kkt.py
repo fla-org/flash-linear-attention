@@ -9,6 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -23,6 +24,7 @@ from fla.ops.utils.op import exp
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'BT', 'IS_VARLEN'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_scaled_dot_kkt_fwd_kernel(
@@ -84,7 +86,8 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=["BC"]
+    key=["BC"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
@@ -159,7 +162,8 @@ def chunk_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=["BK", "BT"]
+    key=["BK", "BT"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_scaled_dot_kkt_fwd_kernel_intra_sub_intra(

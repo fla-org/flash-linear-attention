@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use_cuda_graph
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard, use_cuda_graph
 
 
 @triton.heuristics({
@@ -25,6 +25,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use
     ],
     key=['BK'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_dplr_delta_rule_fwd_kernel(

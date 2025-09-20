@@ -97,16 +97,18 @@ The following requirements should be satisfied
 - [einops](https://einops.rocks/)
 - [transformers](https://github.com/huggingface/transformers) >=4.45.0
 - [datasets](https://github.com/huggingface/datasets) >=3.3.0
-- [causal-conv1d](https://github.com/Dao-AILab/causal-conv1d) >=1.4.0
+
+Starting from v0.3.2, the packages published on PyPI are `fla-core` and `flash-linear-attention`. The former contains all our customized kernels and only depends on PyTorch, Triton, and einops. The latter is an extension package of the former, containing `fla/layers` and `fla/models`, and depends on transformers. We also provide Triton implementations for conv1d operations, so causal-conv1d is not required.
 
 You can install `fla` with pip:
 ```sh
 pip install flash-linear-attention
 ```
-As `fla` is actively developed now, for the latest features and updates, an alternative way is to install the package from source
+
+As `fla` is actively developed now, for the latest features and updates, an alternative way is to install the package from source. Note that installing from git uses the default mode, so you need to uninstall both `fla-core` and `flash-linear-attention` first:
 ```sh
-# uninstall `fla` first to ensure a successful upgrade
-pip uninstall flash-linear-attention && pip install -U git+https://github.com/fla-org/flash-linear-attention
+# uninstall both packages first to ensure a successful upgrade
+pip uninstall fla-core flash-linear-attention -y && pip install -U git+https://github.com/fla-org/flash-linear-attention
 ```
 or manage `fla` with submodules
 ```sh
@@ -117,7 +119,8 @@ ln -s 3rdparty/flash-linear-attention/fla fla
 If you have installed `triton-nightly` and `torch` pre version, please use the following command:
 ```sh
 pip install einops ninja datasets transformers numpy
-pip uninstall flash-linear-attention && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
+# uninstall both packages first to ensure a successful upgrade
+pip uninstall fla-core flash-linear-attention -y && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 ```
 
 
