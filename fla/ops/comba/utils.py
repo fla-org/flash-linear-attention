@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -15,7 +16,8 @@ from fla.ops.utils.index import prepare_chunk_indices
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['B', 'H', 'BT', 'IS_VARLEN']
+    key=['B', 'H', 'BT', 'IS_VARLEN'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_comba_cumsum_scalar_fwd_kernel(
@@ -96,7 +98,8 @@ def chunk_comba_cumsum_scalar_fwd(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['B', 'H', 'BT', 'IS_VARLEN']
+    key=['B', 'H', 'BT', 'IS_VARLEN'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_comba_cumsum_scalar_bwd_kernel(

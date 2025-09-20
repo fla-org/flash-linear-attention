@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 from fla.modules.layernorm import group_norm
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, is_nvidia_hopper
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard, is_nvidia_hopper
 
 NUM_WARPS = [1, 2] if is_nvidia_hopper else [1, 2, 4, 8]
 
@@ -27,6 +27,7 @@ NUM_WARPS = [1, 2] if is_nvidia_hopper else [1, 2, 4, 8]
         triton.Config({}, num_warps=4)
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_ttt_linear_fwd_kernel(
@@ -149,6 +150,7 @@ def fused_chunk_ttt_linear_fwd_kernel(
         triton.Config({}, num_warps=4)
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_ttt_linear_bwd_kernel_h(
@@ -268,6 +270,7 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
         for num_warps in NUM_WARPS
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_ttt_linear_bwd_kernel_dh(

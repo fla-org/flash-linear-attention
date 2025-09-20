@@ -8,7 +8,7 @@ import triton.language as tl
 from fla.ops.mesa_net.chunk_h_kv_intra_bwd_separate import chunk_mesa_net_h_kv_bwd_intra_separate_fn
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, is_nvidia_hopper
+from fla.utils import autotune_cache_kwargs, check_shared_mem, is_nvidia_hopper
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
@@ -23,6 +23,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_mesa_net_h_kv_bwd_intra_kernel(

@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import check_shared_mem, is_intel_alchemist, use_cuda_graph
+from fla.utils import autotune_cache_kwargs, check_shared_mem, is_intel_alchemist, use_cuda_graph
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
 triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
@@ -25,6 +25,7 @@ triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
     ],
     key=['BT', 'BK', 'BV'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_bwd_kernel(

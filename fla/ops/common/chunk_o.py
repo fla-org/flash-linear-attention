@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, is_nvidia_hopper
+from fla.utils import autotune_cache_kwargs, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
@@ -27,6 +27,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         triton.Config({'BK': 32, 'BV': 32}, num_warps=2, num_stages=3),
     ],
     key=['H', 'K', 'V', 'BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_o(
@@ -132,6 +133,7 @@ def chunk_fwd_kernel_o(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_DW'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dqkwg(
@@ -314,6 +316,7 @@ def chunk_bwd_kernel_dqkwg(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dv(
@@ -408,6 +411,7 @@ def chunk_bwd_kernel_dv(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dv_local(

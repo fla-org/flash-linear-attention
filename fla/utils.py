@@ -21,6 +21,11 @@ if TYPE_CHECKING:
     from fla import __version__
 
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
+FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
+
+
+supports_autotune_cache = "cache_results" in inspect.signature(triton.autotune).parameters
+autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if supports_autotune_cache else {}
 
 
 @lru_cache(maxsize=1)

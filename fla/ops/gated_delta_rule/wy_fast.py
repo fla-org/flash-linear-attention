@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
@@ -21,7 +21,8 @@ from fla.utils import check_shared_mem
         for num_warps in [2, 4]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN']
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_bwd_kernel(
@@ -139,6 +140,7 @@ def prepare_wy_repr_bwd_kernel(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def recompute_w_u_fwd_kernel(

@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -22,6 +22,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
         for num_warps in [4, 8]
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_fwd_kernel(
@@ -134,6 +135,7 @@ def fused_recurrent_fwd_kernel(
         for num_warps in [4]
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_bwd_kernel(

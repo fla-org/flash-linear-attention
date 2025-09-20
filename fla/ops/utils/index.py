@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.utils import tensor_cache
+from fla.utils import autotune_cache_kwargs, tensor_cache
 
 
 @triton.autotune(
@@ -17,6 +17,7 @@ from fla.utils import tensor_cache
         for num_warps in [4, 8, 16, 32]
     ],
     key=['B'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def prepare_position_ids_kernel(

@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard, is_amd, tensor_cache
+from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard, is_amd, tensor_cache
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
@@ -59,6 +59,7 @@ def token_shift_ref(
         for num_stages in [1, 2, 3]
     ],
     key=['BD'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def token_shift_fwd_kernel_short(
@@ -149,7 +150,8 @@ def token_shift_fwd_kernel_short(
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [1, 2, 3]
     ],
-    key=['BD', 'NB']
+    key=['BD', 'NB'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def token_shift_fwd_kernel_long(
@@ -223,6 +225,7 @@ def token_shift_fwd_kernel_long(
         for num_stages in [1, 2, 3]
     ],
     key=['BD'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def token_shift_bwd_kernel_short(
@@ -299,7 +302,8 @@ def token_shift_bwd_kernel_short(
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [1, 2, 3]
     ],
-    key=['BD', 'NB']
+    key=['BD', 'NB'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def token_shift_bwd_kernel_long(

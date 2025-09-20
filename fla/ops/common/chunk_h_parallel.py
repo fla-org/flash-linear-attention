@@ -13,6 +13,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -28,7 +29,8 @@ from fla.ops.utils.op import exp
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV']
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_h_parallel(
@@ -142,7 +144,8 @@ def chunk_fwd_kernel_h_parallel(
         for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV']
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_h_reduction(
@@ -227,7 +230,8 @@ def chunk_fwd_kernel_h_reduction(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV']
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dh_parallel(
@@ -330,7 +334,8 @@ def chunk_bwd_kernel_dh_parallel(
         for num_warps in [2, 4, 8, 16]
         for num_stages in [2, 3]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV']
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dh_reduction(

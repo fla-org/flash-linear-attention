@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.autotune(
@@ -13,7 +14,8 @@ from fla.ops.utils.op import exp, log
         for BT in [16, 32, 64]
         for num_warps in [2, 4, 8]
     ],
-    key=['S']
+    key=['S'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def logcumsumexp_fwd_kernel(

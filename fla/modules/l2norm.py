@@ -8,7 +8,7 @@ import torch.nn as nn
 import triton
 import triton.language as tl
 
-from fla.utils import input_guard, is_amd
+from fla.utils import autotune_cache_kwargs, input_guard, is_amd
 
 BT_LIST = [8, 16, 32, 64, 128]
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
@@ -19,7 +19,8 @@ NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
         triton.Config({}, num_warps=num_warps)
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def l2norm_fwd_kernel1(
@@ -49,7 +50,8 @@ def l2norm_fwd_kernel1(
         triton.Config({}, num_warps=num_warps)
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def l2norm_bwd_kernel1(
@@ -81,7 +83,8 @@ def l2norm_bwd_kernel1(
         for num_warps in [1, 2, 4, 8, 16]
         for BT in BT_LIST
     ],
-    key=['D', 'NB']
+    key=['D', 'NB'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def l2norm_fwd_kernel(
@@ -114,7 +117,8 @@ def l2norm_fwd_kernel(
         for num_warps in [1, 2, 4, 8, 16]
         for BT in BT_LIST
     ],
-    key=['D', 'NB']
+    key=['D', 'NB'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def l2norm_bwd_kernel(

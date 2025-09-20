@@ -14,6 +14,7 @@ from fla.ops.utils.op import exp
 from fla.utils import (
     autocast_custom_bwd,
     autocast_custom_fwd,
+    autotune_cache_kwargs,
     check_shared_mem,
     input_guard,
     is_intel_alchemist,
@@ -38,6 +39,7 @@ NUM_WARPS = [2, 4, 8] if is_nvidia_hopper else [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
     key=["BT", "BS", "BK", "BV", "USE_G"],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def parallel_simple_gla_fwd_kernel(
@@ -372,6 +374,7 @@ def parallel_simple_gla_bwd_kernel_dkv(
         for num_warps in NUM_WARPS
     ],
     key=['BT', 'BS', 'BK', 'BV', 'USE_G'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def parallel_simple_gla_bwd_kernel(

@@ -9,7 +9,14 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.op import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, is_nvidia_hopper
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    check_shared_mem,
+    input_guard,
+    is_nvidia_hopper
+)
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
@@ -30,6 +37,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_fwd_kernel(
@@ -163,6 +171,7 @@ def fused_chunk_fwd_kernel(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_bwd_kernel(

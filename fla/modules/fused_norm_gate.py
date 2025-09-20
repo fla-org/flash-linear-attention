@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 
 @triton.heuristics({
@@ -28,6 +28,7 @@ from fla.utils import get_multiprocessor_count, input_guard
         for num_warps in [4, 8, 16]
     ],
     key=['D', 'NB', 'IS_RMS_NORM', 'STORE_RESIDUAL_OUT', 'HAS_RESIDUAL', 'HAS_WEIGHT'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_gated_fwd_kernel(
@@ -116,6 +117,7 @@ def layer_norm_gated_fwd_kernel(
         for num_warps in [2, 4, 8, 16]
     ],
     key=['D', 'IS_RMS_NORM', 'STORE_RESIDUAL_OUT', 'HAS_RESIDUAL', 'HAS_WEIGHT'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_gated_fwd_kernel1(
@@ -200,6 +202,7 @@ def layer_norm_gated_fwd_kernel1(
         for num_warps in [4, 8, 16]
     ],
     key=['D', 'NB', 'IS_RMS_NORM', 'HAS_DRESIDUAL', 'HAS_WEIGHT'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_gated_bwd_kernel(
@@ -325,6 +328,7 @@ def layer_norm_gated_bwd_kernel(
         for num_warps in [2, 4, 8, 16]
     ],
     key=['D', 'IS_RMS_NORM', 'STORE_DRESIDUAL', 'HAS_DRESIDUAL', 'HAS_WEIGHT'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def layer_norm_gated_bwd_kernel1(

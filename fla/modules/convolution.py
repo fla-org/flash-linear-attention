@@ -13,7 +13,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.utils import prepare_chunk_indices, prepare_sequence_ids
-from fla.utils import get_multiprocessor_count, input_guard, is_amd
+from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard, is_amd
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 STATIC_WARPS = 32 if not is_amd else 16
@@ -41,6 +41,7 @@ except ImportError:
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D', 'W', 'NB'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def causal_conv1d_fwd_kernel(
@@ -148,6 +149,7 @@ def causal_conv1d_fwd_kernel(
         for num_warps in [4, 8, 16, 32]
     ],
     key=['D', 'W', 'NB'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def causal_conv1d_bwd_kernel(

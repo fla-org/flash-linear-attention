@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -22,7 +22,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16]
     ],
-    key=['BK', 'BV']
+    key=['BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_rwkv6_fwd_kernel(
@@ -108,7 +109,8 @@ def fused_recurrent_rwkv6_fwd_kernel(
         triton.Config({}, num_warps=2),
         triton.Config({}, num_warps=4),
     ],
-    key=['BK', 'BV']
+    key=['BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_rwkv6_bwd_kernel_dq(
@@ -197,7 +199,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
         triton.Config({}, num_warps=2),
         triton.Config({}, num_warps=4),
     ],
-    key=['BK', 'BV']
+    key=['BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_rwkv6_bwd_kernel_dkv(
@@ -294,7 +297,8 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
         for BK in [32, 64]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['K']
+    key=['K'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_rwkv6_bwd_kernel_dw(
