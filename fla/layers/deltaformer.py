@@ -12,7 +12,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import get_unpad_data, pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
-from fla.ops.deltaformer import delta_pre_attn
+from fla.ops.deltaformer import deltaformer_attn
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
@@ -155,7 +155,7 @@ class DeltaFormerAttention(nn.Module):
             k_full, v_full, beta_full = k, v, beta
 
         if attention_mask is not None:
-            u = delta_pre_attn(
+            u = deltaformer_attn(
                 # kk similarity
                 rearrange(k_full, 'b t h d -> b h t d'),
                 rearrange(k_full, 'b t h d -> b h t d'),
@@ -164,7 +164,7 @@ class DeltaFormerAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
         elif cu_seqlens is not None:
-            u = delta_pre_attn(
+            u = deltaformer_attn(
                 rearrange(k_full, 'b t h d -> b h t d'),
                 rearrange(k_full, 'b t h d -> b h t d'),
                 rearrange(v_full, 'b t h d -> b h t d'),
@@ -172,7 +172,7 @@ class DeltaFormerAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
         else:
-            u = delta_pre_attn(
+            u = deltaformer_attn(
                 rearrange(k_full, 'b t h d -> b h t d'),
                 rearrange(k_full, 'b t h d -> b h t d'),
                 rearrange(v_full, 'b t h d -> b h t d'),

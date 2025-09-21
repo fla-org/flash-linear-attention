@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 
-from .fused_chunk import delta_pre_attn
-from .naive import delta_pre_attn_naive
+from .naive import naive_deltaformer_attn
+from .parallel import deltaformer_attn
 
 __all__ = [
-    'delta_pre_attn',
-    'delta_pre_attn_naive',
+    'deltaformer_attn',
+    'naive_deltaformer_attn',
 ]

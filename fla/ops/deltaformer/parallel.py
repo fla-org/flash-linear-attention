@@ -1070,7 +1070,7 @@ class _DeltaPreAttnFunction(torch.autograd.Function):
         return u_full, ws, lses
 
 
-def delta_pre_attn(
+def deltaformer_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -1100,5 +1100,5 @@ def delta_pre_attn(
 
 
 __all__ = [
-    'delta_pre_attn',
+    'deltaformer_attn',
 ]

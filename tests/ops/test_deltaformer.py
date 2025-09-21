@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from fla.ops.deltaformer import delta_pre_attn
-from fla.ops.deltaformer.naive import delta_pre_attn_naive
+from fla.ops.deltaformer import deltaformer_attn
+from fla.ops.deltaformer.naive import naive_deltaformer_attn
 from fla.utils import assert_close, device, is_intel_alchemist
 
 
@@ -25,7 +25,7 @@ from fla.utils import assert_close, device, is_intel_alchemist
     is_intel_alchemist,
     reason="Skipping test on Intel Alchemist due to known issues with SRAM."
 )
-def test_delta_pre_attn(
+def test_deltaformer_attn(
     B: int,
     T: int,
     H: int,
@@ -44,14 +44,14 @@ def test_delta_pre_attn(
 
     do = torch.randn((B, H, T, D), dtype=dtype, device=device)
 
-    ref = delta_pre_attn_naive(q, k, v, beta)
+    ref = naive_deltaformer_attn(q, k, v, beta)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
     ref_dbeta, beta.grad = beta.grad.clone(), None
 
-    tri = delta_pre_attn(q, k, v, beta)
+    tri = deltaformer_attn(q, k, v, beta)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
@@ -74,7 +74,7 @@ def test_delta_pre_attn(
 
         grad_output_packed = torch.cat([do[i] for i in range(B)], dim=1).unsqueeze(0)
 
-        tri_varlen = delta_pre_attn(q_packed, k_packed, v_packed, beta_packed, cu_seqlens=cu_seqlens)
+        tri_varlen = deltaformer_attn(q_packed, k_packed, v_packed, beta_packed, cu_seqlens=cu_seqlens)
 
         tri_varlen.backward(grad_output_packed)
         tri_varlen_dq = q_packed.grad

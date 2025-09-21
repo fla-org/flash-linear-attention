@@ -36,7 +36,7 @@ def tril_softmax(scores: torch.Tensor, strict: bool = True) -> torch.Tensor:
     return probs
 
 
-def delta_pre_attn_naive(
+def naive_deltaformer_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -88,6 +88,6 @@ def delta_pre_attn_naive(
 
 
 __all__ = [
-    'delta_pre_attn_naive',
+    'naive_deltaformer_attn',
     'tril_softmax',
 ]
