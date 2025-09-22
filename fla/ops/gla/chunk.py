@@ -11,7 +11,7 @@ from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cumsum import chunk_local_cumsum
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, input_guard
+from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -27,7 +27,8 @@ BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=["BC"]
+    key=["BC"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_A_kernel_intra_sub_inter(
@@ -100,7 +101,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
     ],
-    key=["BK", "BT"]
+    key=["BK", "BT"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_A_kernel_intra_sub_intra(
@@ -165,7 +167,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
     ],
-    key=['BC', 'BK']
+    key=['BC', 'BK'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
@@ -236,7 +239,8 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
     ],
-    key=['BC']
+    key=['BC'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
@@ -285,6 +289,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_kernel_o(
@@ -361,6 +366,7 @@ def chunk_gla_fwd_kernel_o(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BK', 'NC', 'BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_bwd_kernel_intra(
@@ -497,6 +503,7 @@ def chunk_gla_bwd_kernel_intra(
         triton.Config({}, num_warps=8),
     ],
     key=['BV', 'BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_bwd_kernel_dA(
@@ -546,6 +553,7 @@ def chunk_gla_bwd_kernel_dA(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_bwd_kernel_dv(
@@ -620,6 +628,7 @@ def chunk_gla_bwd_kernel_dv(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_bwd_kernel_inter(

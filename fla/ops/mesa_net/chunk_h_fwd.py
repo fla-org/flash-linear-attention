@@ -9,6 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.op import exp
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -22,7 +23,8 @@ from fla.ops.utils.op import exp
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT']
+    key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_mesa_net_fwd_kernel_h(

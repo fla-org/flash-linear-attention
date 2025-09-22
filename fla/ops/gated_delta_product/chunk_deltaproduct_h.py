@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
-from fla.utils import is_nvidia_hopper, use_cuda_graph
+from fla.utils import autotune_cache_kwargs, is_nvidia_hopper, use_cuda_graph
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
@@ -30,6 +30,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
     ],
     key=['H', 'K', 'V', 'BT', 'USE_G'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
@@ -208,6 +209,7 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
     ],
     key=['H', 'K', 'V', 'BT', 'BV', 'USE_G'],
     use_cuda_graph=use_cuda_graph,
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(

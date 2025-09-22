@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -23,6 +23,7 @@ from fla.utils import input_guard
         for num_stages in [2, 3, 4]
     ],
     key=["BK"],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def fused_recurrent_fwd_kernel(
@@ -113,6 +114,7 @@ def fused_recurrent_fwd_kernel(
         for num_stages in [2, 3]
     ],
     key=["BK", "BV"],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def fused_recurrent_bwd_kernel(

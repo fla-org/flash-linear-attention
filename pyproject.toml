@@ -17,7 +17,7 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5",
-    "transformers>=4.53.0,<4.56.0",
+    "transformers>=4.53.0",
     "datasets>=3.3.0",
     "einops",
     "pytest",
@@ -29,6 +29,7 @@ benchmark = ["matplotlib"]
 
 [project.urls]
 Homepage = "https://github.com/fla-org/flash-linear-attention"
+Repository = "https://github.com/fla-org/flash-linear-attention"
 
 [build-system]
 requires = ["setuptools>=45", "wheel"]

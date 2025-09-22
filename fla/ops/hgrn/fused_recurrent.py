@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -22,7 +22,8 @@ from fla.utils import input_guard
         for BD in [32, 64, 128]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_hgrn_fwd_kernel(
@@ -83,7 +84,8 @@ def fused_recurrent_hgrn_fwd_kernel(
         for BD in [32, 64, 128]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_hgrn_bwd_kernel(

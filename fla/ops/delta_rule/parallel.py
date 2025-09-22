@@ -10,7 +10,7 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.delta_rule.wy_fast import fwd_prepare_T
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.autotune(
@@ -19,6 +19,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
         for num_warps in [1, 2, 4]
     ],
     key=['BT', 'K', 'V'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_transform_qk_fwd_kernel(
@@ -126,6 +127,7 @@ def chunk_transform_qk_fwd(
         triton.Config({}, num_warps=2),
     ],
     key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def save_intra_chunk_attn(

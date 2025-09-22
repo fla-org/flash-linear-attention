@@ -10,7 +10,7 @@ import triton.language as tl
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_token_indices
 from fla.ops.utils.op import exp, log
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
 
 @triton.heuristics({
@@ -22,6 +22,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def parallel_nsa_compression_fwd_kernel(
@@ -124,6 +125,7 @@ def parallel_nsa_compression_fwd_kernel(
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def parallel_nsa_compression_bwd_kernel_dq(
@@ -227,6 +229,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def parallel_nsa_compression_bwd_kernel_dkv(

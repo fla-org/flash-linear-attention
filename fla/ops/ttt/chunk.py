@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.modules.layernorm import group_norm
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -25,7 +25,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['BT', 'BK', 'BV']
+    key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_fwd_kernel_h(
@@ -130,6 +131,7 @@ def chunk_ttt_linear_fwd_kernel_h(
         for num_stages in [2, 3]
     ],
     key=['BT'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_fwd_kernel_o(
@@ -222,6 +224,7 @@ def chunk_ttt_linear_fwd_kernel_o(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_h(
@@ -323,6 +326,7 @@ def chunk_ttt_linear_bwd_kernel_h(
         for num_warps in [4]
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_dv_local(
@@ -397,6 +401,7 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
         for num_warps in [2, 4, 8, 16]
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_norm(
@@ -554,6 +559,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
         for num_stages in [2, 3]
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dqke(

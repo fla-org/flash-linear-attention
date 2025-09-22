@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
 from transformers.utils.deprecation import deprecate_kwarg
@@ -17,6 +16,7 @@ from fla.layers.attn import Attention
 from fla.layers.mamba import Mamba
 from fla.models.mamba.modeling_mamba import MambaCache
 from fla.models.samba.configuration_samba import SambaConfig
+from fla.models.utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as SambaMLP
 from fla.modules import RMSNorm
@@ -289,7 +289,7 @@ class SambaModel(SambaPreTrainedModel):
         )
 
 
-class SambaForCausalLM(SambaPreTrainedModel, GenerationMixin):
+class SambaForCausalLM(SambaPreTrainedModel, FLAGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -319,38 +319,6 @@ class SambaForCausalLM(SambaPreTrainedModel, GenerationMixin):
     ) -> Dict[str, Any]:
         model_kwargs["cache_params"] = outputs.get("cache_params", None)
         return model_kwargs
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids,
-        cache_params:
-        Optional[MambaCache] = None,
-        inputs_embeds=None,
-        attention_mask=None,
-        use_cache: Optional[bool] = True,
-        logits_to_keep: Optional[int] = None,
-        **kwargs: Unpack[Dict]
-    ):
-        # only last token for inputs_ids if the state is passed along.
-        if cache_params is not None:
-            input_ids = input_ids[:, -1].unsqueeze(-1)
-
-        if inputs_embeds is not None and cache_params is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'cache_params': cache_params,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-            'logits_to_keep': logits_to_keep,
-        })
-        return model_inputs
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(

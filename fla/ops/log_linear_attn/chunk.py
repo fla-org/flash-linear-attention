@@ -11,7 +11,7 @@ from einops import reduce
 
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.op import safe_exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 BLOCK_K = 64
 
@@ -30,6 +30,7 @@ BLOCK_K = 64
         for num_stages in [2, 3, 4]
     ],
     key=["H", "K", "V"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_fwd_kernel(
@@ -917,6 +918,7 @@ def copy_last_chunk_kernel(
     ],
     key=["H", "K", "V"],
     restore_value=["dh", "dg_last"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dhg(
@@ -1033,6 +1035,7 @@ def chunkwise_bwd_kernel_dhg(
     ],
     key=["H", "K", "V"],
     restore_value=["dq", "dg"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_hdqgl(
@@ -1180,6 +1183,7 @@ def chunkwise_bwd_kernel_hdqgl(
     ],
     key=["H", "K", "V"],
     restore_value=["dk", "dg", "dg_last"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dkg(
@@ -1267,6 +1271,7 @@ def chunkwise_bwd_kernel_dkg(
     ],
     key=["H", "K", "V"],
     restore_value=["dv"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dv(
@@ -1329,6 +1334,7 @@ def chunkwise_bwd_kernel_dv(
     ],
     key=["H", "K", "V"],
     restore_value=["dl", "dq", "dk", "dv", "dg"],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_diag(

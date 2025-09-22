@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.index import prepare_lens
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.autotune(
@@ -18,7 +18,8 @@ from fla.utils import input_guard
         triton.Config({}, num_warps=num_warps)
         for num_warps in [4, 8, 16, 32]
     ],
-    key=['D', 'PADDING_SIDE', 'PACK']
+    key=['D', 'PADDING_SIDE', 'PACK'],
+    **autotune_cache_kwargs
 )
 @triton.jit
 def packunpack_sequence_kernel(

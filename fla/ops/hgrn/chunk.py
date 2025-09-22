@@ -25,7 +25,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import input_guard
+from fla.utils import autotune_cache_kwargs, input_guard
 
 
 @triton.autotune(
@@ -43,7 +43,8 @@ from fla.utils import input_guard
         triton.Config({'BD': 128}, num_warps=4),
         triton.Config({'BD': 128}, num_warps=8),
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_hgrn_fwd_kernel_h(
@@ -122,7 +123,8 @@ def chunk_hgrn_fwd_kernel_o(
         for BD in [32, 64, 128]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_hgrn_bwd_kernel_h(
