@@ -254,9 +254,9 @@ def chunk_scaled_dot_kkt_bwd_kernel_gk(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    i_t, i_i = i_c // NC, i_c % NC
+    i_k, i_i = i_kc // NC, i_kc % NC
 
     all = B * T
     if IS_VARLEN:
@@ -503,7 +503,7 @@ def chunk_scaled_dot_kkt_bwd_gk(
     dk = torch.empty_like(k, dtype=torch.float)
     dg = torch.empty_like(g, dtype=torch.float)
     db = beta.new_empty(NK, *beta.shape, dtype=torch.float)
-    grid = (NK, NT * NC, B * H)
+    grid = (NK * NC, NT, B * H)
     chunk_scaled_dot_kkt_bwd_kernel_gk[grid](
         k=k,
         g=g,

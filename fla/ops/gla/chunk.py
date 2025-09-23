@@ -390,9 +390,9 @@ def chunk_gla_bwd_kernel_intra(
     NC: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
-    i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
-    i_t, i_i = i_c // NC, i_c % NC
+    i_k, i_i = i_kc // NC, i_kc % NC
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
@@ -974,7 +974,7 @@ def chunk_gla_bwd_dqk_intra(
 
     dq = torch.empty_like(q, dtype=torch.float)
     dk = torch.empty_like(k, dtype=torch.float)
-    grid = (NK, NT * NC, B * H)
+    grid = (NK * NC, NT, B * H)
     chunk_gla_bwd_kernel_intra[grid](
         q=q,
         k=k,
