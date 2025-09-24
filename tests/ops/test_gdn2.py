@@ -152,7 +152,7 @@ def test_fused_recurrent(
             (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16, True),
             (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16, True),
             (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16, False),
-            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16, True)
+            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16, True),
         ]
     ]
 )
@@ -337,7 +337,7 @@ def test_gdn2_gate(
     g = torch.randn(B, T, H * D, dtype=torch.float32)
     # Ensure some values are > 20 to test the threshold logic in softplus
     g = g * 30  # Scale up to get values > 20
-    A = torch.randn(H, dtype=torch.float32)
+    A = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
     g, A = map(lambda x: x.to(device).requires_grad_(True), (g, A))
 
     # Create gradient output

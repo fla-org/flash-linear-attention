@@ -32,13 +32,14 @@ def gdn2_gate_ref(
 
     Args:
         g: Input tensor of shape [..., num_heads * head_k_dim]
-        A: Parameter tensor of shape [num_heads]
+        A: Parameter tensor of shape [num_heads] or [1, 1, num_heads, 1]
         head_k_dim: Dimension of each head
 
     Returns:
         Output tensor of shape [..., num_heads, head_k_dim]
     """
     # Rearrange g to separate heads: [..., H*D] -> [..., H, D]
+    A = A.view(-1)  # Flatten A to [num_heads] to handle any input shape
     g = rearrange(g, '... (h d) -> ... h d', d=head_k_dim)
 
     # Apply the gate computation: -A.exp().unsqueeze(-1) * softplus(g)
@@ -269,7 +270,7 @@ def gdn2_gate_fwd(
     """
     Forward pass for GDN2 gate:
       input g: [..., H*D]
-      param A: [H]
+      param A: [H] or [1, 1, H, 1]
       beta: softplus beta parameter
       threshold: softplus threshold parameter
       return  : [..., H, D]
@@ -279,7 +280,7 @@ def gdn2_gate_fwd(
     g = g.view(-1, g.shape[-1])
     T = g.shape[0]
     HD = g.shape[1]
-    H = A.shape[0]
+    H = A.numel()
     assert HD == H * head_k_dim
 
     y = torch.empty_like(g)
@@ -308,7 +309,9 @@ def gdn2_gate_bwd(
 
     g_flat = g.view(-1, g.shape[-1])
     T = g_flat.shape[0]
-    H = A.shape[0]
+    A_ori_shape = A.shape
+    H = A.numel()
+
     D = head_k_dim
 
     dy = grad_output.view(T, H * D)
@@ -327,7 +330,7 @@ def gdn2_gate_bwd(
         BD=triton.next_power_of_2(D),
     )
 
-    dA = dA.sum(0).to(A.dtype)
+    dA = dA.sum(0).to(A.dtype).view(A_ori_shape)
     dg = dg.view(g.shape)
     return dg, dA
 
@@ -375,7 +378,7 @@ def fused_gdn2_gate(g: torch.Tensor, A: torch.Tensor, head_k_dim: int,
 
     Args:
         g: Input tensor of shape [..., num_heads * head_k_dim]
-        A: Parameter tensor of shape [num_heads]
+        A: Parameter tensor of shape [num_heads] or [1, 1, num_heads, 1]
         head_k_dim: Dimension of each head
         beta: softplus beta parameter
         threshold: softplus threshold parameter
