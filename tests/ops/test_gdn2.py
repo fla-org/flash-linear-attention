@@ -313,15 +313,21 @@ def test_chunk_varlen(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D'),
+    ('B', 'T', 'H', 'D', 'use_bias'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}".format(*test))
         for test in [
-            (1, 2, 2, 12),
-            (1, 32, 2, 16),
-            (2, 64, 4, 32),
-            (4, 128, 8, 64),
-            (4, 128, 8, 128),
+            (1, 2, 2, 12, False),
+            (1, 32, 2, 16, False),
+            (2, 64, 4, 32, False),
+            (4, 128, 8, 64, False),
+            (4, 128, 8, 128, False),
+            # Add bias tests
+            (1, 2, 2, 12, True),
+            (1, 32, 2, 16, True),
+            (2, 64, 4, 32, True),
+            (4, 128, 8, 64, True),
+            (4, 128, 8, 128, True),
         ]
     ]
 )
@@ -330,6 +336,7 @@ def test_gdn2_gate(
     T: int,
     H: int,
     D: int,
+    use_bias: bool,
 ):
     """Test GDN2 gate forward and backward pass - reference vs Triton implementation"""
     torch.manual_seed(42)
@@ -338,26 +345,38 @@ def test_gdn2_gate(
     # Ensure some values are > 20 to test the threshold logic in softplus
     g = g * 30  # Scale up to get values > 20
     A = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
+    g_bias = torch.randn(H * D, dtype=torch.float32) if use_bias else None
+
+    # Move to device and set requires_grad
     g, A = map(lambda x: x.to(device).requires_grad_(True), (g, A))
+    if g_bias is not None:
+        g_bias = g_bias.to(device).requires_grad_(True)
 
     # Create gradient output
     do = torch.randn_like(g).view(B, T, H, D)
 
     # Reference implementation
-    ref = gdn2_gate_ref(g.clone(), A.clone(), D)
+    ref = gdn2_gate_ref(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
     # Triton implementation
-    tri = fused_gdn2_gate(g.clone(), A.clone(), D)
+    tri = fused_gdn2_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
 
     # Backward pass
     ((ref * do).sum()).backward(retain_graph=True)
     ref_dg, ref_dA = g.grad, A.grad
+    ref_dgbias = g_bias.grad if g_bias is not None else None
     g.grad = A.grad = None
+    if g_bias is not None:
+        g_bias.grad = None
 
     ((tri * do).sum()).backward(retain_graph=True)
     tri_dg, tri_dA = g.grad, A.grad
+    tri_dgbias = g_bias.grad if g_bias is not None else None
     g.grad = A.grad = None
+    if g_bias is not None:
+        g_bias.grad = None
 
-    # Check forward and backward results
     assert_close('o', ref, tri, 1e-4)
     assert_close('dg', ref_dg, tri_dg, 1e-4)
     assert_close('dA', ref_dA, tri_dA, 1e-4)
+    if use_bias:
+        assert_close('dgbias', ref_dgbias, tri_dgbias, 1e-4)
