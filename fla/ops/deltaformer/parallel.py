@@ -872,6 +872,7 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
                     w_t = w.transpose(0, 1).contiguous()
                     u_chunk_view_t = u_chunk_view.transpose(0, 1).contiguous()
                     invcum.forward_inplace(u_chunk_view_t, w_t)
+                    u_chunk_view.copy_(u_chunk_view_t.transpose(0, 1))
 
                 chunk_base += (T_max + C - 1) // C
 
@@ -932,6 +933,7 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
                 w_t = w.transpose(0, 1).contiguous()
                 u_chunk_view_t = u_chunk_view.transpose(0, 1).contiguous()
                 invcum.forward_inplace(u_chunk_view_t, w_t)
+                u_chunk_view.copy_(u_chunk_view_t.transpose(0, 1))
 
             chunk_base += (L + C - 1) // C
 
@@ -953,7 +955,7 @@ def deltaformer_attn(
     B, T, H, D = k.shape
     C = min(C, T)
 
-    u = ParallelDeltaformerFunction.apply(k, k, v, beta, C, cu_seqlens)
+    u = ParallelDeltaformerFunction.apply(q, k, v, beta, C, cu_seqlens)
 
     if attention_mask is not None:
         q_padded, (k_padded, u_padded), indices_q, cu_seqlens_lens, max_seq_lens = unpad_input(q, (k, u), attention_mask, T)
