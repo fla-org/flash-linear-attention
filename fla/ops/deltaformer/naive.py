@@ -52,14 +52,14 @@ def naive_causal_attention_bhtd(
     return o
 
 
-def naive_deltaformer_attn_bhtd(
+def naive_deltaformer_attn_head_first(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     beta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Naive reference implementation of DeltaFormer attention for BHTD format.
+    Naive reference implementation of DeltaFormer attention for head-first format.
 
     Two-stage process:
     1. Computes u[i] = v[i] - beta[i] * sum_{j<i} softmax(q[i] @ k[:i]^T) @ u[:i]
@@ -114,9 +114,7 @@ def naive_deltaformer_attn(
     beta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Naive reference implementation of DeltaFormer attention for BTHD format.
-
-    Takes BTHD input, converts to BHTD, runs naive implementation, converts back to BTHD.
+    Naive reference implementation of DeltaFormer attention for sequence-first format.
 
     Args:
         q: [B, T, H, D]
@@ -141,7 +139,7 @@ def naive_deltaformer_attn(
     else:
         beta_bhtd = None
 
-    o_bhtd = naive_deltaformer_attn_bhtd(q_bhtd, k_bhtd, v_bhtd, beta_bhtd)
+    o_bhtd = naive_deltaformer_attn_head_first(q_bhtd, k_bhtd, v_bhtd, beta_bhtd)
 
     o_bthd = o_bhtd.transpose(1, 2)  # [B, H, T, D] -> [B, T, H, D]
 
