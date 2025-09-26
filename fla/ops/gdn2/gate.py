@@ -234,7 +234,7 @@ def gdn2_gate_fwd(
     H = A.numel()
     assert HD == H * head_k_dim
 
-    y = torch.empty_like(g)
+    y = torch.empty_like(g, dtype=torch.float32)
 
     def grid(meta): return (triton.cdiv(T, meta['BT']), H)
 
