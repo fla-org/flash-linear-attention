@@ -13,10 +13,10 @@ from fla.utils import assert_close, device, is_intel_alchemist
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
         for test in [
-            (2, 128, 2, 64, torch.bfloat16),
-            (1, 256, 4, 64, torch.bfloat16),
-            (2, 512, 4, 64, torch.bfloat16),
-            (4, 1024, 4, 128, torch.bfloat16)
+            (2, 128, 2, 64, torch.float16),
+            (1, 256, 4, 64, torch.float16),
+            (2, 512, 4, 64, torch.float16),
+            (4, 1024, 4, 128, torch.float16)
         ]
     ]
 )
