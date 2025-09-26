@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -15,7 +14,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.deltaformer import DeltaFormerAttention
 from fla.models.deltaformer.configuration_deltaformer import DeltaFormerConfig
-from fla.models.utils import Cache
+from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as DeltaFormerMLP
 from fla.modules import RMSNorm
@@ -207,7 +206,7 @@ class DeltaFormerModel(DeltaFormerPreTrainedModel):
         )
 
 
-class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, GenerationMixin):
+class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -254,38 +253,6 @@ class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, GenerationMixin):
                 )
             else:
                 raise exception
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        use_cache: bool = True,
-        logits_to_keep: Optional[int] = None,
-        **kwargs
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
-            input_ids = input_ids[:, -1:]
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and len(past_key_values) == 0:
-            model_inputs = {'inputs_embeds': inputs_embeds}
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            model_inputs = {'input_ids': input_ids.contiguous()}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'past_key_values': past_key_values,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-        })
-        return model_inputs
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
