@@ -377,7 +377,8 @@ class FLACache(HFCacheBase):
         cache = cls(seen_tokens=seen_tokens, **kwargs)
         if isinstance(past_key_values, (list, tuple)):
             for i, st in enumerate(past_key_values):
-                cache.append_new_layers(i)
+                while len(cache.layers) <= i:
+                    cache.layers.append(cache.layer_class_to_replicate())
                 cache.layers[i].state = dict(st)
         return cache
 
