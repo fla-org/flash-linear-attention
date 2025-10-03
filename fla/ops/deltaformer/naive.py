@@ -36,16 +36,34 @@ def tril_softmax(scores: torch.Tensor, strict: bool = True) -> torch.Tensor:
     return probs
 
 
-def naive_deltaformer_attn(
+def naive_causal_attention_bhtd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> torch.Tensor:
+    B, H, T, D = q.shape
+    qk_scale = 1.0 / math.sqrt(D)
+    scores = torch.matmul(q, k.transpose(-1, -2)) * qk_scale  # [B, H, T, T]
+    causal_mask = torch.triu(torch.ones(T, T, device=q.device), diagonal=1).bool()
+    scores = scores.masked_fill(causal_mask, float('-inf'))
+    attn_weights = torch.softmax(scores, dim=-1)  # [B, H, T, T]
+    o = torch.matmul(attn_weights, v)  # [B, H, T, D]
+
+    return o
+
+
+def naive_deltaformer_attn_head_first(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     beta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Naive reference implementation of DeltaFormer pre-attention.
+    Naive reference implementation of DeltaFormer attention for head-first format.
 
-    Computes u[i] = v[i] - beta[i] * sum_{j<i} softmax(q[i] @ k[:i]^T) @ u[:i]
+    Two-stage process:
+    1. Computes u[i] = v[i] - beta[i] * sum_{j<i} softmax(q[i] @ k[:i]^T) @ u[:i]
+    2. Applies causal attention: o = causal_attn(q, k, u)
 
     Args:
         q: [B, H, T, D]
@@ -54,7 +72,7 @@ def naive_deltaformer_attn(
         beta: [B, H, T] or None (defaults to ones)
 
     Returns:
-        u: [B, H, T, D]
+        o: [B, H, T, D]
     """
     assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "q,k,v must be [B,H,T,D]"
     B, H, T, D = q.shape
@@ -83,8 +101,49 @@ def naive_deltaformer_attn(
             weighted_sum = (w.unsqueeze(-1) * u_prev).sum(dim=-2)  # [B,H,D]
             u_t = vf[:, :, t, :] - betaf[:, :, t].unsqueeze(-1) * weighted_sum
         u_list.append(u_t)
-    u = torch.stack(u_list, dim=2)
-    return u.to(orig_dtype)
+    u = torch.stack(u_list, dim=2)  # [B,H,T,D]
+
+    o = naive_causal_attention_bhtd(q, k, u.to(orig_dtype))
+    return o.to(orig_dtype)
+
+
+def naive_deltaformer_attn(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Naive reference implementation of DeltaFormer attention for sequence-first format.
+
+    Args:
+        q: [B, T, H, D]
+        k: [B, T, H, D]
+        v: [B, T, H, D]
+        beta: [B, T, H] or None (defaults to ones)
+
+    Returns:
+        o: [B, T, H, D]
+    """
+    assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "q,k,v must be [B,T,H,D]"
+    B, T, H, D = q.shape
+    assert k.shape == (B, T, H, D) and v.shape == (B, T, H, D)
+
+    q_bhtd = q.transpose(1, 2)  # [B, T, H, D] -> [B, H, T, D]
+    k_bhtd = k.transpose(1, 2)  # [B, T, H, D] -> [B, H, T, D]
+    v_bhtd = v.transpose(1, 2)  # [B, T, H, D] -> [B, H, T, D]
+
+    if beta is not None:
+        assert beta.shape == (B, T, H)
+        beta_bhtd = beta.transpose(1, 2)  # [B, T, H] -> [B, H, T]
+    else:
+        beta_bhtd = None
+
+    o_bhtd = naive_deltaformer_attn_head_first(q_bhtd, k_bhtd, v_bhtd, beta_bhtd)
+
+    o_bthd = o_bhtd.transpose(1, 2)  # [B, H, T, D] -> [B, T, H, D]
+
+    return o_bthd
 
 
 __all__ = [
