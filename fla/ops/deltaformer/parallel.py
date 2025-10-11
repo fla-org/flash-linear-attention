@@ -300,7 +300,7 @@ def parallel_deltaformer_bwd_kernel_u(
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
-    q = tl.load(q_blk_ptr)
+    q = tl.load(q_blk_ptr, boundary_check=(0,))
 
     for kv_i in range(0, T, BLOCK_T):
         k_blk_ptr = tl.make_block_ptr(
@@ -311,7 +311,7 @@ def parallel_deltaformer_bwd_kernel_u(
             block_shape=(D, BLOCK_T),
             order=(0, 1),
         )
-        k = tl.load(k_blk_ptr)
+        k = tl.load(k_blk_ptr, boundary_check=(1,))
         qk = tl.dot(q, k) * fa_scale
 
         lse_blk_ptr = tl.make_block_ptr(
@@ -322,7 +322,7 @@ def parallel_deltaformer_bwd_kernel_u(
             block_shape=(BLOCK_T,),
             order=(0,),
         )
-        lse = tl.load(lse_blk_ptr)
+        lse = tl.load(lse_blk_ptr, boundary_check=(0,))
         beta_blk_ptr = tl.make_block_ptr(
             base=beta_ptr + pid_h,
             shape=(T,),
@@ -331,7 +331,7 @@ def parallel_deltaformer_bwd_kernel_u(
             block_shape=(BLOCK_T,),
             order=(0,),
         )
-        beta = tl.load(beta_blk_ptr)
+        beta = tl.load(beta_blk_ptr, boundary_check=(0,))
 
         p = tl.math.exp2(qk - lse[None, :]) * beta[None, :]
 
@@ -343,7 +343,7 @@ def parallel_deltaformer_bwd_kernel_u(
             block_shape=(BLOCK_T, D),
             order=(1, 0),
         )
-        v = tl.load(v_blk_ptr)
+        v = tl.load(v_blk_ptr, boundary_check=(0,))
         acc = tl.dot(p.to(v_ptr.dtype.element_ty), v, acc)
 
     o_blk_ptr = tl.make_block_ptr(
@@ -354,7 +354,7 @@ def parallel_deltaformer_bwd_kernel_u(
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
-    tl.store(o_blk_ptr, acc.to(o_ptr.dtype.element_ty))
+    tl.store(o_blk_ptr, acc.to(o_ptr.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.autotune(configs=_config_deltaformer(), key=['T', 'D'])
@@ -389,7 +389,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
-    k_row = tl.load(k_row_blk_ptr)
+    k_row = tl.load(k_row_blk_ptr, boundary_check=(0,))
     lse_blk_ptr = tl.make_block_ptr(
         base=lse_ptr + pid_h,
         shape=(T,),
@@ -398,7 +398,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
         block_shape=(BLOCK_C,),
         order=(0,),
     )
-    lse = tl.load(lse_blk_ptr)
+    lse = tl.load(lse_blk_ptr, boundary_check=(0,))
     grad_v_blk_ptr = tl.make_block_ptr(
         base=grad_v_ptr + pid_h * D,
         shape=(T, D),
@@ -407,7 +407,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
-    grad_v_row = -tl.load(grad_v_blk_ptr)
+    grad_v_row = -tl.load(grad_v_blk_ptr, boundary_check=(0,))
 
     for kv_i in range(0, (pid_c + 1) * BLOCK_C, BLOCK_T):
         k_blk_ptr = tl.make_block_ptr(
@@ -418,7 +418,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
             block_shape=(D, BLOCK_T),
             order=(0, 1),
         )
-        k = tl.load(k_blk_ptr)
+        k = tl.load(k_blk_ptr, boundary_check=(1,))
         qk = tl.dot(k_row, k) * fa_scale
         p = tl.math.exp2(qk - lse[:, None])
 
@@ -430,7 +430,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
             block_shape=(D, BLOCK_T),
             order=(0, 1),
         )
-        ut = tl.load(u_blk_ptr)
+        ut = tl.load(u_blk_ptr, boundary_check=(1,))
         dp = tl.dot(grad_v_row, ut)
         if kv_i + BLOCK_T >= pid_c * BLOCK_C:
             mask = (rowid_block[:, None] <= colid_block[None, :] + kv_i)
@@ -445,7 +445,7 @@ def parallel_deltaformer_bwd_kernel_row_sum(
         block_shape=(BLOCK_C,),
         order=(0,),
     )
-    tl.store(row_dot_block_ptr, acc)
+    tl.store(row_dot_block_ptr, acc, boundary_check=(0,))
 
 
 @triton.autotune(configs=[triton.Config({'BLOCK_C': BC}, num_stages=ns, num_warps=nw)
@@ -484,7 +484,7 @@ def parallel_deltaformer_bwd_kernel_qk(
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
-    k_row = tl.load(k_row_blk_ptr)
+    k_row = tl.load(k_row_blk_ptr, boundary_check=(0,))
     lse_blk_ptr = tl.make_block_ptr(
         base=lse_ptr + pid_h,
         shape=(T,),
@@ -493,7 +493,7 @@ def parallel_deltaformer_bwd_kernel_qk(
         block_shape=(BLOCK_C,),
         order=(0,),
     )
-    lse = tl.load(lse_blk_ptr)
+    lse = tl.load(lse_blk_ptr, boundary_check=(0,))
     beta_blk_ptr = tl.make_block_ptr(
         base=beta_ptr + pid_h,
         shape=(T,),
@@ -502,7 +502,7 @@ def parallel_deltaformer_bwd_kernel_qk(
         block_shape=(BLOCK_C,),
         order=(0,),
     )
-    beta = tl.load(beta_blk_ptr)
+    beta = tl.load(beta_blk_ptr, boundary_check=(0,))
     grad_v_blk_ptr = tl.make_block_ptr(
         base=grad_v_ptr + pid_h * D,
         shape=(T, D),
@@ -511,7 +511,7 @@ def parallel_deltaformer_bwd_kernel_qk(
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
-    grad_v_row = -tl.load(grad_v_blk_ptr)
+    grad_v_row = -tl.load(grad_v_blk_ptr, boundary_check=(0,))
     row_dot_blk_ptr = tl.make_block_ptr(
         base=row_dot_ptr + pid_h,
         shape=(T,),
@@ -520,7 +520,7 @@ def parallel_deltaformer_bwd_kernel_qk(
         block_shape=(BLOCK_C,),
         order=(0,),
     )
-    row_dot_row = tl.load(row_dot_blk_ptr).to(k_ptr.dtype.element_ty)
+    row_dot_row = tl.load(row_dot_blk_ptr, boundary_check=(0,)).to(k_ptr.dtype.element_ty)
 
     for kv_i in range(0, pid_c * BLOCK_C, BLOCK_C):
         k_blk_ptr = tl.make_block_ptr(
@@ -531,7 +531,7 @@ def parallel_deltaformer_bwd_kernel_qk(
             block_shape=(D, BLOCK_C),
             order=(0, 1),
         )
-        kt = tl.load(k_blk_ptr)
+        kt = tl.load(k_blk_ptr, boundary_check=(1,))
         qk = tl.dot(k_row, kt) * fa_scale
         p = tl.math.exp2(qk - lse[:, None]) * beta[:, None]
 
@@ -557,7 +557,7 @@ def parallel_deltaformer_bwd_kernel_qk(
         block_shape=(BLOCK_C, D),
         order=(1, 0),
     )
-    k_row_true = tl.load(k_row_blk_ptr)
+    k_row_true = tl.load(k_row_blk_ptr, boundary_check=(0,))
     qk = tl.dot(k_row, tl.trans(k_row_true, 1, 0)) * fa_scale
     p = tl.math.exp2(qk - lse[:, None]) * beta[:, None]
     u_blk_ptr = tl.make_block_ptr(
@@ -587,7 +587,7 @@ def parallel_deltaformer_bwd_kernel_qk(
         order=(1, 0),
     )
     acc = acc * qk_scale
-    tl.store(grad_q_blk_ptr, acc.to(grad_q_ptr.dtype.element_ty))
+    tl.store(grad_q_blk_ptr, acc.to(grad_q_ptr.dtype.element_ty), boundary_check=(0,))
 
     daat = tl.trans(da, 1, 0)
     acc = tl.dot(daat.to(k_row.dtype), k_row)
@@ -602,7 +602,7 @@ def parallel_deltaformer_bwd_kernel_qk(
             block_shape=(D, BLOCK_C),
             order=(0, 1),
         )
-        kt = tl.load(k_blk_ptr)
+        kt = tl.load(k_blk_ptr, boundary_check=(1,))
         lse_blk_ptr = tl.make_block_ptr(
             base=lse_ptr + pid_h,
             shape=(T,),
@@ -611,7 +611,7 @@ def parallel_deltaformer_bwd_kernel_qk(
             block_shape=(BLOCK_C,),
             order=(0,),
         )
-        lse = tl.load(lse_blk_ptr)
+        lse = tl.load(lse_blk_ptr, boundary_check=(0,))
         beta_blk_ptr = tl.make_block_ptr(
             base=beta_ptr + pid_h,
             shape=(T,),
@@ -620,7 +620,7 @@ def parallel_deltaformer_bwd_kernel_qk(
             block_shape=(BLOCK_C,),
             order=(0,),
         )
-        beta = tl.load(beta_blk_ptr)
+        beta = tl.load(beta_blk_ptr, boundary_check=(0,))
         qk = tl.dot(k_row, kt) * fa_scale
         p = tl.math.exp2(qk - lse[None, :]) * beta[None, :]
 
@@ -632,7 +632,7 @@ def parallel_deltaformer_bwd_kernel_qk(
             block_shape=(D, BLOCK_C),
             order=(0, 1),
         )
-        grad_vt = tl.load(grad_vt_blk_ptr)
+        grad_vt = tl.load(grad_vt_blk_ptr, boundary_check=(1,))
         row_dot_blk_ptr = tl.make_block_ptr(
             base=row_dot_ptr + pid_h,
             shape=(T,),
@@ -641,7 +641,7 @@ def parallel_deltaformer_bwd_kernel_qk(
             block_shape=(BLOCK_C,),
             order=(0,),
         )
-        row_dot = tl.load(row_dot_blk_ptr).to(k_ptr.dtype.element_ty)
+        row_dot = tl.load(row_dot_blk_ptr, boundary_check=(0,)).to(k_ptr.dtype.element_ty)
         dp = tl.dot(nu, grad_vt)
         da = p * (dp - row_dot[None, :])
         k = tl.trans(kt, 1, 0)
@@ -656,7 +656,7 @@ def parallel_deltaformer_bwd_kernel_qk(
         order=(1, 0),
     )
     acc = acc * qk_scale
-    tl.store(grad_k_blk_ptr, acc.to(grad_k_ptr.dtype.element_ty))
+    tl.store(grad_k_blk_ptr, acc.to(grad_k_ptr.dtype.element_ty), boundary_check=(0,))
 
 
 class ParallelDeltaformerFunction(torch.autograd.Function):
@@ -872,6 +872,7 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
                     w_t = w.transpose(0, 1).contiguous()
                     u_chunk_view_t = u_chunk_view.transpose(0, 1).contiguous()
                     invcum.forward_inplace(u_chunk_view_t, w_t)
+                    u_chunk_view.copy_(u_chunk_view_t.transpose(0, 1))
 
                 chunk_base += (T_max + C - 1) // C
 
@@ -932,6 +933,7 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
                 w_t = w.transpose(0, 1).contiguous()
                 u_chunk_view_t = u_chunk_view.transpose(0, 1).contiguous()
                 invcum.forward_inplace(u_chunk_view_t, w_t)
+                u_chunk_view.copy_(u_chunk_view_t.transpose(0, 1))
 
             chunk_base += (L + C - 1) // C
 
@@ -953,7 +955,7 @@ def deltaformer_attn(
     B, T, H, D = k.shape
     C = min(C, T)
 
-    u = ParallelDeltaformerFunction.apply(k, k, v, beta, C, cu_seqlens)
+    u = ParallelDeltaformerFunction.apply(q, k, v, beta, C, cu_seqlens)
 
     if attention_mask is not None:
         q_padded, (k_padded, u_padded), indices_q, cu_seqlens_lens, max_seq_lens = unpad_input(q, (k, u), attention_mask, T)
