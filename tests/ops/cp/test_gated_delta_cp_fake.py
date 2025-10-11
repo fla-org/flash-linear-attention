@@ -174,7 +174,7 @@ class TestFakeCP:
             dg_parts.append(dg_i)
 
             # baton to previous shard
-            dht_current = dh0_i.detach()
+            dht_current = dh0_i
 
         # unshard (reverse back to left→right before concat)
         dq_cp = self.cp_unshard(dq_parts[::-1])
