@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -12,12 +10,12 @@ def naive_chunk_simple_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     chunk_size: int = 64,
-    scale: Optional[float] = None,
+    scale: float | None = None,
 ):
-    q, k, v, g = map(lambda x: rearrange(x, 'b t h ... -> b h t ...').to(torch.float32), [q, k, v, g])
+    q, k, v, g = (rearrange(x, 'b t h ... -> b h t ...').to(torch.float32) for x in [q, k, v, g])
     if scale is None:
         scale = 1.0 / q.shape[-1] ** 0.5
 
@@ -34,7 +32,7 @@ def naive_chunk_simple_gla(
     B, H, T1, K = q.shape
     V = v.shape[-1]
     q = q * scale
-    q, k, v, decay = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size), [q, k, v, decay.unsqueeze(-1)])
+    q, k, v, decay = (rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size) for x in [q, k, v, decay.unsqueeze(-1)])
     decay = decay.squeeze(-1).cumsum(-1)
     L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
     S = k.new_zeros(B, H, K, V)
@@ -60,12 +58,12 @@ def naive_recurrent_simple_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = True
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = True,
 ):
     dtype = q.dtype
-    q, k, v, g = map(lambda x: x.transpose(1, 2).float(), (q, k, v, g))
+    q, k, v, g = (x.transpose(1, 2).float() for x in (q, k, v, g))
     B, H, T, K = q.shape
     V = v.shape[-1]
     if scale is None:
@@ -96,9 +94,9 @@ def naive_parallel_simple_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: Optional[float] = None
+    scale: float | None = None,
 ):
-    q, k, v, g = map(lambda x: rearrange(x, 'b t h ... -> b h t ...').to(torch.float32), [q, k, v, g])
+    q, k, v, g = (rearrange(x, 'b t h ... -> b h t ...').to(torch.float32) for x in [q, k, v, g])
     if scale is None:
         scale = 1.0 / q.shape[-1] ** 0.5
     dtype = q.dtype

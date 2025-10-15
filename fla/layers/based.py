@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 """
@@ -51,7 +50,7 @@ class BasedLinearAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor, **kwargs):
         mode = self.mode
         q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-        q, k, v = map(lambda x: rearrange(x, "... (h d) -> ... h d", d=self.head_dim), [q, k, v])
+        q, k, v = (rearrange(x, "... (h d) -> ... h d", d=self.head_dim) for x in [q, k, v])
         if mode == "fused_chunk":
             q, k = self.feature_map(q), self.feature_map(k)
             o, _ = fused_chunk_linear_attn(q, k, v, normalize=True, scale=1)

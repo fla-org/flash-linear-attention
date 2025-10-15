@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import pytest
 import torch
@@ -27,7 +25,7 @@ def chunk_iplr_delta_rule_ref(
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
 
-    q, k, v, a, b = map(lambda x: x.transpose(1, 2), (q, k, v, a, b))
+    q, k, v, a, b = (x.transpose(1, 2) for x in (q, k, v, a, b))
     T = q.shape[-2]
     pad_len = (BT - (T % BT)) % BT
     if pad_len > 0:
@@ -36,7 +34,7 @@ def chunk_iplr_delta_rule_ref(
         v = F.pad(v, (0, 0, 0, pad_len))
         a = F.pad(a, (0, 0, 0, pad_len))
         b = F.pad(b, (0, 0, 0, pad_len))
-    q, k, v, a, b = map(lambda x: x.to(torch.float32), [q, k, v, a, b])
+    q, k, v, a, b = (x.to(torch.float32) for x in [q, k, v, a, b])
 
     B, H, L, DK = q.shape
     DV = v.shape[-1]
@@ -48,7 +46,7 @@ def chunk_iplr_delta_rule_ref(
 
     # note that diagonal is masked.
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
-    q, k, v, a, b = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size), [q, k, v, a, b])
+    q, k, v, a, b = (rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size) for x in [q, k, v, a, b])
 
     v2 = (a @ k.transpose(-1, -2)).masked_fill_(mask, 0) @ v
     attn = (a @ b.transpose(-1, -2)).masked_fill(mask, 0)
@@ -86,14 +84,14 @@ def recurrence_iplr_delta_rule_ref(
     v,
     a,
     b,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = True,
-    scale: Optional[float] = None
+    scale: float | None = None,
 ):
     orig_dtype = q.dtype
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
-    q, k, v, a, b = map(lambda x: x.transpose(1, 2).to(torch.float32), [q, k, v, a, b])
+    q, k, v, a, b = (x.transpose(1, 2).to(torch.float32) for x in [q, k, v, a, b])
     q = q * scale
     B, H, L, DK = q.shape
     DV = v.shape[-1]
@@ -127,7 +125,7 @@ def recurrence_iplr_delta_rule_ref(
             (2, 1024, 8, 128, 0.1, torch.float),
             (4, 2048, 8, 64, 0.1, torch.float),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
@@ -145,7 +143,7 @@ def test_fused_recurrent(
     a = F.normalize(a, p=2, dim=-1)
     b = -a
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
-    q, k, v, a, b, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, h0))
+    q, k, v, a, b, h0 = (x.to(device).requires_grad_(True) for x in (q, k, v, a, b, h0))
     ref, ref_ht = recurrence_iplr_delta_rule_ref(
         q=q.clone(),
         k=k.clone(),
@@ -159,7 +157,7 @@ def test_fused_recurrent(
     dht = torch.rand_like(h0)
     do = torch.rand_like(ref)
     ((dht * ref_ht).sum() + (do * ref).sum()).backward()
-    dq, dk, dv, da, db, dh0 = map(lambda x: x.grad, (q, k, v, a, b, h0))
+    dq, dk, dv, da, db, dh0 = (x.grad for x in (q, k, v, a, b, h0))
     q.grad, k.grad, v.grad, a.grad, b.grad, h0.grad = None, None, None, None, None, None
     tri, tri_ht = fused_recurrent_iplr_delta_rule(
         q=q.clone(),
@@ -192,9 +190,9 @@ def test_fused_recurrent(
             (2, 1000, 3, 64, 0.1, torch.float16),
             (2, 1024, 4, 100, 1, torch.float16),
             (3, 1024, 4, 128, 0.1, torch.float16),
-            (4, 2048, 8, 64, 0.1, torch.float16)
+            (4, 2048, 8, 64, 0.1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -212,7 +210,7 @@ def test_chunk(
     a = F.normalize(a, p=2, dim=-1)
     b = -a
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
-    q, k, v, a, b, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, a, b, h0))
+    q, k, v, a, b, h0 = (x.to(device).requires_grad_() for x in (q, k, v, a, b, h0))
     ref, ref_ht = recurrence_iplr_delta_rule_ref(
         q=q.clone(),
         k=k.clone(),

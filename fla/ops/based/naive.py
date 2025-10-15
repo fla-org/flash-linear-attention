@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 from einops import rearrange
@@ -10,8 +8,8 @@ def naive_parallel_based(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = None,
-    use_norm: bool = True
+    scale: float | None = None,
+    use_norm: bool = True,
 ):
     if scale is None:
         scale = q.shape[-1] ** -0.5

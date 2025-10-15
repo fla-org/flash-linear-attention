@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -17,7 +15,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -28,7 +26,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_o(
@@ -122,9 +120,9 @@ def chunk_gated_delta_product_fwd_o(
     k: torch.Tensor,
     v: torch.Tensor,
     h: torch.Tensor,
-    g: Optional[torch.Tensor] = None,  # cumsum of log decay
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g: torch.Tensor | None = None,  # cumsum of log decay
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     num_householder: int = 1,
 ) -> torch.Tensor:

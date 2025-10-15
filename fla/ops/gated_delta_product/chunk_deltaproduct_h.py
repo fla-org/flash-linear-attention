@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -30,7 +28,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
     ],
     key=['H', 'K', 'V', 'BT', 'USE_G'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
@@ -209,7 +207,7 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
     ],
     key=['H', 'K', 'V', 'BT', 'BV', 'USE_G'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
@@ -235,7 +233,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     USE_G: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -405,14 +403,14 @@ def chunk_gated_delta_product_fwd_h(
     k: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     num_householder: int = 1,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, u.shape[-1]
     assert T % num_householder == 0, "T must be divisible by num_householder"
     T_true = T // num_householder
@@ -446,7 +444,7 @@ def chunk_gated_delta_product_fwd_h(
         H=H,
         K=K,
         V=V,
-        BT=BT
+        BT=BT,
     )
     return h, v_new, final_state
 
@@ -457,13 +455,13 @@ def chunk_gated_delta_product_bwd_dhu(
     w: torch.Tensor,
     g: torch.Tensor,
     h0: torch.Tensor,
-    dht: Optional[torch.Tensor],
+    dht: torch.Tensor | None,
     do: torch.Tensor,
     dv: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
 
     # N: the actual number of sequences in the batch with either equal or variable lengths

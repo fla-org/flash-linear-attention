@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from fla.modules.convolution import ImplicitLongConvolution, LongConvolution, ShortConvolution
 from fla.modules.fused_bitlinear import BitLinear, FusedBitLinear
@@ -11,7 +10,7 @@ from fla.modules.fused_norm_gate import (
     FusedLayerNormSwishGateLinear,
     FusedRMSNormGated,
     FusedRMSNormSwishGate,
-    FusedRMSNormSwishGateLinear
+    FusedRMSNormSwishGateLinear,
 )
 from fla.modules.l2norm import L2Norm
 from fla.modules.layernorm import GroupNorm, GroupNormLinear, LayerNorm, LayerNormLinear, RMSNorm, RMSNormLinear
@@ -29,5 +28,5 @@ __all__ = [
     'FusedRMSNormGated', 'FusedRMSNormSwishGate', 'FusedRMSNormSwishGateLinear',
     'GatedMLP',
     'RotaryEmbedding',
-    'TokenShift'
+    'TokenShift',
 ]

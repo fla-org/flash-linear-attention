@@ -15,7 +15,7 @@ def extract_dependencies():
     script_dir = Path(__file__).parent
     setup_py = script_dir.parent / 'setup.py'
 
-    with open(setup_py, 'r', encoding='utf-8') as f:
+    with open(setup_py, encoding='utf-8') as f:
         tree = ast.parse(f.read(), filename=str(setup_py))
 
     all_deps = []
@@ -32,7 +32,7 @@ def extract_dependencies():
                     ])
                 elif (keyword.arg == 'extras_require' and
                       isinstance(keyword.value, ast.Dict)):
-                    for key_node, val_node in zip(keyword.value.keys, keyword.value.values):
+                    for key_node, val_node in zip(keyword.value.keys, keyword.value.values, strict=False):
                         if (isinstance(key_node, ast.Constant) and
                             isinstance(key_node.value, str) and
                                 isinstance(val_node, (ast.List, ast.Tuple))):
@@ -121,7 +121,7 @@ def build_split_packages():
 
     # Get current version
     init_file = root_dir / 'fla' / '__init__.py'
-    with open(init_file, 'r', encoding='utf-8') as f:
+    with open(init_file, encoding='utf-8') as f:
         content = f.read()
     version_match = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]\s*$", content, re.MULTILINE)
     if not version_match:
@@ -211,20 +211,14 @@ echo "Build complete! Packages in dist/"
 
     build_script.chmod(0o755)
 
-    print(f"✅ Split packages created in {output_dir}")
-    print(f"✅ fla-core dependencies: {len(core_deps)} packages")
-    print(f"✅ flash-linear-attention dependencies: {len(ext_deps)} packages")
-    print(f"✅ Version: {version}")
 
     return output_dir, version
 
 
 def build_packages(dist_dir):
     """Build wheels and source distributions for both packages."""
-    print("Building packages...")
 
     # Build fla-core (both wheel and sdist)
-    print("Building fla-core packages...")
     try:
         subprocess.run(
             [sys.executable, "-m", "build", str(dist_dir / "fla-core")],
@@ -234,16 +228,12 @@ def build_packages(dist_dir):
             stderr=subprocess.STDOUT,
             text=True,
         )
-    except subprocess.CalledProcessError as e:
-        print("Failed to build fla-core packages:")
-        print(e.stdout)
+    except subprocess.CalledProcessError:
         return False
     except subprocess.TimeoutExpired:
-        print("Timed out building fla-core packages")
         return False
 
     # Build flash-linear-attention (both wheel and sdist)
-    print("Building flash-linear-attention packages...")
     try:
         subprocess.run(
             [sys.executable, "-m", "build", str(dist_dir / "flash-linear-attention")],
@@ -253,15 +243,11 @@ def build_packages(dist_dir):
             stderr=subprocess.STDOUT,
             text=True,
         )
-    except subprocess.CalledProcessError as e:
-        print("Failed to build flash-linear-attention packages:")
-        print(e.stdout)
+    except subprocess.CalledProcessError:
         return False
     except subprocess.TimeoutExpired:
-        print("Timed out building flash-linear-attention packages")
         return False
 
-    print("✅ Packages built successfully")
     return True
 
 
@@ -282,10 +268,8 @@ def copy_packages_to_output(dist_dir):
     ext_sdist = list((dist_dir / 'flash-linear-attention' / 'dist').glob('*.tar.gz'))
 
     if not core_wheels:
-        print("No fla-core wheel found")
         return False
     if not ext_wheels:
-        print("No flash-linear-attention wheel found")
         return False
 
     # Copy all packages to output directory
@@ -293,18 +277,11 @@ def copy_packages_to_output(dist_dir):
     for package in all_packages:
         target = output_dir / package.name
         shutil.copy2(package, target)
-        if package.suffix == ".whl":
-            package_type = "wheel"
-        elif package.suffixes[-2:] == [".tar", ".gz"]:
-            package_type = "sdist"
+        if package.suffix == ".whl" or package.suffixes[-2:] == [".tar", ".gz"]:
+            pass
         else:
-            package_type = "source"
-        print(f"📦 Copied {package_type} package {package.name} to {output_dir}")
+            pass
 
-    print(f"\n✅ All packages copied to: {output_dir}")
-    print("You can install wheels with:")
-    print("  pip install dist-packages/*.whl")
-    print("Source distributions are also available in:", output_dir)
 
     return True
 
@@ -312,14 +289,10 @@ def copy_packages_to_output(dist_dir):
 def main():
     """Build split packages and copy to target directory."""
 
-    print("Building split packages...")
 
     # Build the split packages
     dist_dir, _ = build_split_packages()
 
-    print("\nTo build packages manually:")
-    print(f"cd {dist_dir}")
-    print("./build.sh")
 
     # Build packages (wheels and source distributions)
     if not build_packages(dist_dir):

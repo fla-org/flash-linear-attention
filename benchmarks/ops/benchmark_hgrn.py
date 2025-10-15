@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 import triton
@@ -24,7 +23,7 @@ from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, provider):
     from fla.utils import device

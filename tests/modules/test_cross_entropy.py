@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -17,12 +16,12 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Triton Failure"
+    reason="Intel Triton Failure",
 )
 def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
     logits = torch.randn(B * T, V).to(device).to(dtype=dtype).requires_grad_()
-    target = torch.randint(0, V, (B, T,)).to(device)
+    target = torch.randint(0, V, (B, T)).to(device)
     target = torch.cat((target[..., 1:], torch.full_like(target[..., :1], -100)), -1)
     target = target.flatten()
 
@@ -49,13 +48,13 @@ def test_fused_cross_entropy(B: int, T: int, D: int, V: int, reduction: str, dty
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Triton Failure"
+    reason="Intel Triton Failure",
 )
 def test_fused_linear_cross_entropy(B: int, T: int, D: int, V: int, scale: float, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
 
     x = torch.randn(B * T, D).to(device).to(dtype=dtype).requires_grad_()
-    target = torch.randint(0, V, (B, T,)).to(device)
+    target = torch.randint(0, V, (B, T)).to(device)
     target = torch.cat((target[..., 1:], torch.full_like(target[..., :1], -100)), -1)
     target = target.flatten()
     weight = torch.randn(V, D).to(device).to(dtype=dtype).requires_grad_()

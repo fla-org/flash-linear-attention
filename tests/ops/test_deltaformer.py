@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -17,20 +16,20 @@ from fla.utils import assert_close, device, is_intel_alchemist
             # Test with bfloat16
             (1, 256, 4, 64, torch.bfloat16),
             (2, 512, 4, 64, torch.bfloat16),
-            (4, 1024, 4, 128, torch.bfloat16)
+            (4, 1024, 4, 128, torch.bfloat16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     is_intel_alchemist,
-    reason="Skipping test on Intel Alchemist due to known issues with SRAM."
+    reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
 )
 def test_deltaformer_attn(
     B: int,
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     """
     Test DeltaFormer pre-attention by comparing fused implementation with naive reference.

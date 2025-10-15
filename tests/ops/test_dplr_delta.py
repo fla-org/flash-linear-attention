@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -23,7 +21,7 @@ def recurrent_dplr_delta_rule_ref(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
 ):
-    q, k, v, a, b, gk = map(lambda x: x.transpose(1, 2).to(torch.float), (q, k, v, a, b, gk))
+    q, k, v, a, b, gk = (x.transpose(1, 2).to(torch.float) for x in (q, k, v, a, b, gk))
 
     B, H, T, K, V = *q.shape, v.shape[-1]
     o = torch.zeros_like(v)
@@ -63,12 +61,12 @@ def chunk_dplr_delta_rule_ref(
     scale: float = None,
     chunk_size: int = 64,
 ):
-    q, k, v, a, b, gk = map(lambda x: x.transpose(1, 2).to(torch.float), (q, k, v, a, b, gk))
+    q, k, v, a, b, gk = (x.transpose(1, 2).to(torch.float) for x in (q, k, v, a, b, gk))
     BT = chunk_size
     T = q.shape[-2]
     pad_len = (BT - (T % BT)) % BT
 
-    q, k, v, a, b, gk = map(lambda x: F.pad(x, (0, 0, 0, pad_len)).to(torch.float), [q, k, v, a, b, gk])
+    q, k, v, a, b, gk = (F.pad(x, (0, 0, 0, pad_len)).to(torch.float) for x in [q, k, v, a, b, gk])
     B, H, _, K, V = *q.shape, v.shape[-1]
     NT = q.shape[-2] // BT
     if scale is None:
@@ -81,7 +79,7 @@ def chunk_dplr_delta_rule_ref(
 
     # note that diagonal is masked.
     mask = torch.triu(torch.ones(BT, BT, dtype=torch.bool, device=q.device), diagonal=0)
-    q, k, v, a, b, gk = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=BT), [q, k, v, a, b, gk])
+    q, k, v, a, b, gk = (rearrange(x, 'b h (n c) d -> b h n c d', c=BT) for x in [q, k, v, a, b, gk])
     gk_cumsum = gk.cumsum(-2)
     A_ab = torch.zeros(B, H, NT, BT, BT).to(q.device)
     A_qk = torch.zeros(B, H, NT, BT, BT).to(q.device)
@@ -141,7 +139,7 @@ def chunk_dplr_delta_rule_ref(
             (4, 2048, 8, 64, 0.1, torch.float),
             (2, 1024, 8, 128, 1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_recurrent_fwd(
     B: int,
@@ -165,7 +163,7 @@ def test_recurrent_fwd(
     gk = F.logsigmoid(gk) / 16
 
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
-    q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(False), (q, k, v, a, b, gk, h0))
+    q, k, v, a, b, gk, h0 = (x.to(device).requires_grad_(False) for x in (q, k, v, a, b, gk, h0))
     ref, ref_ht = chunk_dplr_delta_rule_ref(
         q=q.clone(),
         k=k.clone(),
@@ -203,7 +201,7 @@ def test_recurrent_fwd(
             (2, 1024, 8, 128, 0.1, torch.float),
             (4, 2048, 8, 64, 0.1, torch.float),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
@@ -225,7 +223,7 @@ def test_fused_recurrent(
     gk = F.logsigmoid(gk) / 4
 
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
-    q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(False), (q, k, v, a, b, gk, h0))
+    q, k, v, a, b, gk, h0 = (x.to(device).requires_grad_(False) for x in (q, k, v, a, b, gk, h0))
     ref, ref_ht = recurrent_dplr_delta_rule_ref(
         q=q.clone(),
         k=k.clone(),
@@ -265,13 +263,13 @@ def test_fused_recurrent(
             (2, 1024, 4, 128, 0.1, 1, 0, torch.float16),
             (2, 1024, 4, 128, 0.1, 1, 0.5, torch.float16),
             (2, 1024, 4, 128, 0.1, 10, 0, torch.float16),
-            (4, 2048, 8, 64, 0.1, 1, 0, torch.float16)
+            (4, 2048, 8, 64, 0.1, 1, 0, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk(
     B: int,
@@ -297,7 +295,7 @@ def test_chunk(
     gk = gk * (torch.rand_like(gk) > mask_p)
 
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
-    q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
+    q, k, v, a, b, gk, h0 = (x.to(device).requires_grad_(True) for x in (q, k, v, a, b, gk, h0))
     ref, ref_ht = chunk_dplr_delta_rule_ref(
         q=q.clone(),
         k=k.clone(),
@@ -352,17 +350,17 @@ def test_chunk(
             (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
             (4, 100, 0, [0, 15, 100, 300, 1111, 1599, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
     mask_p: float,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -383,7 +381,7 @@ def test_chunk_varlen(
     gk = F.logsigmoid(gk)
     gk = gk * (torch.rand_like(gk) > mask_p)
     h0 = torch.randn(N, H, D, D, dtype=torch.float)
-    q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))
+    q, k, v, a, b, gk, h0 = (x.to(device).requires_grad_(True) for x in (q, k, v, a, b, gk, h0))
 
     tri, tri_ht = chunk_dplr_delta_rule(
         q=q.clone(),

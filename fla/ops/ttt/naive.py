@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang, Yuqi Pan
 
 import torch
@@ -17,7 +16,7 @@ def ttt_linear(
     mini_batch_size: int,
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
-    output_final_state: bool
+    output_final_state: bool,
 ):
     B, H, T, D = q.shape
     BT = mini_batch_size
@@ -105,7 +104,7 @@ def chunk_ttt_linear_ref(
         eta = F.pad(eta, (0, 0, 0, padded))
         eta[:, :, -1, :] = eta[:, :, -(padded+1), :]
     assert q.shape[-2] % mini_batch_size == 0, "Sequence length should be a multiple of mini_batch_size."
-    q, k, v, eta, w, b = map(lambda x: x.to(torch.float32), [q, k, v, eta, w, b])
+    q, k, v, eta, w, b = (x.to(torch.float32) for x in [q, k, v, eta, w, b])
     o, final_state, final_state_bias = ttt_linear(
         q,
         k,

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # modified from https://github.com/mdy666/mdy_triton/blob/e0a856347bd988e05e0152332bba35f1d33c5b1f/others/grpo/grpo_loss.ipynb
 # XHS ID: blueeeee
 
@@ -68,7 +67,7 @@ NUM_WARPS_AUTOTUNE = [4, 8, 16] if is_amd else [4, 8, 16, 32]
         for NUM_STAGES in [1, 2, 4]
     ],
     key=['B', 'N'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def grpo_fwd_kernel(
@@ -86,7 +85,7 @@ def grpo_fwd_kernel(
     N,
     L,
     start_idx,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
 
@@ -144,7 +143,7 @@ def grpo_fwd_kernel(
         for NUM_STAGES in [4]
     ],
     key=['B', 'N'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def grpo_bwd_kernel(
@@ -161,7 +160,7 @@ def grpo_bwd_kernel(
     N,
     L,
     start_idx,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
 
     row_idx = tl.program_id(0)  # B*L
@@ -328,7 +327,7 @@ def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
 def grpo_loss_torch(logits, ref_logp, input_ids, advantages, beta=0.1, completion_mask=None, save_kl=False):
     def get_log_probs(logits, input_ids):
         per_token_logps = []
-        for logits_row, input_ids_row in zip(logits, input_ids[:, -logits.size(1):]):
+        for logits_row, input_ids_row in zip(logits, input_ids[:, -logits.size(1):], strict=False):
             log_probs = logits_row.log_softmax(dim=-1)
             token_log_prob = torch.gather(log_probs, dim=1, index=input_ids_row.unsqueeze(1)).squeeze(1)
             per_token_logps.append(token_log_prob)
@@ -357,7 +356,7 @@ def grpo_loss_with_old_logps(
     logits_to_keep: int,
     rewards: torch.Tensor,
     beta: float = 0.2,
-    epsilon: float = 0.2
+    epsilon: float = 0.2,
 ):
     """
     Compute the GRPO (Group Relative Policy Optimization) loss.

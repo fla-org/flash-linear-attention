@@ -6,11 +6,11 @@ import torch.utils.benchmark as benchmark
 
 
 def benchmark_forward(
-    fn, *inputs, repeats=10, desc="", verbose=True, amp=False, amp_dtype=torch.float16, **kwinputs
+    fn, *inputs, repeats=10, desc="", verbose=True, amp=False, amp_dtype=torch.float16, **kwinputs,
 ):
     """Use Pytorch Benchmark on the forward pass of an arbitrary function."""
     if verbose:
-        print(desc, "- Forward pass")
+        pass
 
     def amp_wrapper(*inputs, **kwinputs):
         with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp):
@@ -23,7 +23,7 @@ def benchmark_forward(
     )
     m = t.timeit(repeats)
     if verbose:
-        print(m)
+        pass
     return t, m
 
 
@@ -40,7 +40,7 @@ def benchmark_backward(
 ):
     """Use Pytorch Benchmark on the backward pass of an arbitrary function."""
     if verbose:
-        print(desc, "- Backward pass")
+        pass
     with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp):
         y = fn(*inputs, **kwinputs)
         if type(y) is tuple:
@@ -65,7 +65,7 @@ def benchmark_backward(
     )
     m = t.timeit(repeats)
     if verbose:
-        print(m)
+        pass
     return t, m
 
 
@@ -82,7 +82,7 @@ def benchmark_combined(
 ):
     """Use Pytorch Benchmark on the forward+backward pass of an arbitrary function."""
     if verbose:
-        print(desc, "- Forward + Backward pass")
+        pass
     with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp):
         y = fn(*inputs, **kwinputs)
         if type(y) is tuple:
@@ -110,7 +110,7 @@ def benchmark_combined(
     )
     m = t.timeit(repeats)
     if verbose:
-        print(m)
+        pass
     return t, m
 
 
@@ -230,7 +230,7 @@ def pytorch_profiler(
         if backward:
             out.backward(g, retain_graph=True)
     activities = ([torch.profiler.ProfilerActivity.CPU] if cpu else []) + [
-        torch.profiler.ProfilerActivity.CUDA
+        torch.profiler.ProfilerActivity.CUDA,
     ]
     with torch.profiler.profile(
         activities=activities,
@@ -250,7 +250,7 @@ def pytorch_profiler(
             out.backward(g, retain_graph=True)
     if verbose:
         # print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=50))
-        print(prof.key_averages().table(row_limit=50))
+        pass
     if trace_filename is not None:
         prof.export_chrome_trace(trace_filename)
 
@@ -263,6 +263,6 @@ def benchmark_memory(fn, *inputs, desc="", verbose=True, **kwinputs):
     torch.cuda.synchronize()
     mem = torch.cuda.max_memory_allocated() / ((2**20) * 1000)
     if verbose:
-        print(f"{desc} max memory: {mem}GB")
+        pass
     torch.cuda.empty_cache()
     return mem

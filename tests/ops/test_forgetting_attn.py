@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import List, Optional
 
 import pytest
 import torch
@@ -16,7 +14,7 @@ def naive_forgetting_attn(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: Optional[float] = None
+    scale: float | None = None,
 ):
     _, T, HQ, D = q.shape
     H = k.shape[2]
@@ -41,9 +39,9 @@ def naive_forgetting_attn(
             (3, 111, 2, 2, 100, 1.0),
             (3, 1024, 2, 8, 60, 0.1),
             (3, 1024, 2, 8, 128, 0.1),
-            (4, 2048, 2, 8, 64, 0.1)
+            (4, 2048, 2, 8, 64, 0.1),
         ]
-    ]
+    ],
 )
 def test_parallel(
     B: int,
@@ -96,17 +94,17 @@ def test_parallel(
             (2, 8, 64, [0, 256, 500, 1000]),
             (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     is_intel_alchemist,
-    reason="Intel Triton Failure"
+    reason="Intel Triton Failure",
 )
 def test_parallel_varlen(
     H: int,
     HQ: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
 ):
     torch.manual_seed(42)
     T = cu_seqlens[-1]
@@ -120,12 +118,12 @@ def test_parallel_varlen(
     do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
 
     ref = q.new_empty(1, T, HQ, D)
-    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
         ref[:, bos:eos] = naive_forgetting_attn(
             q=q[:, bos:eos],
             k=k[:, bos:eos],
             v=v[:, bos:eos],
-            g=g[:, bos:eos]
+            g=g[:, bos:eos],
         )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -138,7 +136,7 @@ def test_parallel_varlen(
         k=k,
         v=v,
         g=g,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
@@ -24,7 +23,7 @@ def naive_mesa_net_decoding_one_step(q, k, v, g, lamb, beta, prev_h_kk, prev_h_k
     p = r.clone()
     delta_old = (r * r).sum(-1)
     # CG iteration
-    for i in range(max_CG_iteration):
+    for _i in range(max_CG_iteration):
         q = (p.unsqueeze(-1) * h_kk).sum(-2) + (lamb * p)
         alpha = (delta_old / ((p * q).sum(-1) + 1e-5))
         x = x + (alpha[..., None] * p)
@@ -59,7 +58,7 @@ def naive_mesa_net_exact(q, k, v, g, lamb, beta, h_kk_init=None, h_kv_init=None)
         h_kk_all[:, i] = h_kk
         h_kv_all[:, i] = h_kv
 
-    q_star_gold = torch.linalg.solve(h_kk_all + torch.diag_embed(lamb)[None, None, ...,], q)
+    q_star_gold = torch.linalg.solve(h_kk_all + torch.diag_embed(lamb)[None, None, ...], q)
     o_gold = (q_star_gold[..., :, None] * h_kv_all).sum(-2)
     return o_gold, h_kk, h_kv
 
@@ -115,7 +114,7 @@ def naive_mesa_net_CG(q, k, v, g, lamb, beta, chunk_size, max_CG_iteration=30, h
     delta_old = (r * r).sum(-1)
 
     # CG iteration
-    for i in range(max_CG_iteration):
+    for _i in range(max_CG_iteration):
         q = (p * chunk_decay_q[..., None]) @ h_kk_all + ((p @ k_chunk.transpose(-1, -2))
                                                          * pairwise_decay) @ k_chunk + (lamb * p)
         alpha = (delta_old / ((p * q).sum(-1) + 1e-5))

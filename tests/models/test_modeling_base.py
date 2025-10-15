@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import pytest
 import torch
@@ -13,7 +11,7 @@ from .test_modeling_utils import (
     HOPPER_EXCLUSIVE,
     MODELING_UNSUPPORTED_VARLEN,
     NOT_READY_FOR_TESTING,
-    create_model_and_config
+    create_model_and_config,
 )
 
 
@@ -22,7 +20,7 @@ from .test_modeling_utils import (
 # ===================================================================================
 @pytest.mark.skipif(
     is_intel_alchemist,
-    reason="Skipping test on Intel Alchemist due to known issues with SRAM."
+    reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
 )
 def run_test_model_forward_backward(
     L: int,
@@ -54,7 +52,7 @@ def run_test_model_forward_backward(
 
     cu_seqlens = torch.arange(0, B * T + 1, T, dtype=torch.int32, device=device)
     output_var = model(
-        input_ids.view(1, B * T), output_hidden_states=True, cu_seqlens=cu_seqlens
+        input_ids.view(1, B * T), output_hidden_states=True, cu_seqlens=cu_seqlens,
     ).hidden_states[-1]
     assert output_var.shape == (1, B * T, config.hidden_size)
     assert_close("output", output_fixed.view(1, B * T, -1), output_var, 1e-3)
@@ -73,8 +71,8 @@ def run_test_generation(
     config_class: type,
     dtype: torch.dtype,
     use_l2warp: bool = False,
-    model: Optional[torch.nn.Module] = None,
-    config: Optional[PretrainedConfig] = None,
+    model: torch.nn.Module | None = None,
+    config: PretrainedConfig | None = None,
     tol: float = 2e-3,
 ):
     """

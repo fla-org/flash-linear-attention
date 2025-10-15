@@ -1,7 +1,6 @@
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -21,7 +20,7 @@ BLOCK_K = 64
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -30,7 +29,7 @@ BLOCK_K = 64
         for num_stages in [2, 3, 4]
     ],
     key=["H", "K", "V"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_fwd_kernel(
@@ -248,10 +247,10 @@ def chunkwise_fwd_kernel(
 
         p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         p_q = tl.make_block_ptr(
-            q + bos * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
+            q + bos * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
         )
         p_k = tl.make_block_ptr(
-            k + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
+            k + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1),
         )
         p_v = tl.make_block_ptr(
             v + (bos * H + i_h) * V,
@@ -275,7 +274,7 @@ def chunkwise_fwd_kernel(
         b_k = tl.load(p_k, boundary_check=(0, 1))
 
         b_s = (tl.dot(b_q, b_k) * safe_exp(b_g[:, None] - b_g[None, :])).to(
-            b_q.dtype
+            b_q.dtype,
         ) * b_h
 
         b_v = tl.load(p_v, boundary_check=(0, 1))
@@ -287,150 +286,138 @@ def chunkwise_fwd_kernel(
             first_chunk_index + i_t
         )  # index of the chunk over the entire sequence, including the offset
 
-        if MIN_LEVEL <= 0 and MAX_LEVEL >= 0:
-            if chunk_index & 1:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_0.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 1 and MAX_LEVEL >= 1:
-            if chunk_index & 2:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 1),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_1.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 2 and MAX_LEVEL >= 2:
-            if chunk_index & 4:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 2),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_2.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 3 and MAX_LEVEL >= 3:
-            if chunk_index & 8:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 3),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_3.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 4 and MAX_LEVEL >= 4:
-            if chunk_index & 16:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 4),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_4.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 5 and MAX_LEVEL >= 5:
-            if chunk_index & 32:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 5),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_5.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 6 and MAX_LEVEL >= 6:
-            if chunk_index & 64:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 6),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_6.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 7 and MAX_LEVEL >= 7:
-            if chunk_index & 128:  # 8192 - 16384
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 7),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_7.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 8 and MAX_LEVEL >= 8:
-            if chunk_index & 256:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 8),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_8.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 9 and MAX_LEVEL >= 9:
-            if chunk_index & 512:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 9),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_9.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 10 and MAX_LEVEL >= 10:
-            if chunk_index & 1024:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 10),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_10.to(b_q.dtype)) * tl.exp(b_g)[:, None]
-        if MIN_LEVEL <= 11 and MAX_LEVEL >= 11:
-            if chunk_index & 2048:
-                p_l = tl.make_block_ptr(
-                    level_scales + (bos * H + i_h) * L,
-                    (T, L),
-                    (H * L, 1),
-                    (i_t * BT, num_intra_levels + 11),
-                    (BT, 1),
-                    (1, 0),
-                )
-                b_l = tl.load(p_l, boundary_check=(0, 1))
-                b_o += tl.dot((b_l * b_q), kv_11.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 0 and MAX_LEVEL >= 0 and chunk_index & 1:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_0.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 1 and MAX_LEVEL >= 1 and chunk_index & 2:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 1),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_1.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 2 and MAX_LEVEL >= 2 and chunk_index & 4:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 2),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_2.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 3 and MAX_LEVEL >= 3 and chunk_index & 8:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 3),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_3.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 4 and MAX_LEVEL >= 4 and chunk_index & 16:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 4),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_4.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 5 and MAX_LEVEL >= 5 and chunk_index & 32:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 5),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_5.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 6 and MAX_LEVEL >= 6 and chunk_index & 64:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 6),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_6.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 7 and MAX_LEVEL >= 7 and chunk_index & 128:  # 8192 - 16384
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 7),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_7.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 8 and MAX_LEVEL >= 8 and chunk_index & 256:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 8),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_8.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 9 and MAX_LEVEL >= 9 and chunk_index & 512:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 9),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_9.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 10 and MAX_LEVEL >= 10 and chunk_index & 1024:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 10),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_10.to(b_q.dtype)) * tl.exp(b_g)[:, None]
+        if MIN_LEVEL <= 11 and MAX_LEVEL >= 11 and chunk_index & 2048:
+            p_l = tl.make_block_ptr(
+                level_scales + (bos * H + i_h) * L,
+                (T, L),
+                (H * L, 1),
+                (i_t * BT, num_intra_levels + 11),
+                (BT, 1),
+                (1, 0),
+            )
+            b_l = tl.load(p_l, boundary_check=(0, 1))
+            b_o += tl.dot((b_l * b_q), kv_11.to(b_q.dtype)) * tl.exp(b_g)[:, None]
 
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
@@ -492,50 +479,39 @@ def chunkwise_fwd_kernel(
 
             check_value = (~chunk_index & (chunk_index + 1)) - 1
 
-            if MIN_LEVEL <= 1 and MAX_LEVEL >= 0:
-                if check_value & 1:
-                    kv_1 += kv_0
-                    kv_0 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 2 and MAX_LEVEL >= 1:
-                if check_value & 2:
-                    kv_2 += kv_1
-                    kv_1 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 3 and MAX_LEVEL >= 2:
-                if check_value & 4:
-                    kv_3 += kv_2
-                    kv_2 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 4 and MAX_LEVEL >= 3:
-                if check_value & 8:
-                    kv_4 += kv_3
-                    kv_3 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 5 and MAX_LEVEL >= 4:
-                if check_value & 16:
-                    kv_5 += kv_4
-                    kv_4 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 6 and MAX_LEVEL >= 5:
-                if check_value & 32:
-                    kv_6 += kv_5
-                    kv_5 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 7 and MAX_LEVEL >= 6:
-                if check_value & 64:
-                    kv_7 += kv_6
-                    kv_6 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 8 and MAX_LEVEL >= 7:
-                if check_value & 128:
-                    kv_8 += kv_7
-                    kv_7 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 9 and MAX_LEVEL >= 8:
-                if check_value & 256:
-                    kv_9 += kv_8
-                    kv_8 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 10 and MAX_LEVEL >= 9:
-                if check_value & 512:
-                    kv_10 += kv_9
-                    kv_9 = tl.zeros([BK, V], dtype=tl.float32)
-            if MIN_LEVEL <= 11 and MAX_LEVEL >= 10:
-                if check_value & 1024:
-                    kv_11 += kv_10
-                    kv_10 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 1 and MAX_LEVEL >= 0 and check_value & 1:
+                kv_1 += kv_0
+                kv_0 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 2 and MAX_LEVEL >= 1 and check_value & 2:
+                kv_2 += kv_1
+                kv_1 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 3 and MAX_LEVEL >= 2 and check_value & 4:
+                kv_3 += kv_2
+                kv_2 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 4 and MAX_LEVEL >= 3 and check_value & 8:
+                kv_4 += kv_3
+                kv_3 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 5 and MAX_LEVEL >= 4 and check_value & 16:
+                kv_5 += kv_4
+                kv_4 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 6 and MAX_LEVEL >= 5 and check_value & 32:
+                kv_6 += kv_5
+                kv_5 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 7 and MAX_LEVEL >= 6 and check_value & 64:
+                kv_7 += kv_6
+                kv_6 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 8 and MAX_LEVEL >= 7 and check_value & 128:
+                kv_8 += kv_7
+                kv_7 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 9 and MAX_LEVEL >= 8 and check_value & 256:
+                kv_9 += kv_8
+                kv_8 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 10 and MAX_LEVEL >= 9 and check_value & 512:
+                kv_10 += kv_9
+                kv_9 = tl.zeros([BK, V], dtype=tl.float32)
+            if MIN_LEVEL <= 11 and MAX_LEVEL >= 10 and check_value & 1024:
+                kv_11 += kv_10
+                kv_10 = tl.zeros([BK, V], dtype=tl.float32)
 
     chunk_index = offset // BT + T // BT
 
@@ -714,13 +690,13 @@ def copy_input_kernel(
 
     for i_t in range(NT):
         p_g = tl.make_block_ptr(
-            g + bos * H + i_h, (T,), (H,), (i_t * BT + input_offset,), (BT,), (0,)
+            g + bos * H + i_h, (T,), (H,), (i_t * BT + input_offset,), (BT,), (0,),
         )
         p_q = tl.make_block_ptr(
-            q + bos * K, (T, K), (K, 1), (i_t * BT + input_offset, 0), (BT, K), (1, 0)
+            q + bos * K, (T, K), (K, 1), (i_t * BT + input_offset, 0), (BT, K), (1, 0),
         )
         p_k = tl.make_block_ptr(
-            k + bos * K, (T, K), (K, 1), (i_t * BT + input_offset, 0), (BT, K), (1, 0)
+            k + bos * K, (T, K), (K, 1), (i_t * BT + input_offset, 0), (BT, K), (1, 0),
         )
         p_v = tl.make_block_ptr(
             v + (bos * H + i_h) * V,
@@ -731,13 +707,13 @@ def copy_input_kernel(
             (1, 0),
         )
         p_g_new = tl.make_block_ptr(
-            g_new + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+            g_new + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,),
         )
         p_q_new = tl.make_block_ptr(
-            q_new + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+            q_new + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0),
         )
         p_k_new = tl.make_block_ptr(
-            k_new + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+            k_new + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0),
         )
         p_v_new = tl.make_block_ptr(
             v_new + (bos * H + i_h) * V,
@@ -755,13 +731,13 @@ def copy_input_kernel(
 
         if i_t == 0:
             p_g_prev = tl.make_block_ptr(
-                g_prev + i_n * BT * H + i_h, (BT,), (H,), (0,), (BT,), (0,)
+                g_prev + i_n * BT * H + i_h, (BT,), (H,), (0,), (BT,), (0,),
             )
             p_q_prev = tl.make_block_ptr(
-                q_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0)
+                q_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0),
             )
             p_k_prev = tl.make_block_ptr(
-                k_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0)
+                k_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0),
             )
             p_v_prev = tl.make_block_ptr(
                 v_prev + (i_n * BT * H + i_h) * V,
@@ -816,7 +792,7 @@ def copy_input_kernel(
 @triton.heuristics(
     {
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def copy_last_chunk_kernel(
@@ -857,10 +833,10 @@ def copy_last_chunk_kernel(
 
     p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (seq_offset,), (BT,), (0,))
     p_q = tl.make_block_ptr(
-        q + bos * K, (T, K), (K, 1), (seq_offset, 0), (BT, K), (1, 0)
+        q + bos * K, (T, K), (K, 1), (seq_offset, 0), (BT, K), (1, 0),
     )
     p_k = tl.make_block_ptr(
-        k + bos * K, (T, K), (K, 1), (seq_offset, 0), (BT, K), (1, 0)
+        k + bos * K, (T, K), (K, 1), (seq_offset, 0), (BT, K), (1, 0),
     )
     p_v = tl.make_block_ptr(
         v + (bos * H + i_h) * V,
@@ -871,16 +847,16 @@ def copy_last_chunk_kernel(
         (1, 0),
     )
     p_g_prev = tl.make_block_ptr(
-        g_prev + i_n * BT * H + i_h, (BT,), (H,), (0,), (BT,), (0,)
+        g_prev + i_n * BT * H + i_h, (BT,), (H,), (0,), (BT,), (0,),
     )
     p_q_prev = tl.make_block_ptr(
-        q_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0)
+        q_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0),
     )
     p_k_prev = tl.make_block_ptr(
-        k_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0)
+        k_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0),
     )
     p_v_prev = tl.make_block_ptr(
-        v_prev + (i_n * BT * H + i_h) * V, (BT, V), (H * V, 1), (0, 0), (BT, V), (1, 0)
+        v_prev + (i_n * BT * H + i_h) * V, (BT, V), (H * V, 1), (0, 0), (BT, V), (1, 0),
     )
 
     tl.store(p_g_prev, tl.load(p_g, boundary_check=(0,)), boundary_check=(0,))
@@ -918,7 +894,7 @@ def copy_last_chunk_kernel(
     ],
     key=["H", "K", "V"],
     restore_value=["dh", "dg_last"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dhg(
@@ -972,7 +948,7 @@ def chunkwise_bwd_kernel_dhg(
 
         if (i_t & (1 << ell)) == 0:  # store the chunk
             tl.store(
-                p_dh, b_dh.to(p_dh.dtype.element_ty) + b_dh_old, boundary_check=(0, 1)
+                p_dh, b_dh.to(p_dh.dtype.element_ty) + b_dh_old, boundary_check=(0, 1),
             )
             # if you are about the transition to compute, reset to zeros
             if i_t > 0 and ((i_t - 1) & (1 << ell)) > 0:
@@ -995,10 +971,10 @@ def chunkwise_bwd_kernel_dhg(
         b_dh *= b_g_last
         if i_t & (1 << ell):  # compute this chunk
             p_g = tl.make_block_ptr(
-                g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+                g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,),
             )
             p_q = tl.make_block_ptr(
-                q + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
+                q + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1),
             )
             p_do = tl.make_block_ptr(
                 do + (bos * H + i_h) * V,
@@ -1035,7 +1011,7 @@ def chunkwise_bwd_kernel_dhg(
     ],
     key=["H", "K", "V"],
     restore_value=["dq", "dg"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_hdqgl(
@@ -1089,7 +1065,7 @@ def chunkwise_bwd_kernel_hdqgl(
                 (1, 0),
             )
             p_q = tl.make_block_ptr(
-                q + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+                q + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0),
             )
             p_l = tl.make_block_ptr(
                 l + (bos * H + i_h) * L + num_intra_levels + ell,
@@ -1108,7 +1084,7 @@ def chunkwise_bwd_kernel_hdqgl(
                 (1, 0),
             )
             p_dg = tl.make_block_ptr(
-                dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+                dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,),
             )
             p_dl = tl.make_block_ptr(
                 dl + (bos * H + i_h) * L + num_intra_levels + ell,
@@ -1147,7 +1123,7 @@ def chunkwise_bwd_kernel_hdqgl(
             tl.store(p_dl, b_dl.to(p_dl.dtype.element_ty), boundary_check=(0,))
             b_dg_old = tl.load(p_dg, boundary_check=(0,))
             tl.store(
-                p_dg, b_dg.to(p_dg.dtype.element_ty) + b_dg_old, boundary_check=(0,)
+                p_dg, b_dg.to(p_dg.dtype.element_ty) + b_dg_old, boundary_check=(0,),
             )
             if ((i_t + 1) & (1 << ell)) == 0:
                 b_h = tl.zeros([V, K], dtype=tl.float32)
@@ -1157,7 +1133,7 @@ def chunkwise_bwd_kernel_hdqgl(
         b_h *= tl.exp(b_g_last)
         if (i_t & (1 << ell)) == 0:  # update the state
             p_k = tl.make_block_ptr(
-                k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+                k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0),
             )
             p_v = tl.make_block_ptr(
                 v + (bos * H + i_h) * V,
@@ -1183,7 +1159,7 @@ def chunkwise_bwd_kernel_hdqgl(
     ],
     key=["H", "K", "V"],
     restore_value=["dk", "dg", "dg_last"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dkg(
@@ -1237,7 +1213,7 @@ def chunkwise_bwd_kernel_dkg(
         (1, 0),
     )
     p_dk = tl.make_block_ptr(
-        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0),
     )
     p_dg = tl.make_block_ptr(dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
 
@@ -1271,7 +1247,7 @@ def chunkwise_bwd_kernel_dkg(
     ],
     key=["H", "K", "V"],
     restore_value=["dv"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dv(
@@ -1312,7 +1288,7 @@ def chunkwise_bwd_kernel_dv(
     p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     p_k = tl.make_block_ptr(k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0))
     p_dv = tl.make_block_ptr(
-        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0),
     )
 
     last_idx = min((i_t + 1) * BT, T) - 1
@@ -1334,7 +1310,7 @@ def chunkwise_bwd_kernel_dv(
     ],
     key=["H", "K", "V"],
     restore_value=["dl", "dq", "dk", "dv", "dg"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_diag(
@@ -1385,20 +1361,20 @@ def chunkwise_bwd_kernel_diag(
     p_q = tl.make_block_ptr(q + bos * K, (K, T), (1, K), (0, i_t * BT), (K, BT), (0, 1))
     p_k = tl.make_block_ptr(k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0))
     p_v = tl.make_block_ptr(
-        v + (bos * H + i_h) * V, (V, T), (1, H * V), (0, i_t * BT), (V, BT), (0, 1)
+        v + (bos * H + i_h) * V, (V, T), (1, H * V), (0, i_t * BT), (V, BT), (0, 1),
     )
     p_do = tl.make_block_ptr(
-        do + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+        do + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0),
     )
     p_dg = tl.make_block_ptr(dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     p_dq = tl.make_block_ptr(
-        dq + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+        dq + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0),
     )
     p_dk = tl.make_block_ptr(
-        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0),
     )
     p_dv = tl.make_block_ptr(
-        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0),
     )
 
     b_g = tl.load(p_g, boundary_check=(0,))
@@ -1519,7 +1495,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         if not math.log2(V).is_integer():
             raise ValueError(
-                "Head dimension must be a power of two. Please pad the head dimension to the next power of two."
+                "Head dimension must be a power of two. Please pad the head dimension to the next power of two.",
             )
 
         if K % BLOCK_K != 0:
@@ -1527,7 +1503,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         if triton.__version__ > "3.2.0":
             warnings.warn("Triton>3.2.0 detected, which is known to have worse performance. "
-                          "For optimal performance, it is recommended to install Triton==3.2.0 (if possible).")
+                          "For optimal performance, it is recommended to install Triton==3.2.0 (if possible).", stacklevel=2)
 
         BT = 64  # chunk size
 
@@ -1547,7 +1523,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                         BT,
                     )
                     for i in range(len(cu_seqlens) - 1)
-                ]
+                ],
             )
             MAX_LEVEL = ceil_log(NT, 2) - 1
             B = len(cu_seqlens) - 1
@@ -1707,7 +1683,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         if initial_state is not None:
             raise NotImplementedError(
-                "Backward pass is not implemented for log-linear attention with a prefilled kernel."
+                "Backward pass is not implemented for log-linear attention with a prefilled kernel.",
             )
 
         B, T, G, K = k.shape
@@ -1720,7 +1696,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 [
                     ceil_div(cu_seqlens[i + 1] - cu_seqlens[i], BT)
                     for i in range(len(cu_seqlens) - 1)
-                ]
+                ],
             )
         else:
             NT = ceil_div(T, BT)
@@ -1857,10 +1833,10 @@ def chunk_log_linear_attn(
     v: torch.Tensor,
     g: torch.Tensor,
     level_scales: torch.Tensor,
-    initial_state: Optional[LogLinearAttentionState] = None,
+    initial_state: LogLinearAttentionState | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -1890,12 +1866,11 @@ def chunk_log_linear_attn(
             Final state of type `LogLinearAttentionState` if `output_final_state=True` else `None`.
 
     """
-    if cu_seqlens is not None:
-        if q.shape[0] != 1:
-            raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
-            )
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+            f"Please flatten variable-length inputs before processing.",
+        )
 
     o, final_state = ChunkLogLinearAttentionFunction.apply(
         q,

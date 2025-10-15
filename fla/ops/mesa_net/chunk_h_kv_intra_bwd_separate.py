@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
@@ -22,7 +21,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
@@ -81,8 +80,8 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_ds = tl.zeros([BT, BT], dtype=tl.float32)
     b_dv = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dg_last = tl.zeros([1,], dtype=tl.float32)
-    b_dg = tl.zeros([BT,], dtype=tl.float32)
+    b_dg_last = tl.zeros([1], dtype=tl.float32)
+    b_dg = tl.zeros([BT], dtype=tl.float32)
 
     p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
@@ -141,7 +140,7 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_mesa_net_h_kv_bwd_intra_kernel_dq(
@@ -239,7 +238,7 @@ def chunk_mesa_net_h_kv_bwd_intra_separate_fn(
     g,
     do,
     cu_seqlens,
-    chunk_size=64
+    chunk_size=64,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -274,7 +273,7 @@ def chunk_mesa_net_h_kv_bwd_intra_separate_fn(
         V=V,
         BT=BT,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     dg_final = torch.empty_like(dg)
     chunk_mesa_net_h_kv_bwd_intra_kernel_dq[grid](
@@ -297,6 +296,6 @@ def chunk_mesa_net_h_kv_bwd_intra_separate_fn(
         V=V,
         BT=BT,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     return dq, dk, dv, dg_final

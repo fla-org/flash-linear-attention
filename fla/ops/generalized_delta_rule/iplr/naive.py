@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 from einops import rearrange
@@ -10,7 +9,7 @@ from einops import rearrange
 def iplr_recurrence(q, k, v, alpha, beta, initial_state=None, output_final_state=True):
     orig_dtype = q.dtype
     b, h, l, d_k = q.shape
-    q, k, v, beta = map(lambda x: x.float(), [q, k, v, beta])
+    q, k, v, beta = (x.float() for x in [q, k, v, beta])
     d_v = v.shape[-1]
     o = torch.zeros_like(v)
     S = torch.zeros(b, h, d_k, d_v).to(v)
@@ -45,7 +44,7 @@ def iplr_chunkwise(q, k, v, alpha, beta, initial_state=None, output_final_state=
 
     # note that diagonal is masked.
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
-    q, k, v, alpha, beta = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size), [q, k, v, alpha, beta])
+    q, k, v, alpha, beta = (rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size) for x in [q, k, v, alpha, beta])
 
     v2 = (alpha @ k.transpose(-1, -2)).masked_fill_(mask, 0) @ v
     attn = (alpha @ beta.transpose(-1, -2)).masked_fill(mask, 0)

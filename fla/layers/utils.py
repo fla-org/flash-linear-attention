@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # Code is adapted from flash-attn.bert_padding.py
 
-from typing import Tuple
 
 import torch
 from einops import rearrange, repeat
@@ -23,7 +21,7 @@ class IndexFirstAxis(torch.autograd.Function):
         # TD [2022-03-04] For some reason torch.gather is a bit faster than indexing.
         # return x[indices]
         return torch.gather(
-            rearrange(x, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim)
+            rearrange(x, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim),
         ).reshape(-1, *other_shape)
 
     @staticmethod
@@ -73,7 +71,7 @@ index_put_first_axis = IndexPutFirstAxis.apply
 
 @tensor_cache
 def get_unpad_data(
-    attention_mask: torch.Tensor
+    attention_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """
     Retrieves indexing data required to repad unpadded (ragged) tensors.
@@ -100,7 +98,7 @@ def get_unpad_data(
 
 def unpad_input(
     q: torch.Tensor,
-    states: Tuple[torch.Tensor],
+    states: tuple[torch.Tensor],
     attention_mask: torch.Tensor,
     q_len: int,
     keepdim: bool = False,

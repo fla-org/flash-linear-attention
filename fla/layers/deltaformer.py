@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -60,11 +59,11 @@ class DeltaFormerAttention(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 32,
-        num_kv_heads: Optional[int] = None,
+        num_kv_heads: int | None = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
         rope_theta: float = 10000.,
-        max_position_embeddings: Optional[int] = None,
+        max_position_embeddings: int | None = None,
         layer_idx: int | None = None,
     ):
         super().__init__()
@@ -96,12 +95,12 @@ class DeltaFormerAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         attentions = None
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -120,7 +119,7 @@ class DeltaFormerAttention(nn.Module):
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
 
-        cu_seqlens_kw = kwargs.get('cu_seqlens', None)
+        cu_seqlens_kw = kwargs.get('cu_seqlens')
         seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
             seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
@@ -141,7 +140,7 @@ class DeltaFormerAttention(nn.Module):
             v=v,
             beta=beta,
             attention_mask=attention_mask,
-            cu_seqlens=cu_seqlens_kw
+            cu_seqlens=cu_seqlens_kw,
         )
 
         o = o.reshape(batch_size, q_len, -1)

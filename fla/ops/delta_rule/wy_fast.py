@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -16,7 +14,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -25,7 +23,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def recompute_w_u_fwd_kernel(
@@ -44,7 +42,7 @@ def recompute_w_u_fwd_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -78,7 +76,7 @@ def recompute_w_u_fwd_kernel(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -87,7 +85,7 @@ def recompute_w_u_fwd_kernel(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_bwd_kernel(
@@ -109,7 +107,7 @@ def prepare_wy_repr_bwd_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -183,8 +181,8 @@ def prepare_wy_repr_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     beta: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
@@ -195,7 +193,7 @@ def prepare_wy_repr_fwd(
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
-        output_dtype=k.dtype
+        output_dtype=k.dtype,
     )
     w, u = recompute_w_u_fwd(
         k=k,
@@ -212,8 +210,8 @@ def recompute_w_u_fwd(
     v: torch.Tensor,
     beta: torch.Tensor,
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = 64
     CONST_TILING = 64 if check_shared_mem() else 32
@@ -252,8 +250,8 @@ def prepare_wy_repr_bwd(
     A: torch.Tensor,
     dw: torch.Tensor,
     du: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor]
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
     CONST_TILING = 64 if check_shared_mem() else 32

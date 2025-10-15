@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 
@@ -10,7 +8,7 @@ def naive_parallel_rebased(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = None,
+    scale: float | None = None,
     use_norm: bool = True,
 ) -> torch.Tensor:
     if scale is None:

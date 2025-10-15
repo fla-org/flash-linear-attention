@@ -1,12 +1,10 @@
-# -*- coding: utf-8 -*-
 
 import argparse
 import time
-from typing import Optional, Tuple
 
 import torch
 from accelerate import Accelerator
-from torch.cuda import max_memory_allocated, memory_allocated
+from torch.cuda import max_memory_allocated
 from torch.optim import AdamW
 from tqdm import trange
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
@@ -32,19 +30,19 @@ def prepare_inputs(
     context_len: int,
     varlen: bool,
     vocab_size: int,
-    device: torch.device
+    device: torch.device,
 ):
     if varlen:
         tokens = torch.randint(high=vocab_size, size=(1, batch_size * seq_len), device=device)
         cu_seqlens = torch.cat([
             torch.tensor([0]),
             torch.randperm(batch_size * seq_len - 16)[:torch.randint(8, 64, size=(1,))] + 16,
-            torch.tensor([batch_size * seq_len])
+            torch.tensor([batch_size * seq_len]),
         ], 0).sort()[0].to(dtype=torch.int32, device=device)
         if context_len is not None:
             cu_seqlens = torch.cat(
-                [torch.arange(i, j, context_len) for i, j in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())] +
-                [torch.tensor([len(tokens[0])])]
+                [torch.arange(i, j, context_len) for i, j in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False)] +
+                [torch.tensor([len(tokens[0])])],
             ).to(dtype=torch.int32, device=device)
     else:
         tokens = torch.randint(high=vocab_size, size=(batch_size, seq_len), device=device)
@@ -62,22 +60,18 @@ def profile(
     steps: int = 32,
     total_steps: int = 1024,
     lr: float = 3e-4,
-    betas: Tuple[float] = (0.9, 0.95),
+    betas: tuple[float] = (0.9, 0.95),
     weight_decay: float = 0.1,
-    dtype: Optional[torch.dtype] = torch.bfloat16,
+    dtype: torch.dtype | None = torch.bfloat16,
     mixed_precision: str = 'bf16',
-    compile: bool = False
+    compile: bool = False,
 ):
     device = torch.device('cuda')
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
     model = AutoModelForCausalLM.from_config(config).cuda().to(dtype)
     if compile:
-        print("Compiling the model")
         model = torch.compile(model)
-    num_parameters = model.num_parameters()
-    print(f"Initializing {name} model from the config:\n{config}\n{model}")
-    print(f"Number of parameters in total: {num_parameters} ({sizeof_fmt(num_parameters)})")
-    print(f"Allocated memory after initialization: {sizeof_fmt(memory_allocated(device))}")
+    model.num_parameters()
 
     accelerator = Accelerator(mixed_precision=mixed_precision)
     optimizer = AdamW(
@@ -85,7 +79,7 @@ def profile(
         lr=lr,
         betas=betas,
         weight_decay=weight_decay,
-        fused=True
+        fused=True,
     )
     scheduler = get_cosine_schedule_with_warmup(optimizer, 0, total_steps)
 
@@ -101,7 +95,7 @@ def profile(
             context_len=context_len,
             varlen=varlen,
             vocab_size=config.vocab_size,
-            device=device
+            device=device,
         )
         outputs = model(tokens, labels=tokens, cu_seqlens=cu_seqlens)
         # backward pass
@@ -122,7 +116,7 @@ def profile(
             context_len=context_len,
             varlen=varlen,
             vocab_size=config.vocab_size,
-            device=device
+            device=device,
         )
         outputs = model(tokens, labels=tokens, cu_seqlens=cu_seqlens)
         # backward pass
@@ -155,5 +149,5 @@ if __name__ == "__main__":
         varlen=args.varlen,
         warmup_steps=args.warmup_steps,
         steps=args.steps,
-        compile=args.compile
+        compile=args.compile,
     )

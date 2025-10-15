@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 from einops import rearrange
@@ -11,7 +10,7 @@ from einops import rearrange
 def dplr_recurrence(q, k, v, alpha, beta, gk, initial_state=None, output_final_state=True):
     orig_dtype = q.dtype
     b, h, l, d_k = q.shape
-    q, k, v, beta, gk = map(lambda x: x.float(), [q, k, v, beta, gk])
+    q, k, v, beta, gk = (x.float() for x in [q, k, v, beta, gk])
     d_v = v.shape[-1]
     o = torch.zeros_like(v)
     S = torch.zeros(b, h, d_k, d_v).to(v)
@@ -46,8 +45,8 @@ def dplr_chunkwise(q, k, v, alpha, beta, gk, initial_state=None, output_final_st
 
     # note that diagonal is masked.
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
-    q, k, v, alpha, beta, gk = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d',
-                                   c=chunk_size).float(), [q, k, v, alpha, beta, gk])
+    q, k, v, alpha, beta, gk = (rearrange(x, 'b h (n c) d -> b h n c d',
+                                   c=chunk_size).float() for x in [q, k, v, alpha, beta, gk])
 
     gk_cumsum = gk.cumsum(-2)
 

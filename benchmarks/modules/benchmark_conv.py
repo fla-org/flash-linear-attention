@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 import triton
@@ -32,7 +31,7 @@ except ImportError:
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, D, provider):
     from fla.utils import device
@@ -52,12 +51,12 @@ def benchmark(T, D, provider):
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
+        torch.tensor([T], dtype=torch.long),
     ], 0).to(device).sort()[0]
     if provider.startswith('causal_conv1d_fwd'):
         results = triton.testing.do_bench(
             lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider.startswith('causal_conv1d_cuda_fwd'):
         results = triton.testing.do_bench(
@@ -69,14 +68,14 @@ def benchmark(T, D, provider):
                     activation='swish',
                     seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
                 ),
-                'b d t -> b t d'
+                'b d t -> b t d',
             ),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider.startswith('causal_conv1d_fwdbwd'):
         results = triton.testing.do_bench(
             lambda: causal_conv1d(x, weight, bias, activation='swish', cu_seqlens=cu_seqlens).backward(x),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider.startswith('causal_conv1d_cuda_fwdbwd'):
         results = triton.testing.do_bench(
@@ -88,9 +87,9 @@ def benchmark(T, D, provider):
                     activation='swish',
                     seq_idx=prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0),
                 ),
-                'b d t -> b t d'
+                'b d t -> b t d',
             ).backward(x),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     return results
 

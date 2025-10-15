@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -17,16 +16,16 @@ from fla.utils import device
             (3, 111, 2, 64, torch.float16),
             (3, 1024, 4, 100, torch.float16),
             (3, 1024, 8, 128, torch.float16),
-            (4, 2048, 8, 256, torch.float16)
+            (4, 2048, 8, 256, torch.float16),
         ]
-    ]
+    ],
 )
 def test_based(
     B: int,
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     q = torch.randn((B, H, T, 16), dtype=dtype, device=device).requires_grad_()

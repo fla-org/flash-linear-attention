@@ -7,7 +7,7 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 
 @triton.heuristics({
     "USE_GATE": lambda args: args['g_cumsum'] is not None,
-    "IS_VARLEN": lambda args: args['offsets'] is not None
+    "IS_VARLEN": lambda args: args['offsets'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def chunk_transform_qk_bwd_kernel_prepare(
@@ -42,7 +42,7 @@ def chunk_transform_qk_bwd_kernel_prepare(
     BT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GATE: tl.constexpr,
-    RETURN_H: tl.constexpr
+    RETURN_H: tl.constexpr,
 ):
     i_t, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
@@ -191,6 +191,6 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
         BK=triton.next_power_of_2(K),
         BV=triton.next_power_of_2(V),
         BT=BT,
-        RETURN_H=return_h
+        RETURN_H=return_h,
     )
     return q_new, k_new, h, dA_local, dv, dg_cumsum

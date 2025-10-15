@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -18,7 +16,7 @@ BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -28,7 +26,7 @@ BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
         for num_stages in [2, 3, 4]
     ],
     key=["BC"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_A_kernel_intra_sub_inter(
@@ -92,7 +90,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -102,7 +100,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         triton.Config({}, num_warps=8),
     ],
     key=["BK", "BT"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_A_kernel_intra_sub_intra(
@@ -158,7 +156,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -168,7 +166,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
         triton.Config({}, num_warps=8),
     ],
     key=['BC', 'BK'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
@@ -230,7 +228,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -240,7 +238,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
         triton.Config({}, num_warps=8),
     ],
     key=['BC'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
@@ -279,7 +277,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -289,7 +287,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_fwd_kernel_o(
@@ -358,7 +356,7 @@ def chunk_gla_fwd_kernel_o(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -366,7 +364,7 @@ def chunk_gla_fwd_kernel_o(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BK', 'NC', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_bwd_kernel_intra(
@@ -493,7 +491,7 @@ def chunk_gla_bwd_kernel_intra(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -503,7 +501,7 @@ def chunk_gla_bwd_kernel_intra(
         triton.Config({}, num_warps=8),
     ],
     key=['BV', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_bwd_kernel_dA(
@@ -543,7 +541,7 @@ def chunk_gla_bwd_kernel_dA(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -553,7 +551,7 @@ def chunk_gla_bwd_kernel_dA(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_bwd_kernel_dv(
@@ -618,7 +616,7 @@ def chunk_gla_bwd_kernel_dv(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -628,7 +626,7 @@ def chunk_gla_bwd_kernel_dv(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_gla_bwd_kernel_inter(
@@ -676,7 +674,7 @@ def chunk_gla_bwd_kernel_inter(
     b_gn = tl.load(p_gn, mask=m_k, other=0)
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dgk = tl.zeros([BK,], dtype=tl.float32)
+    b_dgk = tl.zeros([BK], dtype=tl.float32)
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -728,8 +726,8 @@ def chunk_gla_fwd_intra_gk(
     k: torch.Tensor,
     g: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, K = k.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -824,8 +822,8 @@ def chunk_gla_fwd_o_gk(
     A: torch.Tensor,
     h: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -858,8 +856,8 @@ def chunk_gla_bwd_dA(
     v: torch.Tensor,
     do: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, V = v.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -892,8 +890,8 @@ def chunk_gla_bwd_dv(
     A: torch.Tensor,
     do: torch.Tensor,
     dh: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -926,8 +924,8 @@ def chunk_gla_bwd_dqk_intra(
     k: torch.Tensor,
     g: torch.Tensor,
     dA: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, K = q.shape
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -973,8 +971,8 @@ def chunk_gla_bwd_dqkg(
     dq: torch.Tensor,
     dk: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -1016,13 +1014,13 @@ def chunk_gla_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    g_cumsum: Optional[torch.Tensor],
+    g_cumsum: torch.Tensor | None,
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     T = q.shape[1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     if g_cumsum is None:
@@ -1038,7 +1036,7 @@ def chunk_gla_fwd(
         output_final_state=output_final_state,
         states_in_fp32=False,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
 
     # the intra A is kept in fp32
@@ -1049,7 +1047,7 @@ def chunk_gla_fwd(
         g=g_cumsum,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     o = chunk_gla_fwd_o_gk(
         q=q,
@@ -1059,7 +1057,7 @@ def chunk_gla_fwd(
         h=h,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     return g_cumsum, A, h, ht, o
 
@@ -1069,15 +1067,15 @@ def chunk_gla_bwd(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    g_cumsum: Optional[torch.Tensor],
+    g_cumsum: torch.Tensor | None,
     scale: float,
     initial_state: torch.Tensor,
     h: torch.Tensor,
     A: torch.Tensor,
     do: torch.Tensor,
     dht: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     T = q.shape[1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -1095,7 +1093,7 @@ def chunk_gla_bwd(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
-            states_in_fp32=True
+            states_in_fp32=True,
         )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -1110,7 +1108,7 @@ def chunk_gla_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
-        states_in_fp32=True
+        states_in_fp32=True,
     )
 
     dv = chunk_gla_bwd_dv(
@@ -1120,7 +1118,7 @@ def chunk_gla_bwd(
         do=do,
         dh=dh,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
 
     # dq dk in fp32
@@ -1129,7 +1127,7 @@ def chunk_gla_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     dq, dk = chunk_gla_bwd_dqk_intra(
         q=q,
@@ -1137,7 +1135,7 @@ def chunk_gla_bwd(
         g=g_cumsum,
         dA=dA,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     dq, dk, dg = chunk_gla_bwd_dqkg(
         q=q,
@@ -1151,7 +1149,7 @@ def chunk_gla_bwd(
         dk=dk,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     return dq, dk, dv, dg, dh0
 
@@ -1184,7 +1182,7 @@ class ChunkGLAFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
         # recompute g_cumsum in bwd pass
         if g.dtype != torch.float:
@@ -1215,7 +1213,7 @@ class ChunkGLAFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
         return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None
 
@@ -1226,11 +1224,11 @@ def chunk_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: Optional[int] = None,
+    scale: int | None = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -1294,12 +1292,12 @@ def chunk_gla(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = q.shape[-1] ** -0.5

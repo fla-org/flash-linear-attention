@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 from einops import rearrange
@@ -10,14 +9,14 @@ def naive_chunk_rwkv6(
     v: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    chunk_size: int = 32
+    chunk_size: int = 32,
 ):
     assert q.shape[-2] % chunk_size == 0
     orig_dtype = q.dtype
     num_chunk = q.shape[-2] // chunk_size
     u = u.unsqueeze(0)
 
-    q, k, v, w = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size).float(), (q, k, v, w))
+    q, k, v, w = (rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size).float() for x in (q, k, v, w))
 
     w_cumsum = w.cumsum(-2)
 

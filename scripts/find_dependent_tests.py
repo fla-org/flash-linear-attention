@@ -2,17 +2,17 @@ import ast
 import os
 import sys
 from collections import defaultdict
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "False").lower() in ("true", "1", "yes")
 DEBUG_TEST_FILE = os.environ.get("DEBUG_TEST_FILE", "NULL").lower()
 
 
-@lru_cache(maxsize=None)
+@cache
 def parse_file(file_path):
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             return ast.parse(f.read(), filename=file_path)
     except (SyntaxError, FileNotFoundError, UnicodeDecodeError):
         return None
@@ -82,7 +82,6 @@ class DependencyFinder:
             current_symbol = symbol_chain_map.get(current_symbol)
 
         chain.reverse()
-        print("  - Dependency Chain:", " -> ".join(chain), file=sys.stderr)
 
     def find_dependent_tests(self, changed_files_str: list, max_depth=4) -> set:
         changed_files = {Path(f).resolve() for f in changed_files_str}
@@ -109,7 +108,7 @@ class DependencyFinder:
             for defn in new_defs:
                 symbol_chain_map[defn] = None
 
-        for i in range(max_depth):
+        for _i in range(max_depth):
             if not symbols_to_trace:
                 break
 
@@ -166,8 +165,6 @@ class DependencyFinder:
             if not all_affected_symbols.isdisjoint(imported_in_test):
                 if DEBUG_MODE and DEBUG_TEST_FILE in str(test_file).lower():
                     imported_symbols = [s for s in imported_in_test if s in all_affected_symbols]
-                    print(
-                        f"DEBUG: Test file {test_file} is included because it imports affected symbols: {imported_symbols}", file=sys.stderr)  # noqa: E501
                     for symbol in imported_symbols:
                         self._print_dependency_chain(symbol, symbol_chain_map)
                 dependent_tests.add(str(test_file))
@@ -175,9 +172,7 @@ class DependencyFinder:
 
             if not affected_source_file_stems.isdisjoint(imported_in_test):
                 if DEBUG_MODE and DEBUG_TEST_FILE in str(test_file).lower():
-                    imported_files = [f for f in imported_in_test if f in affected_source_file_stems]
-                    print(
-                        f"DEBUG: Test file {test_file} is included because it imports a symbol matching an affected file stem: {imported_files}", file=sys.stderr)  # noqa: E501
+                    [f for f in imported_in_test if f in affected_source_file_stems]
                 dependent_tests.add(str(test_file))
         for changed_file in changed_files:
             if changed_file in self.all_test_files:
@@ -188,7 +183,6 @@ class DependencyFinder:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python find_dependent_tests.py <file1> <file2> ...")
         sys.exit(1)
 
     all_args_string = " ".join(sys.argv[1:])
@@ -207,4 +201,4 @@ if __name__ == "__main__":
     dependent_tests = finder.find_dependent_tests(changed_files)
 
     if dependent_tests:
-        print(" ".join(sorted(list(dependent_tests))))
+        pass

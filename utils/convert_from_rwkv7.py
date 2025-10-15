@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 # scripts for converting pretrained hf model weights to fla style
 
@@ -16,7 +15,7 @@ from fla.models.rwkv7 import RWKV7Config
 def convert(
     rwkv7: str,
     output: str,
-    precision: str = 'float32'
+    precision: str = 'float32',
 ):
     weights = torch.load(rwkv7, weights_only=True, map_location='cpu')
     config = RWKV7Config()
@@ -48,18 +47,16 @@ def convert(
         dtype = torch.float64
 
     config.torch_dtype = precision
-    print(f"Creating model with config:\n{config}")
     model = AutoModelForCausalLM.from_config(config).to(dtype=dtype)
 
-    print(model)
     model_dict = model.state_dict()
-    model_names = [n for n in model_dict]
+    model_names = list(model_dict)
 
     # these parameters may be present in pth file but are never used:
     unused_names = ['blocks.0.att.v0', 'blocks.0.att.v1', 'blocks.0.att.v2']
     # these parameters may or may not be present in pth file:
     possible_absent_weights = [
-        'model.layers.0.pre_norm.weight', 'model.layers.0.pre_norm.bias'
+        'model.layers.0.pre_norm.weight', 'model.layers.0.pre_norm.bias',
     ]
     # other parameters may raise a KeyError
 
@@ -69,7 +66,7 @@ def convert(
             'emb.weight': 'model.embeddings.weight',
             'ln_out.weight': 'model.norm.weight',
             'ln_out.bias': 'model.norm.bias',
-            'head.weight': 'lm_head.weight'
+            'head.weight': 'lm_head.weight',
         }
         proj = {
             'receptance': 'r_proj',
@@ -91,7 +88,7 @@ def convert(
             'ffn': 'ffn',
             'ln0': 'pre_norm',
             'ln1': 'attn_norm',
-            'ln2': 'ffn_norm'
+            'ln2': 'ffn_norm',
         }[name_compo[2]]
         if re.match("[wvag][012]", name_compo[3]):
             typ, num = name_compo[3]
@@ -107,15 +104,12 @@ def convert(
 
     for name in weights:
         fla_name, transposed = translate_into_fla(name)
-        print(f'{name:32} -> {fla_name:42}, {transposed}')
         if not fla_name:
-            print('redundant parameters in source weight: ', name, '\n')
             continue
         weight = weights[name]
         # print shape information
         shape1 = list(weight.shape)
-        shape2 = list(model_dict[fla_name].shape)
-        print(f'{str(shape1):32}    {str(shape2)}\n')
+        list(model_dict[fla_name].shape)
 
         if transposed:
             weight.t_()
@@ -132,7 +126,6 @@ def convert(
         model_dict[fla_name].data.copy_(weight)
         model_names.remove(fla_name)
 
-    print("uninitialized parameters: ", model_names)
     for n in model_names:
         if n not in possible_absent_weights:
             raise KeyError(n)
