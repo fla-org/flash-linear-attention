@@ -15,4 +15,4 @@ repos:
   rev: v0.14.0
   hooks:
   - id: ruff-check
-    args: [--fix, --unsafe-fixes, --exit-non-zero-on-fix]
+    args: [--fix, --exit-non-zero-on-fix]
