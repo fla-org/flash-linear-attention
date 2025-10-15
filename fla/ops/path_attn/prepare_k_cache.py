@@ -6,7 +6,7 @@ from fla.ops.utils import prepare_chunk_indices
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def parallel_path_fwd_kernel_prepare_k_cache(
@@ -16,7 +16,7 @@ def parallel_path_fwd_kernel_prepare_k_cache(
     H: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr, BK: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -69,6 +69,6 @@ def prepare_k_cache_fn(k, w1, w2, cu_seqlens, BS, use_cache=False):
             T=T,
             K=K,
             BT=BS,
-            BK=triton.next_power_of_2(K)
+            BK=triton.next_power_of_2(K),
         )
         return k_new

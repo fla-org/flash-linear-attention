@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Tri Dao, Yu Zhang, Songlin Yang.
 
 import torch
@@ -24,14 +23,14 @@ NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_fwd_kernel(
     x, y,
     T,
     B: tl.constexpr,
-    D: tl.constexpr
+    D: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
@@ -48,14 +47,14 @@ def sigmoid_fwd_kernel(
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_bwd_kernel(
     x, dy, dx,
     T,
     B: tl.constexpr,
-    D: tl.constexpr
+    D: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
@@ -104,7 +103,7 @@ sigmoid = SigmoidFunction.apply
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def logsigmoid_fwd_kernel(
@@ -113,7 +112,7 @@ def logsigmoid_fwd_kernel(
     temperature,
     T,
     B: tl.constexpr,
-    D: tl.constexpr
+    D: tl.constexpr,
 ):
     i = tl.program_id(0)
     o_i = i * B + tl.arange(0, B)
@@ -133,7 +132,7 @@ def logsigmoid_fwd_kernel(
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def logsigmoid_bwd_kernel(
@@ -143,7 +142,7 @@ def logsigmoid_bwd_kernel(
     temperature,
     T,
     B: tl.constexpr,
-    D: tl.constexpr
+    D: tl.constexpr,
 ):
     i = tl.program_id(0)
     o_i = i * B + tl.arange(0, B)
@@ -187,7 +186,7 @@ class LogSigmoidFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def forward(ctx, x, temperature):
-        ctx.save_for_backward(x,)
+        ctx.save_for_backward(x)
         ctx.temperature = temperature
         return logsigmoid_fwd(x, temperature)
 
@@ -209,14 +208,14 @@ def logsigmoid(x: torch.Tensor, temperature: float = 1.) -> torch.Tensor:
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def swish_fwd_kernel(
     x, y,
     T,
     B: tl.constexpr,
-    D: tl.constexpr
+    D: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
@@ -234,14 +233,14 @@ def swish_fwd_kernel(
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def swish_bwd_kernel(
     x, dy, dx,
     T,
     B: tl.constexpr,
-    D: tl.constexpr
+    D: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
@@ -407,14 +406,14 @@ sqrelu = SquaredReLUFunction.apply
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def swiglu_fwd_kernel(
     x, y, z,
     T,
     B: tl.constexpr,
-    D: tl.constexpr
+    D: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)
@@ -436,7 +435,7 @@ def swiglu_fwd_kernel(
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def swiglu_fwdbwd_kernel(
@@ -444,7 +443,7 @@ def swiglu_fwdbwd_kernel(
     T,
     B: tl.constexpr,
     D: tl.constexpr,
-    HAS_WEIGHT: tl.constexpr
+    HAS_WEIGHT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs = pid * B + tl.arange(0, B)

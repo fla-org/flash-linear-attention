@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -18,7 +17,7 @@ from fla.utils import assert_close, device, is_intel_alchemist
 @pytest.mark.parametrize("l2_penalty_factor", [1e-4, 1])
 @pytest.mark.skipif(
     is_intel_alchemist is True,
-    reason="Intel Triton Failure"
+    reason="Intel Triton Failure",
 )
 def test_fused_linear_cross_entropy_l2_warp(
     B: int,
@@ -26,7 +25,7 @@ def test_fused_linear_cross_entropy_l2_warp(
     H: int,
     V: int,
     l2_penalty_factor: float,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -53,7 +52,7 @@ def test_fused_linear_cross_entropy_l2_warp(
 
     fused_criterion = FusedLinearCrossEntropyLoss(
         l2_penalty_factor=l2_penalty_factor,
-        use_l2warp=True  # Make sure to enable it
+        use_l2warp=True,  # Make sure to enable it
     )
 
     fused_loss = fused_criterion(x, shift_labels, lm_head.weight, lm_head.bias)

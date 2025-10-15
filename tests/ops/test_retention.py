@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -20,9 +18,9 @@ from fla.utils import assert_close, device
             (2, 1000, 3, 100, 1, torch.float16),
             (2, 1000, 3, 128, 2, torch.float16),
             (3, 1024, 4, 256, 2, torch.float16),
-            (4, 2048, 4, 64, 2, torch.float16)
+            (4, 2048, 4, 64, 2, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -30,7 +28,7 @@ def test_chunk(
     H: int,
     K: int,
     expand_ratio: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -71,17 +69,17 @@ def test_chunk(
             (4, 64, 2, [0, 256, 500, 1000], torch.float16),
             (4, 100, 2, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_chunk_varlen(
     H: int,
     K: int,
     expand_ratio: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -146,9 +144,9 @@ def test_chunk_varlen(
             (2, 1000, 3, 100, 1, torch.float16),
             (2, 1000, 3, 128, 2, torch.float16),
             (3, 1024, 4, 256, 2, torch.float16),
-            (4, 2048, 4, 64, 2, torch.float16)
+            (4, 2048, 4, 64, 2, torch.float16),
         ]
-    ]
+    ],
 )
 def test_fused_chunk(
     B: int,
@@ -156,7 +154,7 @@ def test_fused_chunk(
     H: int,
     K: int,
     expand_ratio: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -197,17 +195,17 @@ def test_fused_chunk(
             (4, 64, 2, [0, 256, 500, 1000], torch.float16),
             (4, 100, 2, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_fused_chunk_varlen(
     H: int,
     K: int,
     expand_ratio: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -272,9 +270,9 @@ def test_fused_chunk_varlen(
             (2, 1024, 8, 128, 1, torch.float16),
             (3, 1024, 8, 128, 2, torch.float16),
             (3, 1024, 8, 256, 2, torch.float16),
-            (4, 2048, 8, 64, 2, torch.float16)
+            (4, 2048, 8, 64, 2, torch.float16),
         ]
-    ]
+    ],
 )
 def test_parallel(
     B: int,
@@ -282,7 +280,7 @@ def test_parallel(
     H: int,
     K: int,
     expand_ratio: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     V = K * expand_ratio

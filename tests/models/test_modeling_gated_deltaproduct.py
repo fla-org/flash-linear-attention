@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -23,7 +22,7 @@ from .test_modeling_utils import init_weights_recursively
             (4, 4, 1024, 4, 64, False, torch.bfloat16),
             (4, 4, 1024, 4, 128, False, torch.bfloat16),
         ]
-    ]
+    ],
 )
 def test_modeling(
     L: int,
@@ -48,7 +47,7 @@ def test_modeling(
             (1, 3, 2000, False, 2, torch.float16),
             (2, 4, 4000, True, 3, torch.float16),
         ]
-    ]
+    ],
 )
 def test_generation(
     L: int,

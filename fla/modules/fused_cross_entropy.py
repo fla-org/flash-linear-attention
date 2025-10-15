@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 
 # Copyright (c) 2023, Tri Dao.
 
-from typing import Any, Tuple
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -62,7 +61,7 @@ def cross_entropy_fwd_kernel(
     else:
         label_idx -= class_start_idx
         if label_idx >= col_block_idx * BLOCK_SIZE and label_idx < min(
-            n_cols, (col_block_idx + 1) * BLOCK_SIZE
+            n_cols, (col_block_idx + 1) * BLOCK_SIZE,
         ):
             logits_label = tl.load(logits_ptr + label_idx) * logit_scale
             if HAS_SMOOTHING:
@@ -123,7 +122,7 @@ def cross_entropy_bwd_kernel(
     else:
         dloss = 0.0
     logits = tl.load(logits_ptr + col_offsets, mask=col_offsets < n_cols, other=-float("inf")).to(
-        tl.float32
+        tl.float32,
     ) * logit_scale
     lse = tl.load(lse_ptr + row_idx)
     probs = exp(logits - lse)
@@ -190,7 +189,7 @@ def fused_cross_entropy_forward(
         logits.stride(0),  # strides
         BLOCK_SIZE=BLOCK_SIZE,  # constants
         num_warps=num_warps,
-        SPLIT=split
+        SPLIT=split,
     )
 
     if split:
@@ -207,7 +206,7 @@ def fused_cross_entropy_forward(
             lse_allgather = torch.empty(world_size, n_rows, dtype=lse.dtype, device=lse.device)
             torch.distributed.all_gather_into_tensor(lse_allgather, lse, group=process_group)
             handle_losses = torch.distributed.all_reduce(
-                losses, op=torch.distributed.ReduceOp.SUM, group=process_group, async_op=True
+                losses, op=torch.distributed.ReduceOp.SUM, group=process_group, async_op=True,
             )
             lse = torch.logsumexp(lse_allgather, dim=0)
             handle_losses.wait()
@@ -306,7 +305,7 @@ def cross_entropy_loss(
     ignore_index=-100,
     inplace_backward: bool = False,
     process_group=None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
         logits: [batch, vocab_size]

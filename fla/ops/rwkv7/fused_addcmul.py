@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 
 import logging
 import os
 import sys
-from typing import Optional
 
 import torch
 import triton
@@ -44,7 +42,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
     ],
     key=['BD'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def fused_addcmul_fwd_kernel(
@@ -104,7 +102,7 @@ def fused_addcmul_fwd_kernel(
     ],
     key=['BD'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def addcmul_bwd_kernel1(
@@ -274,7 +272,7 @@ def fused_addcmul_rwkv7(
     xk: torch.Tensor,
     xv: torch.Tensor,
     xa: torch.Tensor,
-    xg: Optional[torch.Tensor] = None
+    xg: torch.Tensor | None = None,
 ):
     if hidden_states.shape[1] == 1:
         # Special case for decode

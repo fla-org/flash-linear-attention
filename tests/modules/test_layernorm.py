@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -153,7 +152,7 @@ def test_groupnorm_linear(N: int, D: int, G: int, is_rms_norm: bool):
     if is_rms_norm:
         ref = nn.Sequential(
             GroupNormRef(num_groups=G, hidden_size=D, bias=True, is_rms_norm=True),
-            nn.Linear(D, D)
+            nn.Linear(D, D),
         ).to(device)
     else:
         ref = nn.Sequential(nn.GroupNorm(G, D), nn.Linear(D, D)).to(device)

@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 from einops import repeat
@@ -11,10 +9,10 @@ def naive_recurrent_abc(
     k: torch.Tensor,
     v: torch.Tensor,
     s: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    scale: Optional[int] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: Optional[bool] = False
+    g: torch.Tensor | None = None,
+    scale: int | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
 ) -> torch.Tensor:
     dtype = q.dtype
 
@@ -24,10 +22,10 @@ def naive_recurrent_abc(
         z = s.float().logcumsumexp(2)
         g = torch.cat((z[:, :, :1], z[:, :, :-1]), 2) - z
         s = torch.exp(s - z)
-    q, k, v, s, g = map(lambda x: x.float(), (q, k, v, s, g))
-    k, v, s, g = map(lambda x: repeat(x, 'b h t d -> b (h g) t d', g=NG), (k, v, s, g))
+    q, k, v, s, g = (x.float() for x in (q, k, v, s, g))
+    k, v, s, g = (repeat(x, 'b h t d -> b (h g) t d', g=NG) for x in (k, v, s, g))
     if initial_state is not None:
-        initial_state = tuple(map(lambda x: repeat(x, 'b h k v -> b (h g) k v', g=NG), initial_state))
+        initial_state = tuple(repeat(x, 'b h k v -> b (h g) k v', g=NG) for x in initial_state)
 
     B, H, T, K, V, M = *q.shape, v.shape[-1], s.shape[-1]
 
@@ -72,7 +70,7 @@ def naive_cumsum_abc(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    s: torch.Tensor
+    s: torch.Tensor,
 ) -> torch.Tensor:
     """
     A simple implementation of vanilla ABC that is more aligned with the descriptions in the paper.
@@ -80,7 +78,7 @@ def naive_cumsum_abc(
     """
 
     dtype = q.dtype
-    q, k, v, s = map(lambda x: x.float(), (q, k, v, s))
+    q, k, v, s = (x.float() for x in (q, k, v, s))
 
     scale = q.shape[-1] ** -0.5
     # [batch_size, n_heads, seq_len, n_slots]

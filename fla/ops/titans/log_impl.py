@@ -8,7 +8,7 @@ def cal_n_log(log_theta, log_eta, seq_len):
     """
     # create log(n)
     log_n = torch.zeros(*log_theta.shape, seq_len, dtype=log_eta.dtype).to(
-        log_eta.device
+        log_eta.device,
     )  # [batch_size, num_heads, seq_len, seq_len]
     for i in range(seq_len):
         for j in range(i + 1):
@@ -16,7 +16,7 @@ def cal_n_log(log_theta, log_eta, seq_len):
                 log_n[..., j, i] = log_theta[..., j]
             else:
                 log_n[..., j, i] = log_theta[..., j] + torch.sum(
-                    log_eta[..., j + 1: i + 1], dim=-1
+                    log_eta[..., j + 1: i + 1], dim=-1,
                 )
 
     return log_n
@@ -68,7 +68,7 @@ def cal_G_log(log_beta, log_n, seq_len):
     #             G[..., i, j] += torch.exp(log_beta[..., i] - log_beta[..., k] + log_n[..., j, k])
 
     log_G = torch.full(
-        (*log_beta.shape[:-1], seq_len, seq_len), float("-inf"), device=log_beta.device
+        (*log_beta.shape[:-1], seq_len, seq_len), float("-inf"), device=log_beta.device,
     )
     # fill in the lower triangular part
     for i in range(seq_len):  # row
@@ -144,7 +144,7 @@ def combine_params_log(theta, alpha, eta, seq_len):
 
     # combine params in log space
     log_beta, beta_T, f, f_T, g, G, m_T, n_T = _combine_params_log(
-        log_theta, log_alpha_complement, log_eta, seq_len
+        log_theta, log_alpha_complement, log_eta, seq_len,
     )
 
     # convert back to normal space

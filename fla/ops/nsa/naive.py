@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Optional
 
 import torch
 from einops import repeat
@@ -14,9 +12,9 @@ def naive_nsa(
     v: torch.Tensor,
     block_indices: torch.LongTensor,
     block_size: int = 64,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    head_first: bool = False,
 ) -> torch.Tensor:
     r"""
     Args:
@@ -51,21 +49,21 @@ def naive_nsa(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].", stacklevel=2,
         )
 
     dtype = q.dtype
     G = q.shape[2] // k.shape[2]
     BS = block_size
     k, v, block_indices = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k, v, block_indices))
-    q, k, v = map(lambda x: x.float(), (q, k, v))
+    q, k, v = (x.float() for x in (q, k, v))
 
     o = torch.zeros_like(v)
     varlen = True
@@ -73,7 +71,7 @@ def naive_nsa(
         varlen = False
         B, T = q.shape[:2]
         cu_seqlens = torch.cat([
-            block_indices.new_tensor(range(0, B*T, T)), block_indices.new_tensor([B*T])
+            block_indices.new_tensor(range(0, B*T, T)), block_indices.new_tensor([B*T]),
         ])
 
     for i in range(len(cu_seqlens) - 1):
@@ -81,7 +79,7 @@ def naive_nsa(
             q_b, k_b, v_b, i_b = q[i], k[i], v[i], block_indices[i]
         else:
             T = cu_seqlens[i+1] - cu_seqlens[i]
-            q_b, k_b, v_b, i_b = map(lambda x: x[0][cu_seqlens[i]:cu_seqlens[i+1]], (q, k, v, block_indices))
+            q_b, k_b, v_b, i_b = (x[0][cu_seqlens[i]:cu_seqlens[i+1]] for x in (q, k, v, block_indices))
 
         i_b = i_b.unsqueeze(-1) * BS + i_b.new_tensor(range(BS))
         # [T, S*BS, HQ]
@@ -92,7 +90,7 @@ def naive_nsa(
             # [S*BS, HQ]
             i_i = i_b[i_q]
             # [S*BS, HQ, -1]
-            k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, T-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
+            k_i, v_i = (x.gather(0, i_i.clamp(0, T-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])) for x in (k_b, v_b))
             # [S*BS, HQ]
             attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill(i_i > i_q, float('-inf')).softmax(0)
             if not varlen:

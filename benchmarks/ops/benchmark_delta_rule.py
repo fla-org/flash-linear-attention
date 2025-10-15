@@ -54,7 +54,7 @@ for causal in causal_vals:
             o1, _ = chunk_delta_rule(q, k, v, beta)
             o1.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
-                chunk_delta_rule, q, k, v, beta, verbose=False
+                chunk_delta_rule, q, k, v, beta, verbose=False,
             )
             time_f_b[config, "chunk_delta_rule"] = f_b
 
@@ -66,10 +66,9 @@ for causal in causal_vals:
 #            )
 #            time_f_b[config, "fused_chunk_delta_rule"] = f_b
 
-            print(f"### causal={causal}, headdim={headdim}, B={B}, seqlen={seqlen} ###")
-            for method in methods:
+            for _method in methods:
                 # time_f_b[config, method] = time_f[config, method] + time_b[config, method]
-                print(f"{method:>50} fwd + bwd:\t {time_f_b[config, method]*1000:>6.4f} ms ")
+                pass
 
                 # speed_f[config, method] = efficiency(
                 #     flops(B, seqlen, headdim, H, causal, mode="fwd"),

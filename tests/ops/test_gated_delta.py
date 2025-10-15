@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -22,7 +20,7 @@ def recurrent_gated_delta_rule_ref(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
 ):
-    q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g])
+    q, k, v, beta, g = (x.transpose(1, 2).contiguous().to(torch.float32) for x in [q, k, v, beta, g])
     B, H, T, K, V = *k.shape, v.shape[-1]
     o = torch.zeros(B, H, T, V).to(v)
     h = torch.zeros(B, H, K, V).to(v)
@@ -62,7 +60,7 @@ def chunk_gated_delta_rule_ref(
     if scale is None:
         scale = 1 / (q.shape[-1] ** 0.5)
     # Calculate padding needed to make T a multiple of BT
-    q, k, v, beta, g = map(lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, beta, g])
+    q, k, v, beta, g = (x.transpose(1, 2).contiguous().to(torch.float32) for x in [q, k, v, beta, g])
 
     T = q.shape[-2]
     pad_len = (BT - (T % BT)) % BT
@@ -73,7 +71,7 @@ def chunk_gated_delta_rule_ref(
         v = F.pad(v, (0, 0, 0, pad_len))
         beta = F.pad(beta, (0, pad_len))
         g = F.pad(g, (0, pad_len))
-    q, k, v, beta, g = map(lambda x: x.to(torch.float32), [q, k, v, beta, g])
+    q, k, v, beta, g = (x.to(torch.float32) for x in [q, k, v, beta, g])
     decay = g
     chunk_size = BT
     b, h, l, d_k = q.shape
@@ -84,10 +82,7 @@ def chunk_gated_delta_rule_ref(
     assert l % chunk_size == 0
     # note that diagonal is masked.
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
-    q, k, v, k_beta, decay = map(
-        lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size),
-        [q, k, v, k_beta, decay.unsqueeze(-1)]
-    )
+    q, k, v, k_beta, decay = (rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size) for x in [q, k, v, k_beta, decay.unsqueeze(-1)])
     decay = decay.squeeze(-1).cumsum(-1)
     decay_exp = decay.exp()[..., None]
     L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
@@ -136,7 +131,7 @@ def chunk_gated_delta_rule_ref(
             (2, 1024, 4, 4, 128, 1, 0.1, torch.float16),
             (2, 1024, 4, 8, 128, 1, 10, torch.float16),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
@@ -156,7 +151,7 @@ def test_fused_recurrent(
     g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32))
     g = g / gate_logit_normalizer
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
-    q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
+    q, k, v, beta, g, h0 = (x.to(device).requires_grad_() for x in (q, k, v, beta, g, h0))
     ref, ref_ht = recurrent_gated_delta_rule_ref(
         q=F.normalize(repeat(q.clone(), 'b t h d -> b t (h g) d', g=HV // H), p=2, dim=-1).to(dtype),
         k=F.normalize(repeat(k.clone(), 'b t h d -> b t (h g) d', g=HV // H), p=2, dim=-1).to(dtype),
@@ -187,7 +182,7 @@ def test_fused_recurrent(
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test)
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
             (1, 63, 1, 64, 1, 1, 0, False, torch.float16),
@@ -197,9 +192,9 @@ def test_fused_recurrent(
             (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16),
             (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16),
             (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16),
-            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16)
+            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -224,7 +219,7 @@ def test_chunk(
     g = g / gate_logit_normalizer
     g = g * (torch.rand_like(g) > mask_p)
     h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
-    q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
+    q, k, v, beta, g, h0 = (x.to(device).requires_grad_(True) for x in (q, k, v, beta, g, h0))
 
     tri, tri_ht = chunk_gated_delta_rule(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
@@ -276,17 +271,17 @@ def test_chunk(
             (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
             (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
     mask_p: float,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
@@ -307,7 +302,7 @@ def test_chunk_varlen(
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=dtype)
 
-    q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
+    q, k, v, beta, g, h0 = (x.to(device).requires_grad_() for x in (q, k, v, beta, g, h0))
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 

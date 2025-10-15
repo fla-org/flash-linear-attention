@@ -190,7 +190,7 @@ jobs:
       - name: Get changed files
         if: steps.check_skip.outputs.skip_tests == 'false'
         id: changed-files
-        uses: tj-actions/changed-files@v46.0.5
+        uses: tj-actions/changed-files@v47.0.0
 
       # =================================================================
       # STAGE 2: OPS TESTS
@@ -301,7 +301,7 @@ jobs:
       - name: Get changed files
         if: steps.check_skip.outputs.skip_tests == 'false'
         id: changed-files
-        uses: tj-actions/changed-files@v46.0.5
+        uses: tj-actions/changed-files@v47.0.0
 
       - name: Install/Update Dependencies
         if: steps.check_skip.outputs.skip_tests == 'false'

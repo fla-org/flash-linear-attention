@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # "Hierarchically Gated Recurrent Neural Network for Sequence Modeling" [https://arxiv.org/abs/2311.04823]
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -27,13 +26,13 @@ class HGRNAttention(nn.Module):
         self,
         mode: str = 'chunk',
         hidden_size: int = 1024,
-        expand_ratio: Optional[int] = 1,
+        expand_ratio: int | None = 1,
         use_short_conv: bool = False,
         conv_size: int = 4,
         conv_bias: bool = False,
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-5,
-        layer_idx: int = None
+        layer_idx: int = None,
     ) -> HGRNAttention:
         super().__init__()
 
@@ -72,20 +71,20 @@ class HGRNAttention(nn.Module):
         self.g_norm = FusedRMSNormGated(
             hidden_size=self.input_dim,
             elementwise_affine=elementwise_affine,
-            eps=norm_eps
+            eps=norm_eps,
         )
         self.o_proj = nn.Linear(self.input_dim, hidden_size, bias=False)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        lower_bound: Optional[torch.Tensor] = None,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        lower_bound: torch.Tensor | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -100,7 +99,7 @@ class HGRNAttention(nn.Module):
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
         if self.use_short_conv:
             conv_state_i, conv_state_f = None, None
             if last_state is not None:
@@ -111,14 +110,14 @@ class HGRNAttention(nn.Module):
                 mask=conv_mask,
                 cache=conv_state_i,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             f, conv_state_f = self.f_conv1d(
                 x=self.f_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_f,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
         else:
             i = self.i_proj(hidden_states)
@@ -150,7 +149,7 @@ class HGRNAttention(nn.Module):
                 g=f,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
@@ -160,7 +159,7 @@ class HGRNAttention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_i, conv_state_f) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=i.shape[2]
+                offset=i.shape[2],
             )
 
         o = self.g_norm(o, self.g_proj(hidden_states))

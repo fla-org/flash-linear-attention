@@ -11,11 +11,10 @@ def get_xpu_memory_usage():
             ["xpu-smi", "stats", "-d", "0"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         return extract_gpu_memory_used(result.stdout)
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to run xpu-smi: {e}")
+    except subprocess.CalledProcessError:
         return None
 
 
@@ -32,7 +31,6 @@ def extract_gpu_memory_used(output):
     if value_str:
         return int(value_str)
     else:
-        print("Could not find GPU memory usage in xpu-smi output.")
         return None
 
 
@@ -40,7 +38,7 @@ def get_nvgpu_memory_usage():
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
         capture_output=True,
-        text=True
+        text=True,
     )
     memory_used = int(result.stdout.strip())
     return memory_used
@@ -65,17 +63,13 @@ def check_gpu_memory():
         if memory_used_mib is None:
             exit(1)
 
-        print(f"Current GPU memory usage: {memory_used_mib} MiB")
 
         if memory_used_mib > max_memory_mib:
-            print(f"GPU memory usage exceeds {max_memory_mib} MiB. Sleeping for {sleep_time} seconds...")
             time.sleep(sleep_time)
         else:
-            print("GPU memory usage is within limits.")
             exit(0)
 
         if time.time() - start_time > max_wait_time:
-            print("GPU memory usage remains high for 10 minutes. Skipping this action.")
             exit(1)
 
 

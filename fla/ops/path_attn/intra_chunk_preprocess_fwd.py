@@ -165,6 +165,6 @@ def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_s
         BK=triton.next_power_of_2(K),
         BV=triton.next_power_of_2(V),
         BT=BT,
-        num_warps=4 if BT == 64 else 2
+        num_warps=4 if BT == 64 else 2,
     )
     return q_new, k_new, w2, o, L, M

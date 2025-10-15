@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import os
 
@@ -24,22 +23,22 @@ from fla.utils import assert_close, device, is_nvidia_hopper
 @pytest.mark.parametrize("xprevdim", [2, 3])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled",
 )
 def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdim):
     torch.manual_seed(42)
     torch._dynamo.config.cache_size_limit = 512
 
     x = torch.randn(
-        B, T, n_embd, device=device, dtype=dtype, requires_grad=True
+        B, T, n_embd, device=device, dtype=dtype, requires_grad=True,
     )
     if xprevdim == 3:
         x_prev = torch.randn(
-            B, 1, n_embd, device=device, dtype=dtype, requires_grad=True
+            B, 1, n_embd, device=device, dtype=dtype, requires_grad=True,
         )
     else:
         x_prev = torch.randn(
-            B, n_embd, device=device, dtype=dtype, requires_grad=True
+            B, n_embd, device=device, dtype=dtype, requires_grad=True,
         )
     x_k = torch.randn(1, 1, n_embd, device=device, dtype=dtype, requires_grad=True)
     K_ = torch.randn(n_embd, dim_ffn, device=device, dtype=dtype, requires_grad=True)
@@ -80,7 +79,7 @@ def test_channel_mixing_gradients(B, T, n_embd, dim_ffn, dtype, inplace, xprevdi
 @pytest.mark.parametrize('dtype', [torch.float32])
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '0',
-    reason='Skipping test because TEST_CHUNK_VARLEN is enabled'
+    reason='Skipping test because TEST_CHUNK_VARLEN is enabled',
 )
 def test_fused_mul_recurrent_fwd(
     B: int,
@@ -103,8 +102,7 @@ def test_fused_mul_recurrent_fwd(
     a_scale = torch.empty(B, T, H, D, device=device).uniform_(0, 0.1).to(dtype=dtype)
     b = (kk * a_scale).requires_grad_(False)  # kk*a
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
-    r, k, v, a, a_scale, b, w, h0 = map(lambda x: x.to(device).requires_grad_(False),
-                                        (r, k, v, a, a_scale, b, w, h0))
+    r, k, v, a, a_scale, b, w, h0 = (x.to(device).requires_grad_(False) for x in (r, k, v, a, a_scale, b, w, h0))
     ref, ref_ht = fused_recurrent_dplr_delta_rule(
         q=r.clone(),
         k=k.clone(),
@@ -140,7 +138,7 @@ def test_fused_mul_recurrent_fwd(
 @pytest.mark.parametrize("use_g", [True, False])
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled",
 )
 def test_fused_rwkv7_addcmul(
     B: int,
@@ -148,7 +146,7 @@ def test_fused_rwkv7_addcmul(
     H: int,
     D: int,
     dtype: torch.dtype,
-    use_g: bool
+    use_g: bool,
 ):
     if T == 128 * 1024 and not is_nvidia_hopper:
         pytest.skip("Skipping test for T=131072 on non-Hopper GPUs")

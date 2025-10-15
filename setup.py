@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import ast
 import os
@@ -35,18 +34,18 @@ setup(
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: MIT License',
         'Operating System :: OS Independent',
-        'Topic :: Scientific/Engineering :: Artificial Intelligence'
+        'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     python_requires='>=3.10',
     install_requires=[
         'torch>=2.5',
         'transformers>=4.53.0',
         'datasets>=3.3.0',
-        'einops'
+        'einops',
     ],
     extras_require={
         'conv1d': ['causal-conv1d>=1.4.0'],
         'benchmark': ['matplotlib'],
         'test': ['pytest'],
-    }
+    },
 )

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # Implementations of BitLinear layer with fused LayerNorm and quantized Linear layer.
@@ -63,7 +62,7 @@ def weight_quant(w):
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def layer_norm_fwd_kernel_quant(
@@ -86,7 +85,7 @@ def layer_norm_fwd_kernel_quant(
     HAS_RESIDUAL: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
-    HAS_BIAS: tl.constexpr
+    HAS_BIAS: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
@@ -144,7 +143,7 @@ def layer_norm_fwd_quant(
     residual: torch.Tensor = None,
     out_dtype: torch.dtype = None,
     residual_dtype: torch.dtype = None,
-    is_rms_norm: bool = False
+    is_rms_norm: bool = False,
 ):
     if residual is not None:
         residual_dtype = residual.dtype
@@ -190,7 +189,7 @@ def layer_norm_fwd_quant(
 
 
 @triton.heuristics({
-    "RECOMPUTE_OUTPUT": lambda args: args["Y"] is not None
+    "RECOMPUTE_OUTPUT": lambda args: args["Y"] is not None,
 })
 @triton.autotune(
     configs=[
@@ -198,7 +197,7 @@ def layer_norm_fwd_quant(
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def layer_norm_bwd_kernel(
@@ -456,7 +455,7 @@ class LayerNormLinearQuantFn(torch.autograd.Function):
             ctx.has_residual,
             ctx.is_rms_norm,
             x_dtype=ctx.x_dtype,
-            recompute_output=True
+            recompute_output=True,
         )
         dlinear_weight = torch.einsum("bo,bi->oi", dout, y)
         return (
@@ -508,7 +507,7 @@ def rms_norm_linear_quant(
     residual: torch.Tensor = None,
     eps: float = 1e-5,
     prenorm: bool = False,
-    residual_in_fp32: bool = False
+    residual_in_fp32: bool = False,
 ):
     return layer_norm_linear_quant_fn(
         x=x,
@@ -520,7 +519,7 @@ def rms_norm_linear_quant(
         eps=eps,
         prenorm=prenorm,
         residual_in_fp32=residual_in_fp32,
-        is_rms_norm=True
+        is_rms_norm=True,
     )
 
 
@@ -546,7 +545,7 @@ def bit_linear(x, weight, bias=None, norm_weight=None, norm_bias=None, eps=1e-8)
         norm_bias,
         weight,
         bias,
-        is_rms_norm=True
+        is_rms_norm=True,
     )
 
 
@@ -561,7 +560,7 @@ class BitLinear(nn.Linear):
         in_features: int,
         out_features: int,
         bias: bool = False,
-        norm_eps: float = 1e-8
+        norm_eps: float = 1e-8,
     ):
         """
         Initializes the BitLinear layer.
@@ -572,7 +571,7 @@ class BitLinear(nn.Linear):
             bias: If set to False, the layer will not learn an additive bias. Default: True.
         """
         # Initialize the superclass nn.Linear with the given parameters
-        super(BitLinear, self).__init__(in_features, out_features, bias=bias)
+        super().__init__(in_features, out_features, bias=bias)
 
         self.norm = RMSNorm(in_features, eps=norm_eps)
 
@@ -621,7 +620,7 @@ class FusedBitLinear(BitLinear):
             bias: If set to False, the layer will not learn an additive bias. Default: True.
         """
         # Initialize the superclass nn.Linear with the given parameters
-        super(FusedBitLinear, self).__init__(in_features, out_features, bias=bias)
+        super().__init__(in_features, out_features, bias=bias)
 
     def forward(self, x):
         return layer_norm_linear_quant_fn(
@@ -630,5 +629,5 @@ class FusedBitLinear(BitLinear):
             self.norm.bias,
             self.weight,
             self.bias,
-            is_rms_norm=True
+            is_rms_norm=True,
         )

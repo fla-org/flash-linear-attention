@@ -1,4 +1,3 @@
-from typing import List, Optional
 
 import pytest
 import torch
@@ -14,7 +13,7 @@ test_cu_seqlens_list = [
     [0, 4, 7, 40, 128],
     [0, 10, 20, 64],
     [0, 32],
-    [0, 1, 3, 4]
+    [0, 1, 3, 4],
 ]
 test_dtype_list = [torch.float]
 
@@ -53,7 +52,7 @@ def test_token_shift(B, T, H, cu_seqlens_val, dtype):
 def _split_for_passing(
     x: torch.Tensor,
     cu_seqlens,
-    split_at: int = 1
+    split_at: int = 1,
 ):
     assert x.size(0) == 1
     assert 0 < split_at < len(cu_seqlens) - 1
@@ -75,7 +74,7 @@ def _check_passing_vs_whole(
     B: int,
     T: int,
     H: int,
-    cu_seqlens: Optional[List[int]],
+    cu_seqlens: list[int] | None,
     dtype: torch.dtype,
     split_at: int = 1,
 ):
@@ -126,7 +125,7 @@ def _check_passing_vs_whole(
             (2, 512, 1024, None, 1),
             (1, 8192, 1024, None, 2),
         ]
-    ]
+    ],
 )
 def test_all_with_and_without_varlen(B, T, H, cu_seqlens, split_at):
     dtype = torch.float

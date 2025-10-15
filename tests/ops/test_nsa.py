@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -23,9 +21,9 @@ from fla.utils import assert_close, device
             (3, 111, 1, 32, 100, 16, 32, 1.0, torch.float16),
             (3, 1024, 2, 32, 60, 16, 32, 0.1, torch.float16),
             (3, 1024, 2, 32, 128, 16, 32, 0.1, torch.float16),
-            (4, 2048, 2, 32, 64, 16, 32, 0.1, torch.float16)
+            (4, 2048, 2, 32, 64, 16, 32, 0.1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_parallel(
     B: int,
@@ -81,11 +79,11 @@ def test_parallel(
             (2, 32, 64, 16, 32, [0, 256, 500, 1000], torch.float16),
             (2, 32, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_parallel_varlen(
     H: int,
@@ -93,7 +91,7 @@ def test_parallel_varlen(
     D: int,
     S: int,
     block_size: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -124,7 +122,7 @@ def test_parallel_varlen(
         v=v,
         block_indices=block_indices,
         block_size=block_size,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -137,7 +135,7 @@ def test_parallel_varlen(
         v=v,
         block_indices=block_indices,
         block_size=block_size,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None

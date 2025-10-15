@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -14,7 +12,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -22,7 +20,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
         for num_warps in [4, 8]
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_fwd_kernel(
@@ -52,7 +50,7 @@ def fused_recurrent_fwd_kernel(
     USE_GV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -127,7 +125,7 @@ def fused_recurrent_fwd_kernel(
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -135,7 +133,7 @@ def fused_recurrent_fwd_kernel(
         for num_warps in [4]
     ],
     key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['B', 'T'])
 def fused_recurrent_bwd_kernel(
@@ -339,15 +337,15 @@ def fused_recurrent_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    gk: Optional[torch.Tensor] = None,
-    gv: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    gv: torch.Tensor | None = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -393,17 +391,17 @@ def fused_recurrent_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    gk: Optional[torch.Tensor] = None,
-    gv: Optional[torch.Tensor] = None,
-    o: Optional[torch.Tensor] = None,
-    do: Optional[torch.Tensor] = None,
-    dht: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    gv: torch.Tensor | None = None,
+    o: torch.Tensor | None = None,
+    do: torch.Tensor | None = None,
+    dht: torch.Tensor | None = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -483,15 +481,15 @@ class FusedRecurrentFunction(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        g: Optional[torch.Tensor] = None,
-        g_gamma: Optional[torch.Tensor] = None,
-        gk: Optional[torch.Tensor] = None,
-        gv: Optional[torch.Tensor] = None,
-        scale: Optional[float] = None,
-        initial_state: Optional[torch.Tensor] = None,
+        g: torch.Tensor | None = None,
+        g_gamma: torch.Tensor | None = None,
+        gk: torch.Tensor | None = None,
+        gv: torch.Tensor | None = None,
+        scale: float | None = None,
+        initial_state: torch.Tensor | None = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         o, ht = fused_recurrent_fwd(
             q=q,
@@ -541,15 +539,15 @@ def fused_recurrent(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    gk: Optional[torch.Tensor] = None,
-    gv: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    gv: torch.Tensor | None = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     if scale is None:
         scale = k.shape[-1] ** -0.5

@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -14,7 +12,7 @@ from fla.utils import autotune_cache_kwargs, input_guard
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -23,7 +21,7 @@ from fla.utils import autotune_cache_kwargs, input_guard
         for num_warps in [1, 2, 4, 8]
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_hgrn_fwd_kernel(
@@ -38,7 +36,7 @@ def fused_recurrent_hgrn_fwd_kernel(
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_d, i_n = tl.program_id(0), tl.program_id(1)
     if IS_VARLEN:
@@ -76,7 +74,7 @@ def fused_recurrent_hgrn_fwd_kernel(
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -85,7 +83,7 @@ def fused_recurrent_hgrn_fwd_kernel(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_hgrn_bwd_kernel(
@@ -103,7 +101,7 @@ def fused_recurrent_hgrn_bwd_kernel(
     BD: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_d, i_n = tl.program_id(0), tl.program_id(1)
     if IS_VARLEN:
@@ -159,8 +157,8 @@ def fused_recurrent_hgrn_fwd(
     g: torch.Tensor,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, D = x.shape
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
@@ -176,7 +174,7 @@ def fused_recurrent_hgrn_fwd(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         T=T,
-        D=D
+        D=D,
     )
     return o, final_state
 
@@ -187,8 +185,8 @@ def fused_recurrent_hgrn_bwd(
     do: torch.Tensor,
     dht: torch.Tensor = None,
     initial_state: torch.Tensor = None,
-    cu_seqlens: Optional[torch.LongTensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, D = do.shape
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
 
@@ -207,7 +205,7 @@ def fused_recurrent_hgrn_bwd(
         dh0=dh0,
         cu_seqlens=cu_seqlens,
         T=T,
-        D=D
+        D=D,
     )
     return dx, dg, dh0
 
@@ -222,14 +220,14 @@ class FusedRecurrentHGRNFunction(torch.autograd.Function):
         g: torch.Tensor,
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         o, ht = fused_recurrent_hgrn_fwd(
             x=x,
             g=g,
             initial_state=initial_state,
             output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(g, o, initial_state)
         ctx.cu_seqlens = cu_seqlens
@@ -247,7 +245,7 @@ class FusedRecurrentHGRNFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             initial_state=initial_state,
-            cu_seqlens=cu_seqlens
+            cu_seqlens=cu_seqlens,
         )
         return dx, dg, dh0, None, None
 
@@ -258,8 +256,8 @@ def fused_recurrent_hgrn(
     g: torch.Tensor,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         x (torch.Tensor):
@@ -306,5 +304,5 @@ def fused_recurrent_hgrn(
         g,
         initial_state,
         output_final_state,
-        cu_seqlens
+        cu_seqlens,
     )

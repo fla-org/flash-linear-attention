@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -13,7 +11,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -22,7 +20,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_bwd_kernel(
@@ -46,7 +44,7 @@ def prepare_wy_repr_bwd_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -131,7 +129,7 @@ def prepare_wy_repr_bwd_kernel(
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_GK': lambda args: args['gk'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -140,7 +138,7 @@ def prepare_wy_repr_bwd_kernel(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def recompute_w_u_fwd_kernel(
@@ -163,7 +161,7 @@ def recompute_w_u_fwd_kernel(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -210,10 +208,10 @@ def recompute_w_u_fwd(
     v: torch.Tensor,
     beta: torch.Tensor,
     A: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    gk: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    g: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
     BK = 64
@@ -254,8 +252,8 @@ def prepare_wy_repr_bwd(
     A: torch.Tensor,
     dw: torch.Tensor,
     du: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = 64
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None

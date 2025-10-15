@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -15,7 +13,7 @@ from fla.utils import (
     autotune_cache_kwargs,
     check_shared_mem,
     input_guard,
-    is_nvidia_hopper
+    is_nvidia_hopper,
 )
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -37,7 +35,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_fwd_kernel(
@@ -171,7 +169,7 @@ def fused_chunk_fwd_kernel(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_bwd_kernel(
@@ -315,7 +313,7 @@ def fused_chunk_bwd_kernel(
         b_dh += tl.load(p_dh, boundary_check=(0, 1)).to(tl.float32)
 
     if USE_G:
-        b_dg = tl.zeros([BT,], dtype=tl.float32)
+        b_dg = tl.zeros([BT], dtype=tl.float32)
         b_dg_last = tl.sum(tl.trans(b_h) * b_dh)
 
     # sync threads
@@ -411,13 +409,13 @@ def fused_chunk_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
@@ -462,8 +460,8 @@ def fused_chunk_bwd(
     scale,
     initial_state: torch.Tensor,
     dht: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -528,7 +526,7 @@ class FusedChunkFunction(torch.autograd.Function):
         scale,
         initial_state,
         output_final_state,
-        cu_seqlens
+        cu_seqlens,
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
         g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
@@ -542,7 +540,7 @@ class FusedChunkFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
 
         ctx.save_for_backward(q, k, v, g, g_gamma, initial_state)
@@ -568,7 +566,7 @@ class FusedChunkFunction(torch.autograd.Function):
             initial_state=initial_state,
             dht=dht,
             cu_seqlens=ctx.cu_seqlens,
-            chunk_size=ctx.chunk_size
+            chunk_size=ctx.chunk_size,
         )
         if g is not None:
             dg = dg.to(g)
@@ -579,13 +577,13 @@ def fused_chunk(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -633,6 +631,6 @@ def fused_chunk(
         scale,
         initial_state,
         output_final_state,
-        cu_seqlens
+        cu_seqlens,
     )
     return o, final_state

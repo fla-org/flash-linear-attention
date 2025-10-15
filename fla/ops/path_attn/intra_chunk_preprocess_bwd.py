@@ -18,7 +18,7 @@ def intra_chunk_preprocess_bwd_kernel(
     offsets, indices,
     HQ: tl.constexpr, G: tl.constexpr, H: tl.constexpr,
     K: tl.constexpr, BT: tl.constexpr, BK: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hq = i_nh // HQ, i_nh % HQ
@@ -136,6 +136,6 @@ def intra_chunk_preprocess_bwd_fn(q, k, w, w2, beta,
         offsets=cu_seqlens, indices=indices,
         HQ=HQ, G=G, H=H,
         K=K, BT=BT, BK=triton.next_power_of_2(K),
-        num_stages=3 if check_shared_mem('hopper') else 1
+        num_stages=3 if check_shared_mem('hopper') else 1,
     )
     return dq_new, dk_new, dbeta, dw

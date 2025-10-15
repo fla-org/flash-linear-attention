@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 
@@ -24,7 +22,7 @@ def chunk_comba_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     g0, g = chunk_comba_cumsum_scalar_fwd(g, chunk_size=64, cu_seqlens=cu_seqlens)
     # obtain WY representation. u is actually the new v.
@@ -35,12 +33,12 @@ def chunk_comba_fwd(
         g0=g0,
         g=g,
         cu_seqlens=cu_seqlens,
-        output_dtype=torch.float32
+        output_dtype=torch.float32,
     )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
-        output_dtype=k.dtype
+        output_dtype=k.dtype,
     )
     w, u = recompute_w_u_fwd(
         k=p,
@@ -84,7 +82,7 @@ def chunk_comba_bwd(
     initial_state: torch.Tensor,
     do: torch.Tensor,
     dht: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     w, u = recompute_w_u_fwd(
         k=p,
@@ -174,7 +172,7 @@ class ChunkCombaFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         use_qk_l2norm_in_kernel: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -206,7 +204,7 @@ class ChunkCombaFunction(torch.autograd.Function):
     def backward(
         ctx,
         do: torch.Tensor,
-        dht: torch.Tensor
+        dht: torch.Tensor,
     ):
         q, q_rstd, k, k_rstd, p, p_rstd, v, g0, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
         dq, dk, dv, dp, db, dg, dh0 = chunk_comba_bwd(
@@ -243,7 +241,7 @@ def chunk_comba(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     r"""
     Args:
@@ -317,12 +315,12 @@ def chunk_comba(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5

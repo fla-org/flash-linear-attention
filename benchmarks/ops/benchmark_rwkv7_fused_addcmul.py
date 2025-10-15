@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 
 import torch
@@ -27,10 +26,10 @@ def torch_compile_addcmul(hidden_states, delta, x_r, x_w, x_k, x_v, x_a, x_g):
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         line_vals=['addcmul_torch', 'addcmul_triton', 'compile',
-                   'addcmul_torch_bwd', 'addcmul_triton_bwd', 'compile_bwd',],
+                   'addcmul_torch_bwd', 'addcmul_triton_bwd', 'compile_bwd'],
         # label name for the lines
         line_names=['torch', 'triton', 'compile',
-                    'torch_bwd', 'triton_bwd', 'compile_bwd',],
+                    'torch_bwd', 'triton_bwd', 'compile_bwd'],
         # line styles
         styles=[
             ('green', '-'),
@@ -44,7 +43,7 @@ def torch_compile_addcmul(hidden_states, delta, x_r, x_w, x_k, x_v, x_a, x_g):
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, provider):
     from fla.utils import device

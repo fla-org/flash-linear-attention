@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 import triton
@@ -63,7 +62,7 @@ def gate_output_correction_backward_ref(grad_output, o, r, k, r_k, v, g):
         for BT in [2, 4, 8]
     ],
     key=['num_heads', 'head_dim', 'BLOCK_SIZE_D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def gate_output_correction_fwd_kernel(
@@ -115,7 +114,7 @@ def gate_output_correction_fwd_kernel(
         for BT in [2, 4, 8]
     ],
     key=['num_heads', 'head_dim', 'BLOCK_SIZE_D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def gate_output_correction_bwd_kernel(
@@ -231,7 +230,7 @@ class GateOutputCorrection(torch.autograd.Function):
                 v.stride(0), v.stride(1), v.stride(2),
                 r_k.stride(0),
                 T_SIZE, T_OFFSET,
-                num_heads, head_dim, BLOCK_SIZE_D=triton.next_power_of_2(head_dim)
+                num_heads, head_dim, BLOCK_SIZE_D=triton.next_power_of_2(head_dim),
             )
         return output
 

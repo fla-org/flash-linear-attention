@@ -39,7 +39,7 @@ def parallel_path_bwd_dkv_kernel(
     S: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GATE: tl.constexpr,
-    NUM_BLOCKS: tl.constexpr
+    NUM_BLOCKS: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -81,10 +81,10 @@ def parallel_path_bwd_dkv_kernel(
     b_v = tl.load(p_v, boundary_check=(0, 1))
 
     if USE_GATE:
-        b_g_cumsum_k = tl.zeros([BT,], dtype=tl.float32)
+        b_g_cumsum_k = tl.zeros([BT], dtype=tl.float32)
         p_g_cumsum_k = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
         b_g_cumsum_k += tl.load(p_g_cumsum_k, boundary_check=(0, ))
-        b_dg_cumsum_k = tl.zeros([BT,], dtype=tl.float32)
+        b_dg_cumsum_k = tl.zeros([BT], dtype=tl.float32)
     else:
         b_g_cumsum_k = None
         b_dg_cumsum_k = None
@@ -130,7 +130,7 @@ def parallel_path_bwd_dkv_kernel(
         dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ * K + tl.arange(0, BK)[None, :],
         b_dv,
         mask=mask[:, None],
-        sem='relaxed'
+        sem='relaxed',
     )
     if USE_GATE:
         tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_k, mask=mask, sem='relaxed')
@@ -140,7 +140,7 @@ def parallel_path_bwd_dkv_fn(
     q, k, v, g_cumsum, do, dv, dg_cumsum,
     hc_whole, scale, L, D,
     cu_seqlens,
-    S, BT, BS
+    S, BT, BS,
 ):
     B, T, num_blocks, HQ, K = q.shape
     V = v.shape[-1]
@@ -184,6 +184,6 @@ def parallel_path_bwd_dkv_fn(
         BK=triton.next_power_of_2(K),
         BV=triton.next_power_of_2(V),
         num_warps=8 if (BT == 128 and K == 128) else 4,
-        NUM_BLOCKS=num_blocks
+        NUM_BLOCKS=num_blocks,
     )
     return dk, dv, dg_cumsum

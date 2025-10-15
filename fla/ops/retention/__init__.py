@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from .chunk import chunk_retention
 from .fused_chunk import fused_chunk_retention
@@ -9,5 +8,5 @@ __all__ = [
     'chunk_retention',
     'fused_chunk_retention',
     'parallel_retention',
-    'fused_recurrent_retention'
+    'fused_recurrent_retention',
 ]

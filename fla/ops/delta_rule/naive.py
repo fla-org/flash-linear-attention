@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 from einops import rearrange
@@ -7,7 +6,7 @@ from einops import rearrange
 def delta_rule_recurrence(q, k, v, beta, initial_state=None, output_final_state=True):
     orig_dtype = q.dtype
     b, h, l, d_k = q.shape
-    q, k, v, beta = map(lambda x: x.float(), [q, k, v, beta])
+    q, k, v, beta = (x.float() for x in [q, k, v, beta])
     d_v = v.shape[-1]
     o = torch.zeros_like(v)
     S = torch.zeros(b, h, d_k, d_v).to(v)
@@ -43,7 +42,7 @@ def delta_rule_chunkwise(q, k, v, beta, chunk_size=32):
 
     # compute (I - tri(diag(beta) KK^T))^{-1}
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
-    q, k, v, k_beta = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size), [q, k, v, k_beta])
+    q, k, v, k_beta = (rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size) for x in [q, k, v, k_beta])
     attn = -(k_beta @ k.transpose(-1, -2)).masked_fill(mask, 0)
     for i in range(1, chunk_size):
         attn[..., i, :i] = attn[..., i, :i] + (attn[..., i, :, None].clone() * attn[..., :, :i].clone()).sum(-2)
@@ -72,7 +71,7 @@ def delta_rule_parallel(q, k, v, beta, BM=128, BN=32):
     v = v * beta[..., None]
     k_beta = k * beta[..., None]
     # compute (I - tri(diag(beta) KK^T))^{-1}
-    q, k, v, k_beta = map(lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=BN), [q, k, v, k_beta])
+    q, k, v, k_beta = (rearrange(x, 'b h (n c) d -> b h n c d', c=BN) for x in [q, k, v, k_beta])
     mask = torch.triu(torch.ones(BN, BN, dtype=torch.bool, device=q.device), diagonal=0)
     T = -(k_beta @ k.transpose(-1, -2)).masked_fill(mask, 0)
     for i in range(1, BN):
@@ -91,7 +90,7 @@ def delta_rule_parallel(q, k, v, beta, BM=128, BN=32):
 
     A = torch.zeros(b, h, l, l, device=q.device)
 
-    q, k, v, k_beta, o_intra = map(lambda x: rearrange(x, 'b h n c d -> b h (n c) d'), [q, k, v, k_beta, o_intra])
+    q, k, v, k_beta, o_intra = (rearrange(x, 'b h n c d -> b h (n c) d') for x in [q, k, v, k_beta, o_intra])
     o = torch.empty_like(v)
     for i in range(0, l, BM):
         q_i = q[:, :, i:i+BM]

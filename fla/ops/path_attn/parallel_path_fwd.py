@@ -92,7 +92,7 @@ def parallel_path_fwd_kernel(
             b_s = b_s + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
         b_s = tl.where(m_s[:, None], b_s * sm_scale, float("-inf"))
         b_m_new = tl.maximum(b_m, tl.max(b_s, 1))
-        alpha = tl.math.exp2((b_m - b_m_new))
+        alpha = tl.math.exp2(b_m - b_m_new)
         b_s = tl.math.exp2(b_s - b_m_new[:, None])
         b_o *= alpha[:, None]
         b_l = b_l * alpha + tl.sum(b_s, 1)
@@ -123,7 +123,7 @@ def parallel_path_fwd_kernel(
             b_s = b_s + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
         b_s = b_s * sm_scale
         b_m_new = tl.maximum(b_m, tl.max(b_s, 1))
-        alpha = tl.math.exp2((b_m - b_m_new))
+        alpha = tl.math.exp2(b_m - b_m_new)
         b_s = tl.math.exp2(b_s - b_m_new[:, None])
         b_o *= alpha[:, None]
         b_l = b_l * alpha + tl.sum(b_s, 1)
@@ -190,6 +190,6 @@ def parallel_path_fwd_fn(
         H=H,
         BS=BS,
         BT=BT,
-        num_warps=8 if (BT == 128 and K == 128) else 4
+        num_warps=8 if (BT == 128 and K == 128) else 4,
     )
     return o_new, L_new

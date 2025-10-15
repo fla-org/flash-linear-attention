@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -23,13 +21,13 @@ from fla.utils import assert_close, device
             (2, 1024, 1000, torch.float),
             (4, 2048, 2048, torch.float),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
     T: int,
     D: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -71,12 +69,12 @@ def test_fused_recurrent(
             (1000, [0, 15, 100, 300, 1200, 2000], torch.float),
             (2048, [0, 200, 512, 1200, 2048], torch.float16),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent_varlen(
     D: int,
-    cu_seqlens: List[int],
-    dtype: torch.dtype
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -99,7 +97,7 @@ def test_fused_recurrent_varlen(
             x[:, cu_seqlens[i]:cu_seqlens[i+1]],
             g[:, cu_seqlens[i]:cu_seqlens[i+1]],
             h0[i:i+1],
-            output_final_state=True
+            output_final_state=True,
         )
         refs.append(ref)
         ref_hts.append(ref_ht)
@@ -133,13 +131,13 @@ def test_fused_recurrent_varlen(
             (2, 1000, 1024, torch.float16),
             (4, 2048, 2048, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
     T: int,
     D: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'

@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
 
 # Code adapted from
 # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_linear_cross_entropy.py
 
 from functools import partial
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -44,7 +42,7 @@ def cross_entropy_kernel(
     logit_scale: tl.constexpr,
     reduction: tl.constexpr,
     V: tl.constexpr,
-    BV: tl.constexpr
+    BV: tl.constexpr,
 ):
     """
     This kernel computes both cross entropy loss and the gradient of the input.
@@ -165,7 +163,7 @@ def elementwise_mul_kernel(
     x,
     g,
     N: tl.constexpr,
-    B: tl.constexpr
+    B: tl.constexpr,
 ):
     """
     This function multiplies each element of the tensor pointed by x with the value pointed by g.
@@ -203,7 +201,7 @@ def fused_linear_cross_entropy_forward(
     num_chunks: int = 8,
     reduction: str = "mean",
     use_l2warp: bool = False,
-    l2_penalty_factor: float = 1e-4
+    l2_penalty_factor: float = 1e-4,
 ):
     device = x.device
     # inputs have shape: [N, H]
@@ -265,7 +263,7 @@ def fused_linear_cross_entropy_forward(
             reduction=reduction,
             V=V,
             BV=BV,
-            num_warps=STATIC_WARPS
+            num_warps=STATIC_WARPS,
         )
         if use_l2warp:
             # a. Calculate the L2 gradient w.r.t logits (g_logits_l2)
@@ -313,7 +311,7 @@ def fused_linear_cross_entropy_backward(
     do: torch.Tensor,
     dx: torch.Tensor,
     dw: torch.Tensor,
-    db: torch.Tensor
+    db: torch.Tensor,
 ):
     # If cross entropy is the last layer, do is 1.0. Skip the mul to save time
     if torch.ne(do, torch.tensor(1.0, device=do.device)):
@@ -418,7 +416,7 @@ class FusedLinearCrossEntropyFunction(torch.autograd.Function):
             num_chunks,
             reduction,
             use_l2warp,
-            l2_penalty_factor
+            l2_penalty_factor,
         )
         # downcast to dtype and store for backward
         ctx.save_for_backward(
@@ -448,7 +446,7 @@ def fused_linear_cross_entropy_loss(
     reduction: str = "mean",
     use_l2warp: bool = False,
     l2_penalty_factor: float = 1e-4,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
         x (torch.Tensor): [batch_size * seq_len, hidden_size]
@@ -486,7 +484,7 @@ def fused_linear_cross_entropy_loss(
         num_chunks,
         reduction,
         use_l2warp,
-        l2_penalty_factor
+        l2_penalty_factor,
     )
 
 
@@ -537,7 +535,7 @@ class FusedLinearCrossEntropyLoss(nn.Module):
         x: torch.Tensor,
         target: torch.LongTensor,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None
+        bias: torch.Tensor | None = None,
     ):
         """
         Args:
@@ -562,7 +560,7 @@ class FusedLinearCrossEntropyLoss(nn.Module):
             num_chunks=self.num_chunks,
             reduction=self.reduction,
             use_l2warp=self.use_l2warp,
-            l2_penalty_factor=self.l2_penalty_factor
+            l2_penalty_factor=self.l2_penalty_factor,
         )
         return loss
 
@@ -616,5 +614,5 @@ class LinearLossParallel(ParallelStyle):
             device_mesh,
             partition_fn=None,
             input_fn=partial(self._prepare_input_fn, self.sequence_sharding),
-            output_fn=partial(self._prepare_output_fn, self.use_local_output)
+            output_fn=partial(self._prepare_output_fn, self.use_local_output),
         )

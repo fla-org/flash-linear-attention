@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import List
 
 import pytest
 import torch
@@ -22,11 +20,11 @@ from fla.utils import assert_close, device, device_platform
             (3, 2000, 4, 128, 0.1, False, torch.float16),
             (4, 2048, 8, 64, 0.1, False, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk(
     B: int,
@@ -43,7 +41,7 @@ def test_chunk(
     v = torch.randn(B, T, H, D, dtype=dtype)
     beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-    q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
+    q, k, v, beta, h0 = (x.to(device).requires_grad_(True) for x in (q, k, v, beta, h0))
     do = torch.rand_like(v)
     dht = torch.rand_like(h0)
 
@@ -93,16 +91,16 @@ def test_chunk(
             (3, 64, [0, 256, 500, 900, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -116,7 +114,7 @@ def test_chunk_varlen(
     v = torch.randn((1, T, H, D), dtype=dtype)
     beta = torch.randn(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(N, H, D, D, dtype=dtype)
-    q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, h0))
+    q, k, v, beta, h0 = (x.to(device).requires_grad_() for x in (q, k, v, beta, h0))
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 

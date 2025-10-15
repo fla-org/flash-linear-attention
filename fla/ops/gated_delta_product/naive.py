@@ -12,7 +12,7 @@ def naive_recurrent_gated_delta_product(q, k, v, g, beta, scale, cu_seqlens,
     assert beta.shape == (B, T*num_householder, H)
     if g is not None:
         assert g.shape == (B, T, H)
-    q, k, v, beta = map(lambda x: x.float(), (q, k, v, beta))
+    q, k, v, beta = (x.float() for x in (q, k, v, beta))
 
     h = torch.zeros(B, H, K, V, dtype=torch.float32, device=q.device)
     if initial_state is not None:

@@ -5,7 +5,6 @@
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -166,7 +165,7 @@ def layer_norm_fwd(
         BLOCK_N=BLOCK_N,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
-        num_warps=num_warps
+        num_warps=num_warps,
     )
     return out, mean, rstd
 
@@ -379,7 +378,7 @@ def layer_norm_bwd(
         BLOCK_N=BLOCK_N,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
-        num_warps=num_warps
+        num_warps=num_warps,
     )
     dw = _dw.sum(0).to(weight.dtype)
     db = _db.sum(0).to(bias.dtype) if bias is not None else None
@@ -445,7 +444,7 @@ class LayerNormFn(torch.autograd.Function):
             z,
             ctx.group_size,
             ctx.norm_before_gate,
-            ctx.is_rms_norm
+            ctx.is_rms_norm,
         )
         dx = dx.reshape(ctx.x_shape_og)
         dz = dz.reshape(ctx.x_shape_og) if dz is not None else None
@@ -466,10 +465,10 @@ class LayerNormGated(nn.Module):
         self,
         hidden_size,
         eps: float = 1e-5,
-        group_size: Optional[int] = None,
+        group_size: int | None = None,
         norm_before_gate: bool = True,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
@@ -501,10 +500,10 @@ class RMSNormGated(nn.Module):
         self,
         hidden_size,
         eps: float = 1e-5,
-        group_size: Optional[int] = None,
+        group_size: int | None = None,
         norm_before_gate: bool = False,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).

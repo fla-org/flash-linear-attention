@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -28,7 +27,7 @@ class PaTHAttention(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 32,
-        num_kv_heads: Optional[int] = None,
+        num_kv_heads: int | None = None,
         use_forget_gate: bool = False,
         use_qk_norm: bool = False,
         layer_idx: int = None,
@@ -58,7 +57,7 @@ class PaTHAttention(nn.Module):
         if use_low_rank_w:
             self.w_proj = nn.Sequential(
                 nn.Linear(self.hidden_size, 32, bias=False),
-                nn.Linear(32, self.kv_dim, bias=False)
+                nn.Linear(32, self.kv_dim, bias=False),
             )
         # In MQA/GQA settings, key/value heads are shared, so we use a standard linear projection
         # which doesn't introduce too many parameters
@@ -85,12 +84,12 @@ class PaTHAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         if use_cache:
             assert past_key_values is not None, "past_key_values must be provided when use_cache is True"
         if attention_mask is not None:
@@ -106,7 +105,7 @@ class PaTHAttention(nn.Module):
         w = self.w_proj(hidden_states)
         beta = self.bt_proj(hidden_states).float().sigmoid() * 2  # allowing negative eigenvalues
         g = F.logsigmoid(self.g_proj(hidden_states).float()) if self.use_forget_gate else None
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
         assert not (cu_seqlens is not None and attention_mask is not None), (
             "cu_seqlens should not be provided when attention_mask is not None"
         )
@@ -162,7 +161,7 @@ class PaTHAttention(nn.Module):
                 past_key_values.update(
                     conv_state=w_conv_state,
                     layer_idx=self.layer_idx,
-                    offset=q_len
+                    offset=q_len,
                 )
                 if g is not None:
                     q, (k, v, g), indices_q, cu_seqlens, max_seq_lens = unpad_input(
@@ -209,7 +208,7 @@ class PaTHAttention(nn.Module):
                         attn_state=(k_cache, v_cache, g_cache) if g_cache is not None else (k_cache, v_cache),
                         conv_state=w_conv_state,
                         layer_idx=self.layer_idx,
-                        offset=q_len
+                        offset=q_len,
                     )
             o = pad_input(o.squeeze(0), indices_q, batch_size, q_len)
         o = rearrange(o, '... h d -> ... (h d)')

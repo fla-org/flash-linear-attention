@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2024, Songlin Yang, Yu Zhang.
 
 import argparse
@@ -37,30 +36,24 @@ if __name__ == "__main__":
     dtype = torch.bfloat16
     torch.manual_seed(0)
 
-    print(f"Loading {args.path}")
     tokenizer = AutoTokenizer.from_pretrained(
         args.path,
         trust_remote_code=True,
-        add_eos_token=False
+        add_eos_token=False,
     )
     tokenizer.pad_token_id = tokenizer.eos_token_id
-    print(f"{tokenizer}")
 
     model = AutoModelForCausalLM.from_pretrained(
         args.path,
         device_map={"": device},
         torch_dtype=dtype,
-        use_cache=not args.no_cache
+        use_cache=not args.no_cache,
     )
     if args.compile:
-        print("Compiling the model")
         model = torch.compile(model)
     model.eval()
-    print(f"{model.config}\n{model}\nNumber of parameters: {model.num_parameters()} ({sizeof_fmt(model.num_parameters())})\n")
 
-    print(f"Loading {args.data}")
     dataset = load_dataset(args.data, split='train', trust_remote_code=True)
-    print(f"{dataset}")
 
     prompt = dataset[0]['text']
     tokens = tokenizer(prompt, return_tensors="pt")
@@ -79,13 +72,9 @@ if __name__ == "__main__":
             do_sample=True,
             temperature=args.temperature,
             top_p=args.topp,
-            repetition_penalty=args.repetition_penalty
+            repetition_penalty=args.repetition_penalty,
         )
     torch.cuda.synchronize()
     elapsed = time.time() - start
     if args.output_generation:
-        print(f"Prompt:\n{tokenizer.batch_decode(input_ids, skip_special_tokens=True)[0].strip()}\n")
-        print(f"Generated:\n{tokenizer.batch_decode(text, skip_special_tokens=True)[0].strip()}\n")
-    print(f"Prompt length: {len(input_ids[0])}, generation length: {len(text[0]) - len(input_ids[0])}")
-    print(f"Total prompt processing + decoding time: {elapsed * 1000:.0f}ms")
-    print(f"Max memory used: {sizeof_fmt(torch.cuda.max_memory_allocated())}")
+        pass

@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -344,7 +342,7 @@ class FusedChunkBasedFunction(torch.autograd.Function):
             scale,
             T=T, B=B, H=H, K=K, V=V, BT=BT, BK=BK, BV=BV,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         dq = dq.sum(0)
         dk = dk.sum(0)
@@ -356,15 +354,15 @@ def fused_chunk_based(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = None,
+    scale: float | None = None,
     use_norm: bool = True,
-    head_first: bool = False
+    head_first: bool = False,
 ):
     assert q.shape[-1] <= 16, 'only support feature dimension up to 16.'
     if scale is None:
         scale = q.shape[-1] ** -0.5
     if not head_first:
-        q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
+        q, k, v = (x.transpose(1, 2) for x in (q, k, v))
     o, z = FusedChunkBasedFunction.apply(q, k, v, scale)
     if use_norm:
         o = o / (z[..., None] + 1e-6)

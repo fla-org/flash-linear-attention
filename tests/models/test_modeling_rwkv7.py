@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -20,7 +19,7 @@ from .test_modeling_base import run_test_generation, run_test_model_forward_back
             (4, 4, 1024, 4, 64, False, torch.bfloat16),
             (4, 4, 1024, 4, 128, False, torch.bfloat16),
         ]
-    ]
+    ],
 )
 def test_modeling(
     L: int,
@@ -45,7 +44,7 @@ def test_modeling(
         for test in [
             (2, 4, 2000, 8, 64, torch.float16),
         ]
-    ]
+    ],
 )
 def test_generation(
     L: int,

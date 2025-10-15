@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from .cumsum import (
     chunk_global_cumsum,
@@ -6,7 +5,7 @@ from .cumsum import (
     chunk_global_cumsum_vector,
     chunk_local_cumsum,
     chunk_local_cumsum_scalar,
-    chunk_local_cumsum_vector
+    chunk_local_cumsum_vector,
 )
 from .index import (
     get_max_num_splits,
@@ -19,7 +18,7 @@ from .index import (
     prepare_lens_from_mask,
     prepare_position_ids,
     prepare_sequence_ids,
-    prepare_token_indices
+    prepare_token_indices,
 )
 from .logsumexp import logsumexp_fwd
 from .matmul import addmm, matmul
@@ -54,5 +53,5 @@ __all__ = [
     'softmax_bwd',
     'softmax_fwd',
     'solve_tril',
-    'get_max_num_splits'
+    'get_max_num_splits',
 ]

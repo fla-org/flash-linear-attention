@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
@@ -9,7 +8,7 @@ def forward(u, w):
         w.float(),
         u.float(),
         upper=False,
-        unitriangular=True
+        unitriangular=True,
     ).to(u.dtype)
 
 
@@ -22,7 +21,7 @@ def backward_x(do, w):
         w.tril(-1).mH.float(),
         do.float(),
         upper=True,
-        unitriangular=True
+        unitriangular=True,
     ).to(do.dtype)
 
 
@@ -31,7 +30,7 @@ def backward(do, w, x):
         w.tril(-1).mH.float(),
         do.float(),
         upper=True,
-        unitriangular=True
+        unitriangular=True,
     ).to(do.dtype)
     dw = torch.bmm(-du, x.mH)
     dw = dw.tril(-1)

@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 import triton
@@ -25,7 +23,7 @@ def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Te
         for s in [1, 2, 3]
     ],
     key=['BD'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def k_update_fwd_kernel_short(
@@ -68,7 +66,7 @@ def k_update_fwd_kernel_short(
         for s in [1, 2, 3]
     ],
     key=['BD', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def k_update_fwd_kernel_long(
@@ -115,7 +113,7 @@ def k_update_fwd_kernel_long(
         for BT in [2, 4, 8]
     ],
     key=['BD'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def k_update_bwd_kernel_short(
@@ -167,7 +165,7 @@ def k_update_bwd_kernel_short(
         for s in [1, 2, 3]
     ],
     key=['BD', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def k_update_bwd_kernel_long(
@@ -214,7 +212,7 @@ def k_update_fwd(
     k: torch.Tensor,
     a: torch.Tensor,
     ka: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     B, T, D = k.shape
     out = torch.empty_like(k)
@@ -235,7 +233,7 @@ def k_update_fwd(
         )
     else:
         BT = min(64, triton.next_power_of_2(
-            triton.cdiv(max(16, B * T), get_multiprocessor_count(k.device.index))
+            triton.cdiv(max(16, B * T), get_multiprocessor_count(k.device.index)),
         ))
         if cu_seqlens is not None:
             chunk_idx = prepare_chunk_indices(cu_seqlens, BT)
@@ -266,7 +264,7 @@ def k_update_bwd(
     k: torch.Tensor,
     a: torch.Tensor,
     ka: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor],
+    cu_seqlens: torch.Tensor | None,
     use_short: bool,
     N: int,
     T: int,
@@ -288,7 +286,7 @@ def k_update_bwd(
         )
     else:
         BT = min(64, triton.next_power_of_2(
-            triton.cdiv(max(16, B * T), get_multiprocessor_count(grad_out.device.index))
+            triton.cdiv(max(16, B * T), get_multiprocessor_count(grad_out.device.index)),
         ))
         if cu_seqlens is not None:
             chunk_idx = prepare_chunk_indices(cu_seqlens, BT)

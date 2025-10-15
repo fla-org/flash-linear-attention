@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -15,7 +13,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -25,7 +23,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
     ],
     key=['BK', 'BT', 'K'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_kernel_intra(
@@ -59,7 +57,7 @@ def chunk_dplr_bwd_kernel_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    GATHER_SUPPORTED: tl.constexpr
+    GATHER_SUPPORTED: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -231,7 +229,7 @@ def chunk_dplr_bwd_kernel_intra(
     ],
     key=['BK', 'BT', 'K'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_dgk_kernel(
@@ -299,7 +297,7 @@ def chunk_dplr_bwd_dqk_intra(
     dbg: torch.Tensor,
     dgk_last: torch.Tensor,
     scale: float = 1.0,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ):
     B, T, H, K = q.shape
@@ -348,7 +346,7 @@ def chunk_dplr_bwd_dqk_intra(
         BT=BT,
         BC=BT,
         BK=BK,
-        GATHER_SUPPORTED=is_gather_supported
+        GATHER_SUPPORTED=is_gather_supported,
     )
 
     dgk_output = torch.empty_like(dgk)

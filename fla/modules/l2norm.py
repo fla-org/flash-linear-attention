@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -20,7 +18,7 @@ NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def l2norm_fwd_kernel1(
@@ -51,7 +49,7 @@ def l2norm_fwd_kernel1(
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def l2norm_bwd_kernel1(
@@ -84,7 +82,7 @@ def l2norm_bwd_kernel1(
         for BT in BT_LIST
     ],
     key=['D', 'NB'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def l2norm_fwd_kernel(
@@ -118,7 +116,7 @@ def l2norm_fwd_kernel(
         for BT in BT_LIST
     ],
     key=['D', 'NB'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def l2norm_bwd_kernel(
@@ -149,7 +147,7 @@ def l2norm_bwd_kernel(
 def l2norm_fwd(
     x: torch.Tensor,
     eps: float = 1e-6,
-    output_dtype: Optional[torch.dtype] = None
+    output_dtype: torch.dtype | None = None,
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -196,7 +194,7 @@ def l2norm_bwd(
     y: torch.Tensor,
     rstd: torch.Tensor,
     dy: torch.Tensor,
-    eps: float = 1e-6
+    eps: float = 1e-6,
 ):
     y_shape_og = y.shape
     y = y.view(-1, dy.shape[-1])
@@ -247,7 +245,7 @@ class L2NormFunction(torch.autograd.Function):
         ctx,
         x,
         eps=1e-6,
-        output_dtype=None
+        output_dtype=None,
     ):
         y, rstd = l2norm_fwd(x, eps, output_dtype)
         ctx.eps = eps
@@ -266,7 +264,7 @@ class L2NormFunction(torch.autograd.Function):
 def l2norm(
     x: torch.Tensor,
     eps: float = 1e-6,
-    output_dtype: Optional[torch.dtype] = None
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     return L2NormFunction.apply(x, eps, output_dtype)
 
@@ -279,7 +277,7 @@ class L2Norm(nn.Module):
     def __init__(
         self,
         eps: float = 1e-6,
-        output_dtype: Optional[torch.dtype] = None
+        output_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.eps = eps

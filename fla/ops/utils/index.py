@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -17,13 +15,13 @@ from fla.utils import autotune_cache_kwargs, tensor_cache
         for num_warps in [4, 8, 16, 32]
     ],
     key=['B'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def prepare_position_ids_kernel(
     y,
     cu_seqlens,
-    B: tl.constexpr
+    B: tl.constexpr,
 ):
     i_n = tl.program_id(0)
     bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
@@ -48,7 +46,7 @@ def prepare_lens_from_mask(mask: torch.BoolTensor) -> torch.LongTensor:
 @tensor_cache
 def prepare_cu_seqlens_from_lens(
     lens: torch.LongTensor,
-    dtype: Optional[torch.dtype] = torch.int32
+    dtype: torch.dtype | None = torch.int32,
 ) -> torch.LongTensor:
     return F.pad(lens.cumsum(dim=0, dtype=dtype), (1, 0))
 
@@ -56,7 +54,7 @@ def prepare_cu_seqlens_from_lens(
 @tensor_cache
 def prepare_cu_seqlens_from_mask(
     mask: torch.BoolTensor,
-    dtype: Optional[torch.dtype] = torch.int32
+    dtype: torch.dtype | None = torch.int32,
 ) -> torch.LongTensor:
     return prepare_cu_seqlens_from_lens(prepare_lens_from_mask(mask), dtype)
 
@@ -73,9 +71,9 @@ def prepare_split_cu_seqlens(
     batch_size: int,
     seq_len: int,
     split_size: int,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    dtype: Optional[torch.dtype] = torch.int32,
-    device: Optional[torch.device] = torch.device('cpu')
+    cu_seqlens: torch.LongTensor | None = None,
+    dtype: torch.dtype | None = torch.int32,
+    device: torch.device | None = torch.device('cpu'),
 ) -> torch.LongTensor:
     if cu_seqlens is None:
         total_tokens = batch_size * seq_len
@@ -85,11 +83,11 @@ def prepare_split_cu_seqlens(
     return torch.tensor(
         [
             i
-            for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:])
+            for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
             for i in range(bos, eos, split_size)
         ] + [cu_seqlens[-1]],
         dtype=dtype,
-        device=device
+        device=device,
     )
 
 
@@ -115,7 +113,7 @@ def prepare_token_indices(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
 @tensor_cache
 def prepare_chunk_indices(
     cu_seqlens: torch.LongTensor,
-    chunk_size: int
+    chunk_size: int,
 ) -> torch.LongTensor:
     indices = torch.cat([torch.arange(n) for n in triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
@@ -124,7 +122,7 @@ def prepare_chunk_indices(
 @tensor_cache
 def prepare_chunk_offsets(
     cu_seqlens: torch.LongTensor,
-    chunk_size: int
+    chunk_size: int,
 ) -> torch.LongTensor:
     return torch.cat([cu_seqlens.new_tensor([0]), triton.cdiv(prepare_lens(cu_seqlens), chunk_size)]).cumsum(-1)
 

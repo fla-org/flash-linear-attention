@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 import torch.nn as nn
@@ -27,7 +26,7 @@ from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, provider):
     from fla.utils import device

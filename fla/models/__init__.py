@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
@@ -8,7 +7,7 @@ from fla.models.deltaformer import DeltaFormerConfig, DeltaFormerForCausalLM, De
 from fla.models.forgetting_transformer import (
     ForgettingTransformerConfig,
     ForgettingTransformerForCausalLM,
-    ForgettingTransformerModel
+    ForgettingTransformerModel,
 )
 from fla.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
 from fla.models.gated_deltaproduct import GatedDeltaProductConfig, GatedDeltaProductForCausalLM, GatedDeltaProductModel

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import os
 
@@ -21,7 +20,7 @@ from fla.utils import device
             (4, 4, 1024, 4, 64, torch.bfloat16, 'triton'),
             (4, 4, 1024, 4, 128, torch.bfloat16, 'cuda'),
         ]
-    ]
+    ],
 )
 def test_modeling(
     L: int,
@@ -67,4 +66,3 @@ def test_modeling(
 
     # Backward pass
     y.logits.sum().backward()
-    print(f"Test test_modeling passed with H={H}, D={D}, backend={conv_backend}.")

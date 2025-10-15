@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 import triton
@@ -25,7 +24,7 @@ import triton
         ylabel="Time (ms)",
         plot_name="solve_tril_performance",
         args={},
-    )
+    ),
 )
 def benchmark(B, T, H, chunk_size, provider):
     from fla.ops.utils.solve_tril import solve_tril
@@ -49,7 +48,7 @@ def benchmark(B, T, H, chunk_size, provider):
 
     results = triton.testing.do_bench(
         lambda:  solve_tril(A),
-        quantiles=[0.5, 0.2, 0.8]
+        quantiles=[0.5, 0.2, 0.8],
     )
     return results
 

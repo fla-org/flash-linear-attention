@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 import triton
@@ -26,7 +25,7 @@ from fla.ops.nsa import parallel_nsa
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, provider):
     from fla.utils import device
@@ -53,22 +52,22 @@ def benchmark(T, provider):
     if provider == 'nsa':
         results = triton.testing.do_bench(
             lambda: parallel_nsa(q, k, v, block_indices=indices, block_size=block_size),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider == 'nsa_bwd':
         results = triton.testing.do_bench(
             lambda: parallel_nsa(q, k, v, block_indices=indices, block_size=block_size).backward(do),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider == 'flash':
         results = triton.testing.do_bench(
             lambda: flash_attn_func(q, k, v, causal=True),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider == 'flash_bwd':
         results = triton.testing.do_bench(
             lambda: flash_attn_func(q, k, v, causal=True).backward(do),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     return results
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
