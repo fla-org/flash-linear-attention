@@ -63,6 +63,7 @@ select = [
     "C4",   # flake8-comprehensions
     "TCH",  # flake8-type-checking
     "COM",  # flake8-commas
+    "T",    # flake8-debugger
 ]
 ignore = [
     "E501",
