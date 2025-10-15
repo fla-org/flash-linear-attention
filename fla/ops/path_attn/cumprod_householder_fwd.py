@@ -105,7 +105,7 @@ def chunk_cumprod_householder_fwd_fn(
     grid = (NS, H)
     hc_whole = torch.empty((NS, H, K, K), device=k.device, dtype=w1.dtype)
     k_new = torch.empty_like(k, dtype=k.dtype)
-    hc_suffix = torch.empty((NT, H, K, K), device=k.device, dtype=w2.dtype)
+    hc_suffix = torch.empty((NT, H, K, K), device=k.device, dtype=w1.dtype)
     chunk_cumprod_householder_fwd_kernel[grid](
         k=k, k_new=k_new, w1=w1, w2=w2, hc_whole=hc_whole, hc_suffix=hc_suffix,
         cu_seqlens=cu_seqlens,

@@ -29,9 +29,11 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_fwd
     def forward(ctx, q, k, v, w, beta, g, scale, cu_seqlens, use_cache=False):
+
         g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, output_dtype=torch.float32) if g is not None else None
         BS = 64 if check_shared_mem('hopper') else 32
         BT = 128 if check_shared_mem('ampere') else 64
+
         A = chunk_scaled_dot_kkt_fwd(
             k=w,
             beta=beta,
@@ -42,7 +44,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
         A = solve_tril(
             A=A,
             cu_seqlens=cu_seqlens,
-            output_dtype=w.dtype
+            output_dtype=w.dtype  # force fp32?
         )
         q_new, k_new, w2, o, L, M = intra_chunk_preprocess_fwd_fn(
             q=q,
@@ -56,13 +58,15 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             BT=BS,
             cu_seqlens=cu_seqlens,
         )
+        w_fp16 = w.to(torch.float16)
+        w2_fp16 = w2.to(torch.float16)
         o, L = parallel_path_fwd_fn(
             q=q_new,
             k=k_new,
             v=v,
             L=L,
-            w1=w,
-            w2=w2,
+            w1=w_fp16,
+            w2=w2_fp16,
             M=M,
             o=o,
             g_cumsum=g_cumsum,
@@ -103,18 +107,20 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             return_h=False,
         )
-
+        w_fp16 = w.to(torch.float16)
+        h_fp16 = h.to(torch.float16)
         k_new_large, hc_suffix, hc_whole = chunk_cumprod_householder_fwd_fn(
             k=k_new,
-            w1=w,
-            w2=h,
+            w1=w_fp16,
+            w2=h_fp16,
             S=S,
             BT=BS,
             cu_seqlens=cu_seqlens
         )
-
-        q_new_large = transform_q_fwd_fn(q=q_new, w1=w, w2=h, cu_seqlens=cu_seqlens, BT=BT, BS=BS, S=S)
-
+        q_new_large = transform_q_fwd_fn(q=q_new, w1=w_fp16, w2=h_fp16, cu_seqlens=cu_seqlens, BT=BT, BS=BS, S=S)
+        w = w.to(q.dtype)
+        h = h.to(q.dtype)
+        A = A.to(q.dtype)
         dk, dv, _ = parallel_path_bwd_dkv_fn(
             q=q_new_large,
             k=k_new_large,
@@ -184,6 +190,7 @@ class ParallelPATHAttentionFunction(torch.autograd.Function):
             q=q,
             k=k,
             w=w,
+            w2=h,
             beta=beta,
             dq=dq,
             dk=dk,
@@ -255,6 +262,9 @@ def parallel_path_attn(
     """
     if scale is None:
         scale = k.shape[-1]**-0.5
+    assert w.dtype == beta.dtype == torch.float32, 'w, beta should be float32 to preserve precision.'
+    if g is not None:
+        assert g.dtype == torch.float32, 'g should be float32 to preserve precision.'
     assert q.shape[-1] in [16, 32, 64, 128], "only support head_dim in [16, 32, 64, 128] for now. Stay tuned!"
     assert v.shape[-1] in [16, 32, 64, 128], "only support head_dim in [16, 32, 64, 128] for now. Stay tuned!"
     assert q.shape[-1] == k.shape[-1], 'q, k should have the same head_dim.'
@@ -265,6 +275,5 @@ def parallel_path_attn(
     assert q.shape[-2] % k.shape[-2] == 0, 'the number of query heads should be divisible by the number of key heads'
     o, k_cache = ParallelPATHAttentionFunction.apply(q, k, v, w, beta, g, scale, cu_seqlens, use_cache)
     return o, k_cache
-
 
 parallel_path_attention = parallel_path_attn

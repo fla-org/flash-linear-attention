@@ -20,12 +20,12 @@ dependencies = [
     "transformers>=4.53.0",
     "datasets>=3.3.0",
     "einops",
-    "pytest",
 ]
 
 [project.optional-dependencies]
 conv1d = ["causal-conv1d>=1.4.0"]
 benchmark = ["matplotlib"]
+test = ["pytest"]
 
 [project.urls]
 Homepage = "https://github.com/fla-org/flash-linear-attention"

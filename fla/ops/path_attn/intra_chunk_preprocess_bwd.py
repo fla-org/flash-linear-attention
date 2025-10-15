@@ -12,7 +12,7 @@ from fla.utils import check_shared_mem
 })
 @triton.jit(do_not_specialize=['T'])
 def intra_chunk_preprocess_bwd_kernel(
-    q, k, w, beta,
+    q, k, w, w2, beta,
     AT,
     dA_local, dq, dq_new, dk, dk_new, dw, dbeta, dw1, dw2, T,
     offsets, indices,
@@ -39,9 +39,11 @@ def intra_chunk_preprocess_bwd_kernel(
     p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (K*HQ, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (K*H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_w = tl.make_block_ptr(w + (bos * H + i_h) * K, (T, K), (K*H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_w2 = tl.make_block_ptr(w2 + (bos * H + i_h) * K, (T, K), (K*H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_beta = tl.make_block_ptr(beta + (bos * H + i_h), (T, ), (H, ), (i_t * BT, ), (BT, ), (0, ))
     p_T = tl.make_block_ptr(AT + (bos * H + i_h) * BT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_w = tl.load(p_w, boundary_check=(0, 1))
+    b_Twb = tl.load(p_w2, boundary_check=(0, 1))
     b_beta = tl.load(p_beta, boundary_check=(0, ))
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -51,7 +53,6 @@ def intra_chunk_preprocess_bwd_kernel(
     o_i = tl.arange(0, BT)
     b_qw = tl.where(o_i[:, None] >= o_i[None, :], tl.dot(b_q, tl.trans(b_w)), 0).to(b_q.dtype)
     b_wbk = tl.where(o_i[:, None] > o_i[None, :], tl.dot(b_w_beta, tl.trans(b_k)), 0).to(b_k.dtype)
-    b_Twb = tl.dot(b_T, b_w_beta).to(b_w.dtype)
     b_Twbk = tl.dot(b_T, b_wbk).to(b_w.dtype)
 
     p_dA_local = tl.make_block_ptr(dA_local + (bos * HQ + i_hq) * BT, (T, BT), (BT*HQ, 1), (i_t * BT, 0), (BT, BT), (1, 0))
@@ -110,7 +111,7 @@ def intra_chunk_preprocess_bwd_kernel(
     tl.store(p_dbeta, b_dbeta.to(dbeta.dtype.element_ty), boundary_check=(0, ))
 
 
-def intra_chunk_preprocess_bwd_fn(q, k, w, beta,
+def intra_chunk_preprocess_bwd_fn(q, k, w, w2, beta,
                                   dq, dk, dA_local,
                                   dw1, dw2,
                                   A, L, D, do, scale, cu_seqlens=None):
@@ -129,7 +130,7 @@ def intra_chunk_preprocess_bwd_fn(q, k, w, beta,
     dq_new = torch.empty_like(dq, dtype=q.dtype)
 
     intra_chunk_preprocess_bwd_kernel[grid](
-        q=q, k=k, w=w, beta=beta,
+        q=q, k=k, w=w, w2=w2, beta=beta,
         AT=A,
         dA_local=dA_local, dq=dq, dq_new=dq_new, dk=dk, dk_new=dk_new, dw=dw, dbeta=dbeta, dw1=dw1, dw2=dw2, T=T,
         offsets=cu_seqlens, indices=indices,

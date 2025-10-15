@@ -24,6 +24,7 @@ HOPPER_EXCLUSIVE = []
 GENERATION_UNSUPPORTED = [
     "ABCConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "NSAConfig", "SambaConfig", "RWKV6Config", "RWKV7Config",
+    "DeltaFormerConfig",
 ]
 
 
