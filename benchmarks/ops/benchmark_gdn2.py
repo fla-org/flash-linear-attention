@@ -107,8 +107,7 @@ def benchmark(T, provider):
                     scale=scale,
                     initial_state=h0,
                     output_final_state=True,
-                    use_q_l2norm=True,
-                    use_k_l2norm=True
+                    use_qk_l2norm_in_kernel=True
                 ),
                 quantiles=quantiles
             )
@@ -124,8 +123,7 @@ def benchmark(T, provider):
                     scale=scale,
                     initial_state=h0,
                     output_final_state=True,
-                    use_q_l2norm=True,
-                    use_k_l2norm=True
+                    use_qk_l2norm_in_kernel=True
                 )[0].backward(do),
                 quantiles=quantiles
             )

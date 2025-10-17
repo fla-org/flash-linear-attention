@@ -164,13 +164,11 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
-        use_q_l2norm: bool = False,
-        use_k_l2norm: bool = False,
+        use_qk_l2norm_in_kernel: bool = False,
     ):
         q_rstd, k_rstd = None, None
-        if use_q_l2norm:
+        if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
-        if use_k_l2norm:
             k, k_rstd = l2norm_fwd(k)
 
         g, o, A, final_state = chunk_gated_delta_rule_fwd(
@@ -186,8 +184,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         )
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens)
         ctx.scale = scale
-        ctx.use_q_l2norm = use_q_l2norm
-        ctx.use_k_l2norm = use_k_l2norm
+        ctx.use_qk_l2norm = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -212,11 +209,10 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             dht=dht,
             cu_seqlens=cu_seqlens,
         )
-        if ctx.use_q_l2norm:
+        if ctx.use_qk_l2norm:
             dq = l2norm_bwd(q, q_rstd, dq)
-        if ctx.use_k_l2norm:
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None
 
 
 @torch.compiler.disable
@@ -229,8 +225,7 @@ def chunk_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    use_q_l2norm: bool = False,
-    use_k_l2norm: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
     **kwargs,
 ):
@@ -255,10 +250,8 @@ def chunk_gated_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
-        use_q_l2norm (bool):
-            Whether to apply L2norm to the q tensor internally. Default: `False`.
-        use_k_l2norm (bool):
-            Whether to apply L2norm to the k tensor internally. Default: `False`.
+        use_qk_l2norm_in_kernel(bool):
+            Whether to apply L2norm to the q/k tensor internally. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -303,9 +296,6 @@ def chunk_gated_delta_rule(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-    if 'use_qk_l2norm_in_kernel' in kwargs and (not use_q_l2norm and not use_k_l2norm):
-        use_q_l2norm = True
-        use_k_l2norm = True
 
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -330,7 +320,6 @@ def chunk_gated_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
-        use_q_l2norm,
-        use_k_l2norm
+        use_qk_l2norm_in_kernel
     )
     return o, final_state
