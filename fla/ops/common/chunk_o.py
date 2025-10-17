@@ -470,9 +470,9 @@ def chunk_bwd_kernel_dv_local(
 
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_A += tl.dot(b_k, b_q)
+            b_A += tl.dot(b_k, b_q) * scale
         if USE_G or USE_G_GAMMA:
-            b_A *= exp(b_g[None, :] - b_g[:, None]) * scale
+            b_A *= exp(b_g[None, :] - b_g[:, None])
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
