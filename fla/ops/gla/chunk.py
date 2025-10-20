@@ -411,6 +411,7 @@ def chunk_gla_bwd_kernel_intra(
     b_dq = tl.zeros([BC, BK], dtype=tl.float32)
     if i_i > 0:
         p_gn = g + (bos + i_t * BT + i_i * BC) * H*K + i_h*K + o_k
+        # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(0, i_i):
             p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k * BK), (BC, BK), (1, 0))
@@ -418,8 +419,10 @@ def chunk_gla_bwd_kernel_intra(
             p_dA = tl.make_block_ptr(dA+(bos*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t*BT+i_i*BC, i_j * BC), (BC, BC), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
+            b_kg = b_k * exp(b_gn[None, :] - b_gk)
+            # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
-            b_kg = (b_k * exp(b_gn[None, :] - b_gk))
+
             b_dq += tl.dot(b_dA, b_kg)
         b_dq *= exp(b_g - b_gn[None, :])
 
@@ -459,8 +462,6 @@ def chunk_gla_bwd_kernel_intra(
             p_gq = tl.make_block_ptr(g + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
             p_dA = tl.make_block_ptr(dA + (bos*H+i_h)*BT, (BT, T), (1, H*BT), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_gq = tl.load(p_gq, boundary_check=(0, 1))
-            b_dA = tl.load(p_dA, boundary_check=(0, 1))
 
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
@@ -1212,7 +1213,7 @@ class ChunkGLAFunction(torch.autograd.Function):
         T = q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
 
-        g_cumsum, A, h, ht, o = chunk_gla_fwd(
+        g_cumsum, A, _, ht, o = chunk_gla_fwd(
             q=q,
             k=k,
             v=v,
