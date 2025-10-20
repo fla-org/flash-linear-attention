@@ -44,10 +44,10 @@ def benchmark(T, provider):
     original_tma_env = os.environ.get('FLA_NO_USE_TMA', '0')
 
     if provider.endswith('_no_tma'):
-        os.environ['FLA_NO_USE_TMA'] = '1'
+        os.environ['FLA_USE_TMA'] = '0'
         provider_base = provider.replace('_no_tma', '')
     else:
-        os.environ['FLA_NO_USE_TMA'] = '0'
+        os.environ['FLA_USE_TMA'] = '1'
         provider_base = provider
 
     with torch.no_grad():
