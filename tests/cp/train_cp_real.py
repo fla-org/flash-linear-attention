@@ -307,7 +307,7 @@ def main():
         vocab_size=args.vocab_size,
         attn_mode='chunk',
         use_gate=True,
-        use_short_conv=True,
+        use_short_conv=False, # Simplify for testing
         expand_v=1.0,
     )
     
@@ -354,7 +354,7 @@ def main():
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,  # Shuffle the full dataset
+        shuffle=False, # No shuffle to keep data consistent across ranks for CP (may need shared deterministic sampler)
         collate_fn=collator,  # Shard sequences in collator
         num_workers=0,  # Keep simple for now
         pin_memory=True

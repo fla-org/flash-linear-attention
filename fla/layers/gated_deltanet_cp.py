@@ -291,7 +291,7 @@ class GatedDeltaNet(nn.Module):
 
             o, recurrent_state = chunk_gated_delta_rule_cp(
                 q=q, k=k, v=v, g=g, beta=beta,
-                initial_state=recurrent_state, output_final_state=True,
+                initial_state=recurrent_state, output_final_state=use_cache,
                 cu_seqlens=cu_seqlens, use_qk_l2norm_in_kernel=True,
                 cp_rank=cp_rank, cp_size=cp_size, cp_group=cp_group
             )

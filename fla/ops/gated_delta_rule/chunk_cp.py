@@ -134,9 +134,9 @@ class ChunkGatedDeltaRuleFunctionCP(torch.autograd.Function):
             else:
                 # Intermediate ranks: receive from next rank
                 dht_local = torch.empty((B, H, K, V), dtype=torch.float32, device=q.device)
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
                 dist.recv(dht_local, src=cp_rank + 1, group=cp_group)
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
         else:
             # Single rank case
             dht_local = dht.to(torch.float32) if dht is not None else torch.zeros(
