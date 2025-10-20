@@ -36,12 +36,12 @@ from fla.ops.gdn2.gate import fused_gdn2_gate, gdn2_gate_ref
 def benchmark(T, provider):
     from fla.utils import device
     dtype = torch.bfloat16
-    B, H, D = 16, 8, 128
+    B, H, D = 2, 32, 128
     scale = 1.0
     gate_logit_normalizer = 1.0
 
     # Set TMA environment variable based on provider
-    original_tma_env = os.environ.get('FLA_NO_USE_TMA', '0')
+    original_tma_env = os.environ.get('FLA_USE_TMA', '0')
 
     if provider.endswith('_no_tma'):
         os.environ['FLA_USE_TMA'] = '0'
@@ -129,7 +129,7 @@ def benchmark(T, provider):
             )
 
     # Restore original TMA environment variable
-    os.environ['FLA_NO_USE_TMA'] = original_tma_env
+    os.environ['FLA_USE_TMA'] = original_tma_env
     return results
 
 
