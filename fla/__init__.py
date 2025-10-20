@@ -108,4 +108,4 @@ __all__ = [
     'RWKV7Attention', 'RWKV7ForCausalLM', 'RWKV7Model',
 ]
 
-__version__ = '0.3.2'
+__version__ = '0.4.0'
