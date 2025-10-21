@@ -57,8 +57,11 @@ class ChunkGatedDeltaRuleFunctionCP(torch.autograd.Function):
                 h0_local = torch.empty((B, H, K, V), dtype=torch.float32, device=device)
                 # Synchronize before communication
                 # torch.cuda.synchronize()
-                dist.recv(h0_local, src=cp_rank - 1, group=cp_group)
+                # dist.recv(h0_local, src=cp_rank - 1, group=cp_group)
                 # torch.cuda.synchronize()
+
+                recv_req = dist.irecv(h0_local, src=cp_rank - 1, group=cp_group)
+                recv_req.wait()
         else:
             h0_local = initial_state.to(torch.float32) if initial_state is not None else torch.zeros(
                 (B, H, K, V), dtype=torch.float32, device=device
@@ -83,15 +86,8 @@ class ChunkGatedDeltaRuleFunctionCP(torch.autograd.Function):
         # Send final state to next rank (only if we have next rank)
         if cp_size > 1 and cp_rank < cp_size - 1:
             if final_state is not None:
-                # torch.cuda.synchronize()
-                dist.send(final_state.contiguous(), dst=cp_rank + 1, group=cp_group)
-                # torch.cuda.synchronize()
-            else:
-                # Send a zero tensor if final_state is None (shouldn't happen with force_output_final_state=True)
-                zero_state = torch.zeros((B, H, K, V), dtype=torch.float32, device=device)
-                # torch.cuda.synchronize()
-                dist.send(zero_state, dst=cp_rank + 1, group=cp_group)
-                # torch.cuda.synchronize()
+                send_req = dist.isend(final_state, dst=cp_rank + 1, group=cp_group)
+                send_req.wait()  # Wait for send to complete
 
         # Save for backward 
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, h0_local)
@@ -135,8 +131,11 @@ class ChunkGatedDeltaRuleFunctionCP(torch.autograd.Function):
                 # Intermediate ranks: receive from next rank
                 dht_local = torch.empty((B, H, K, V), dtype=torch.float32, device=q.device)
                 # torch.cuda.synchronize()
-                dist.recv(dht_local, src=cp_rank + 1, group=cp_group)
+                # dist.recv(dht_local, src=cp_rank + 1, group=cp_group)
                 # torch.cuda.synchronize()
+
+                recv_req = dist.irecv(dht_local, src=cp_rank + 1, group=cp_group)
+                recv_req.wait()
         else:
             # Single rank case
             dht_local = dht.to(torch.float32) if dht is not None else torch.zeros(
@@ -160,15 +159,9 @@ class ChunkGatedDeltaRuleFunctionCP(torch.autograd.Function):
         # Send gradient of initial state to previous rank
         if cp_size > 1 and cp_rank > 0:
             if dh0 is not None:
-                # torch.cuda.synchronize()
-                dist.send(dh0.contiguous(), dst=cp_rank - 1, group=cp_group)
-                # torch.cuda.synchronize()
-            else:
-                # Send zero if dh0 is None (shouldn't happen)
-                zero_grad = torch.zeros((B, H, K, V), dtype=torch.float32, device=q.device)
-                # torch.cuda.synchronize()
-                dist.send(zero_grad, dst=cp_rank - 1, group=cp_group)
-                # torch.cuda.synchronize()
+                send_req = dist.isend(dh0, dst=cp_rank - 1, group=cp_group)
+                send_req.wait()  # Wait for send to complete
+
 
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
