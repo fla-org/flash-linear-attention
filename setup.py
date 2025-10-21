@@ -45,7 +45,7 @@ setup(
     ],
     extras_require={
         'conv1d': ['causal-conv1d>=1.4.0'],
-        'benchmark': ['matplotlib'],
-        'test': ['pytest', 'datasets>=3.3.0'],
+        'benchmark': ['matplotlib', 'datasets>=3.3.0'],
+        'test': ['pytest'],
     }
 )
