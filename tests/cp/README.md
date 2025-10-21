@@ -11,12 +11,12 @@ Context Parallelism is a technique that allows splitting long sequences across m
 
 - `fla/ops/chunk_cp.py` - Core CP operator for chunk-based computation
 - `fla/layers/gated_deltanet_cp.py` - CP-enabled layer implementation
-- `fla.models/modeling_gated_deltanet_cp.py` - CP-enabled model implementation  
+- `fla/models/modeling_gated_deltanet_cp.py` - CP-enabled model implementation  
 - `tests/cp/train_cp_real.py` - Simple training with CP
 - `tests/cp/benchmark_memory.py` - Memory usage comparison across different CP sizes
-- `tests/cp/test_numerical_correctness.py` - Validation that CP matches single-GPU results (still working on it)
+- `tests/cp/test_numerical_correctness.py` - Validation that CP matches single-GPU results 
 - Profiling, benchmarking speed need to be done.
-- ToDo: Integrated with TorchTitan
+- ToDo: Integrate with TorchTitan
 
 ## Quick Start
 
@@ -45,6 +45,8 @@ python tests/cp/benchmark_memory.py --cp_size 1
 # Compare with CP
 torchrun --nproc_per_node=4 tests/cp/benchmark_memory.py --cp_size 4
 ```
+
+
 
 ## Memory Reduction Results
 
@@ -80,3 +82,15 @@ Seq Len    Chunk      Model      Peak       Status
 
 
 
+### 3. Validation
+
+
+```
+
+
+# Step 1: Generate reference on single GPU
+python test_numerical_correctness.py --mode single --save_ref
+
+# Step 2: Test with CP
+torchrun --nproc_per_node=2 test_numerical_correctness.py --mode cp --cp_size 2
+```
