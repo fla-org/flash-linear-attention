@@ -8,17 +8,11 @@ import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dv_local
-from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd
-from fla.ops.gdn2.wy_fast import recompute_w_u_fwd
-from fla.ops.gla.chunk import (
-    chunk_gla_bwd_dA,
-    chunk_gla_bwd_dqk_intra,
-    chunk_gla_bwd_dqkwg,
-    chunk_gla_fwd_intra_gk,
-    chunk_gla_fwd_o_gk
-)
-from fla.ops.utils import chunk_local_cumsum, solve_tril
+from fla.ops.gdn2.chunk_inter import chunk_gdn2_bwd_dqkwg
+from fla.ops.gdn2.chunk_intra import chunk_gdn2_bwd_intra, chunk_gdn2_fwd_intra
+from fla.ops.gdn2.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
+from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_fwd_o_gk
+from fla.ops.utils import chunk_local_cumsum
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -35,23 +29,22 @@ def chunk_gdn2_fwd(
 ):
     chunk_size = 64
     g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens)
-    A = chunk_scaled_dot_kkt_fwd(
+    # the intra Aqk is kept in fp32
+    # the computation has very marginal effect on the entire throughput
+    Aqk, Akk = chunk_gdn2_fwd_intra(
+        q=q,
         k=k,
         gk=g,
         beta=beta,
+        scale=scale,
         cu_seqlens=cu_seqlens,
         output_dtype=torch.float32
-    )
-    A = solve_tril(
-        A=A,
-        cu_seqlens=cu_seqlens,
-        output_dtype=k.dtype
     )
     w, u, _, kg = recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,
-        A=A,
+        A=Akk,
         gk=g,
         cu_seqlens=cu_seqlens,
     )
@@ -65,16 +58,6 @@ def chunk_gdn2_fwd(
         cu_seqlens=cu_seqlens,
     )
 
-    # the intra Aqk is kept in fp32
-    # the computation has very marginal effect on the entire throughput
-    Aqk = chunk_gla_fwd_intra_gk(
-        q=q,
-        k=k,
-        g=g,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
-    )
     o = chunk_gla_fwd_o_gk(
         q=q,
         v=v_new,
@@ -85,7 +68,7 @@ def chunk_gdn2_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
-    return g, o, Aqk, A, final_state
+    return g, o, Aqk, Akk, final_state
 
 
 def chunk_gdn2_bwd(
@@ -95,7 +78,7 @@ def chunk_gdn2_bwd(
     g: torch.Tensor,
     beta: torch.Tensor,
     Aqk: torch.Tensor,
-    A: torch.Tensor,
+    Akk: torch.Tensor,
     scale: float,
     initial_state: torch.Tensor,
     do: torch.Tensor,
@@ -108,7 +91,7 @@ def chunk_gdn2_bwd(
         k=k,
         v=v,
         beta=beta,
-        A=A,
+        A=Akk,
         gk=g,
         cu_seqlens=cu_seqlens,
     )
@@ -152,15 +135,7 @@ def chunk_gdn2_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
-    dq, dk = chunk_gla_bwd_dqk_intra(
-        q=q,
-        k=k,
-        g=g,
-        dA=dAqk,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
-    )
-    dq, dk, dw, dg = chunk_gla_bwd_dqkwg(
+    dq, dk, dw, dg = chunk_gdn2_bwd_dqkwg(
         q=q,
         k=k,
         v=v_new,
@@ -170,22 +145,33 @@ def chunk_gdn2_bwd(
         dv=dv,
         do=do,
         dh=dh,
-        dq=dq,
-        dk=dk,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
     )
-
-    dk2, dv, db, _, dg2 = prepare_wy_repr_bwd(
+    dk2, dv, db, dg2, dAkk = prepare_wy_repr_bwd(
         k=k,
         v=v,
         beta=beta,
         gk=g,
-        A=A,
+        A=Akk,
         dw=dw,
         du=dv,
         cu_seqlens=cu_seqlens,
+    )
+    dq, dk2, db, dg2 = chunk_gdn2_bwd_intra(
+        q=q,
+        k=k,
+        g=g,
+        beta=beta,
+        dAqk=dAqk,
+        dAkk=dAkk,
+        dq=dq,
+        dk=dk2,
+        db=db,
+        dg=dg2,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size
     )
     dk.add_(dk2)
     dg.add_(dg2)
@@ -215,7 +201,7 @@ class ChunkGDN2Function(torch.autograd.Function):
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
 
-        g, o, Aqk, A, final_state = chunk_gdn2_fwd(
+        g, o, Aqk, Akk, final_state = chunk_gdn2_fwd(
             q=q,
             k=k,
             v=v,
@@ -226,7 +212,7 @@ class ChunkGDN2Function(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, Aqk, A, initial_state, cu_seqlens)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, Aqk, Akk, initial_state, cu_seqlens)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
@@ -239,7 +225,7 @@ class ChunkGDN2Function(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, q_rstd, k, k_rstd, v, g, beta, Aqk, A, initial_state, cu_seqlens = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, g, beta, Aqk, Akk, initial_state, cu_seqlens = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0 = chunk_gdn2_bwd(
             q=q,
             k=k,
@@ -247,7 +233,7 @@ class ChunkGDN2Function(torch.autograd.Function):
             g=g,
             beta=beta,
             Aqk=Aqk,
-            A=A,
+            Akk=Akk,
             scale=ctx.scale,
             initial_state=initial_state,
             do=do,

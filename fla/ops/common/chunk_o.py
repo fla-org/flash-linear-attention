@@ -591,7 +591,7 @@ def chunk_bwd_dv_local(
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):

@@ -221,7 +221,6 @@ def test_chunk(
     assert_close('dg', ref_dg, tri_dg, 0.02)
     assert_close('db', ref_db, tri_db, 0.02)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
-    os.environ['FLA_USE_TMA'] = '1'
 
 
 @pytest.mark.parametrize(

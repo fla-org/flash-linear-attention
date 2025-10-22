@@ -132,7 +132,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
-    dk2, dv, db, dg2, _ = prepare_wy_repr_bwd(
+    dk2, dv, db, dg2 = prepare_wy_repr_bwd(
         k=k,
         v=v,
         beta=beta,
