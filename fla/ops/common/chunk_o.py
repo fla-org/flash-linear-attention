@@ -192,7 +192,7 @@ def chunk_bwd_kernel_dqkwg(
     dk += (bos * H + i_h) * K
 
     # for delta rule only
-    if USE_W:
+    if USE_DW:
         dw += (bos * H + i_h) * K
         dv += (bos * H + i_h) * V
 
