@@ -14,7 +14,6 @@ class KDAConfig(PretrainedConfig):
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
         expand_v: int = 1,
-        use_output_gate: bool = True,
         use_short_conv: bool = True,
         allow_neg_eigval: bool = False,
         conv_size: int = 4,
@@ -44,7 +43,6 @@ class KDAConfig(PretrainedConfig):
         self.attn_mode = attn_mode
         self.hidden_size = hidden_size
         self.expand_v = expand_v
-        self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.head_dim = head_dim

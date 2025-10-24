@@ -12,7 +12,7 @@ from einops import rearrange, repeat
 from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
-from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.gate import fused_kda_gate
 
@@ -59,8 +59,6 @@ class KDA(nn.Module):
             Default: `chunk`.
         use_beta (bool, Optional):
             Whether to use beta. Default: `True`.
-        use_output_gate (bool, Optional):
-            Whether to use output gate. Default: `True`.
         use_short_conv (bool, Optional):
             Whether to use short convolutions. Default: `True`.
         allow_neg_eigval (bool, Optional):
@@ -79,12 +77,11 @@ class KDA(nn.Module):
     def __init__(
         self,
         hidden_size: int = 2048,
-        expand_v: float = 2,
-        head_dim: int = 256,
-        num_heads: int = 6,
+        expand_v: float = 1,
+        head_dim: int = 128,
+        num_heads: int = 16,
         num_v_heads: int = None,
         mode: str = 'chunk',
-        use_output_gate: bool = True,
         use_short_conv: bool = True,
         allow_neg_eigval: bool = False,
         conv_size: int = 4,
@@ -100,7 +97,6 @@ class KDA(nn.Module):
         self.hidden_size = hidden_size
         self.expand_v = expand_v
 
-        self.use_output_gate = use_output_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
@@ -157,22 +153,18 @@ class KDA(nn.Module):
                 activation='silu'
             )
 
-        self.A = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)).view(
-            1, 1, -1, 1))
+        self.A = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)))
         self.f_proj = nn.Sequential(
             nn.Linear(hidden_size, self.head_v_dim, bias=False),
             nn.Linear(self.head_v_dim, self.key_dim, bias=True)
         )
         self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
 
-        if use_output_gate:
-            self.g_proj = nn.Sequential(
-                nn.Linear(hidden_size, self.head_v_dim, bias=False),
-                nn.Linear(self.head_v_dim, self.value_dim, bias=True)
-            )
-            self.o_norm = FusedRMSNormGated(self.head_v_dim, activation='sigmoid', eps=norm_eps)
-        else:
-            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
+        self.g_proj = nn.Sequential(
+            nn.Linear(hidden_size, self.head_v_dim, bias=False),
+            nn.Linear(self.head_v_dim, self.value_dim, bias=True)
+        )
+        self.o_norm = FusedRMSNormGated(self.head_v_dim, activation='sigmoid', eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
     def forward(
@@ -282,10 +274,7 @@ class KDA(nn.Module):
                 offset=q_len
             )
 
-        if self.use_output_gate:
-            o = self.o_norm(o, rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim))
-        else:
-            o = self.o_norm(o)
+        o = self.o_norm(o, rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim))
         o = rearrange(o, 'b t h d -> b t (h d)')
         o = self.o_proj(o)
         if attention_mask is not None:
