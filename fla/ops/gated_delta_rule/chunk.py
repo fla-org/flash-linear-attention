@@ -184,7 +184,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         )
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens)
         ctx.scale = scale
-        ctx.use_qk_l2norm = use_qk_l2norm_in_kernel
+        ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -209,7 +209,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             dht=dht,
             cu_seqlens=cu_seqlens,
         )
-        if ctx.use_qk_l2norm:
+        if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None
@@ -250,7 +250,7 @@ def chunk_gated_delta_rule(
             Default: `None`.
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
-        use_qk_l2norm_in_kernel(bool):
+        use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q/k tensor internally. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
