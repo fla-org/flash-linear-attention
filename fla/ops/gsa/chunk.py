@@ -552,7 +552,7 @@ def chunk_gsa_fwd_k(
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     BC = min(16, BT)
     BV = min(64, triton.next_power_of_2(V))
     HQ = q.shape[2]
@@ -668,7 +668,7 @@ def chunk_gsa_bwd_k(
     chunk_size: int = 64
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
     BV = min(64, triton.next_power_of_2(V))
@@ -931,8 +931,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         checkpoint_level: int,
         cu_seqlens: Optional[torch.LongTensor],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        T = q.shape[1]
-        chunk_size = min(64, max(16, triton.next_power_of_2(T)))
+        chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
 
         g_org, g = g, chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
         Ak, hk, hkt, ok, p, Av, hv, hvt, ov = chunk_gsa_fwd(

@@ -18,13 +18,12 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5",
     "transformers>=4.53.0",
-    "datasets>=3.3.0",
     "einops",
 ]
 
 [project.optional-dependencies]
 conv1d = ["causal-conv1d>=1.4.0"]
-benchmark = ["matplotlib"]
+benchmark = ["matplotlib", "datasets>=3.3.0"]
 test = ["pytest"]
 
 [project.urls]

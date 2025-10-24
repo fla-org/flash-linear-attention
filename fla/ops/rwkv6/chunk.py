@@ -747,7 +747,7 @@ def chunk_rwkv6_fwd_intra(
     chunk_size: int = 64
 ):
     B, T, H, K = k.shape
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -853,7 +853,7 @@ def chunk_rwkv6_bwd_dh(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     # N: the actual number of sequences in the batch with either equal or variable lengths
     # NG: number of groups in GQA
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
@@ -900,7 +900,7 @@ def chunk_rwkv6_bwd_dqk_intra(
     chunk_size: int = 64
 ):
     B, T, H, K = q.shape
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
 
@@ -952,7 +952,7 @@ def chunk_rwkv6_bwd_dqkgu(
     chunk_size: int = 64
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)

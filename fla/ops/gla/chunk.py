@@ -766,7 +766,7 @@ def chunk_gla_fwd_intra_gk(
     chunk_size: int = 64
 ):
     B, T, H, K = k.shape
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -930,7 +930,7 @@ def chunk_gla_bwd_dv(
     chunk_size: int = 64
 ):
     B, T, H, K, V = *k.shape, do.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -964,7 +964,7 @@ def chunk_gla_bwd_dqk_intra(
     chunk_size: int = 64
 ):
     B, T, H, K = q.shape
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
 
@@ -1013,7 +1013,7 @@ def chunk_gla_bwd_dqkwg(
     chunk_size: int = 64
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -1062,10 +1062,8 @@ def chunk_gla_fwd(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    T = q.shape[1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     if g_cumsum is None:
-        g_cumsum = chunk_local_cumsum(g, BT, cu_seqlens=cu_seqlens)
+        g_cumsum = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
 
     h, ht = chunk_fwd_h(
         k=k,
@@ -1077,7 +1075,7 @@ def chunk_gla_fwd(
         output_final_state=output_final_state,
         states_in_fp32=False,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
 
     # the intra A is kept in fp32
@@ -1088,7 +1086,7 @@ def chunk_gla_fwd(
         g=g_cumsum,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
     o = chunk_gla_fwd_o_gk(
         q=q,
@@ -1098,7 +1096,7 @@ def chunk_gla_fwd(
         h=h,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
     return g_cumsum, A, h, ht, o
 
@@ -1118,10 +1116,8 @@ def chunk_gla_bwd(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
-    T = q.shape[1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     if g_cumsum is None:
-        g_cumsum = chunk_local_cumsum(g, BT, cu_seqlens=cu_seqlens)
+        g_cumsum = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
 
     if h is None:
         h, _ = chunk_fwd_h(
@@ -1133,7 +1129,7 @@ def chunk_gla_bwd(
             h0=initial_state,
             output_final_state=False,
             cu_seqlens=cu_seqlens,
-            chunk_size=BT,
+            chunk_size=chunk_size,
             states_in_fp32=True
         )
     dh, dh0 = chunk_bwd_dh(
@@ -1148,7 +1144,7 @@ def chunk_gla_bwd(
         dht=dht,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT,
+        chunk_size=chunk_size,
         states_in_fp32=True
     )
 
@@ -1159,7 +1155,7 @@ def chunk_gla_bwd(
         do=do,
         dh=dh,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
 
     # dq dk in fp32
@@ -1168,7 +1164,7 @@ def chunk_gla_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
     dq, dk = chunk_gla_bwd_dqk_intra(
         q=q,
@@ -1176,7 +1172,7 @@ def chunk_gla_bwd(
         g=g_cumsum,
         dA=dA,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
     dq, dk, _, dg = chunk_gla_bwd_dqkwg(
         q=q,
@@ -1190,7 +1186,7 @@ def chunk_gla_bwd(
         dk=dk,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
     return dq, dk, dv, dg, dh0
 

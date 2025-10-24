@@ -121,7 +121,7 @@ def chunk_dplr_bwd_dhu(
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *qg.shape, do.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
     BK = max(triton.next_power_of_2(K), 16)
     assert BK <= 256, "current kernel does not support head dimension being larger than 256."
     # H100
