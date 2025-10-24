@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from fla.models import GDN2Config
+from fla.models import KDAConfig
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
@@ -30,7 +30,7 @@ def test_modeling(
     use_l2warp: bool,
     dtype: torch.dtype,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, GDN2Config, use_l2warp=use_l2warp, dtype=dtype)
+    run_test_model_forward_backward(L, B, T, H, D, KDAConfig, use_l2warp=use_l2warp, dtype=dtype)
 
 
 # ===================================================================================
@@ -53,4 +53,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, GDN2Config, dtype)
+    run_test_generation(L, B, T, H, D, KDAConfig, dtype)

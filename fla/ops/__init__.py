@@ -7,7 +7,6 @@ from .comba import chunk_comba, fused_recurrent_comba
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from .forgetting_attn import parallel_forgetting_attn
 from .gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from .gdn2 import chunk_gdn2, fused_recurrent_gdn2
 from .generalized_delta_rule import (
     chunk_dplr_delta_rule,
     chunk_iplr_delta_rule,
@@ -17,6 +16,7 @@ from .generalized_delta_rule import (
 from .gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
 from .gsa import chunk_gsa, fused_recurrent_gsa
 from .hgrn import fused_recurrent_hgrn
+from .kda import chunk_kda, fused_recurrent_kda
 from .lightning_attn import chunk_lightning_attn, fused_recurrent_lightning_attn
 from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
 from .log_linear_attn import chunk_log_linear_attn
@@ -38,7 +38,7 @@ __all__ = [
     'chunk_comba', 'fused_recurrent_comba',
     'chunk_dplr_delta_rule', 'chunk_iplr_delta_rule',
     'fused_recurrent_dplr_delta_rule', 'fused_recurrent_iplr_delta_rule',
-    'chunk_gdn2', 'fused_recurrent_gdn2',
+    'chunk_kda', 'fused_recurrent_kda',
     'chunk_gla', 'fused_chunk_gla', 'fused_recurrent_gla',
     'chunk_gsa', 'fused_recurrent_gsa',
     'fused_recurrent_hgrn',

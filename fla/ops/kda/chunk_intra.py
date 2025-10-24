@@ -26,7 +26,7 @@ from fla.utils import autotune_cache_kwargs
     **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_gdn2_fwd_kernel_intra_sub_inter(
+def chunk_kda_fwd_kernel_intra_sub_inter(
     q,
     k,
     g,
@@ -116,7 +116,7 @@ def chunk_gdn2_fwd_kernel_intra_sub_inter(
     **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_gdn2_fwd_kernel_intra_sub_intra(
+def chunk_kda_fwd_kernel_intra_sub_intra(
     q,
     k,
     g,
@@ -192,7 +192,7 @@ def chunk_gdn2_fwd_kernel_intra_sub_intra(
     **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['B', 'T'])
-def chunk_gdn2_bwd_kernel_intra(
+def chunk_kda_bwd_kernel_intra(
     q,
     k,
     g,
@@ -386,7 +386,7 @@ def chunk_gdn2_bwd_kernel_intra(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 
 
-def chunk_gdn2_fwd_intra(
+def chunk_kda_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
     gk: Optional[torch.Tensor] = None,
@@ -397,15 +397,17 @@ def chunk_gdn2_fwd_intra(
     output_dtype: torch.dtype = torch.float32
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
-    Compute beta * K * K^T.
-
     Args:
+        q (torch.Tensor):
+            The query tensor of shape `[B, T, H, K]`.
         k (torch.Tensor):
             The key tensor of shape `[B, T, H, K]`.
-        beta (torch.Tensor):
-            The beta tensor of shape `[B, T, H]`.
         gk (torch.Tensor):
             The cumulative sum of the gate tensor of shape `[B, T, H, K]` applied to the key tensor. Default: `None`.
+        beta (torch.Tensor):
+            The beta tensor of shape `[B, T, H]`. Default: `None`.
+        scale (Optional[float]):
+            The scale factor. Default: `None`.
         cu_seqlens (torch.LongTensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
@@ -415,7 +417,10 @@ def chunk_gdn2_fwd_intra(
             The dtype of the output tensor. Default: `torch.float32`
 
     Returns:
-        beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
+        Aqk (torch.Tensor):
+            The intra Aqk tensor of shape `[B, T, H, BT]` where `BT` is the chunk size.
+        Akk (torch.Tensor):
+            The intra Akk tensor of shape `[B, T, H, BT]` where `BT` is the chunk size.
     """
     B, T, H, K = k.shape
     assert K <= 256
@@ -430,7 +435,7 @@ def chunk_gdn2_fwd_intra(
     Aqk = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
     Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
     grid = (NT, NC * NC, B * H)
-    chunk_gdn2_fwd_kernel_intra_sub_inter[grid](
+    chunk_kda_fwd_kernel_intra_sub_inter[grid](
         q=q,
         k=k,
         g=gk,
@@ -449,7 +454,7 @@ def chunk_gdn2_fwd_intra(
     )
 
     grid = (NT, NC, B * H)
-    chunk_gdn2_fwd_kernel_intra_sub_intra[grid](
+    chunk_kda_fwd_kernel_intra_sub_intra[grid](
         q=q,
         k=k,
         g=gk,
@@ -474,7 +479,7 @@ def chunk_gdn2_fwd_intra(
     return Aqk, Akk
 
 
-def chunk_gdn2_bwd_intra(
+def chunk_kda_bwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
     g: torch.Tensor,
@@ -503,7 +508,7 @@ def chunk_gdn2_bwd_intra(
     db2 = beta.new_empty(NK, *beta.shape, dtype=torch.float)
     dg2 = torch.empty_like(dg, dtype=torch.float)
     grid = (NK * NC, NT, B * H)
-    chunk_gdn2_bwd_kernel_intra[grid](
+    chunk_kda_bwd_kernel_intra[grid](
         q=q,
         k=k,
         g=g,

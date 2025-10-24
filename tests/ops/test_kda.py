@@ -7,9 +7,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
-from fla.ops.gdn2.gate import fused_gdn2_gate, gdn2_gate_ref
-from fla.ops.gdn2.naive import naive_chunk_gdn2, naive_recurrent_gdn2
+from fla.ops.kda import chunk_kda, fused_recurrent_kda
+from fla.ops.kda.gate import fused_kda_gate, kda_gate_ref
+from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.utils import assert_close, device, is_intel_alchemist
 
 
@@ -49,7 +49,7 @@ def test_naive_chunk(
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
-    ref, ref_ht = naive_recurrent_gdn2(
+    ref, ref_ht = naive_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
@@ -60,7 +60,7 @@ def test_naive_chunk(
         output_final_state=True,
     )
 
-    tri, tri_ht = naive_chunk_gdn2(
+    tri, tri_ht = naive_chunk_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
@@ -111,7 +111,7 @@ def test_fused_recurrent(
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
-    ref, ref_ht = naive_recurrent_gdn2(
+    ref, ref_ht = naive_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
@@ -122,7 +122,7 @@ def test_fused_recurrent(
         output_final_state=True,
     )
 
-    tri, tri_ht = fused_recurrent_gdn2(
+    tri, tri_ht = fused_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
         k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
@@ -184,7 +184,7 @@ def test_chunk(
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
-    ref, ref_ht = naive_recurrent_gdn2(
+    ref, ref_ht = naive_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
@@ -198,7 +198,7 @@ def test_chunk(
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
 
-    tri, tri_ht = chunk_gdn2(
+    tri, tri_ht = chunk_kda(
         q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
         k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
@@ -267,7 +267,7 @@ def test_chunk_varlen(
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 
-    tri, tri_ht = chunk_gdn2(
+    tri, tri_ht = chunk_kda(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -284,7 +284,7 @@ def test_chunk_varlen(
     ref = []
     ref_ht = []
     for i in range(N):
-        ref_i, ref_ht_i = naive_recurrent_gdn2(
+        ref_i, ref_ht_i = naive_recurrent_kda(
             q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
             k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
             v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
@@ -330,14 +330,14 @@ def test_chunk_varlen(
         ]
     ]
 )
-def test_gdn2_gate(
+def test_kda_gate(
     B: int,
     T: int,
     H: int,
     D: int,
     use_bias: bool,
 ):
-    """Test GDN2 gate forward and backward pass - reference vs Triton implementation"""
+    """Test kda gate forward and backward pass - reference vs Triton implementation"""
     torch.manual_seed(42)
 
     g = torch.randn(B, T, H * D, dtype=torch.float32)
@@ -355,9 +355,9 @@ def test_gdn2_gate(
     do = torch.randn_like(g).view(B, T, H, D)
 
     # Reference implementation
-    ref = gdn2_gate_ref(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
+    ref = kda_gate_ref(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
     # Triton implementation
-    tri = fused_gdn2_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
+    tri = fused_kda_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
 
     # Backward pass
     ((ref * do).sum()).backward(retain_graph=True)

@@ -5,8 +5,8 @@ from typing import Dict, Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class GDN2Config(PretrainedConfig):
-    model_type = 'gdn2'
+class KDAConfig(PretrainedConfig):
+    model_type = 'kda'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(

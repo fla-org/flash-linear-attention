@@ -9,8 +9,8 @@ from torch.nn import functional as F
 
 from fla.ops.comba import chunk_comba
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-from fla.ops.gdn2 import chunk_gdn2
 from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
+from fla.ops.kda import chunk_kda
 
 
 @triton.testing.perf_report(
@@ -22,9 +22,9 @@ from fla.ops.generalized_delta_rule import chunk_dplr_delta_rule
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``
-        line_vals=['gdn', 'comba', 'gdn2', 'dplr'],
+        line_vals=['gdn', 'comba', 'kda', 'dplr'],
         # label name for the lines
-        line_names=['gdn', 'comba', 'gdn2', 'dplr'],
+        line_names=['gdn', 'comba', 'kda', 'dplr'],
         # line styles
         styles=[('blue', '-'), ('red', '-.'), ('green', '-'), ('orange', '-.'),
                 ('purple', '-'), ('brown', '-.'), ('pink', '-'), ('gray', '-.')],
@@ -102,7 +102,7 @@ def benchmark(T, provider):
             )[0].backward(do),
             quantiles=quantiles
         )
-    if provider_base == 'gdn2':
+    if provider_base == 'kda':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         p = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -110,7 +110,7 @@ def benchmark(T, provider):
         g = F.logsigmoid(torch.randn(B, T, H, D, dtype=dtype, device=device)).requires_grad_(True)
         beta = torch.randn(B, T, H, dtype=dtype, device=device).sigmoid().requires_grad_(True)
         results = triton.testing.do_bench(
-            lambda: chunk_gdn2(
+            lambda: chunk_kda(
                 q=q,
                 k=k,
                 v=v,

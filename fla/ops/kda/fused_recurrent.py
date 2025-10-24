@@ -8,7 +8,7 @@ import torch
 from fla.ops.gated_delta_rule.fused_recurrent import fused_recurrent_gated_delta_rule
 
 
-def fused_recurrent_gdn2(
+def fused_recurrent_kda(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -59,7 +59,7 @@ def fused_recurrent_gdn2(
         >>> import torch
         >>> import torch.nn.functional as F
         >>> from einops import rearrange
-        >>> from fla.ops.gdn2 import fused_recurrent_gdn2
+        >>> from fla.ops.kda import fused_recurrent_kda
         # inputs with equal lengths
         >>> B, T, H, HV, K, V = 4, 2048, 4, 8, 512, 512
         >>> q = torch.randn(B, T, H, K, device='cuda')

@@ -13,8 +13,8 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
-from fla.ops.gdn2.gate import fused_gdn2_gate
+from fla.ops.kda import chunk_kda, fused_recurrent_kda
+from fla.ops.kda.gate import fused_kda_gate
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-class GDN2(nn.Module):
+class KDA(nn.Module):
     """
     The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
 
@@ -92,7 +92,7 @@ class GDN2(nn.Module):
         layer_idx: int = None,
         norm_eps: float = 1e-5,
         **kwargs
-    ) -> GDN2:
+    ) -> KDA:
         super().__init__()
 
         self.mode = mode
@@ -158,7 +158,7 @@ class GDN2(nn.Module):
             )
 
         self.A = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)).view(
-                                1, 1, -1, 1))
+            1, 1, -1, 1))
         self.f_proj = nn.Sequential(
             nn.Linear(hidden_size, self.head_v_dim, bias=False),
             nn.Linear(self.head_v_dim, self.key_dim, bias=True)
@@ -234,7 +234,7 @@ class GDN2(nn.Module):
             v = F.silu(self.v_proj(hidden_states))
 
         g = self.f_proj(hidden_states)
-        g = fused_gdn2_gate(g, self.A, self.head_k_dim)
+        g = fused_kda_gate(g, self.A, self.head_k_dim)
         beta = self.b_proj(hidden_states).sigmoid()
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
@@ -248,7 +248,7 @@ class GDN2(nn.Module):
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
-            o, recurrent_state = chunk_gdn2(
+            o, recurrent_state = chunk_kda(
                 q=q,
                 k=k,
                 v=v,
@@ -260,7 +260,7 @@ class GDN2(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
-            o, recurrent_state = fused_recurrent_gdn2(
+            o, recurrent_state = fused_recurrent_kda(
                 q=q,
                 k=k,
                 v=v,

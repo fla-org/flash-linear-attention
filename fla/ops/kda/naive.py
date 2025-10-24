@@ -6,7 +6,7 @@ import torch
 from einops import rearrange
 
 
-def naive_recurrent_gdn2(
+def naive_recurrent_kda(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -38,7 +38,7 @@ def naive_recurrent_gdn2(
     return o.to(dtype), S
 
 
-def naive_chunk_gdn2(
+def naive_chunk_kda(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,

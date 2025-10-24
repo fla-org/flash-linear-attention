@@ -30,7 +30,7 @@ BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
     **autotune_cache_kwargs
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_gdn2_bwd_kernel_inter(
+def chunk_kda_bwd_kernel_inter(
     q,
     k,
     v,
@@ -138,7 +138,7 @@ def chunk_gdn2_bwd_kernel_inter(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 
 
-def chunk_gdn2_bwd_dqkwg(
+def chunk_kda_bwd_dqkwg(
     q: torch.Tensor,
     k: torch.Tensor,
     w: torch.Tensor,
@@ -163,7 +163,7 @@ def chunk_gdn2_bwd_dqkwg(
     dw = torch.empty_like(w)
     dg = torch.empty_like(g)
     def grid(meta): return (triton.cdiv(K, meta['BK']), NT, B * H)
-    chunk_gdn2_bwd_kernel_inter[grid](
+    chunk_kda_bwd_kernel_inter[grid](
         q=q,
         k=k,
         v=v,

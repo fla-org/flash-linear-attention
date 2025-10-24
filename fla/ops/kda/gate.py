@@ -15,7 +15,7 @@ BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 
 
-def gdn2_gate_ref(
+def kda_gate_ref(
     g: torch.Tensor,
     A: torch.Tensor,
     head_k_dim: int,
@@ -23,7 +23,7 @@ def gdn2_gate_ref(
     beta=1.0, threshold=20.0
 ) -> torch.Tensor:
     """
-    Torch reference implementation for GDN2 gate computation.
+    Torch reference implementation for KDA gate computation.
 
     Computes: g = -A.exp().unsqueeze(-1) * softplus(rearrange(g, '... (h d) -> ... h d', d=head_k_dim))
 
@@ -65,7 +65,7 @@ def gdn2_gate_ref(
     **autotune_cache_kwargs
 )
 @triton.jit
-def gdn2_gate_fwd_kernel(
+def kda_gate_fwd_kernel(
     g, A, y,
     g_bias,
     beta: tl.constexpr,
@@ -133,7 +133,7 @@ def gdn2_gate_fwd_kernel(
     **autotune_cache_kwargs
 )
 @triton.jit
-def gdn2_gate_bwd_kernel(
+def kda_gate_bwd_kernel(
     g,
     A,
     dy,
@@ -210,7 +210,7 @@ def gdn2_gate_bwd_kernel(
     tl.store(dA + out_off, tile_sum)
 
 
-def gdn2_gate_fwd(
+def kda_gate_fwd(
     g: torch.Tensor,
     A: torch.Tensor,
     head_k_dim: int,
@@ -219,7 +219,7 @@ def gdn2_gate_fwd(
     threshold: float = 20.0
 ) -> torch.Tensor:
     """
-    Forward pass for GDN2 gate:
+    Forward pass for KDA gate:
       input g: [..., H*D]
       param A: [H] or [1, 1, H, 1]
       beta: softplus beta parameter
@@ -238,7 +238,7 @@ def gdn2_gate_fwd(
 
     def grid(meta): return (triton.cdiv(T, meta['BT']), H)
 
-    gdn2_gate_fwd_kernel[grid](
+    kda_gate_fwd_kernel[grid](
         g, A, y, g_bias,
         beta, threshold,
         T, H, head_k_dim,
@@ -250,7 +250,7 @@ def gdn2_gate_fwd(
     return y
 
 
-def gdn2_gate_bwd(
+def kda_gate_bwd(
     grad_output: torch.Tensor,  # [..., H, D]
     g: torch.Tensor,            # [..., H*D]
     A: torch.Tensor,            # [H]
@@ -275,7 +275,7 @@ def gdn2_gate_bwd(
     dA = torch.empty((NT, H), dtype=torch.float32, device=g.device)
 
     grid = (triton.cdiv(T, BT), H)
-    gdn2_gate_bwd_kernel[grid](
+    kda_gate_bwd_kernel[grid](
         g_flat, A, dy, dg, dA, g_bias,
         beta, threshold,
         T, H, D,
@@ -290,9 +290,9 @@ def gdn2_gate_bwd(
     return dg, dA, dgbias
 
 
-class GDN2GateFunction(torch.autograd.Function):
+class KDAGateFunction(torch.autograd.Function):
     """
-    Autograd function for GDN2 gate computation.
+    Autograd function for KDA gate computation.
 
     Supports both formats:
     - Standard: [batch_size, seq_len, num_heads * head_k_dim]
@@ -311,7 +311,7 @@ class GDN2GateFunction(torch.autograd.Function):
         ctx.beta = beta
         ctx.threshold = threshold
 
-        return gdn2_gate_fwd(g, A, head_k_dim, g_bias, beta, threshold)
+        return kda_gate_fwd(g, A, head_k_dim, g_bias, beta, threshold)
 
     @input_guard
     @staticmethod
@@ -322,15 +322,15 @@ class GDN2GateFunction(torch.autograd.Function):
         threshold = ctx.threshold
         g_bias = ctx.g_bias
 
-        grad_g, grad_A, grad_gbias = gdn2_gate_bwd(grad_output, g, A, head_k_dim, g_bias, beta, threshold)
+        grad_g, grad_A, grad_gbias = kda_gate_bwd(grad_output, g, A, head_k_dim, g_bias, beta, threshold)
         return grad_g, grad_A, None, grad_gbias, None, None
 
 
-def fused_gdn2_gate(g: torch.Tensor, A: torch.Tensor, head_k_dim: int,
-                    g_bias: torch.Tensor | None = None,
-                    beta: float = 1.0, threshold: float = 20.0) -> torch.Tensor:
+def fused_kda_gate(g: torch.Tensor, A: torch.Tensor, head_k_dim: int,
+                   g_bias: torch.Tensor | None = None,
+                   beta: float = 1.0, threshold: float = 20.0) -> torch.Tensor:
     """
-    Fused GDN2 gate computation with autograd support.
+    Fused KDA gate computation with autograd support.
 
     Supports both formats:
     - Standard: [batch_size, seq_len, num_heads * head_k_dim]
@@ -346,4 +346,4 @@ def fused_gdn2_gate(g: torch.Tensor, A: torch.Tensor, head_k_dim: int,
     Returns:
         Output tensor of shape [..., num_heads, head_k_dim]
     """
-    return GDN2GateFunction.apply(g, A, head_k_dim, g_bias, beta, threshold)
+    return KDAGateFunction.apply(g, A, head_k_dim, g_bias, beta, threshold)

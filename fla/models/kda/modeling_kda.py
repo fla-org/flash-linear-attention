@@ -15,11 +15,11 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
-from fla.layers.gdn2 import GDN2
-from fla.models.gdn2.configuration_gdn2 import GDN2Config
+from fla.layers.kda import KDA
+from fla.models.kda.configuration_kda import KDAConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
-from fla.modules import GatedMLP as GDN2MLP
+from fla.modules import GatedMLP as KDAMLP
 from fla.modules import RMSNorm
 from fla.modules.l2warp import l2_warp
 
@@ -35,8 +35,8 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-class GDN2Block(nn.Module):
-    def __init__(self, config: GDN2Config, layer_idx: int):
+class KDABlock(nn.Module):
+    def __init__(self, config: KDAConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
@@ -55,7 +55,7 @@ class GDN2Block(nn.Module):
                 layer_idx=layer_idx
             )
         else:
-            self.attn = GDN2(
+            self.attn = KDA(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
                 expand_v=config.expand_v,
@@ -70,7 +70,7 @@ class GDN2Block(nn.Module):
                 layer_idx=layer_idx,
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.mlp = GDN2MLP(
+        self.mlp = KDAMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -111,12 +111,12 @@ class GDN2Block(nn.Module):
         return outputs
 
 
-class GDN2PreTrainedModel(PreTrainedModel):
+class KDAPreTrainedModel(PreTrainedModel):
 
-    config_class = GDN2Config
+    config_class = KDAConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
-    _no_split_modules = ['GDN2Block']
+    _no_split_modules = ['KDABlock']
     _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
@@ -128,7 +128,7 @@ class GDN2PreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: Optional[str] = None,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, GDN2) and next(module.parameters()).device.type != 'meta':
+        if isinstance(module, KDA) and next(module.parameters()).device.type != 'meta':
             with torch.no_grad():
                 module.A.copy_(nn.init.uniform_(module.A, a=1, b=16).log())
                 dt = torch.exp(
@@ -175,15 +175,15 @@ class GDN2PreTrainedModel(PreTrainedModel):
                     raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
-class GDN2Model(GDN2PreTrainedModel):
+class KDAModel(KDAPreTrainedModel):
 
-    def __init__(self, config: GDN2Config):
+    def __init__(self, config: KDAConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([GDN2Block(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([KDABlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
 
         self.gradient_checkpointing = False
@@ -209,7 +209,7 @@ class GDN2Model(GDN2PreTrainedModel):
         **kwargs: Unpack[Dict]
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if output_attentions:
-            warnings.warn("`GDN2Model` does not `output_attentions` now, setting it to `False`.")
+            warnings.warn("`KDAModel` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -278,13 +278,13 @@ class GDN2Model(GDN2PreTrainedModel):
         )
 
 
-class GDN2ForCausalLM(GDN2PreTrainedModel, GenerationMixin):
+class KDAForCausalLM(KDAPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = GDN2Model(config)
+        self.model = KDAModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None
