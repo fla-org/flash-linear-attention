@@ -131,17 +131,16 @@ def run_cp(cp_size: int, varlen: bool):
     input_local = input_ids[:, s:e]
     labels_local = labels[:, s:e]
 
-    # Set cp_shard_start_idx for varlen
-    cp_shard_start_idx = s if varlen else None
+    cp_shard_start_idx = s
 
     with torch.no_grad():
         out = model(
-            input_ids=input_local,
-            labels=labels_local,
-            cp_rank=rank, cp_size=cp_size, cp_group=group,
-            cu_seqlens=cu_seqlens.to(device) if cu_seqlens is not None else None,
-            cp_shard_start_idx=cp_shard_start_idx,
-        )
+        input_ids=input_ids,
+        labels=labels,
+        cp_rank=0, cp_size=1, cp_group=None,
+        cu_seqlens=cu_seqlens.to(device) if cu_seqlens is not None else None,
+        cp_shard_start_idx=0,   # <= was conditional before, make it explicit
+    )
 
     # Gather logits across ranks
     logits_local = out.logits
