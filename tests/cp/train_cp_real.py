@@ -206,7 +206,8 @@ def compute_loss_with_cp(
             labels=labels,
             cp_rank=cp_rank,
             cp_size=cp_size,
-            cp_group=cp_group
+            cp_group=cp_group,
+            cp_shard_start_idx=batch.get('chunk_start', 0),  # important for halo varlen safety
         )
         
         loss = outputs.loss

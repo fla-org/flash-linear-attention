@@ -17,6 +17,7 @@ from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.chunk_cp import chunk_gated_delta_rule_cp
+from fla.ops.gated_delta_rule.cp_halo import halo_exchange_and_extend
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -222,6 +223,13 @@ class GatedDeltaNet(nn.Module):
         # # change to inference mode.
         # mode = 'fused_recurrent' if q_len <= 64 else self.mode
         mode = self.mode
+
+        # Extract context parallel parameters from kwargs
+        cp_rank = kwargs.get('cp_rank', 0)
+        cp_size = kwargs.get('cp_size', 1)
+        cp_group = kwargs.get('cp_group', None)
+        cp_shard_start_idx = kwargs.get('cp_shard_start_idx', None)
+
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
@@ -235,27 +243,61 @@ class GatedDeltaNet(nn.Module):
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         if self.use_short_conv:
-            conv_state_q, conv_state_k, conv_state_v = None, None, None
-            if last_state is not None:
-                conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
-            q, conv_state_q = self.q_conv1d(
-                x=self.q_proj(hidden_states),
-                cache=conv_state_q,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
-            )
-            k, conv_state_k = self.k_conv1d(
-                x=self.k_proj(hidden_states),
-                cache=conv_state_k,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
-            )
-            v, conv_state_v = self.v_conv1d(
-                x=self.v_proj(hidden_states),
-                cache=conv_state_v,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
-            )
+            if mode == 'chunk':
+                # Context-Parallel halo exchange before causal short convs
+                # Project to conv inputs first
+                q_in = self.q_proj(hidden_states)  # [B, T, key_dim]
+                k_in = self.k_proj(hidden_states)  # [B, T, key_dim]
+                v_in = self.v_proj(hidden_states)  # [B, T, value_dim]
+                h = self.conv_size - 1
+
+                # Default conv states are not used in chunk+CP path
+                conv_state_q = conv_state_k = conv_state_v = None
+
+                if h > 0 and cp_size > 1:
+                    # Use helper to exchange halo and build extended inputs
+                    q_ext, k_ext, v_ext, cu_seqlens_ext = halo_exchange_and_extend(
+                        q_in, k_in, v_in, h,
+                        cp_rank=cp_rank, cp_size=cp_size, cp_group=cp_group,
+                        cu_seqlens=cu_seqlens, cp_shard_start_idx=kwargs.get('cp_shard_start_idx')
+                    )
+
+                    # Run causal short convs without cache on extended inputs
+                    q_conv, _ = self.q_conv1d(x=q_ext, cache=None, output_final_state=False, cu_seqlens=cu_seqlens_ext)
+                    k_conv, _ = self.k_conv1d(x=k_ext, cache=None, output_final_state=False, cu_seqlens=cu_seqlens_ext)
+                    v_conv, _ = self.v_conv1d(x=v_ext, cache=None, output_final_state=False, cu_seqlens=cu_seqlens_ext)
+
+                    # Drop halo outputs to realign to original length
+                    q = q_conv[:, h:, :]
+                    k = k_conv[:, h:, :]
+                    v = v_conv[:, h:, :]
+                else:
+                    # No CP or no need for halo; run convs as usual
+                    q, _ = self.q_conv1d(x=q_in, cache=None, output_final_state=False, cu_seqlens=cu_seqlens)
+                    k, _ = self.k_conv1d(x=k_in, cache=None, output_final_state=False, cu_seqlens=cu_seqlens)
+                    v, _ = self.v_conv1d(x=v_in, cache=None, output_final_state=False, cu_seqlens=cu_seqlens)
+            else:
+                conv_state_q, conv_state_k, conv_state_v = None, None, None
+                if last_state is not None:
+                    conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
+                q, conv_state_q = self.q_conv1d(
+                    x=self.q_proj(hidden_states),
+                    cache=conv_state_q,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens
+                )
+                k, conv_state_k = self.k_conv1d(
+                    x=self.k_proj(hidden_states),
+                    cache=conv_state_k,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens
+                )
+                v, conv_state_v = self.v_conv1d(
+                    x=self.v_proj(hidden_states),
+                    cache=conv_state_v,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens
+                )
         else:
             q = F.silu(self.q_proj(hidden_states))
             k = F.silu(self.k_proj(hidden_states))
@@ -274,12 +316,6 @@ class GatedDeltaNet(nn.Module):
         g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-
-
-        # Extract context parallel parameters from kwargs
-        cp_rank = kwargs.get('cp_rank', 0)
-        cp_size = kwargs.get('cp_size', 1)
-        cp_group = kwargs.get('cp_group', None)
 
         if mode == 'chunk':
 
