@@ -128,7 +128,7 @@ def chunk_dplr_bwd_wy(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A_ab_inv, A_ak, v, ag, dw, du = map(lambda x: x.contiguous(), [A_ab_inv, A_ak, v, ag, dw, du])
     B, T, H, K, V = *dw.shape, du.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)

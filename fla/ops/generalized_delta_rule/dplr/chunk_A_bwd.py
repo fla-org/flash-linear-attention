@@ -303,7 +303,7 @@ def chunk_dplr_bwd_dqk_intra(
     chunk_size: int = 64,
 ):
     B, T, H, K = q.shape
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     BK = min(64, triton.next_power_of_2(K)) if check_shared_mem() else min(32, triton.next_power_of_2(K))
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None

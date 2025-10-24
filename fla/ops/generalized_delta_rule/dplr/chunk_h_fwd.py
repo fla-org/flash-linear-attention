@@ -120,7 +120,7 @@ def chunk_dplr_fwd_h(
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *kg.shape, u.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths

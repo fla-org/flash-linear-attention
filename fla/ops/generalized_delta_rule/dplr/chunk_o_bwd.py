@@ -301,7 +301,7 @@ def chunk_dplr_bwd_dv(
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *kg.shape, do.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -344,7 +344,7 @@ def chunk_dplr_bwd_o(
 
     B, T, H, K, V = *w.shape, v.shape[-1]
 
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
@@ -398,7 +398,7 @@ def chunk_dplr_bwd_dAu(
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, V = v.shape
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 

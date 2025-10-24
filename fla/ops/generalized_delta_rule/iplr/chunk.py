@@ -218,7 +218,7 @@ def chunk_generalized_iplr_delta_rule_fwd_o(
     B, T, H, K, V = *q.shape, v.shape[-1]
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -262,7 +262,7 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, u.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
@@ -333,15 +333,13 @@ def chunk_generalized_iplr_delta_rule_fwd(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
 ):
-    T = q.shape[1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     w, u, _ = prepare_wy_repr_fwd(
         a=a,
         b=b,
         k=k,
         v=v,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
 
     h, v_new, final_state = chunk_generalized_iplr_delta_rule_fwd_h(
@@ -353,7 +351,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
     o = chunk_generalized_iplr_delta_rule_fwd_o(
         q=q,
@@ -364,7 +362,7 @@ def chunk_generalized_iplr_delta_rule_fwd(
         h=h,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size
     )
     return o, final_state
 
@@ -386,8 +384,7 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
     ):
-        chunk_size = 64
-
+        chunk_size = min(64, max(triton.next_power_of_2(q.shape[1]), 16))
         o, final_state = chunk_generalized_iplr_delta_rule_fwd(
             q=q,
             k=k,

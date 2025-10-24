@@ -494,7 +494,7 @@ def chunk_fwd_o(
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
@@ -534,7 +534,7 @@ def chunk_bwd_dv(
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):
@@ -585,7 +585,7 @@ def chunk_bwd_dv_local(
     chunk_size: int = 64
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):
@@ -638,7 +638,7 @@ def chunk_bwd_dqkwg(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
