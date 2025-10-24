@@ -119,7 +119,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BK: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -187,7 +187,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -388,7 +388,7 @@ def chunk_gla_bwd_kernel_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -406,6 +406,7 @@ def chunk_gla_bwd_kernel_intra(
     m_k = o_k < K
 
     p_g = tl.make_block_ptr(g + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+    # [BC, BK]
     b_g = tl.load(p_g, boundary_check=(0, 1))
 
     b_dq = tl.zeros([BC, BK], dtype=tl.float32)
@@ -417,6 +418,7 @@ def chunk_gla_bwd_kernel_intra(
             p_k = tl.make_block_ptr(k+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k * BK), (BC, BK), (1, 0))
             p_gk = tl.make_block_ptr(g+(bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k * BK), (BC, BK), (1, 0))
             p_dA = tl.make_block_ptr(dA+(bos*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t*BT+i_i*BC, i_j * BC), (BC, BC), (1, 0))
+            # [BC, BK]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
             b_kg = b_k * exp(b_gn[None, :] - b_gk)
@@ -446,29 +448,33 @@ def chunk_gla_bwd_kernel_intra(
         b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp(b_g - b_gkj[None, :]), 0.)
         p_kj += H*K
         p_gkj += H*K
-
-    p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
     tl.debug_barrier()
+    # [BC, BK]
     b_dk = tl.zeros([BC, BK], dtype=tl.float32)
 
     NC = min(NC, tl.cdiv(T - i_t * BT, BC))
     if i_i < NC - 1:
         p_gn = g + (bos + min(i_t * BT + i_i * BC + BC, T) - 1) * H*K + i_h * K + o_k
+
+        # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(i_i + 1, NC):
             p_q = tl.make_block_ptr(q + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
             p_gq = tl.make_block_ptr(g + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
             p_dA = tl.make_block_ptr(dA + (bos*H+i_h)*BT, (BT, T), (1, H*BT), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
-            b_q = tl.load(p_q, boundary_check=(0, 1))
 
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
-
+            # [BC, BK]
+            b_q = tl.load(p_q, boundary_check=(0, 1))
             b_gq = tl.load(p_gq, boundary_check=(0, 1))
-            b_dA = tl.load(p_dA, boundary_check=(0, 1))
             b_qg = b_q * tl.where(m_j[:, None], exp(b_gq - b_gn[None, :]), 0)
+            # [BC, BC]
+            b_dA = tl.load(p_dA, boundary_check=(0, 1))
+            # [BC, BK]
+            # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dk += tl.dot(b_dA, b_qg)
         b_dk *= exp(b_gn[None, :] - b_g)
     o_dA = bos*H*BT + (i_t * BT + i_i * BC) * H*BT + i_h * BT + i_i * BC + tl.arange(0, BC)
@@ -571,7 +577,7 @@ def chunk_gla_bwd_kernel_dv(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -619,16 +625,14 @@ def chunk_gla_bwd_kernel_dv(
 
 
 @triton.heuristics({
-    'USE_W': lambda args: args['dw'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
         for BK in BK_LIST
         for BV in BV_LIST
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
     ],
     key=['BT'],
     **autotune_cache_kwargs
@@ -646,8 +650,6 @@ def chunk_gla_bwd_kernel_inter(
     dk,
     dq2,
     dk2,
-    dv,
-    dw,
     dg,
     cu_seqlens,
     chunk_indices,
@@ -659,8 +661,7 @@ def chunk_gla_bwd_kernel_inter(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_W: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -688,9 +689,6 @@ def chunk_gla_bwd_kernel_inter(
     dk += (bos * H + i_h) * K
     dq2 += (bos * H + i_h) * K
     dk2 += (bos * H + i_h) * K
-    if USE_W:
-        dw += (bos * H + i_h) * K
-        dv += (bos * H + i_h) * V
     dg += (bos * H + i_h) * K
 
     p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -699,7 +697,6 @@ def chunk_gla_bwd_kernel_inter(
     b_gn = tl.load(p_gn, mask=m_k, other=0)
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dw = tl.zeros([BT, BK], dtype=tl.float32) if USE_W else None
     b_dgk = tl.zeros([BK,], dtype=tl.float32)
 
     for i_v in range(tl.cdiv(V, BV)):
@@ -719,15 +716,6 @@ def chunk_gla_bwd_kernel_inter(
         # [BT, BK]
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
-
-        if USE_W:
-            p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            b_dv = tl.load(p_dv, boundary_check=(0, 1))
-            b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
-
-    if USE_W:
-        p_dw = tl.make_block_ptr(dw, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
 
     b_dgk *= exp(b_gn)
     b_dq *= scale
@@ -996,7 +984,7 @@ def chunk_gla_bwd_dqk_intra(
     return dq, dk
 
 
-def chunk_gla_bwd_dqkwg(
+def chunk_gla_bwd_dqkg(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -1006,8 +994,6 @@ def chunk_gla_bwd_dqkwg(
     dh: torch.Tensor,
     dq: torch.Tensor,
     dk: torch.Tensor,
-    dv: Optional[torch.Tensor] = None,
-    w: Optional[torch.Tensor] = None,
     scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64
@@ -1021,7 +1007,6 @@ def chunk_gla_bwd_dqkwg(
     dg = torch.empty_like(g)
     dq2 = torch.empty_like(dq)
     dk2 = torch.empty_like(dk)
-    dw = torch.empty_like(w) if w is not None else None
     def grid(meta): return (triton.cdiv(K, meta['BK']), NT, B * H)
     chunk_gla_bwd_kernel_inter[grid](
         q=q,
@@ -1035,8 +1020,6 @@ def chunk_gla_bwd_dqkwg(
         dk=dk,
         dq2=dq2,
         dk2=dk2,
-        dv=dv,
-        dw=dw,
         dg=dg,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -1047,7 +1030,7 @@ def chunk_gla_bwd_dqkwg(
         V=V,
         BT=BT,
     )
-    return dq2, dk2, dw, dg
+    return dq2, dk2, dg
 
 
 def chunk_gla_fwd(
@@ -1174,7 +1157,7 @@ def chunk_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size
     )
-    dq, dk, _, dg = chunk_gla_bwd_dqkwg(
+    dq, dk, dg = chunk_gla_bwd_dqkg(
         q=q,
         k=k,
         v=v,
@@ -1206,8 +1189,7 @@ class ChunkGLAFunction(torch.autograd.Function):
         output_final_state,
         cu_seqlens,
     ):
-        T = q.shape[1]
-        chunk_size = min(64, max(16, triton.next_power_of_2(T)))
+        chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
 
         g_cumsum, A, _, ht, o = chunk_gla_fwd(
             q=q,
@@ -1316,14 +1298,12 @@ def chunk_gla(
         >>> q, k, v, g = map(lambda x: rearrange(x, 'b t h d -> 1 (b t) h d'), (q, k, v, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = chunk_gla(
+        >>> o, ht = chunk_gla(
             q, k, v, g,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
         )
-        >>> assert o.allclose(o_var.view(o.shape))
-        >>> assert ht.allclose(ht_var)
     """
     if cu_seqlens is not None:
         if q.shape[0] != 1:
