@@ -284,7 +284,7 @@ def chunk_fwd_h(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
-    BS = BT if split_size is None else min(split_size, max(16, triton.next_power_of_2(T)))
+    BS = BT if split_size is None else split_size
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
@@ -342,7 +342,7 @@ def chunk_bwd_dh(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     BT = chunk_size
-    BS = BT if split_size is None else min(split_size, max(16, triton.next_power_of_2(T)))
+    BS = BT if split_size is None else split_size
     assert BS % BT == 0, f"The `split_size` (got {BS}) must be a multiple of `chunk_size` {BT}"
     # N: the actual number of sequences in the batch with either equal or variable lengths
     # NG: number of groups in GQA
