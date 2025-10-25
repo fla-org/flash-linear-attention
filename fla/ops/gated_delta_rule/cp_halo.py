@@ -113,3 +113,133 @@ def halo_exchange_and_extend(
             cu_seqlens_ext[1:] = cu_seqlens_ext[1:] + h
 
     return q_ext, k_ext, v_ext, cu_seqlens_ext
+
+
+class HaloExchangeAndExtendFn(torch.autograd.Function):
+    """Autograd-aware halo exchange for CP short convs.
+
+    Forward: delegates to halo_exchange_and_extend.
+    Backward: exchanges gradients across ranks so local inputs receive
+    contributions from the next rank that consumed our right tail, and the
+    previous rank receives gradients for the left halo we consumed.
+    """
+
+    @staticmethod
+    def forward(ctx,
+                q_in: torch.Tensor,
+                k_in: torch.Tensor,
+                v_in: torch.Tensor,
+                h: int,
+                cp_rank: int,
+                cp_size: int,
+                cp_group,
+                cu_seqlens: Optional[torch.LongTensor] = None,
+                cp_shard_start_idx: Optional[int] = None):
+        # Save metadata for backward
+        ctx.h = int(h)
+        ctx.cp_rank = int(cp_rank)
+        ctx.cp_size = int(cp_size)
+        ctx.cp_group = cp_group
+        ctx.has_cu = cu_seqlens is not None
+        ctx.cp_shard_start_idx = cp_shard_start_idx
+        ctx.B = int(q_in.shape[0])
+        ctx.T = int(q_in.shape[1])
+        ctx.Dq = int(q_in.shape[-1])
+        ctx.Dk = int(k_in.shape[-1])
+        ctx.Dv = int(v_in.shape[-1])
+        if ctx.has_cu:
+            # Save for boundary check in backward
+            ctx.save_for_backward(cu_seqlens)
+
+        q_ext, k_ext, v_ext, cu_seqlens_ext = halo_exchange_and_extend(
+            q_in, k_in, v_in, ctx.h,
+            cp_rank=ctx.cp_rank, cp_size=ctx.cp_size, cp_group=ctx.cp_group,
+            cu_seqlens=cu_seqlens, cp_shard_start_idx=cp_shard_start_idx,
+            detach_send=True, blocking_send=True,
+        )
+
+        # cu_seqlens_ext is metadata; exclude from autograd
+        if cu_seqlens_ext is not None:
+            ctx.mark_non_differentiable(cu_seqlens_ext)
+        return q_ext, k_ext, v_ext, cu_seqlens_ext
+
+    @staticmethod
+    def backward(ctx, grad_q_ext: torch.Tensor, grad_k_ext: torch.Tensor, grad_v_ext: torch.Tensor, *_) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], None, None, None, None, None, None]:
+        h = ctx.h
+        cp_rank = ctx.cp_rank
+        cp_size = ctx.cp_size
+        cp_group = ctx.cp_group
+        B = ctx.B
+        T = ctx.T
+        Dq, Dk, Dv = ctx.Dq, ctx.Dk, ctx.Dv
+        t_send = min(T, h)
+
+        # Fast path: no halo or single rank
+        if h <= 0 or cp_size == 1:
+            return grad_q_ext, grad_k_ext, grad_v_ext, None, None, None, None, None, None
+
+        # Local grads: drop the first h tokens that correspond to received halo
+        gq_local = grad_q_ext[:, h:, :].contiguous()
+        gk_local = grad_k_ext[:, h:, :].contiguous()
+        gv_local = grad_v_ext[:, h:, :].contiguous()
+
+        # Post irecv from next rank for tail grads (if any)
+        if cp_rank < cp_size - 1:
+            recv_buf = grad_q_ext.new_empty(B, h, Dq + Dk + Dv)
+            recv_req = dist.irecv(recv_buf, src=cp_rank + 1, group=cp_group)
+        else:
+            recv_buf = None
+            recv_req = None
+
+        # Send grads of consumed left halo to previous rank (if any)
+        if cp_rank > 0:
+            send_buf = torch.cat([
+                grad_q_ext[:, :h, :],
+                grad_k_ext[:, :h, :],
+                grad_v_ext[:, :h, :],
+            ], dim=-1).contiguous()
+
+            # Zero if this shard begins at a true sequence boundary
+            if ctx.has_cu and (ctx.cp_shard_start_idx is not None):
+                (cu_seqlens_saved,) = ctx.saved_tensors if len(ctx.saved_tensors) == 1 else (None,)
+                if cu_seqlens_saved is not None:
+                    seq_boundaries = cu_seqlens_saved[1:-1]
+                    if seq_boundaries.numel() > 0 and bool((seq_boundaries == ctx.cp_shard_start_idx).any().item()):
+                        send_buf.zero_()
+
+            dist.send(send_buf, dst=cp_rank - 1, group=cp_group)
+
+        # Receive tail grads from next and accumulate into the last tokens
+        if cp_rank < cp_size - 1:
+            recv_req.wait()
+            gq_tail, gk_tail, gv_tail = torch.split(recv_buf, [Dq, Dk, Dv], dim=-1)
+            if t_send > 0:
+                # Ignore the leading pad part when T < h
+                gq_local[:, -t_send:, :] += gq_tail[:, -t_send:, :]
+                gk_local[:, -t_send:, :] += gk_tail[:, -t_send:, :]
+                gv_local[:, -t_send:, :] += gv_tail[:, -t_send:, :]
+
+        # Return grads for q_in, k_in, v_in; None for non-tensor args
+        return gq_local, gk_local, gv_local, None, None, None, None, None, None
+
+
+def halo_exchange_and_extend_autograd(
+    q_in: torch.Tensor,
+    k_in: torch.Tensor,
+    v_in: torch.Tensor,
+    h: int,
+    *,
+    cp_rank: int,
+    cp_size: int,
+    cp_group,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    cp_shard_start_idx: Optional[int] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.LongTensor]]:
+    """Autograd-enabled variant of halo_exchange_and_extend.
+
+    Returns the extended q/k/v and adjusted cu_seqlens while ensuring correct
+    gradient communication across CP boundaries during backprop.
+    """
+    return HaloExchangeAndExtendFn.apply(
+        q_in, k_in, v_in, h, cp_rank, cp_size, cp_group, cu_seqlens, cp_shard_start_idx
+    )
