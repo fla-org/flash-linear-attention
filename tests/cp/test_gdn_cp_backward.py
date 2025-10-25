@@ -10,8 +10,8 @@ Procedure:
 - Also validate parameter grads for q/k/v projections and short conv weights.
 
 Run:
-  python tests/cp/test_gdn_cp_backward.py --mode single --save_ref
-  torchrun --nproc_per_node=2 tests/cp/test_gdn_cp_backward.py --mode cp --cp_size 2
+  python tests/cp/test_gdn_cp_backward.py --mode single --save_ref [--dtype fp32|bf16]
+  torchrun --nproc_per_node=2 tests/cp/test_gdn_cp_backward.py --mode cp --cp_size 2 [--dtype fp32|bf16]
 """
 
 import argparse
@@ -59,10 +59,20 @@ def _get_param_grads(model):
     return {n: p.grad.detach().cpu().clone() for n, p in model.named_parameters() if p.grad is not None and _select_param(n)}
 
 
-def single(save_ref: bool):
+def _to_dtype(model: torch.nn.Module, dtype_str: str) -> torch.dtype:
+    if dtype_str == 'bf16':
+        model.to(torch.bfloat16)
+        return torch.bfloat16
+    else:
+        model.to(torch.float32)
+        return torch.float32
+
+
+def single(save_ref: bool, dtype_str: str):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     cfg = config_small()
-    model = GatedDeltaNetForCausalLMCP(cfg).to(device).to(torch.bfloat16)
+    model = GatedDeltaNetForCausalLMCP(cfg).to(device)
+    _to_dtype(model, dtype_str)
 
     torch.manual_seed(321)
     input_ids = torch.randint(0, cfg.vocab_size, (2, 96), device=device)
@@ -78,7 +88,7 @@ def single(save_ref: bool):
     param_grads = _get_param_grads(model)
     state = model.state_dict()
 
-    ref = {'state': state, 'emb_grad': emb_grad, 'param_grads': param_grads, 'cfg': cfg, 'input_ids': input_ids.cpu(), 'labels': labels.cpu()}
+    ref = {'state': state, 'emb_grad': emb_grad, 'param_grads': param_grads, 'cfg': cfg, 'input_ids': input_ids.cpu(), 'labels': labels.cpu(), 'dtype': dtype_str}
     if save_ref:
         os.makedirs(os.path.dirname(REF_PATH), exist_ok=True)
         torch.save(ref, REF_PATH)
@@ -111,10 +121,12 @@ def cp(cp_size: int):
     ref = obj[0]
 
     cfg = ref['cfg']
+    dtype_str = ref.get('dtype', 'fp32')
     input_ids = ref['input_ids'].to(device)
     labels = ref['labels'].to(device)
 
-    model = GatedDeltaNetForCausalLMCP(cfg).to(device).to(torch.bfloat16)
+    model = GatedDeltaNetForCausalLMCP(cfg).to(device)
+    _to_dtype(model, dtype_str)
     model.load_state_dict(ref['state'])
 
     # shard
@@ -146,6 +158,8 @@ def cp(cp_size: int):
 
     # parameter grads parity (reduce-sum across ranks)
     param_grads_ref = {k: v.to(device) for k, v in ref['param_grads'].items()}
+    tol_default = 5e-2
+    tol_conv = 7e-2 if dtype_str == 'bf16' else tol_default
     for name, p in model.named_parameters():
         if not _select_param(name):
             continue
@@ -157,7 +171,8 @@ def cp(cp_size: int):
         d = (g.float() - rg.float()).abs()
         dmax, dmean = d.max().item(), d.mean().item()
         print(f"Grad {name} max {dmax:.6f}, mean {dmean:.6f}")
-        assert dmax < 5e-2, f"Param grad mismatch beyond tolerance for {name}"
+        tol = tol_conv if 'conv1d.weight' in name else tol_default
+        assert dmax < tol, f"Param grad mismatch beyond tolerance for {name}"
 
     if rank == 0:
         print("✓ Backward CP parity (emb + key params) passed")
@@ -170,10 +185,11 @@ def main():
     parser.add_argument('--mode', choices=['single', 'cp'], required=True)
     parser.add_argument('--cp_size', type=int, default=2)
     parser.add_argument('--save_ref', action='store_true')
+    parser.add_argument('--dtype', choices=['fp32', 'bf16'], default='fp32')
     args = parser.parse_args()
 
     if args.mode == 'single':
-        single(save_ref=args.save_ref)
+        single(save_ref=args.save_ref, dtype_str=args.dtype)
     else:
         cp(cp_size=args.cp_size)
 
