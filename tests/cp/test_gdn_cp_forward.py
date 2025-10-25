@@ -135,15 +135,16 @@ def run_cp(cp_size: int, varlen: bool):
 
     with torch.no_grad():
         out = model(
-        input_ids=input_ids,
-        labels=labels,
-        cp_rank=0, cp_size=1, cp_group=None,
-        cu_seqlens=cu_seqlens.to(device) if cu_seqlens is not None else None,
-        cp_shard_start_idx=0,   # <= was conditional before, make it explicit
-    )
+            input_ids=input_local,
+            labels=labels_local,
+            cp_rank=rank, cp_size=cp_size, cp_group=group,
+            cu_seqlens=cu_seqlens.to(device) if cu_seqlens is not None else None,
+            # Only needed for varlen to avoid crossing seq boundaries in halo exchange
+            cp_shard_start_idx=cp_shard_start_idx if cu_seqlens is not None else None,
+        )
 
-    # Gather logits across ranks
-    logits_local = out.logits
+    # Gather logits across ranks (sequence dimension)
+    logits_local = out.logits  # [B, chunk, V]
     logits_list = [torch.zeros_like(logits_local) for _ in range(cp_size)]
     dist.all_gather(logits_list, logits_local, group=group)
     logits_full = torch.cat(logits_list, dim=1)
