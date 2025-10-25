@@ -17,7 +17,7 @@ from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.chunk_cp import chunk_gated_delta_rule_cp
-from fla.ops.gated_delta_rule.cp_halo import halo_exchange_and_extend
+from fla.ops.gated_delta_rule.cp_halo import halo_exchange_and_extend, halo_exchange_and_extend_autograd
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -256,11 +256,18 @@ class GatedDeltaNet(nn.Module):
 
                 if h > 0 and cp_size > 1:
                     # Use helper to exchange halo and build extended inputs
-                    q_ext, k_ext, v_ext, cu_seqlens_ext = halo_exchange_and_extend(
-                        q_in, k_in, v_in, h,
-                        cp_rank=cp_rank, cp_size=cp_size, cp_group=cp_group,
-                        cu_seqlens=cu_seqlens, cp_shard_start_idx=kwargs.get('cp_shard_start_idx')
-                    )
+                    if self.training:
+                        q_ext, k_ext, v_ext, cu_seqlens_ext = halo_exchange_and_extend_autograd(
+                            q_in, k_in, v_in, h,
+                            cp_rank=cp_rank, cp_size=cp_size, cp_group=cp_group,
+                            cu_seqlens=cu_seqlens, cp_shard_start_idx=kwargs.get('cp_shard_start_idx')
+                        )
+                    else:
+                        q_ext, k_ext, v_ext, cu_seqlens_ext = halo_exchange_and_extend(
+                            q_in, k_in, v_in, h,
+                            cp_rank=cp_rank, cp_size=cp_size, cp_group=cp_group,
+                            cu_seqlens=cu_seqlens, cp_shard_start_idx=kwargs.get('cp_shard_start_idx')
+                        )
 
                     # Run causal short convs without cache on extended inputs
                     q_conv, _ = self.q_conv1d(x=q_ext, cache=None, output_final_state=False, cu_seqlens=cu_seqlens_ext)

@@ -1,9 +1,10 @@
 from .chunk import chunk_gated_delta_rule
 from .fused_recurrent import fused_recurrent_gated_delta_rule
-from .cp_halo import halo_exchange_and_extend
+from .cp_halo import halo_exchange_and_extend, halo_exchange_and_extend_autograd
 
 __all__ = [
     "chunk_gated_delta_rule",
     "fused_recurrent_gated_delta_rule",
-    "halo_exchange_and_extend"
+    "halo_exchange_and_extend",
+    "halo_exchange_and_extend_autograd"
 ]
