@@ -6,7 +6,7 @@ Gradient parity tests for GDN CP with short conv halo exchange.
 Procedure:
 - Build reference single-rank model, compute grad wrt embeddings on a short batch.
 - Run CP with identical weights, shard inputs, compute grads.
-- All-gather per-rank input-grads and compare to reference.
+- All-reduce(AVG) per-rank grads and compare to reference.
 - Also validate parameter grads for q/k/v projections and short conv weights.
 
 Run:
@@ -23,6 +23,15 @@ from fla.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNet
 from fla.models.gated_deltanet.modeling_gated_deltanet_cp import GatedDeltaNetForCausalLMCP
 
 REF_PATH = 'tests/cp/.gdn_cp_backward_ref.pt'
+
+
+def _set_determinism(seed: int = 321):
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")  # deterministic GEMMs on Ampere+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def config_small():
@@ -56,14 +65,20 @@ def _select_param(name: str) -> bool:
 
 
 def _get_param_grads(model):
-    return {n: p.grad.detach().cpu().clone() for n, p in model.named_parameters() if p.grad is not None and _select_param(n)}
+    return {
+        n: p.grad.detach().cpu().clone()
+        for n, p in model.named_parameters()
+        if p.grad is not None and _select_param(n)
+    }
 
 
 def single(save_ref: bool):
+    _set_determinism(321)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     cfg = config_small()
     model = GatedDeltaNetForCausalLMCP(cfg).to(device).to(torch.bfloat16)
 
+    # fixed data for reproducibility
     torch.manual_seed(321)
     input_ids = torch.randint(0, cfg.vocab_size, (2, 96), device=device)
     labels = torch.randint(0, cfg.vocab_size, (2, 96), device=device)
@@ -73,12 +88,19 @@ def single(save_ref: bool):
     out = model(input_ids=input_ids, labels=labels, cp_rank=0, cp_size=1, cp_group=None)
     out.loss.backward()
 
-    # Grads
+    # Grads + state
     emb_grad = model.get_input_embeddings().weight.grad.detach().cpu()
     param_grads = _get_param_grads(model)
     state = model.state_dict()
 
-    ref = {'state': state, 'emb_grad': emb_grad, 'param_grads': param_grads, 'cfg': cfg, 'input_ids': input_ids.cpu(), 'labels': labels.cpu()}
+    ref = {
+        'state': state,
+        'emb_grad': emb_grad,
+        'param_grads': param_grads,
+        'cfg': cfg,
+        'input_ids': input_ids.cpu(),
+        'labels': labels.cpu()
+    }
     if save_ref:
         os.makedirs(os.path.dirname(REF_PATH), exist_ok=True)
         torch.save(ref, REF_PATH)
@@ -87,28 +109,33 @@ def single(save_ref: bool):
 
 
 def setup(cp_size: int):
-    dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
+    # env init via torchrun
+    backend = 'nccl' if torch.cuda.is_available() else 'gloo'
+    dist.init_process_group(backend=backend)
+
+    world_size = dist.get_world_size()
+    assert world_size == cp_size, f"world_size ({world_size}) must equal cp_size ({cp_size}) for this test"
     rank = dist.get_rank()
-    local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else 'cpu')
+
+    # require LOCAL_RANK to be present when using GPUs
     if torch.cuda.is_available():
+        local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
-    group = dist.new_group(list(range(cp_size)))
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device('cpu')
+
+    group = dist.group.WORLD  # use the full world as the CP group
     return rank, device, group
 
 
 def cp(cp_size: int):
+    _set_determinism(321)
     rank, device, group = setup(cp_size)
 
-    # Load ref
-    if rank == 0:
-        assert os.path.exists(REF_PATH), f"Run single first to create {REF_PATH}"
-        ref = torch.load(REF_PATH, weights_only=False, map_location='cpu')
-    else:
-        ref = None
-    obj = [ref]
-    dist.broadcast_object_list(obj, src=0, group=group)
-    ref = obj[0]
+    # Load ref on every rank (avoids large object broadcast and stays simple)
+    assert os.path.exists(REF_PATH), f"Run single first to create {REF_PATH}"
+    ref = torch.load(REF_PATH, weights_only=False, map_location='cpu')
 
     cfg = ref['cfg']
     input_ids = ref['input_ids'].to(device)
@@ -117,11 +144,11 @@ def cp(cp_size: int):
     model = GatedDeltaNetForCausalLMCP(cfg).to(device).to(torch.bfloat16)
     model.load_state_dict(ref['state'])
 
-    # shard
+    # shard sequence dimension equally
     B, T = input_ids.shape
-    assert T % cp_size == 0
+    assert T % cp_size == 0, f"T ({T}) must be divisible by cp_size ({cp_size})"
     chunk = T // cp_size
-    s = rank * chunk
+    s = dist.get_rank() * chunk
     e = s + chunk
     in_local = input_ids[:, s:e]
     lab_local = labels[:, s:e]
@@ -129,41 +156,56 @@ def cp(cp_size: int):
     # train mode grad test
     model.train()
     model.zero_grad(set_to_none=True)
-    out = model(input_ids=in_local, labels=lab_local, cp_rank=rank, cp_size=cp_size, cp_group=group)
+    out = model(input_ids=in_local, labels=lab_local,
+                cp_rank=dist.get_rank(), cp_size=cp_size, cp_group=group)
     out.loss.backward()
 
-    # collect embedding grads and sum across ranks (they should match full grads)
+    # ===== Embedding grad parity =====
     emb_grad_local = model.get_input_embeddings().weight.grad
-    emb_grad_full = emb_grad_local.clone()
-    dist.all_reduce(emb_grad_full, op=dist.ReduceOp.SUM, group=group)
+    emb_grad_avg = emb_grad_local.clone()
+    dist.all_reduce(emb_grad_avg, op=dist.ReduceOp.AVG, group=group)  # average to match single-rank scale
 
     ref_grad = ref['emb_grad'].to(device)
-    diff = (emb_grad_full.float() - ref_grad.float()).abs()
-    max_diff = diff.max().item()
-    mean_diff = diff.mean().item()
-    print(f"Embedding grad max abs diff: {max_diff:.6f}, mean: {mean_diff:.6f}")
-    tol_emb = 7e-2  # bf16 default tolerance
-    assert max_diff < tol_emb, "Embedding grad mismatch beyond tolerance"
+    d = (emb_grad_avg.float() - ref_grad.float()).abs()
+    dmax, dmean = d.max().item(), d.mean().item()
 
-    # parameter grads parity (reduce-sum across ranks)
+    # tighter tol with determinism + bf16
+    emb_atol, emb_rtol = 2e-2, 1e-2
+    ok_emb = torch.allclose(emb_grad_avg.float(), ref_grad.float(), atol=emb_atol, rtol=emb_rtol)
+    print(f"[rank {dist.get_rank()}] Embedding grad: max {dmax:.6f}, mean {dmean:.6f}, allclose={ok_emb}")
+    if not ok_emb:
+        raise AssertionError(f"Embedding grad mismatch: max {dmax:.6f}, mean {dmean:.6f} (atol={emb_atol}, rtol={emb_rtol})")
+
+    # ===== Parameter grad parity (q/k/v linear + short conv) =====
     param_grads_ref = {k: v.to(device) for k, v in ref['param_grads'].items()}
-    tol_default = 5e-2
-    tol_conv = 7e-2  # bf16 conv tolerance
+    lin_atol, lin_rtol = 3e-2, 1e-2
+    conv_atol, conv_rtol = 5e-2, 1e-2
+
     for name, p in model.named_parameters():
         if not _select_param(name):
             continue
         if p.grad is None:
             raise AssertionError(f"Missing grad for {name}")
-        g = p.grad.detach().clone()
-        dist.all_reduce(g, op=dist.ReduceOp.SUM, group=group)
-        rg = param_grads_ref[name]
-        d = (g.float() - rg.float()).abs()
-        dmax, dmean = d.max().item(), d.mean().item()
-        print(f"Grad {name} max {dmax:.6f}, mean {dmean:.6f}")
-        tol = tol_conv if 'conv1d.weight' in name else tol_default
-        assert dmax < tol, f"Param grad mismatch beyond tolerance for {name}"
 
-    if rank == 0:
+        g = p.grad.detach().clone()
+        dist.all_reduce(g, op=dist.ReduceOp.AVG, group=group)  # average to match single-rank scale
+
+        rg = param_grads_ref[name]
+        diff = (g.float() - rg.float()).abs()
+        dmax, dmean = diff.max().item(), diff.mean().item()
+
+        if 'conv1d.weight' in name:
+            atol, rtol = conv_atol, conv_rtol
+        else:
+            atol, rtol = lin_atol, lin_rtol
+
+        ok = torch.allclose(g.float(), rg.float(), atol=atol, rtol=rtol)
+        print(f"[rank {dist.get_rank()}] Grad {name}: max {dmax:.6f}, mean {dmean:.6f}, allclose={ok}")
+        if not ok:
+            raise AssertionError(f"Param grad mismatch for {name}: max {dmax:.6f}, mean {dmean:.6f} (atol={atol}, rtol={rtol})")
+
+    dist.barrier(group=group)
+    if dist.get_rank() == 0:
         print("✓ Backward CP parity (emb + key params) passed")
 
     dist.destroy_process_group()
