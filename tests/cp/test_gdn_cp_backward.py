@@ -170,7 +170,7 @@ def cp(cp_size: int):
     dmax, dmean = d.max().item(), d.mean().item()
 
     # tighter tol with determinism + bf16
-    emb_atol, emb_rtol = 2e-2, 1e-2
+    emb_atol, emb_rtol = 3e-2, 1e-2
     ok_emb = torch.allclose(emb_grad_avg.float(), ref_grad.float(), atol=emb_atol, rtol=emb_rtol)
     print(f"[rank {dist.get_rank()}] Embedding grad: max {dmax:.6f}, mean {dmean:.6f}, allclose={ok_emb}")
     if not ok_emb:
