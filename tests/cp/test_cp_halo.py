@@ -55,17 +55,17 @@ def test_basic_halo(cp_size: int, h: int = 2):
         cu_seqlens=cu_seqlens, cp_shard_start_idx=None,
     )
 
+    # Gather previous rank tails on ALL ranks to avoid deadlock
+    q_tails = [torch.zeros(B, h, Dq) for _ in range(world_size)]
+    local_tail = q_in[:, -h:, :].contiguous()
+    dist.all_gather(q_tails, local_tail)
+
     # Rank 0 should have zero halo
     if rank == 0:
         assert torch.allclose(q_ext[:, :h], torch.zeros_like(q_ext[:, :h]))
         assert cu_ext is None
     # Rank > 0 should have halo equal to last h tokens of previous rank
     else:
-        # Receive prev rank's tail via a helper all_gather for verification
-        # We need the previous rank's q_in to compare. Gather small tensors.
-        q_tails = [torch.zeros(B, h, Dq) for _ in range(world_size)]
-        local_tail = q_in[:, -h:, :].contiguous()
-        dist.all_gather(q_tails, local_tail)
         prev_tail = q_tails[rank - 1]
         assert torch.allclose(q_ext[:, :h, :], prev_tail, atol=1e-6), (
             f"Rank {rank}: halo mismatch vs prev rank tail"
