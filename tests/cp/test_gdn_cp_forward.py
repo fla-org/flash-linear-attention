@@ -29,7 +29,7 @@ from fla.models.gated_deltanet.modeling_gated_deltanet_cp import GatedDeltaNetFo
 REF_PATH = 'tests/cp/.gdn_cp_forward_ref.pt'
 
 
-def create_config(use_short_conv: bool = True) -> GatedDeltaNetConfig:
+def create_config(use_short_conv: bool = True, conv_size: int = 4) -> GatedDeltaNetConfig:
     return GatedDeltaNetConfig(
         hidden_size=256,
         num_hidden_layers=2,
@@ -39,7 +39,7 @@ def create_config(use_short_conv: bool = True) -> GatedDeltaNetConfig:
         attn_mode='chunk',
         use_gate=True,
         use_short_conv=use_short_conv,
-        conv_size=4,
+        conv_size=conv_size,
         expand_v=1.0,
     )
 
@@ -58,35 +58,42 @@ def create_data(batch_size: int, seq_len: int, vocab_size: int, varlen: bool = F
 
 def run_single(save_ref: bool, varlen: bool):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    config = create_config(use_short_conv=True)
-    model = GatedDeltaNetForCausalLMCP(config).to(device).to(torch.bfloat16)
+    # Test two conv sizes, one with h=1 (size=2) and one with h=3 (size=4)
+    conv_sizes = [2, 4]
+    refs = {}
+    for conv_size in conv_sizes:
+        config = create_config(use_short_conv=True, conv_size=conv_size)
+        model = GatedDeltaNetForCausalLMCP(config).to(device).to(torch.bfloat16)
 
-    input_ids, labels, cu_seqlens = create_data(batch_size=2, seq_len=128, vocab_size=config.vocab_size, varlen=varlen)
-    input_ids = input_ids.to(device)
-    labels = labels.to(device)
+        # Choose seq_len such that T<h is also covered for conv_size=4 (h=3)
+        seq_len = 128
+        input_ids, labels, cu_seqlens = create_data(batch_size=2, seq_len=seq_len, vocab_size=config.vocab_size, varlen=varlen)
+        input_ids = input_ids.to(device)
+        labels = labels.to(device)
 
-    with torch.no_grad():
-        out = model(
-            input_ids=input_ids,
-            labels=labels,
-            cp_rank=0, cp_size=1, cp_group=None,
-            cu_seqlens=cu_seqlens.to(device) if cu_seqlens is not None else None,
-            cp_shard_start_idx=0 if varlen else None,
-        )
-    ref = {
-        'state': model.state_dict(),
-        'loss': out.loss.detach().cpu(),
-        'logits': out.logits.detach().cpu(),
-        'config': config,
-        'input_ids': input_ids.cpu(),
-        'labels': labels.cpu(),
-        'cu_seqlens': cu_seqlens,
-    }
+        with torch.no_grad():
+            out = model(
+                input_ids=input_ids,
+                labels=labels,
+                cp_rank=0, cp_size=1, cp_group=None,
+                cu_seqlens=cu_seqlens.to(device) if cu_seqlens is not None else None,
+                cp_shard_start_idx=0 if varlen else None,
+            )
+        refs[conv_size] = {
+            'state': model.state_dict(),
+            'loss': out.loss.detach().cpu(),
+            'logits': out.logits.detach().cpu(),
+            'config': config,
+            'input_ids': input_ids.cpu(),
+            'labels': labels.cpu(),
+            'cu_seqlens': cu_seqlens,
+        }
+
     if save_ref:
         os.makedirs(os.path.dirname(REF_PATH), exist_ok=True)
-        torch.save(ref, REF_PATH)
+        torch.save(refs, REF_PATH)
         print(f"Saved reference to {REF_PATH}")
-    return ref
+    return refs
 
 
 def setup_dist(cp_size: int):
@@ -103,61 +110,62 @@ def setup_dist(cp_size: int):
 def run_cp(cp_size: int, varlen: bool):
     rank, device, group = setup_dist(cp_size)
 
-    # Load and broadcast reference
+    # Load and broadcast reference dict
     if rank == 0:
         assert os.path.exists(REF_PATH), f"Run single first to create {REF_PATH}"
-        ref = torch.load(REF_PATH, weights_only=False, map_location='cpu')
+        refs = torch.load(REF_PATH, weights_only=False, map_location='cpu')
     else:
-        ref = None
-    obj_list = [ref]
+        refs = None
+    obj_list = [refs]
     dist.broadcast_object_list(obj_list, src=0, group=group)
-    ref = obj_list[0]
+    refs = obj_list[0]
 
-    config: GatedDeltaNetConfig = ref['config']
-    input_ids = ref['input_ids'].to(device)
-    labels = ref['labels'].to(device)
-    cu_seqlens = ref['cu_seqlens']
+    for conv_size, ref in refs.items():
+        config: GatedDeltaNetConfig = ref['config']
+        input_ids = ref['input_ids'].to(device)
+        labels = ref['labels'].to(device)
+        cu_seqlens = ref['cu_seqlens']
 
-    model = GatedDeltaNetForCausalLMCP(config).to(device).to(torch.bfloat16)
-    model.load_state_dict(ref['state'])
+        model = GatedDeltaNetForCausalLMCP(config).to(device).to(torch.bfloat16)
+        model.load_state_dict(ref['state'])
 
-    # Shard inputs
-    B, T = input_ids.shape
-    assert T % cp_size == 0
-    chunk = T // cp_size
-    s = rank * chunk
-    e = s + chunk
+        # Shard inputs
+        B, T = input_ids.shape
+        assert T % cp_size == 0
+        chunk = T // cp_size
+        s = rank * chunk
+        e = s + chunk
 
-    input_local = input_ids[:, s:e]
-    labels_local = labels[:, s:e]
+        input_local = input_ids[:, s:e]
+        labels_local = labels[:, s:e]
 
-    cp_shard_start_idx = s
+        cp_shard_start_idx = s
 
-    with torch.no_grad():
-        out = model(
-            input_ids=input_local,
-            labels=labels_local,
-            cp_rank=rank, cp_size=cp_size, cp_group=group,
-            cu_seqlens=cu_seqlens.to(device) if cu_seqlens is not None else None,
-            # Only needed for varlen to avoid crossing seq boundaries in halo exchange
-            cp_shard_start_idx=cp_shard_start_idx if cu_seqlens is not None else None,
-        )
+        with torch.no_grad():
+            out = model(
+                input_ids=input_local,
+                labels=labels_local,
+                cp_rank=rank, cp_size=cp_size, cp_group=group,
+                cu_seqlens=cu_seqlens.to(device) if cu_seqlens is not None else None,
+                # Only needed for varlen to avoid crossing seq boundaries in halo exchange
+                cp_shard_start_idx=cp_shard_start_idx if cu_seqlens is not None else None,
+            )
 
-    # Gather logits across ranks (sequence dimension)
-    logits_local = out.logits  # [B, chunk, V]
-    logits_list = [torch.zeros_like(logits_local) for _ in range(cp_size)]
-    dist.all_gather(logits_list, logits_local, group=group)
-    logits_full = torch.cat(logits_list, dim=1)
+        # Gather logits across ranks (sequence dimension)
+        logits_local = out.logits  # [B, chunk, V]
+        logits_list = [torch.zeros_like(logits_local) for _ in range(cp_size)]
+        dist.all_gather(logits_list, logits_local, group=group)
+        logits_full = torch.cat(logits_list, dim=1)
 
-    # Compare to reference on rank 0
-    if rank == 0:
-        ref_logits = ref['logits'].to(device)
-        diff = (logits_full.float() - ref_logits.float()).abs()
-        max_diff = diff.max().item()
-        mean_diff = diff.mean().item()
-        print(f"Max abs diff: {max_diff:.6f}, mean abs diff: {mean_diff:.6f}")
-        assert max_diff < 5e-2, "Logits mismatch beyond tolerance"
-        print("✓ Forward CP parity passed")
+        # Compare to reference on rank 0
+        if rank == 0:
+            ref_logits = ref['logits'].to(device)
+            diff = (logits_full.float() - ref_logits.float()).abs()
+            max_diff = diff.max().item()
+            mean_diff = diff.mean().item()
+            print(f"conv_size={conv_size} Max abs diff: {max_diff:.6f}, mean abs diff: {mean_diff:.6f}")
+            assert max_diff < 5e-2, "Logits mismatch beyond tolerance"
+            print("✓ Forward CP parity passed for conv_size=", conv_size)
 
     dist.destroy_process_group()
 

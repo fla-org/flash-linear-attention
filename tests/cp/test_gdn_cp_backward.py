@@ -7,6 +7,7 @@ Procedure:
 - Build reference single-rank model, compute grad wrt embeddings on a short batch.
 - Run CP with identical weights, shard inputs, compute grads.
 - All-gather per-rank input-grads and compare to reference.
+- Also validate parameter grads for q/k/v projections and short conv weights.
 
 Run:
   python tests/cp/test_gdn_cp_backward.py --mode single --save_ref
@@ -23,6 +24,7 @@ from fla.models.gated_deltanet.modeling_gated_deltanet_cp import GatedDeltaNetFo
 
 REF_PATH = 'tests/cp/.gdn_cp_backward_ref.pt'
 
+
 def config_small():
     return GatedDeltaNetConfig(
         hidden_size=128,
@@ -36,6 +38,25 @@ def config_small():
         conv_size=4,
         expand_v=1.0,
     )
+
+
+def _select_param(name: str) -> bool:
+    """Filter for key projection and short conv weights."""
+    keys = [
+        'attn.q_proj.weight',
+        'attn.k_proj.weight',
+        'attn.v_proj.weight',
+        'attn.q_conv1d',
+        'attn.k_conv1d',
+        'attn.v_conv1d',
+    ]
+    if any(k in name for k in keys) and name.endswith('weight'):
+        return True
+    return False
+
+
+def _get_param_grads(model):
+    return {n: p.grad.detach().cpu().clone() for n, p in model.named_parameters() if p.grad is not None and _select_param(n)}
 
 
 def single(save_ref: bool):
@@ -52,15 +73,17 @@ def single(save_ref: bool):
     out = model(input_ids=input_ids, labels=labels, cp_rank=0, cp_size=1, cp_group=None)
     out.loss.backward()
 
-    # Grab grad wrt input embeddings table
+    # Grads
     emb_grad = model.get_input_embeddings().weight.grad.detach().cpu()
+    param_grads = _get_param_grads(model)
     state = model.state_dict()
 
+    ref = {'state': state, 'emb_grad': emb_grad, 'param_grads': param_grads, 'cfg': cfg, 'input_ids': input_ids.cpu(), 'labels': labels.cpu()}
     if save_ref:
         os.makedirs(os.path.dirname(REF_PATH), exist_ok=True)
-        torch.save({'state': state, 'emb_grad': emb_grad, 'cfg': cfg, 'input_ids': input_ids.cpu(), 'labels': labels.cpu()}, REF_PATH)
+        torch.save(ref, REF_PATH)
         print(f"Saved reference grads to {REF_PATH}")
-    return {'state': state, 'emb_grad': emb_grad, 'cfg': cfg, 'input_ids': input_ids.cpu(), 'labels': labels.cpu()}
+    return ref
 
 
 def setup(cp_size: int):
@@ -83,7 +106,9 @@ def cp(cp_size: int):
         ref = torch.load(REF_PATH, weights_only=False, map_location='cpu')
     else:
         ref = None
-    ref = dist.broadcast_object_list([ref], src=0)[0] if hasattr(dist, 'broadcast_object_list') else ref
+    obj = [ref]
+    dist.broadcast_object_list(obj, src=0, group=group)
+    ref = obj[0]
 
     cfg = ref['cfg']
     input_ids = ref['input_ids'].to(device)
@@ -116,10 +141,26 @@ def cp(cp_size: int):
     diff = (emb_grad_full.float() - ref_grad.float()).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
-    print(f"Grad max abs diff: {max_diff:.6f}, mean: {mean_diff:.6f}")
+    print(f"Embedding grad max abs diff: {max_diff:.6f}, mean: {mean_diff:.6f}")
     assert max_diff < 5e-2, "Embedding grad mismatch beyond tolerance"
+
+    # parameter grads parity (reduce-sum across ranks)
+    param_grads_ref = {k: v.to(device) for k, v in ref['param_grads'].items()}
+    for name, p in model.named_parameters():
+        if not _select_param(name):
+            continue
+        if p.grad is None:
+            raise AssertionError(f"Missing grad for {name}")
+        g = p.grad.detach().clone()
+        dist.all_reduce(g, op=dist.ReduceOp.SUM, group=group)
+        rg = param_grads_ref[name]
+        d = (g.float() - rg.float()).abs()
+        dmax, dmean = d.max().item(), d.mean().item()
+        print(f"Grad {name} max {dmax:.6f}, mean {dmean:.6f}")
+        assert dmax < 5e-2, f"Param grad mismatch beyond tolerance for {name}"
+
     if rank == 0:
-        print("✓ Backward CP parity passed")
+        print("✓ Backward CP parity (emb + key params) passed")
 
     dist.destroy_process_group()
 
