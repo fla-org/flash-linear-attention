@@ -19,7 +19,7 @@ from typing import Tuple
 import torch
 import torch.distributed as dist
 
-from fla.ops.gated_delta_rule.cp_halo import halo_exchange_and_extend
+from fla.ops.gated_delta_rule import halo_exchange_and_extend
 
 
 def _init_dist(backend: str = 'gloo') -> Tuple[int, int]:
