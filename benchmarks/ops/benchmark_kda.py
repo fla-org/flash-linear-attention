@@ -22,9 +22,9 @@ from fla.ops.kda import chunk_kda
         # argument name whose value corresponds to a different line in the plot
         line_arg='provider',
         # possible values for `line_arg``
-        line_vals=['gdn', 'comba', 'kda', 'dplr'],
+        line_vals=['gdn', 'comba', 'kda', 'dplr', 'attn'],
         # label name for the lines
-        line_names=['gdn', 'comba', 'kda', 'dplr'],
+        line_names=['gdn', 'comba', 'kda', 'dplr', 'attn'],
         # line styles
         styles=[('blue', '-'), ('red', '-.'), ('green', '-'), ('orange', '-.'),
                 ('purple', '-'), ('brown', '-.'), ('pink', '-'), ('gray', '-.')],
@@ -70,7 +70,6 @@ def benchmark(T, provider):
             )[0].backward(do),
             quantiles=quantiles
         )
-
     elif provider_base == 'attn':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -83,7 +82,7 @@ def benchmark(T, provider):
             ).backward(do),
             quantiles=quantiles
         )
-    if provider_base == 'comba':
+    elif provider_base == 'comba':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         p = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -102,10 +101,9 @@ def benchmark(T, provider):
             )[0].backward(do),
             quantiles=quantiles
         )
-    if provider_base == 'kda':
+    elif provider_base == 'kda':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
-        p = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         v = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         g = F.logsigmoid(torch.randn(B, T, H, D, dtype=dtype, device=device)).requires_grad_(True)
         beta = torch.randn(B, T, H, dtype=dtype, device=device).sigmoid().requires_grad_(True)
