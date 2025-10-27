@@ -59,7 +59,8 @@ class KDA(nn.Module):
             Whether to use short convolutions. Default: `True`.
         allow_neg_eigval (bool, Optional):
             Allow negative eigenvalues. Default: `False`. If set to `True`, the beta will be multiplied by 2.
-            See reference: [Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues](https://arxiv.org/abs/2411.12537)
+            See reference:
+            [Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues](https://arxiv.org/abs/2411.12537)
         conv_size (int, Optional):
             The kernel size of the short convolution, only used when `use_short_conv` is `True`. Default: 4.
         conv_bias (bool, Optional):
