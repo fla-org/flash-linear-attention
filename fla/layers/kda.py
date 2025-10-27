@@ -24,41 +24,37 @@ if TYPE_CHECKING:
 
 class KDA(nn.Module):
     """
-    The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
+    Kimi Delta Attention (KDA) layer implementation.
 
-    Similar to Mamba2, each layer contains around 6*hidden_size*hidden_size parameters.
+    Each layer contains approximately 6*hidden_size*hidden_size parameters.
 
-    Parameter alloation when use_output_gate=True:
-        - 0.75 * hidden_size * hidden_size for the q_proj and k_proj each
-        - 1.5 * hidden_size * hidden_size for the v_proj, g_proj and o_proj each
-        - Others are ignorably small.
-        - In total = 0.75 * 2 + 1.5 * 3 = 6 * hidden_size * hidden_size
-    NOTE: num_heads * head_dim = 0.75 * hidden_size, please make sure to set the correct num_heads and head_dim.
-
-    Parameter allocation when use_output_gate=False:
-        - 1 * hidden_size * hidden_size for the q_proj and k_proj each
-        - 2 * hidden_size * hidden_size for the v_proj and o_proj each
-        - Others are ignorably small.
-        - In total = 1 * 2 + 2 * 2 = 6 * hidden_size * hidden_size
+    Parameter allocation:
+        - q_proj: hidden_size * key_dim (where key_dim = num_heads * head_dim)
+        - k_proj: hidden_size * key_dim
+        - v_proj: hidden_size * value_dim (where value_dim = num_v_heads * head_dim * expand_v)
+        - o_proj: value_dim * hidden_size
+        - f_proj: hidden_size * head_v_dim + head_v_dim * key_dim (with bias)
+        - b_proj: hidden_size * num_heads
+        - g_proj: hidden_size * head_v_dim + head_v_dim * value_dim (with bias)
+        - A: num_heads parameters
+        - Plus convolution layers when use_short_conv=True
 
     Args:
         hidden_size (int, Optional):
             The hidden size of the input. Default: 2048.
         expand_v (float, Optional):
-            The expansion ratio for the value dim. Default: 2.0.
+            The expansion ratio for the value dimension. Default: 1.0.
         head_dim (int, Optional):
-            The dimension of each head. Default: 256.
+            The dimension of each head. Default: 128.
         num_heads (int, Optional):
-            The number of heads. Default: 4.
+            The number of heads. Default: 16.
         num_v_heads (int, Optional):
             The number of heads for the value projection, equal to `num_heads` if `None`.
-            GVA is applied if `num_v_heads` > `num_heads`. Default: `None`.
+            GVA (Grouped Value Attention) is applied if `num_v_heads` > `num_heads`. Default: `None`.
         mode (str, Optional):
             Which Gated DeltaNet kernel to use.
             Currently available: `chunk` and `fused_recurrent`.
             Default: `chunk`.
-        use_beta (bool, Optional):
-            Whether to use beta. Default: `True`.
         use_short_conv (bool, Optional):
             Whether to use short convolutions. Default: `True`.
         allow_neg_eigval (bool, Optional):
@@ -127,7 +123,7 @@ class KDA(nn.Module):
                 f"expand_v={expand_v} does not produce an integer value when multiplied by head_dim={head_dim}. "
                 f"Resulting head_v_dim would be {head_dim * expand_v}, which is invalid for FusedRMSNormGated."
             )
-        assert mode in ['chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)

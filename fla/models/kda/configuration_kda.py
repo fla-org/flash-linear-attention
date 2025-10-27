@@ -13,7 +13,7 @@ class KDAConfig(PretrainedConfig):
         self,
         attn_mode: str = "chunk",
         hidden_size: int = 2048,
-        expand_v: int = 1,
+        expand_v: float = 1.0,
         use_short_conv: bool = True,
         allow_neg_eigval: bool = False,
         conv_size: int = 4,
