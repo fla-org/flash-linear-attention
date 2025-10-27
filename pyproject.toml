@@ -75,5 +75,5 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
-"fla/utils.py" = ["TC004"]
+"fla/utils.py" = ["TCH004"]
 "evals/harness.py" = ["I", "TCH"]
