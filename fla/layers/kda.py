@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-class KDA(nn.Module):
+class KimiDeltaAttention(nn.Module):
     """
     Kimi Delta Attention (KDA) layer implementation.
 
@@ -86,7 +86,7 @@ class KDA(nn.Module):
         layer_idx: int = None,
         norm_eps: float = 1e-5,
         **kwargs
-    ) -> KDA:
+    ) -> KimiDeltaAttention:
         super().__init__()
 
         self.mode = mode

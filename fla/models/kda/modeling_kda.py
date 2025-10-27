@@ -15,7 +15,7 @@ from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
-from fla.layers.kda import KDA
+from fla.layers.kda import KimiDeltaAttention
 from fla.models.kda.configuration_kda import KDAConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
@@ -55,7 +55,7 @@ class KDABlock(nn.Module):
                 layer_idx=layer_idx
             )
         else:
-            self.attn = KDA(
+            self.attn = KimiDeltaAttention(
                 mode=config.attn_mode,
                 hidden_size=config.hidden_size,
                 expand_v=config.expand_v,
@@ -127,7 +127,7 @@ class KDAPreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: Optional[str] = None,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, KDA) and next(module.parameters()).device.type != 'meta':
+        if isinstance(module, KimiDeltaAttention) and next(module.parameters()).device.type != 'meta':
             with torch.no_grad():
                 module.A.copy_(nn.init.uniform_(module.A, a=1, b=16).log())
                 dt = torch.exp(
