@@ -9,7 +9,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, is_nvidia_hopper, use_cuda_graph
+from fla.utils import autotune_cache_kwargs, is_nvidia_hopper, use_cuda_graph, check_shared_mem
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
@@ -231,7 +231,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [4, 3, 2]
+        for num_stages in [4, 3, 2] if check_shared_mem('ampere') else [1]
         for BV in [64, 32]
     ],
     key=['H', 'K', 'V', 'BT', 'BV', 'USE_G'],
