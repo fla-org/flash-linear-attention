@@ -144,7 +144,6 @@ def chunk_gated_delta_rule_bwd(
     )
     dk.add_(dk2)
     dg.add_(dg2)
-    assert dg.dtype == torch.float32, "dg should be fp32"
     dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens)
     return dq, dk, dv, db, dg, dh0
 
@@ -165,13 +164,12 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
-        use_qk_l2norm_in_kernel: bool = False
+        use_qk_l2norm_in_kernel: bool = False,
     ):
+        q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
-        else:
-            q_rstd, k_rstd = None, None
 
         g, o, A, final_state = chunk_gated_delta_rule_fwd(
             q=q,
@@ -229,7 +227,7 @@ def chunk_gated_delta_rule(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
+    **kwargs,
 ):
     r"""
     Args:
@@ -257,9 +255,6 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
@@ -296,22 +291,12 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
-    assert q.dtype == k.dtype == v.dtype
-    assert q.dtype != torch.float32, "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
-    assert len(beta.shape) == 3, "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
-
-    if head_first:
+    if 'head_first' in kwargs:
         warnings.warn(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead."
         )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

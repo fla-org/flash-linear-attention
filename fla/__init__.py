@@ -6,6 +6,7 @@ from fla.layers import (
     BasedLinearAttention,
     BitAttention,
     Comba,
+    DeltaFormerAttention,
     DeltaNet,
     GatedDeltaNet,
     GatedDeltaProduct,
@@ -34,6 +35,8 @@ from fla.models import (
     BitNetModel,
     CombaForCausalLM,
     CombaModel,
+    DeltaFormerForCausalLM,
+    DeltaFormerModel,
     DeltaNetForCausalLM,
     DeltaNetModel,
     GatedDeltaNetForCausalLM,
@@ -83,6 +86,7 @@ __all__ = [
     'BitAttention', 'BitNetForCausalLM', 'BitNetModel',
     'Comba', 'CombaForCausalLM', 'CombaModel',
     'DeltaNet', 'DeltaNetForCausalLM', 'DeltaNetModel',
+    'DeltaFormerAttention', 'DeltaFormerForCausalLM', 'DeltaFormerModel',
     'GatedDeltaNet', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
     'GatedDeltaProduct', 'GatedDeltaProductForCausalLM', 'GatedDeltaProductModel',
     'GatedLinearAttention', 'GLAForCausalLM', 'GLAModel',
@@ -104,4 +108,4 @@ __all__ = [
     'RWKV7Attention', 'RWKV7ForCausalLM', 'RWKV7Model',
 ]
 
-__version__ = '0.3.2'
+__version__ = '0.4.0'

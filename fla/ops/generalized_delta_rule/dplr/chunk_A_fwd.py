@@ -153,7 +153,7 @@ def chunk_dplr_fwd_intra(
     cu_seqlens: Optional[torch.LongTensor] = None,
 ):
     B, T, H, K = k.shape
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)

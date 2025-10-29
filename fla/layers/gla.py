@@ -226,8 +226,6 @@ class GatedLinearAttention(nn.Module):
             v = self.v_proj(hidden_states)
         gk = self.gk_proj(hidden_states)
 
-        if self.feature_map_fn is not None:
-            q, k = map(self.feature_map_fn, (q, k))
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_k_dim)
         if self.num_kv_groups > 1:
             k, gk = (repeat(x, '... (h d) -> ... (h g) d', g=self.num_kv_groups, d=self.head_k_dim) for x in (k, gk))
@@ -235,10 +233,13 @@ class GatedLinearAttention(nn.Module):
         else:
             k, gk = (rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim) for x in (k, gk))
             v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
-        gk = F.logsigmoid(gk) / self.gate_logit_normalizer
 
+        gk = F.logsigmoid(gk) / self.gate_logit_normalizer
         if self.clamp_min is not None:
             gk = torch.clamp_min(gk, self.clamp_min)
+
+        if self.feature_map_fn is not None:
+            q, k = map(self.feature_map_fn, (q, k))
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'fused_recurrent':

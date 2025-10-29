@@ -18,14 +18,13 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.5",
     "transformers>=4.53.0",
-    "datasets>=3.3.0",
     "einops",
-    "pytest",
 ]
 
 [project.optional-dependencies]
 conv1d = ["causal-conv1d>=1.4.0"]
-benchmark = ["matplotlib"]
+benchmark = ["matplotlib", "datasets>=3.3.0"]
+test = ["pytest"]
 
 [project.urls]
 Homepage = "https://github.com/fla-org/flash-linear-attention"
@@ -34,9 +33,9 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
 [build-system]
 requires = ["setuptools>=45", "wheel"]
 
-[tool.isort]
-line_length = 127
-multi_line_output = 3
+[tool.ruff.lint.isort]
+known-first-party = ["fla"]
+force-sort-within-sections = false
 
 [tool.pytest.ini_options]
 log_cli = true
@@ -44,3 +43,36 @@ log_cli_level = "INFO"
 pythonpath = [
   "."
 ]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 127
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # Pyflakes
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "I",    # isort
+    "C4",   # flake8-comprehensions
+    "TCH",  # flake8-type-checking
+    "COM",  # flake8-commas
+    "T",    # flake8-debugger
+]
+ignore = [
+    "E501",
+    "E741",
+    "B023",
+    "B008",
+    "SIM108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"fla/utils.py" = ["TCH004"]
+"evals/harness.py" = ["I", "TCH"]

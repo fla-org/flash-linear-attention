@@ -84,41 +84,33 @@ def chunk_transform_qk_bwd_kernel_prepare(
     p_q = tl.make_block_ptr(q, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT), (BK, BT), (0, 1))
     p_w = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_beta = tl.make_block_ptr(beta, (T, ), (H, ), (i_t * BT, ), (BT, ), (0, ))
+
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_kt = tl.load(p_k, boundary_check=(0, 1))
     b_w = tl.load(p_w, boundary_check=(0, 1))
+    b_beta = tl.load(p_beta, boundary_check=(0, ))
     p_T = tl.make_block_ptr(AT, (T, BT), (BT*H, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_T = tl.load(p_T, boundary_check=(0, 1))
+    b_T = tl.load(p_T, boundary_check=(0, 1)) * b_beta[None, :]
 
     o_i = tl.arange(0, BT)
     m_t = o_i[:, None] >= o_i[None, :]
-    p_beta = tl.make_block_ptr(beta, (T, ), (H, ), (i_t * BT, ), (BT, ), (0, ))
-    b_beta = tl.load(p_beta, boundary_check=(0, ))
-    b_w_beta = (b_w * b_beta[:, None]).to(b_w.dtype)
-
-    b_Twb = tl.dot(b_T.to(b_w_beta.dtype), b_w_beta).to(b_w_beta.dtype)
-
-    b_qw = tl.where(m_t, tl.dot(b_q, tl.trans(b_w)), 0).to(b_q.dtype)
-    b_qwT = tl.dot(b_qw, b_T).to(b_q.dtype)
-    b_wbk = tl.where(o_i[:, None] > o_i[None, :], tl.dot(b_w_beta, b_kt), 0).to(b_w.dtype)
+    b_qw = tl.where(m_t, tl.dot(b_q, tl.trans(b_w.to(b_q.dtype))), 0).to(b_q.dtype)
+    b_qwT = tl.dot(b_qw, b_T.to(b_q.dtype)).to(b_q.dtype)
+    b_wbk = tl.where(o_i[:, None] > o_i[None, :], tl.dot(b_w.to(b_kt.dtype), b_kt), 0).to(b_q.dtype)
     b_A = tl.where(m_t, tl.dot(b_q, b_kt) - tl.dot(b_qwT, b_wbk), 0)
 
-    b_q = b_q - tl.dot(b_qwT, b_w_beta)
+    b_q = b_q.to(tl.float32) - tl.dot(b_qwT, b_w.to(b_qwT.dtype))
     p_q_new = tl.make_block_ptr(q_new, (T, K), (K*HQ, 1), (i_t * BT, 0), (BT, K), (1, 0))
     tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
 
     if i_hq % G == 0:
-        if RETURN_H:
-            b_h = tl.dot(tl.trans(b_w), b_Twb)
-            p_h = tl.make_block_ptr(h, (K, K), (K, 1), (0, 0), (BK, BK), (1, 0))
-            tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
-        else:
-            p_h = tl.make_block_ptr(h, (T, K), (K * H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
-            tl.store(p_h, b_Twb.to(p_h.dtype.element_ty), boundary_check=(0, 1))
-
-        b_T_wbk = tl.dot(b_T, b_wbk).to(b_w.dtype)
+        b_Twb = tl.dot(b_T, b_w) # tf32
+        p_h = tl.make_block_ptr(h, (T, K), (K * H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+        tl.store(p_h, b_Twb.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+        b_T_wbk = tl.dot(b_T.to(b_wbk.dtype), b_wbk).to(b_kt.dtype)
         p_k_new = tl.make_block_ptr(k_new, (K, T), (1, K*H), (0, i_t * BT), (BK, BT), (0, 1))
-        tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w), b_T_wbk)).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
 
     if USE_GATE:
         p_g_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
@@ -164,12 +156,8 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B*HQ)
-    # better precision because h would be of norm smaller than 1 anyways
-    if return_h:
-        h = torch.empty(B, NT, H, K, K, dtype=w.dtype, device=q.device)
-    else:
-        h = torch.empty_like(w)
-    dA_local = torch.empty(B, T, HQ, BT, dtype=w.dtype, device=q.device)
+    h = torch.empty_like(w)
+    dA_local = torch.empty(B, T, HQ, BT, dtype=q.dtype, device=q.device)
     dv = torch.empty(B, T, HQ, V, device=q.device, dtype=torch.float32)
     dg_cumsum = torch.empty_like(g_cumsum) if g_cumsum is not None else None
 

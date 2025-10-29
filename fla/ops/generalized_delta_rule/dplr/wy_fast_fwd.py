@@ -216,7 +216,7 @@ def wu_fwd(
     chunk_size: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *ag.shape, v.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
@@ -254,7 +254,7 @@ def prepare_wy_repr_fwd(
     chunk_size: int = 64
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, _ = ag.shape
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
