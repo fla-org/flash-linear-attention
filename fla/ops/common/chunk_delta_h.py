@@ -231,7 +231,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [4, 3, 2] if check_shared_mem('ampere') else [1]
+        for num_stages in ([4, 3, 2] if check_shared_mem('ampere') else [1])
         for BV in [64, 32]
     ],
     key=['H', 'K', 'V', 'BT', 'BV', 'USE_G'],
