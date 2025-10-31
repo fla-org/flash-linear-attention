@@ -227,6 +227,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     chunk_offsets,
     scale,
     T,
+    num_householder: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -239,6 +240,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
+
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
@@ -247,7 +249,9 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
-        boh = i_n * NT
+        # boh = i_n * tl.cdiv(T, BT)
+        # Jinha: update boh to match the chunk_gated_delta_product_fwd_kernel_h_blockdim64 implementation
+        boh = i_n * tl.cdiv(T // num_householder, BT)
 
     # [BK, BV]
     b_dh1 = tl.zeros([64, BV], dtype=tl.float32)
@@ -314,13 +318,13 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
             b_g_exp = None
 
         p_dv = tl.make_block_ptr(dv, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_wo = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_dv2 = tl.make_block_ptr(dv2, (T, V), (stride_v, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
-        b_wo = tl.load(p_wo, boundary_check=(0, 1))
+        b_do = tl.load(p_do, boundary_check=(0, 1))
         b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
-        # Update dv
+        # Update dv based on hidden state gradients
         p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, 64), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_dv += tl.dot(b_k, b_dh1.to(b_k.dtype))
@@ -346,7 +350,8 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
         b_dv += tl.load(p_dv, boundary_check=(0, 1))
 
         tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-        # Update dh
+
+        # Update hidden state gradients
         p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
         p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
         b_w = tl.load(p_w, boundary_check=(0, 1))
@@ -355,7 +360,8 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
             b_dh1 *= bg_last_exp
             b_q = b_q * b_g_exp[None, :]
         b_q = (b_q * scale).to(b_q.dtype)
-        b_dh1 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+        b_dh1 += tl.dot(b_q, b_do.to(b_q.dtype)) - tl.dot(b_w, b_dv.to(b_w.dtype))
+
         if K > 64:
             p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
@@ -365,7 +371,8 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
                 b_dh2 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
             b_q = (b_q * scale).to(b_q.dtype)
-            b_dh2 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+            b_dh2 += tl.dot(b_q, b_do.to(b_q.dtype)) - tl.dot(b_w, b_dv.to(b_w.dtype))
+
         if K > 128:
             p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
@@ -375,7 +382,8 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
                 b_dh3 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
             b_q = (b_q * scale).to(b_q.dtype)
-            b_dh3 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+            b_dh3 += tl.dot(b_q, b_do.to(b_q.dtype)) - tl.dot(b_w, b_dv.to(b_w.dtype))
+
         if K > 192:
             p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
@@ -385,7 +393,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
                 b_dh4 *= bg_last_exp
                 b_q = b_q * b_g_exp[None, :]
             b_q = (b_q * scale).to(b_q.dtype)
-            b_dh4 += tl.dot(b_q, b_wo.to(b_q.dtype))-tl.dot(b_w, b_dv.to(b_w.dtype))
+            b_dh4 += tl.dot(b_q, b_do.to(b_q.dtype)) - tl.dot(b_w, b_dv.to(b_w.dtype))
 
     if USE_INITIAL_STATE:
         p_dh0 = tl.make_block_ptr(dh0, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
@@ -462,19 +470,25 @@ def chunk_gated_delta_product_bwd_dhu(
     dv: torch.Tensor,
     scale: float,
     cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    chunk_size: int = 64,
+    num_householder: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
+    assert T % num_householder == 0, "T must be divisible by num_householder"
+    T_true = T // num_householder
 
     # N: the actual number of sequences in the batch with either equal or variable lengths
     BT = 64
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    chunk_indices = prepare_chunk_indices(cu_seqlens // num_householder, chunk_size) if cu_seqlens is not None else None
     if cu_seqlens is None:
-        N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+        N, NT, chunk_offsets = B, triton.cdiv(T_true, BT), None
     else:
-        N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
+        N, NT, chunk_offsets = (
+            len(cu_seqlens) - 1, len(chunk_indices),
+            prepare_chunk_offsets(cu_seqlens // num_householder, BT)
+        )
 
     dh = q.new_empty(B, NT, H, K, V)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
@@ -496,9 +510,12 @@ def chunk_gated_delta_product_bwd_dhu(
         chunk_offsets=chunk_offsets,
         scale=scale,
         T=T,
+        num_householder=num_householder,
         H=H,
         K=K,
         V=V,
         BT=BT,
     )
+    # could call chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64 instead
+    # after adjusting number of tokens
     return dh, dh0, dv2
