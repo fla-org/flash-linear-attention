@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 
@@ -8,8 +6,8 @@ import torch
 def naive_recurrent_hgrn(
     x: torch.Tensor,
     g: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: Optional[bool] = False
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
 ) -> torch.Tensor:
     dtype = x.dtype
     x, g = map(lambda i: i.float(), (x, g))
@@ -34,9 +32,9 @@ def naive_recurrent_hgrn(
 def naive_chunk_hgrn(
     x: torch.Tensor,
     g: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: Optional[bool] = False,
-    chunk_size: int = 64
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
+    chunk_size: int = 64,
 ) -> torch.Tensor:
     dtype = x.dtype
     x, g = map(lambda i: i.float(), (x, g))

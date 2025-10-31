@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 
@@ -18,9 +16,9 @@ def fused_recurrent_kda(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    **kwargs
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -89,12 +87,12 @@ def fused_recurrent_kda(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5

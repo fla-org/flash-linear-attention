@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -30,19 +29,19 @@ class RWKV7Attention(nn.Module):
         self,
         mode: str = 'chunk',
         hidden_size: int = 1024,
-        head_dim: Optional[int] = 64,
-        num_heads: Optional[int] = None,
-        decay_low_rank_dim: Optional[int] = None,
-        gate_low_rank_dim: Optional[int] = None,
-        a_low_rank_dim: Optional[int] = None,
-        v_low_rank_dim: Optional[int] = None,
-        elementwise_affine: Optional[bool] = True,
+        head_dim: int | None = 64,
+        num_heads: int | None = None,
+        decay_low_rank_dim: int | None = None,
+        gate_low_rank_dim: int | None = None,
+        a_low_rank_dim: int | None = None,
+        v_low_rank_dim: int | None = None,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
         fuse_norm: bool = False,
         value_dim: int = None,
         num_hidden_layers: int = None,
-        **kwargs
+        **kwargs,
     ) -> RWKV7Attention:
         super().__init__()
 
@@ -128,7 +127,7 @@ class RWKV7Attention(nn.Module):
                 num_groups=self.num_heads,
                 num_channels=self.value_dim,
                 eps=self.head_dim*norm_eps,
-                affine=elementwise_affine
+                affine=elementwise_affine,
             )
 
         try:
@@ -144,7 +143,7 @@ class RWKV7Attention(nn.Module):
             "According to Bo, you are using a potentially buggy FLA implementation of RWKV. "
             "If you plan to report any numbers based on this implementation, we strongly recommend "
             "cross-checking with the official repo: https://github.com/BlinkDL/RWKV-LM. "
-            "Bo may disagree with results reported from this version."
+            "Bo may disagree with results reported from this version.",
         )
 
     @torch.no_grad()
@@ -217,14 +216,14 @@ class RWKV7Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
         v_first: torch.Tensor = None,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-        **kwargs
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        cu_seqlens: torch.LongTensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         batch_size, seq_len, _ = hidden_states.shape
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -251,7 +250,7 @@ class RWKV7Attention(nn.Module):
             recurrent_state = last_state['recurrent_state']
 
         delta, conv_state = token_shift(
-                hidden_states, cu_seqlens, output_cache=True, cache=conv_cache
+                hidden_states, cu_seqlens, output_cache=True, cache=conv_cache,
             )
         xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
                                                      self.x_k, self.x_v, self.x_a, self.x_g)
@@ -333,7 +332,7 @@ class RWKV7Attention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=conv_state,
                 layer_idx=self.layer_idx,
-                offset=r.shape[1]
+                offset=r.shape[1],
             )
 
         if self.fuse_norm:

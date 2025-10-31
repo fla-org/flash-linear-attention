@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -28,7 +26,7 @@ BK_LIST = [32, 64, 128] if check_shared_mem() else [16, 32]
     ],
     key=['BT'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_fwd_kernel_o(
@@ -96,8 +94,8 @@ def chunk_dplr_fwd_o(
     A_qk: torch.Tensor,
     A_qb: torch.Tensor,
     h: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, H, K, V = *qg.shape, v.shape[-1]
     BT = chunk_size

@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
@@ -15,9 +14,8 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.deltaformer import DeltaFormerAttention
 from fla.models.deltaformer.configuration_deltaformer import DeltaFormerConfig
 from fla.models.utils import Cache, FLAGenerationMixin
-from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
+from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as DeltaFormerMLP
-from fla.modules import RMSNorm
 from fla.modules.l2warp import l2_warp
 
 try:
@@ -56,18 +54,18 @@ class DeltaFormerBlock(GradientCheckpointingLayer):
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            fuse_swiglu=config.fuse_swiglu
+            fuse_swiglu=config.fuse_swiglu,
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         residual = hidden_states
         hidden_states = self.attn_norm(hidden_states)
         hidden_states, _, past_key_values = self.attn(
@@ -104,7 +102,7 @@ class DeltaFormerPreTrainedModel(PreTrainedModel):
     def _init_weights(
         self,
         module: nn.Module,
-        prenorm_residual_strategy: Optional[str] = None,
+        prenorm_residual_strategy: str | None = None,
         num_residuals_per_layer: int = 2,
     ):
         if isinstance(module, (nn.Linear, nn.Conv1d)):
@@ -140,20 +138,20 @@ class DeltaFormerModel(DeltaFormerPreTrainedModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
         attention_mask: Optional[torch.Tensor] = None,  # noqa
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast:
         if output_attentions:
             warnings.warn(
                 "`DeltaFormerModel` does not support output attention weights now, "
-                "so `output_attentions` is set to `False`."
+                "so `output_attentions` is set to `False`.",
             )
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -185,7 +183,7 @@ class DeltaFormerModel(DeltaFormerPreTrainedModel):
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
-                **kwargs
+                **kwargs,
             )
 
             if output_attentions:
@@ -202,7 +200,7 @@ class DeltaFormerModel(DeltaFormerPreTrainedModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
-            attentions=all_attns
+            attentions=all_attns,
         )
 
 
@@ -249,7 +247,7 @@ class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAGenerationMixin):
                     f"which is not supported for {self.__class__.__name__}. "
                     f"Try another generation strategy instead. "
                     f"For the available generation strategies, check this doc: "
-                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies"
+                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies",
                 )
             else:
                 raise exception
@@ -257,18 +255,18 @@ class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAGenerationMixin):
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        labels: Optional[torch.LongTensor] = None,
-        logits_to_keep: Optional[int] = 0,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        labels: torch.LongTensor | None = None,
+        logits_to_keep: int | None = 0,
+        **kwargs: Unpack[dict],
+    ) -> tuple | CausalLMOutputWithPast:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.model(
@@ -280,7 +278,7 @@ class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAGenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            **kwargs
+            **kwargs,
         )
 
         hidden_states = outputs[0]

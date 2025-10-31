@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 from einops import rearrange
@@ -12,8 +10,8 @@ def naive_recurrent_kda(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
 ):
     dtype = v.dtype
@@ -44,10 +42,10 @@ def naive_chunk_kda(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    chunk_size: int = 64
+    chunk_size: int = 64,
 ):
     dtype = v.dtype
     B, T, H, K, V = *q.shape, v.shape[-1]

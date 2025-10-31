@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -26,9 +24,9 @@ except Exception:
             (3, 111, 2, 2, 100, 1.0),
             (3, 1024, 2, 8, 60, 0.1),
             (3, 1024, 2, 8, 128, 0.1),
-            (4, 2048, 2, 8, 64, 0.1)
+            (4, 2048, 2, 8, 64, 0.1),
         ]
-    ]
+    ],
 )
 def test_parallel(
     B: int,
@@ -76,13 +74,13 @@ def test_parallel(
             (2, 8, 64, [0, 256, 500, 1000]),
             (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
         ]
-    ]
+    ],
 )
 def test_parallel_varlen(
     H: int,
     HQ: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
 ):
     if not HAS_FLASH:
         pytest.skip(reason="Skipping test because flash-attn is not installed")
@@ -103,7 +101,7 @@ def test_parallel_varlen(
         cu_seqlens_k=cu_seqlens,
         max_seqlen_q=prepare_lens(cu_seqlens).max(),
         max_seqlen_k=prepare_lens(cu_seqlens).max(),
-        causal=True
+        causal=True,
     )
     ref.backward(do.squeeze(0))
     ref_dq, q.grad = q.grad.clone(), None
@@ -114,7 +112,7 @@ def test_parallel_varlen(
         q=q,
         k=k,
         v=v,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None

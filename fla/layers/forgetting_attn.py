@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -29,12 +28,12 @@ class ForgettingAttention(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 32,
-        num_kv_heads: Optional[int] = None,
+        num_kv_heads: int | None = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
-        window_size: Optional[int] = None,
+        window_size: int | None = None,
         use_output_gate: bool = False,
-        layer_idx: int = None
+        layer_idx: int = None,
     ):
         super().__init__()
 
@@ -78,12 +77,12 @@ class ForgettingAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -98,14 +97,14 @@ class ForgettingAttention(nn.Module):
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
             state = past_key_values.update(
                 attn_state=(k, v, f),
                 layer_idx=self.layer_idx,
                 offset=q_len,
-                cache_kwargs=dict(window_size=self.window_size)
+                cache_kwargs=dict(window_size=self.window_size),
             )
             k, v, f = state['attn_state']
 

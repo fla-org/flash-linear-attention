@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2024, Songlin Yang, Yu Zhang
 
 from typing import Any, cast
@@ -463,7 +462,7 @@ class FusedRecurrentRWKV4Function(Function):
     @once_differentiable
     @input_guard
     def backward(ctx: FunctionCtx, gwkv: Tensor, gstate: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        w, u, k, v, state = cast(tuple[Tensor, ...], ctx.saved_tensors)
+        w, u, k, v, state = cast("tuple[Tensor, ...]", ctx.saved_tensors)
         gw, gu, gk, gv, gstate = fused_recurrent_rwkv4_backward(w, u, k, v, state, gwkv, gstate)
         return gw.to(ctx.w_dtype), gu.to(u), gk.to(k), gv.to(v), gstate.to(state)
 

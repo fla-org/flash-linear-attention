@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -72,7 +71,7 @@ def _upad_input(
 
     key_layer = index_first_axis(key_layer.reshape(batch_size * kv_seq_len, dim), indices_k)
     value_layer = index_first_axis(
-        value_layer.reshape(batch_size * kv_seq_len, v_dim), indices_k
+        value_layer.reshape(batch_size * kv_seq_len, v_dim), indices_k,
     )
     gate_layer = index_first_axis(gate_layer.reshape(batch_size * kv_seq_len, -1), indices_k)
     beta_layer = index_first_axis(beta_layer.reshape(batch_size * kv_seq_len, -1), indices_k)
@@ -84,7 +83,7 @@ def _upad_input(
     elif query_length == 1:
         max_seqlen_in_batch_q = 1
         cu_seqlens_q = torch.arange(
-            batch_size + 1, dtype=torch.int32, device=query_layer.device
+            batch_size + 1, dtype=torch.int32, device=query_layer.device,
         )  # There is a memcpy here, that is very bad.
         indices_q = cu_seqlens_q[:-1]
         query_layer = query_layer.squeeze(1)
@@ -205,7 +204,7 @@ def reconstruct(
     seq_len: int,
     topk: int,
     routing_weights: torch.Tensor,
-    mask: torch.Tensor
+    mask: torch.Tensor,
 ):
     '''
     Reconstruct and mix transformed outputs back into the original input sequence shape.
@@ -295,7 +294,7 @@ class MomAttention(nn.Module):
         capacity: float = 1.0,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
-        **kwargs
+        **kwargs,
     ) -> MomAttention:
         super().__init__()
         self.num_memories = num_memories
@@ -365,7 +364,7 @@ class MomAttention(nn.Module):
         dt_init_floor = 1e-4
         dt = torch.exp(
             torch.rand(self.num_heads) * (math.log(dt_max) - math.log(dt_min))
-            + math.log(dt_min)
+            + math.log(dt_min),
         )
         dt = torch.clamp(dt, min=dt_init_floor)
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
@@ -381,24 +380,24 @@ class MomAttention(nn.Module):
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu'
+                activation='silu',
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu'
+                activation='silu',
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu'
+                activation='silu',
             )
         else:
             raise UserWarning(
                 "ShortConvolution is crucial to the performance. "
-                "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing."
+                "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing.",
             )
         if use_output_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
@@ -420,12 +419,12 @@ class MomAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             attention_mask = (attention_mask == 1)
             assert len(attention_mask.shape) == 2, (
@@ -434,7 +433,7 @@ class MomAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        origin_cu_seqlens = kwargs.get('cu_seqlens', None)
+        origin_cu_seqlens = kwargs.get('cu_seqlens')
         if origin_cu_seqlens is not None:
             hidden_states, attention_mask = self.cu2pad(hidden_states, origin_cu_seqlens)
 
@@ -458,7 +457,7 @@ class MomAttention(nn.Module):
             routing_weights.shape[1],
             self.num_memories,
             dtype=routing_weights.dtype,
-            device=routing_weights.device
+            device=routing_weights.device,
         ).scatter(-1, selected_memories, routing_weights)
         routing_mask = routing_weights_full.bool().int()
 
@@ -507,7 +506,7 @@ class MomAttention(nn.Module):
                 conv_cu_seqlens,
                 cu_seqlen_all[0],
                 reverse_indices,
-                batch_size
+                batch_size,
             )
             cu_q, conv_q_new = self.q_conv1d(
                 x=cu_q,
@@ -520,14 +519,14 @@ class MomAttention(nn.Module):
                 conv_q_new,
                 conv_cu_seqlens,
                 cu_seqlen_all[0],
-                reverse_indices
+                reverse_indices,
             )
             conv_k = self.prepare_recurrent_state(
                 conv_state_k[0],
                 conv_cu_seqlens,
                 cu_seqlen_all[0],
                 reverse_indices,
-                batch_size
+                batch_size,
             )
             cu_k, conv_k_new = self.k_conv1d(
                 x=cu_k,
@@ -540,14 +539,14 @@ class MomAttention(nn.Module):
                 conv_k_new,
                 conv_cu_seqlens,
                 cu_seqlen_all[0],
-                reverse_indices
+                reverse_indices,
             )
             conv_v = self.prepare_recurrent_state(
                 conv_state_v[0],
                 conv_cu_seqlens,
                 cu_seqlen_all[0],
                 reverse_indices,
-                batch_size
+                batch_size,
             )
             cu_v, conv_v_new = self.v_conv1d(
                 x=cu_v,
@@ -559,14 +558,14 @@ class MomAttention(nn.Module):
                 conv_state_v[0],
                 conv_v_new, conv_cu_seqlens,
                 cu_seqlen_all[0],
-                reverse_indices
+                reverse_indices,
             )
 
             if padded:
                 cu_q, cu_k, cu_v = self.unpad_after_conv(conv_cu_seqlens, cu_seqlens, cu_q, cu_k, cu_v, pad_lengths)
 
         else:
-            q, k, v = self.silu(q), self.silu(k), self.silu(v),
+            q, k, v = self.silu(q), self.silu(k), self.silu(v)
 
         cu_q, cu_k, cu_v = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', h=self.num_heads), (cu_q, cu_k, cu_v))
 
@@ -596,7 +595,7 @@ class MomAttention(nn.Module):
             memories = self.prepare_recurrent_state(
                 recurrent_state[0],
                 cu_seqlens, cu_seqlen_all[0],
-                reverse_indices, batch_size
+                reverse_indices, batch_size,
             )
             o, recurrent_state_ = fused_recurrent_gated_delta_rule(
                 q=cu_q,
@@ -634,7 +633,7 @@ class MomAttention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[2]
+                offset=q.shape[2],
             )
 
         if self.use_output_gate:
@@ -654,13 +653,13 @@ class MomAttention(nn.Module):
     def shared_o(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         recurrent_state=None,
-        use_cache: Optional[bool] = False,
+        use_cache: bool | None = False,
         conv_state_q=[None, None],
         conv_state_k=[None, None],
         conv_state_v=[None, None],
-        **kwargs
+        **kwargs,
     ) -> torch.Tensor:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -684,19 +683,19 @@ class MomAttention(nn.Module):
                 x=self.q_proj(hidden_states),
                 cache=conv_state_q[1],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             k, conv_state_k[1] = self.k_conv1d(
                 x=self.shared_k(hidden_states),
                 cache=conv_state_k[1],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             v, conv_state_v[1] = self.v_conv1d(
                 x=self.shared_v(hidden_states),
                 cache=conv_state_v[1],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
         else:
             q = self.silu(self.q_proj(hidden_states))
@@ -717,7 +716,7 @@ class MomAttention(nn.Module):
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True
+                use_qk_l2norm_in_kernel=True,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state[-1] = fused_recurrent_gated_delta_rule(
@@ -729,7 +728,7 @@ class MomAttention(nn.Module):
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True
+                use_qk_l2norm_in_kernel=True,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
@@ -759,7 +758,7 @@ class MomAttention(nn.Module):
         new_lengths = lengths + pad_lengths
         new_cu_seqlens = torch.cat([
             torch.tensor([0], device=cu_seqlens.device, dtype=cu_seqlens.dtype),
-            torch.cumsum(new_lengths, dim=0)
+            torch.cumsum(new_lengths, dim=0),
         ])
         final_total_len = new_cu_seqlens[-1].item()
         new_q = torch.zeros((1, final_total_len, cu_q.shape[-1]), dtype=cu_q.dtype, device=cu_q.device)

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -23,7 +22,7 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool, 
             with torch.inference_mode():
                 logits = logits[:, :-1]
                 per_token_logps = []
-                for logits_row, input_ids_row in zip(logits, input_ids[:, -logits.size(1):]):
+                for logits_row, input_ids_row in zip(logits, input_ids[:, -logits.size(1):], strict=False):
                     log_probs = torch.randn_like(logits_row).log_softmax(dim=-1)
                     token_log_prob = torch.gather(log_probs, dim=1, index=input_ids_row.unsqueeze(1)).squeeze(1)
                     per_token_logps.append(token_log_prob)

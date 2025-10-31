@@ -6,7 +6,7 @@ import torch.utils.benchmark as benchmark
 
 
 def benchmark_forward(
-    fn, *inputs, repeats=10, desc="", verbose=True, amp=False, amp_dtype=torch.float16, **kwinputs
+    fn, *inputs, repeats=10, desc="", verbose=True, amp=False, amp_dtype=torch.float16, **kwinputs,
 ):
     """Use Pytorch Benchmark on the forward pass of an arbitrary function."""
     if verbose:
@@ -230,7 +230,7 @@ def pytorch_profiler(
         if backward:
             out.backward(g, retain_graph=True)
     activities = ([torch.profiler.ProfilerActivity.CPU] if cpu else []) + [
-        torch.profiler.ProfilerActivity.CUDA
+        torch.profiler.ProfilerActivity.CUDA,
     ]
     with torch.profiler.profile(
         activities=activities,

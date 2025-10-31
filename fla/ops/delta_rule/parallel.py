@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Tuple
 
 import torch
 import triton
@@ -19,7 +17,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
         for num_warps in [1, 2, 4]
     ],
     key=['BT', 'K', 'V'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_transform_qk_fwd_kernel(
@@ -39,7 +37,7 @@ def chunk_transform_qk_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     BT: tl.constexpr,
-    OUTPUT_ATTENTIONS: tl.constexpr
+    OUTPUT_ATTENTIONS: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
 
@@ -89,7 +87,7 @@ def chunk_transform_qk_fwd(
     A: torch.Tensor,
     scale: float,
     chunk_size: int,
-    output_attentions: bool
+    output_attentions: bool,
 ):
     B, H, T, K = k.shape
     BT = chunk_size
@@ -116,7 +114,7 @@ def chunk_transform_qk_fwd(
         BT=BT,
         BK=triton.next_power_of_2(K),
         BV=triton.next_power_of_2(V),
-        OUTPUT_ATTENTIONS=output_attentions
+        OUTPUT_ATTENTIONS=output_attentions,
     )
     return q_new, k_new, o, A_local
 
@@ -127,7 +125,7 @@ def chunk_transform_qk_fwd(
         triton.Config({}, num_warps=2),
     ],
     key=['BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def save_intra_chunk_attn(
@@ -144,7 +142,7 @@ def save_intra_chunk_attn(
 
 
 @triton.heuristics({
-    'OUTPUT_ATTENTIONS': lambda args: args['attn'] is not None
+    'OUTPUT_ATTENTIONS': lambda args: args['attn'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def parallel_delta_rule_fwd_kernel(
@@ -163,7 +161,7 @@ def parallel_delta_rule_fwd_kernel(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    OUTPUT_ATTENTIONS: tl.constexpr
+    OUTPUT_ATTENTIONS: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
@@ -256,7 +254,7 @@ class ParallelDeltaRuleFunction(torch.autograd.Function):
             A,
             scale,
             BS,
-            output_attentions
+            output_attentions,
         )
 
         num_stages = 3 if K <= 64 else 2
@@ -281,7 +279,7 @@ class ParallelDeltaRuleFunction(torch.autograd.Function):
             BK=BK,
             BV=BV,
             num_stages=num_stages,
-            num_warps=num_warps
+            num_warps=num_warps,
         )
 
         if output_attentions:
@@ -290,7 +288,7 @@ class ParallelDeltaRuleFunction(torch.autograd.Function):
                 A=attn,
                 A_local=A_local,
                 T=T,
-                BT=BS
+                BT=BS,
             )
         return o_new.to(q.dtype), attn
 
@@ -308,8 +306,8 @@ def parallel_delta_rule(
     beta: torch.Tensor,
     scale: float = None,
     output_attentions: bool = False,
-    head_first: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    head_first: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -338,14 +336,14 @@ def parallel_delta_rule(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
     o, attn = ParallelDeltaRuleFunction.apply(q, k, v, beta, scale, output_attentions)
     return o, attn

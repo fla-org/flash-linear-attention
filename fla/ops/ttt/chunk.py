@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang, Yuqi Pan
 
 import warnings
-from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -26,7 +24,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_fwd_kernel_h(
@@ -131,7 +129,7 @@ def chunk_ttt_linear_fwd_kernel_h(
         for num_stages in [2, 3]
     ],
     key=['BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_fwd_kernel_o(
@@ -224,7 +222,7 @@ def chunk_ttt_linear_fwd_kernel_o(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_h(
@@ -326,7 +324,7 @@ def chunk_ttt_linear_bwd_kernel_h(
         for num_warps in [4]
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_dv_local(
@@ -401,7 +399,7 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
         for num_warps in [2, 4, 8, 16]
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_norm(
@@ -472,8 +470,8 @@ def chunk_ttt_linear_bwd_kernel_norm(
     offs_t = tl.arange(0, BT)
     b_w = tl.load(w + i_h * V + offs_v, mask=offs_v < V, other=0.)
     b_b = tl.load(b + i_h * V + offs_v, mask=offs_v < V, other=0.)
-    b_dw = tl.zeros([BV,], dtype=b_w.dtype)
-    b_db = tl.zeros([BV,], dtype=b_b.dtype)
+    b_dw = tl.zeros([BV], dtype=b_w.dtype)
+    b_db = tl.zeros([BV], dtype=b_b.dtype)
     p_dw = tl.make_block_ptr(dw + i_nh * V, (V,), (1,), (i_v * BV,), (BV,), (0,))
     p_db = tl.make_block_ptr(db + i_nh * V, (V,), (1,), (i_v * BV,), (BV,), (0,))
 
@@ -559,7 +557,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
         for num_stages in [2, 3]
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dqke(
@@ -619,7 +617,7 @@ def chunk_bwd_kernel_dqke(
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_ds = tl.zeros([BT, BT], dtype=tl.float32)
-    b_de = tl.zeros([BT,], dtype=tl.float32)
+    b_de = tl.zeros([BT], dtype=tl.float32)
 
     p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -680,12 +678,12 @@ def chunk_ttt_linear_fwd_h(
     b: torch.Tensor,
     eta: torch.Tensor,
     eps: float,
-    initial_state: Optional[torch.Tensor] = None,
-    initial_state_bias: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
+    initial_state_bias: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 16,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
@@ -745,9 +743,9 @@ def chunk_ttt_linear_fwd_o(
     eta: torch.Tensor,
     h: torch.Tensor,
     hb: torch.Tensor,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
     if scale is None:
@@ -795,11 +793,11 @@ def chunk_ttt_linear_bwd_h(
     b: torch.Tensor,
     eta: torch.Tensor,
     eps: float,
-    initial_state: Optional[torch.Tensor] = None,
-    initial_state_bias: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    initial_state: torch.Tensor | None = None,
+    initial_state_bias: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 16,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
@@ -859,8 +857,8 @@ def chunk_ttt_linear_bwd_dv_local(
     eta: torch.Tensor,
     do: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 16
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
@@ -906,14 +904,14 @@ def chunk_ttt_linear_bwd_norm(
     h0: torch.Tensor,  # [B, H, D, D]
     hb0: torch.Tensor,  # [B, H, 1, D]
     h: torch.Tensor,  # [B, H, NT, D, D]
-    dht: Optional[torch.Tensor],  # [B, H, D, D]
-    dhbt: Optional[torch.Tensor],  # [B, H, 1, D]
-    dv_new: Optional[torch.Tensor],  # [B, H, L, D]
+    dht: torch.Tensor | None,  # [B, H, D, D]
+    dhbt: torch.Tensor | None,  # [B, H, 1, D]
+    dv_new: torch.Tensor | None,  # [B, H, L, D]
     do: torch.Tensor,  # [B, H, L, D]
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 16
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # torch implementation of `dkh, dw, db, dk, dv` for LN^2
     assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *q.shape, do.shape[-1]
@@ -994,14 +992,14 @@ def chunk_ttt_linear_bwd_norm_ref(
     eta: torch.Tensor,  # [B, H, L, 1]
     h0: torch.Tensor,  # [B, H, D, D]
     h: torch.Tensor,  # [B, H, NT, D, D]
-    dht: Optional[torch.Tensor],  # [B, H, D, D]
-    dv_new: Optional[torch.Tensor],  # [B, H, L, D]
+    dht: torch.Tensor | None,  # [B, H, D, D]
+    dv_new: torch.Tensor | None,  # [B, H, L, D]
     do: torch.Tensor,  # [B, H, L, D]
     scale: float,
     eps: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 16
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # torch implementation of `dkh, dw, db, dk, dv` for LN^2
     assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *q.shape, do.shape[-1]
@@ -1095,9 +1093,9 @@ def chunk_ttt_linear_bwd_dqke(
     dh: torch.Tensor,
     dhb: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 16,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
@@ -1153,8 +1151,8 @@ def chunk_ttt_linear_fwd(
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 16
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
 ):
     BT = chunk_size
     h, hb, v_new, final_state, final_state_bias = chunk_ttt_linear_fwd_h(
@@ -1168,7 +1166,7 @@ def chunk_ttt_linear_fwd(
         initial_state_bias=initial_state_bias,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     o = chunk_ttt_linear_fwd_o(
         q=q,
@@ -1179,7 +1177,7 @@ def chunk_ttt_linear_fwd(
         hb=hb,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     return o, final_state, final_state_bias
 
@@ -1199,7 +1197,7 @@ def chunk_ttt_linear_bwd(
     chunk_size: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     BT = chunk_size
     h, v_new, x, y, rstd = chunk_ttt_linear_bwd_h(
@@ -1212,7 +1210,7 @@ def chunk_ttt_linear_bwd(
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     dv_new = chunk_ttt_linear_bwd_dv_local(
         q=q,
@@ -1221,7 +1219,7 @@ def chunk_ttt_linear_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     dh, dhb, dh0, dhb0, dv, dk, dw, db = chunk_ttt_linear_bwd_norm(
         q=q,
@@ -1243,7 +1241,7 @@ def chunk_ttt_linear_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     dq, dk2, de = chunk_ttt_linear_bwd_dqke(
         q=q,
@@ -1256,7 +1254,7 @@ def chunk_ttt_linear_bwd(
         dhb=dhb,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     dk.add_(dk2)
     return dq, dk, dv, de, dw, db, dh0, dhb0
@@ -1281,7 +1279,7 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
         initial_state,
         initial_state_bias,
         output_final_state,
-        cu_seqlens
+        cu_seqlens,
     ):
         o, final_state, final_state_bias = chunk_ttt_linear_fwd(
             q=q,
@@ -1356,7 +1354,7 @@ def chunk_ttt_linear(
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     head_first: bool = False,
 ):
     r"""
@@ -1404,25 +1402,25 @@ def chunk_ttt_linear(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5

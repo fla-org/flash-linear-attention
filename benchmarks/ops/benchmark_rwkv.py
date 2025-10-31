@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import os
 
@@ -41,13 +40,13 @@ except BaseException:
             ('yellow', 'dotted'),  # gla_bwd
             ('black', ':'),      # retention_bwd
             ('gray', ':'),       # flash
-            ('gray', '--')       # flash_bwd
+            ('gray', '--'),       # flash_bwd
         ],
         ylabel="Execution Time (ms)",  # label name for the y-axis
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, provider):
     from fla.utils import device

@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import math
-from typing import Optional
 
 import torch
 
@@ -56,7 +54,7 @@ def naive_deltaformer_attn_head_first(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    beta: Optional[torch.Tensor] = None,
+    beta: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Naive reference implementation of DeltaFormer attention for head-first format.
@@ -111,7 +109,7 @@ def naive_deltaformer_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    beta: Optional[torch.Tensor] = None,
+    beta: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Naive reference implementation of DeltaFormer attention for sequence-first format.

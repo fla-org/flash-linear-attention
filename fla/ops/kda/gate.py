@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 
@@ -20,7 +19,7 @@ def kda_gate_ref(
     A: torch.Tensor,
     head_k_dim: int,
     g_bias: torch.Tensor | None = None,
-    beta=1.0, threshold=20.0
+    beta=1.0, threshold=20.0,
 ) -> torch.Tensor:
     """
     Torch reference implementation for KDA gate computation.
@@ -62,7 +61,7 @@ def kda_gate_ref(
         for ns in [2, 3]
     ],
     key=['H', 'D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def kda_gate_fwd_kernel(
@@ -75,7 +74,7 @@ def kda_gate_fwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
-    HAS_BIAS: tl.constexpr
+    HAS_BIAS: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
     n_t = i_t * BT
@@ -130,7 +129,7 @@ def kda_gate_fwd_kernel(
         for ns in [2, 3]
     ],
     key=['H', 'D'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def kda_gate_bwd_kernel(
@@ -216,7 +215,7 @@ def kda_gate_fwd(
     head_k_dim: int,
     g_bias: torch.Tensor | None = None,
     beta: float = 1.0,
-    threshold: float = 20.0
+    threshold: float = 20.0,
 ) -> torch.Tensor:
     """
     Forward pass for KDA gate:
@@ -232,7 +231,7 @@ def kda_gate_fwd(
     T = g.shape[0]
     HD = g.shape[1]
     H = A.numel()
-    assert HD == H * head_k_dim
+    assert H * head_k_dim == HD
 
     y = torch.empty_like(g, dtype=torch.float32)
 
@@ -243,7 +242,7 @@ def kda_gate_fwd(
         beta, threshold,
         T, H, head_k_dim,
         BD=triton.next_power_of_2(head_k_dim),
-        HAS_BIAS=g_bias is not None
+        HAS_BIAS=g_bias is not None,
     )
 
     y = y.view(*orig_shape, H, head_k_dim)
@@ -281,7 +280,7 @@ def kda_gate_bwd(
         T, H, D,
         BT=BT,
         BD=triton.next_power_of_2(D),
-        HAS_BIAS=g_bias is not None
+        HAS_BIAS=g_bias is not None,
     )
 
     dA = dA.sum(0).view(A_ori_shape).type_as(A)

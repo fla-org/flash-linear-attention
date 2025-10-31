@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 import triton
@@ -14,7 +12,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
 def token_shift_ref(
     x: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         # Variable length mode with cu_seqlens
@@ -59,7 +57,7 @@ def token_shift_ref(
         for num_stages in [1, 2, 3]
     ],
     key=['BD'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def token_shift_fwd_kernel_short(
@@ -151,7 +149,7 @@ def token_shift_fwd_kernel_short(
         for num_stages in [1, 2, 3]
     ],
     key=['BD', 'NB'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def token_shift_fwd_kernel_long(
@@ -216,7 +214,7 @@ def token_shift_fwd_kernel_long(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_INITIAL_STATE': lambda args: args['grad_cache_out'] is not None,
-    'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None
+    'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -225,7 +223,7 @@ def token_shift_fwd_kernel_long(
         for num_stages in [1, 2, 3]
     ],
     key=['BD'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def token_shift_bwd_kernel_short(
@@ -294,7 +292,7 @@ def token_shift_bwd_kernel_short(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_INITIAL_STATE': lambda args: args['grad_cache_out'] is not None,
-    'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None
+    'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -303,7 +301,7 @@ def token_shift_bwd_kernel_short(
         for num_stages in [1, 2, 3]
     ],
     key=['BD', 'NB'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def token_shift_bwd_kernel_long(
@@ -368,9 +366,9 @@ def prepare_maxlens(cu_seqlens: torch.LongTensor) -> int:
 
 def token_shift_fwd(
     x: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    cache: Optional[torch.Tensor] = None,
-    output_cache: bool = False
+    cu_seqlens: torch.Tensor | None = None,
+    cache: torch.Tensor | None = None,
+    output_cache: bool = False,
 ) -> torch.Tensor:
     B, T, D = x.shape
     y = torch.empty_like(x)
@@ -405,7 +403,7 @@ def token_shift_fwd(
             D=D,
             BD=BD,
             STORE_FINAL_STATE=output_cache,
-            IS_DECODE=IS_DECODE
+            IS_DECODE=IS_DECODE,
         )
     else:
         BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
@@ -438,10 +436,10 @@ def token_shift_bwd(
     dy: torch.Tensor,
     N: int,
     T: int,
-    dcache: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    dcache: torch.Tensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     use_short_kernel: bool = True,
-    has_init_cache: bool = False
+    has_init_cache: bool = False,
 ) -> torch.Tensor:
     D = dy.shape[2]
     BD = triton.next_power_of_2(D)
@@ -491,8 +489,8 @@ class TokenShift(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def forward(ctx, x: torch.Tensor, cu_seqlens: Optional[torch.Tensor] = None,
-                cache: Optional[torch.Tensor] = None, output_cache: bool = False):
+    def forward(ctx, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None,
+                cache: torch.Tensor | None = None, output_cache: bool = False):
         output, N, T, use_short_kernel, cache_out = token_shift_fwd(x, cu_seqlens, cache, output_cache)
         ctx.cu_seqlens = cu_seqlens
         ctx.N = N
@@ -503,7 +501,7 @@ class TokenShift(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def backward(ctx, dy: torch.Tensor, dcache: Optional[torch.Tensor] = None):
+    def backward(ctx, dy: torch.Tensor, dcache: torch.Tensor | None = None):
         dx, grad_cache = token_shift_bwd(dy, ctx.N, ctx.T, dcache, ctx.cu_seqlens,
                                          ctx.use_short_kernel, ctx.has_cache)
         return dx, None, grad_cache, None
@@ -511,9 +509,9 @@ class TokenShift(torch.autograd.Function):
 
 def token_shift(
     x: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    cache: Optional[torch.Tensor] = None,
-    output_cache: bool = False
+    cu_seqlens: torch.LongTensor | None = None,
+    cache: torch.Tensor | None = None,
+    output_cache: bool = False,
 ):
     """
     Token-shift operation implemented with Triton kernels.

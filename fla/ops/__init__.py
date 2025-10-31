@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from .abc import chunk_abc
 from .attn import parallel_attn
@@ -11,7 +10,7 @@ from .generalized_delta_rule import (
     chunk_dplr_delta_rule,
     chunk_iplr_delta_rule,
     fused_recurrent_dplr_delta_rule,
-    fused_recurrent_iplr_delta_rule
+    fused_recurrent_iplr_delta_rule,
 )
 from .gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
 from .gsa import chunk_gsa, fused_recurrent_gsa

@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang, Yuqi Pan
 
 import warnings
-from typing import Optional
 
 import torch
 import triton
@@ -24,10 +22,10 @@ NUM_WARPS = [1, 2] if is_nvidia_hopper else [1, 2, 4, 8]
     configs=[
         triton.Config({}, num_warps=1),
         triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4)
+        triton.Config({}, num_warps=4),
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_ttt_linear_fwd_kernel(
@@ -147,10 +145,10 @@ def fused_chunk_ttt_linear_fwd_kernel(
     configs=[
         triton.Config({}, num_warps=1),
         triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4)
+        triton.Config({}, num_warps=4),
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_ttt_linear_bwd_kernel_h(
@@ -270,7 +268,7 @@ def fused_chunk_ttt_linear_bwd_kernel_h(
         for num_warps in NUM_WARPS
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_chunk_ttt_linear_bwd_kernel_dh(
@@ -332,8 +330,8 @@ def fused_chunk_ttt_linear_bwd_kernel_dh(
     m_A_t = o_i[:, None] <= o_i[None, :]
     b_w = tl.load(w + i_h * V + v_i, mask=v_i < V, other=0.)
     b_b = tl.load(b + i_h * V + v_i, mask=v_i < V, other=0.)
-    b_dw = tl.zeros([BV,], dtype=b_w.dtype)
-    b_db = tl.zeros([BV,], dtype=b_b.dtype)
+    b_dw = tl.zeros([BV], dtype=b_w.dtype)
+    b_db = tl.zeros([BV], dtype=b_b.dtype)
     p_dw = tl.make_block_ptr(dw + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
     p_db = tl.make_block_ptr(db + i_nh * V, (V,), (1,), (0,), (BV,), (0,))
 
@@ -435,7 +433,7 @@ def fused_chunk_ttt_linear_bwd_h(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -499,7 +497,7 @@ def fused_chunk_ttt_linear_bwd_dh(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -565,8 +563,8 @@ def fused_chunk_ttt_linear_fwd(
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    BT: int = 16
+    cu_seqlens: torch.LongTensor | None = None,
+    BT: int = 16,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
@@ -619,7 +617,7 @@ def fused_chunk_ttt_linear_bwd(
     BT: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     dq, h, v2, x, y, rstd = fused_chunk_ttt_linear_bwd_h(
@@ -741,7 +739,7 @@ def fused_chunk_ttt_linear(
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     head_first: bool = False,
 ):
     r"""
@@ -791,25 +789,25 @@ def fused_chunk_ttt_linear(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5

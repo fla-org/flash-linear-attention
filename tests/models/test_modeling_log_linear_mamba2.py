@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import os
 
@@ -21,7 +20,7 @@ from fla.utils import device
             (4, 4, 1024, 4, 64, torch.bfloat16, 'triton'),
             (4, 4, 1024, 4, 128, torch.bfloat16, 'cuda'),
         ]
-    ]
+    ],
 )
 def test_modeling(
     L: int,

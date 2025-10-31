@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -16,7 +15,7 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Triton Failure"
+    reason="Intel Triton Failure",
 )
 def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
     torch.manual_seed(42)
@@ -28,7 +27,7 @@ def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtyp
     ref = F.kl_div(
         F.linear(x, x_weight).log_softmax(-1),
         F.linear(target_x, target_weight).softmax(-1),
-        reduction=reduction
+        reduction=reduction,
     ).to(dtype)
     do = torch.randn_like(ref).to(device)
     ref.backward(do)

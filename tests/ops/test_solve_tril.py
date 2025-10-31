@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -23,11 +21,11 @@ from fla.utils import assert_close, device, device_platform
             (3, 1024, 6, 64),
             (4, 2048, 8, 64),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Pytorch Failure'
+    reason='Intel Pytorch Failure',
 )
 def test_solve_tril(B, T, H, chunk_size):
     # do not randomly intiialize A otherwise the inverse is not stable
@@ -57,21 +55,21 @@ def test_solve_tril(B, T, H, chunk_size):
             (4, 64, 16, [0, 1, 100, 300, 1200, 2048]),
             (4, 128, 32, [0, 200, 512, 1200, 2048]),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Pytorch Failure'
+    reason='Intel Pytorch Failure',
 )
 def test_solve_tril_varlen(
     H: int,
     D: int,
     chunk_size: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
 ):
     T = cu_seqlens[-1]
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
@@ -86,7 +84,7 @@ def test_solve_tril_varlen(
             actual_size = min(chunk_size, cu_seqlens[i+1] - j)
             ref[:, j:j+actual_size, :, :actual_size] = torch.inverse(
                 A[:, j:j+actual_size, :, :actual_size].transpose(1, 2) +
-                torch.eye(actual_size, device=A.device, dtype=A.dtype)[None, None, ...]
+                torch.eye(actual_size, device=A.device, dtype=A.dtype)[None, None, ...],
             ).transpose(1, 2)
 
     tri = solve_tril(A, cu_seqlens=cu_seqlens)

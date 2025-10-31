@@ -37,7 +37,7 @@ dtype = torch.bfloat16
 bs_seqlen_vals = [(8, 2048), (4, 4096), (2, 8192)]
 causal_vals = [True]
 # headdim_vals = [64, 128]
-headdim_vals = [64,]
+headdim_vals = [64]
 dim = 2048
 dropout_p = 0.0
 
@@ -61,7 +61,7 @@ for causal in causal_vals:
             o1, _ = chunk_gla(q, k, v, g)
             o1.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
-                chunk_gla, q, k, v, g, verbose=False
+                chunk_gla, q, k, v, g, verbose=False,
             )
             time_f_b[config, "chunk_gla"] = f_b
 
@@ -72,7 +72,7 @@ for causal in causal_vals:
             o2, _ = chunk_delta_rule(q, k, v, beta)
             o2.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
-                chunk_delta_rule, q, k, v, beta, verbose=False
+                chunk_delta_rule, q, k, v, beta, verbose=False,
             )
             time_f_b[config, "chunk_delta_rule"] = f_b
 
@@ -85,7 +85,7 @@ for causal in causal_vals:
             o3, _, _ = chunk_ttt_linear(q, k, v, w, b, eta, chunk_size=16)
             o3.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
-                chunk_ttt_linear, q, k, v, w, b, eta, chunk_size=16, verbose=False
+                chunk_ttt_linear, q, k, v, w, b, eta, chunk_size=16, verbose=False,
             )
             time_f_b[config, "chunk_ttt_linear"] = f_b
 
@@ -98,7 +98,7 @@ for causal in causal_vals:
             o4, _, _ = fused_chunk_ttt_linear(q, k, v, w, b, eta, chunk_size=16)
             o4.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
-                fused_chunk_ttt_linear, q, k, v, w, b, eta, chunk_size=16, verbose=False
+                fused_chunk_ttt_linear, q, k, v, w, b, eta, chunk_size=16, verbose=False,
             )
             time_f_b[config, "fused_chunk_ttt_linear"] = f_b
 

@@ -54,7 +54,7 @@ for causal in causal_vals:
             o1, _ = chunk_delta_rule(q, k, v, beta)
             o1.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
-                chunk_delta_rule, q, k, v, beta, verbose=False
+                chunk_delta_rule, q, k, v, beta, verbose=False,
             )
             time_f_b[config, "chunk_delta_rule"] = f_b
 

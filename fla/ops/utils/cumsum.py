@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -15,7 +13,7 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 @triton.heuristics({
     'HAS_SCALE': lambda args: args['scale'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -23,7 +21,7 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
         for num_warps in [1, 2, 4, 8]
     ],
     key=['B', 'H', 'BT', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_local_cumsum_scalar_kernel(
@@ -69,7 +67,7 @@ def chunk_local_cumsum_scalar_kernel(
 
 @triton.heuristics({
     'HAS_SCALE': lambda args: args['scale'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -78,7 +76,7 @@ def chunk_local_cumsum_scalar_kernel(
         for num_warps in [2, 4, 8]
     ],
     key=['B', 'H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_local_cumsum_vector_kernel(
@@ -129,7 +127,7 @@ def chunk_local_cumsum_vector_kernel(
 
 @triton.heuristics({
     'HAS_SCALE': lambda args: args['scale'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -139,7 +137,7 @@ def chunk_local_cumsum_vector_kernel(
         for num_stages in [1, 2, 3, 4]
     ],
     key=['B', 'H', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_global_cumsum_scalar_kernel(
@@ -199,7 +197,7 @@ def chunk_global_cumsum_scalar_kernel(
         for num_stages in [1, 2, 3, 4]
     ],
     key=['B', 'H', 'S', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_global_cumsum_vector_kernel(
@@ -256,9 +254,9 @@ def chunk_local_cumsum_scalar(
     chunk_size: int,
     reverse: bool = False,
     scale: float = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -281,7 +279,7 @@ def chunk_local_cumsum_scalar(
         H=H,
         BT=BT,
         HEAD_FIRST=head_first,
-        REVERSE=reverse
+        REVERSE=reverse,
     )
     return g
 
@@ -291,9 +289,9 @@ def chunk_local_cumsum_vector(
     chunk_size: int,
     reverse: bool = False,
     scale: float = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T, S = g.shape
@@ -321,7 +319,7 @@ def chunk_local_cumsum_vector(
         S=S,
         BT=BT,
         HEAD_FIRST=head_first,
-        REVERSE=reverse
+        REVERSE=reverse,
     )
     return g
 
@@ -330,10 +328,10 @@ def chunk_local_cumsum_vector(
 def chunk_global_cumsum_scalar(
     s: torch.Tensor,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     scale: float = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = s.shape
@@ -352,7 +350,7 @@ def chunk_global_cumsum_scalar(
         B=B,
         H=H,
         HEAD_FIRST=head_first,
-        REVERSE=reverse
+        REVERSE=reverse,
     )
     return z
 
@@ -361,10 +359,10 @@ def chunk_global_cumsum_scalar(
 def chunk_global_cumsum_vector(
     s: torch.Tensor,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     scale: float = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T, S = s.shape
@@ -386,7 +384,7 @@ def chunk_global_cumsum_vector(
         S=S,
         BS=BS,
         HEAD_FIRST=head_first,
-        REVERSE=reverse
+        REVERSE=reverse,
     )
     return z
 
@@ -395,10 +393,10 @@ def chunk_global_cumsum_vector(
 def chunk_global_cumsum(
     s: torch.Tensor,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     scale: float = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         assert s.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
@@ -409,7 +407,7 @@ def chunk_global_cumsum(
             cu_seqlens=cu_seqlens,
             scale=scale,
             head_first=head_first,
-            output_dtype=output_dtype
+            output_dtype=output_dtype,
         )
     elif len(s.shape) == 4:
         return chunk_global_cumsum_vector(
@@ -418,13 +416,13 @@ def chunk_global_cumsum(
             cu_seqlens=cu_seqlens,
             scale=scale,
             head_first=head_first,
-            output_dtype=output_dtype
+            output_dtype=output_dtype,
         )
     else:
         raise ValueError(
             f"Unsupported input shape {s.shape}, "
             f"which should be [B, T, H]/[B, T, H, D] if `head_first=False` "
-            f"or [B, H, T]/[B, H, T, D] otherwise"
+            f"or [B, H, T]/[B, H, T, D] otherwise",
         )
 
 
@@ -434,10 +432,10 @@ def chunk_local_cumsum(
     chunk_size: int,
     reverse: bool = False,
     scale: float = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float,
-    **kwargs
+    output_dtype: torch.dtype | None = torch.float,
+    **kwargs,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
@@ -449,7 +447,7 @@ def chunk_local_cumsum(
             scale=scale,
             cu_seqlens=cu_seqlens,
             head_first=head_first,
-            output_dtype=output_dtype
+            output_dtype=output_dtype,
         )
     elif len(g.shape) == 4:
         return chunk_local_cumsum_vector(
@@ -459,11 +457,11 @@ def chunk_local_cumsum(
             scale=scale,
             cu_seqlens=cu_seqlens,
             head_first=head_first,
-            output_dtype=output_dtype
+            output_dtype=output_dtype,
         )
     else:
         raise ValueError(
             f"Unsupported input shape {g.shape}, "
             f"which should be (B, T, H, D) if `head_first=False` "
-            f"or (B, H, T, D) otherwise"
+            f"or (B, H, T, D) otherwise",
         )

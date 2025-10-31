@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
@@ -6,7 +5,7 @@ from fla.models.log_linear_mamba2.configuration_log_linear_mamba2 import LogLine
 from fla.models.log_linear_mamba2.modeling_log_linear_mamba2 import (
     LogLinearMamba2Block,
     LogLinearMamba2ForCausalLM,
-    LogLinearMamba2Model
+    LogLinearMamba2Model,
 )
 
 AutoConfig.register(LogLinearMamba2Config.model_type, LogLinearMamba2Config, exist_ok=True)

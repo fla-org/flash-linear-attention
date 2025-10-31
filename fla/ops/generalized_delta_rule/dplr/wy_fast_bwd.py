@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -15,7 +13,7 @@ triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -25,7 +23,7 @@ triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
     ],
     key=['BT', 'BK', 'BV'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_bwd_kernel(
@@ -123,9 +121,9 @@ def chunk_dplr_bwd_wy(
     dw: torch.Tensor,
     du: torch.Tensor,
     dv0: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
+    cu_seqlens: torch.LongTensor | None,
     chunk_size: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A_ab_inv, A_ak, v, ag, dw, du = map(lambda x: x.contiguous(), [A_ab_inv, A_ak, v, ag, dw, du])
     B, T, H, K, V = *dw.shape, du.shape[-1]
     BT = chunk_size

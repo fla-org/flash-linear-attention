@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -17,7 +16,7 @@ def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
     if num_complete_chunks > 0:
         theta_chunks = torch.rand(B, H, num_complete_chunks, 1, dtype=dtype)
         theta_main = theta_chunks.repeat_interleave(
-            BT, dim=2
+            BT, dim=2,
         )  # Shape: (B, H, num_complete_chunks*BT, 1)
     else:
         theta_main = torch.empty(B, H, 0, 1, dtype=dtype)
@@ -26,7 +25,7 @@ def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
     if remainder > 0:
         theta_remainder = torch.rand(B, H, 1, 1, dtype=dtype)
         theta_remainder = theta_remainder.repeat_interleave(
-            remainder, dim=2
+            remainder, dim=2,
         )  # Shape: (B, H, remainder, 1)
 
         # Concatenate main chunks with remainder
@@ -48,10 +47,10 @@ def initialize_chunked_param(B, H, T, BT, dtype=torch.float32):
             (3, 2000, 4, 128, torch.float16),
             (4, 2048, 8, 64, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
-    True, reason='FIXME'
+    True, reason='FIXME',
 )
 def test_naive_chunk(
     B: int,
@@ -85,7 +84,7 @@ def test_naive_chunk(
     alpha = alpha.permute(0, 2, 1, 3)
     eta = eta.permute(0, 2, 1, 3)
     q, k, v, w, b, theta, alpha, eta = map(
-        lambda x: x.to(device).requires_grad_(False), (q, k, v, w, b, theta, alpha, eta)
+        lambda x: x.to(device).requires_grad_(False), (q, k, v, w, b, theta, alpha, eta),
     )
     # in titans paper, h0 is not learnable
     h0 = h0.to(device)

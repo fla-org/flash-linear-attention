@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 # scripts for converting pretrained hf model weights to fla style
 # calling the code to make conversions for mistralai/Mistral-7B-v0.1 would achieve the following results:
@@ -44,7 +43,7 @@ def convert(
     llama: str,
     config: str,
     output: str,
-    precision: str = 'float32'
+    precision: str = 'float32',
 ):
     AutoTokenizer.from_pretrained(llama).save_pretrained(output)
     llama = AutoModelForCausalLM.from_pretrained(llama, torch_dtype=precision)

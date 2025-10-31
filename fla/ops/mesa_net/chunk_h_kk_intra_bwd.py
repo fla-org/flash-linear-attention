@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -73,9 +71,9 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
 
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_dv = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dbeta = tl.zeros([BT, ], dtype=tl.float32)
-    b_dg_last = tl.zeros([1,], dtype=tl.float32)
-    b_dg = tl.zeros([BT,], dtype=tl.float32)
+    b_dbeta = tl.zeros([BT ], dtype=tl.float32)
+    b_dg_last = tl.zeros([1], dtype=tl.float32)
+    b_dg = tl.zeros([BT], dtype=tl.float32)
 
     p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_g = tl.load(p_g, boundary_check=(0,))
@@ -144,9 +142,9 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
     q_star: torch.Tensor,
     dq: torch.Tensor,
     dk_beta: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     B, T, H, K = k.shape
     V = K
@@ -185,7 +183,7 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
         V=V,
         BT=BT,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     dlamb = dlamb.sum([0, 1])
     return dk, dg, dlamb, dbeta

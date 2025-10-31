@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 from einops import rearrange
@@ -25,8 +23,8 @@ def chunk_gated_delta_product_fwd(
     g: torch.Tensor,
     beta: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     num_householder: int = 1,
 ):
@@ -46,12 +44,12 @@ def chunk_gated_delta_product_fwd(
         g=g_interleaved,
         beta=beta,
         cu_seqlens=cu_seqlens_dp,
-        output_dtype=torch.float32
+        output_dtype=torch.float32,
     )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens_dp,
-        output_dtype=k.dtype
+        output_dtype=k.dtype,
     )
     if g is not None:
         w, u = gdn_recompute_w_u_fwd(
@@ -110,7 +108,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         use_qk_l2norm_in_kernel: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -142,7 +140,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
     def backward(
         ctx,
         do: torch.Tensor,
-        dht: torch.Tensor
+        dht: torch.Tensor,
     ):
         q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
         q_new = q.new_zeros(q.shape[0], q.shape[1], ctx.num_householder, q.shape[2], q.shape[3])
@@ -201,7 +199,7 @@ def chunk_gated_delta_product(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     r"""
     Args:
@@ -280,12 +278,12 @@ def chunk_gated_delta_product(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5

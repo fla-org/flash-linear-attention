@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -18,7 +16,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_G_GAMMA': lambda args: args['g_gamma'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -27,7 +25,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         triton.Config({'BK': 32, 'BV': 32}, num_warps=2, num_stages=3),
     ],
     key=['H', 'K', 'V', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_o(
@@ -133,7 +131,7 @@ def chunk_fwd_kernel_o(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_DW'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dqkwg(
@@ -198,7 +196,7 @@ def chunk_bwd_kernel_dqkwg(
 
     if USE_G:
         dg += i_k * all * H
-        b_dg_last = tl.zeros([1,], dtype=tl.float32) if USE_G else None
+        b_dg_last = tl.zeros([1], dtype=tl.float32) if USE_G else None
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (tl.arange(0, BT) + 1)
@@ -249,7 +247,7 @@ def chunk_bwd_kernel_dqkwg(
     m_t = o_t < T
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
     if USE_G:
-        b_dg = tl.zeros([BT,], dtype=tl.float32)
+        b_dg = tl.zeros([BT], dtype=tl.float32)
         g += bos * H + i_h
         dg += bos * H + i_h
         p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
@@ -314,7 +312,7 @@ def chunk_bwd_kernel_dqkwg(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dv(
@@ -410,7 +408,7 @@ def chunk_bwd_kernel_dv(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dv_local(
@@ -492,11 +490,11 @@ def chunk_fwd_o(
     k: torch.Tensor,
     v: torch.Tensor,
     h: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
@@ -532,11 +530,11 @@ def chunk_bwd_dv(
     k: torch.Tensor,
     do: torch.Tensor,
     dh: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
@@ -583,12 +581,12 @@ def chunk_bwd_dv_local(
     q: torch.Tensor,
     k: torch.Tensor,
     do: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    A: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    A: torch.Tensor | None = None,
     scale: float = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
@@ -635,14 +633,14 @@ def chunk_bwd_dqkwg(
     do: torch.Tensor,
     h: torch.Tensor,
     dh: torch.Tensor,
-    w: Optional[torch.Tensor] = None,
-    g: Optional[torch.Tensor] = None,
-    g_gamma: Optional[torch.Tensor] = None,
-    dv: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    w: torch.Tensor | None = None,
+    g: torch.Tensor | None = None,
+    g_gamma: torch.Tensor | None = None,
+    dv: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size

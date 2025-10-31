@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import List
 
 import pytest
 import torch
@@ -18,20 +16,20 @@ from fla.utils import assert_close, device, is_intel_alchemist
             (2, 128, 2, 64, torch.float16),
             (1, 256, 4, 64, torch.float16),
             (2, 512, 4, 64, torch.float16),
-            (4, 1024, 4, 128, torch.float16)
+            (4, 1024, 4, 128, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     is_intel_alchemist,
-    reason="Skipping test on Intel Alchemist due to known issues with SRAM."
+    reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
 )
 def test_deltaformer_attn(
     B: int,
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     """
     Test DeltaFormer pre-attention by comparing fused implementation with naive reference.
@@ -76,16 +74,16 @@ def test_deltaformer_attn(
             (4, 128, [0, 15, 100, 300, 1200, 2000], torch.float16),
             (2, 128, [0, 100, 123, 300, 500, 800, 1000, 1500, 2048], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     is_intel_alchemist,
-    reason="Skipping test on Intel Alchemist due to known issues with SRAM."
+    reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
 )
 def test_deltaformer_attn_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -107,7 +105,7 @@ def test_deltaformer_attn_varlen(
             q[:, cu_seqlens[i]:cu_seqlens[i+1]],
             k[:, cu_seqlens[i]:cu_seqlens[i+1]],
             v[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            beta[:, cu_seqlens[i]:cu_seqlens[i+1]]
+            beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
         )
         refs.append(ref)
     ref = torch.cat(refs, dim=1)

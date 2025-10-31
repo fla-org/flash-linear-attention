@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -28,10 +27,10 @@ class GatedMLP(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        hidden_ratio: Optional[int] = None,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = None,
+        intermediate_size: int | None = None,
         hidden_act: str = 'swish',
-        fuse_swiglu: bool = True
+        fuse_swiglu: bool = True,
     ) -> GatedMLP:
         super().__init__()
 
@@ -60,7 +59,7 @@ class GatedMLP(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        **kwargs: Unpack[Any]
+        **kwargs: Unpack[Any],
     ) -> torch.Tensor:
         gate, y = self.gate_proj(x), self.up_proj(x)
         if self.fuse_swiglu:
@@ -79,8 +78,8 @@ class SwiGLULinearParallel(ParallelStyle):
     def __init__(
         self,
         *,
-        input_layouts: Optional[Placement] = None,
-        output_layouts: Optional[Placement] = None,
+        input_layouts: Placement | None = None,
+        output_layouts: Placement | None = None,
         use_local_output: bool = True,
     ):
         super().__init__()
@@ -91,7 +90,7 @@ class SwiGLULinearParallel(ParallelStyle):
 
     @staticmethod
     def _prepare_input_fn(
-        input_layouts, desired_input_layouts, mod, inputs, device_mesh
+        input_layouts, desired_input_layouts, mod, inputs, device_mesh,
     ):
         x, y, weight, bias = inputs
         if not isinstance(x, DTensor):
@@ -128,5 +127,5 @@ class SwiGLULinearParallel(ParallelStyle):
             device_mesh,
             partition_fn=None,
             input_fn=partial(self._prepare_input_fn, self.input_layouts, self.desired_input_layouts),
-            output_fn=partial(self._prepare_output_fn, self.output_layouts, self.use_local_output)
+            output_fn=partial(self._prepare_output_fn, self.output_layouts, self.use_local_output),
         )

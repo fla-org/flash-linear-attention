@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -13,7 +11,7 @@ from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -23,7 +21,7 @@ from fla.utils import autotune_cache_kwargs
         for num_stages in [2, 3, 4]
     ],
     key=["BC"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_kda_fwd_kernel_intra_sub_inter(
@@ -105,7 +103,7 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -113,7 +111,7 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
         for num_warps in [1, 2, 4, 8]
     ],
     key=["BK", "BT"],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_kda_fwd_kernel_intra_sub_intra(
@@ -180,7 +178,7 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -189,7 +187,7 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
         for num_stages in [2, 3, 4]
     ],
     key=['BK', 'NC', 'BT'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['B', 'T'])
 def chunk_kda_bwd_kernel_intra(
@@ -215,7 +213,7 @@ def chunk_kda_bwd_kernel_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -389,12 +387,12 @@ def chunk_kda_bwd_kernel_intra(
 def chunk_kda_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
-    gk: Optional[torch.Tensor] = None,
-    beta: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    gk: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-    output_dtype: torch.dtype = torch.float32
+    output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -474,7 +472,7 @@ def chunk_kda_fwd_intra(
     Akk = solve_tril(
         A=Akk,
         cu_seqlens=cu_seqlens,
-        output_dtype=k.dtype
+        output_dtype=k.dtype,
     )
     return Aqk, Akk
 
@@ -490,8 +488,8 @@ def chunk_kda_bwd_intra(
     dk: torch.Tensor,
     db: torch.Tensor,
     dg: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     B, T, H, K = k.shape
     BT = chunk_size

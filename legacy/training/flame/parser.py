@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import transformers
 from transformers import HfArgumentParser, TrainingArguments
@@ -19,12 +17,12 @@ class TrainingArguments(TrainingArguments):
     model_name_or_path: str = field(
         default=None,
         metadata={
-            "help": "Path to the model weight or identifier from huggingface.co/models or modelscope.cn/models."
+            "help": "Path to the model weight or identifier from huggingface.co/models or modelscope.cn/models.",
         },
     )
     tokenizer: str = field(
         default="fla-hub/gla-1.3B-100B",
-        metadata={"help": "Name of the tokenizer to use."}
+        metadata={"help": "Name of the tokenizer to use."},
     )
     use_fast_tokenizer: bool = field(
         default=False,
@@ -34,11 +32,11 @@ class TrainingArguments(TrainingArguments):
         default=True,
         metadata={"help": "Whether to initialize models from scratch."},
     )
-    dataset: Optional[str] = field(
+    dataset: str | None = field(
         default=None,
         metadata={"help": "The dataset(s) to use. Use commas to separate multiple datasets."},
     )
-    dataset_name: Optional[str] = field(
+    dataset_name: str | None = field(
         default=None,
         metadata={"help": "The name of provided dataset(s) to use."},
     )
@@ -54,11 +52,11 @@ class TrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Enable dataset streaming."},
     )
-    hf_hub_token: Optional[str] = field(
+    hf_hub_token: str | None = field(
         default=None,
         metadata={"help": "Auth token to log in with Hugging Face Hub."},
     )
-    preprocessing_num_workers: Optional[int] = field(
+    preprocessing_num_workers: int | None = field(
         default=None,
         metadata={"help": "The number of processes to use for the pre-processing."},
     )
@@ -82,8 +80,8 @@ def get_train_args():
 
     if unknown_args:
         print(parser.format_help())
-        print("Got unknown args, potentially deprecated arguments: {}".format(unknown_args))
-        raise ValueError("Some specified arguments are not used by the HfArgumentParser: {}".format(unknown_args))
+        print(f"Got unknown args, potentially deprecated arguments: {unknown_args}")
+        raise ValueError(f"Some specified arguments are not used by the HfArgumentParser: {unknown_args}")
 
     if args.should_log:
         transformers.utils.logging.set_verbosity(args.get_process_log_level())

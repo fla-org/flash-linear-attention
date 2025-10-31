@@ -1,8 +1,6 @@
 
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -20,7 +18,7 @@ def chunk_update_once(
     b_m,
     b_g_exp_q,
     b_h,
-    b_lamb
+    b_lamb,
 ):
     b_o = tl.dot((tl.dot(b_p.to(b_k.dtype), tl.trans(b_k)) * b_m).to(b_v.dtype), b_v)
     b_o += tl.dot((b_p * b_g_exp_q).to(b_h.dtype), b_h)
@@ -142,10 +140,10 @@ def chunk_mesa_cg_fwd(
     g_local_cumsum: torch.Tensor,
     beta: torch.Tensor,
     lamb: torch.Tensor,  # lambda
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     max_CG_iteration: int = 30,
-    output_dtype: Optional[torch.dtype] = None
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     B, T, H, K = q.shape
     assert K <= 128, "head dimension must be less than 128"
@@ -181,6 +179,6 @@ def chunk_mesa_cg_fwd(
         BT=chunk_size,
         BK=BK,
         num_warps=4,
-        num_stages=1
+        num_stages=1,
     )
     return q_final, o

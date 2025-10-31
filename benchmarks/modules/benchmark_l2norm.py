@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from functools import partial
 
@@ -28,7 +27,7 @@ from fla.modules.l2norm import l2norm
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(B, H, D, T, provider):
     from fla.utils import device

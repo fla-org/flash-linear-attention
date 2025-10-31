@@ -19,7 +19,7 @@ def parallel_path_bwd_intra_chunk_kernel(
     G: tl.constexpr, HQ: tl.constexpr, H: tl.constexpr,
     K: tl.constexpr, V: tl.constexpr, BK: tl.constexpr,  BV: tl.constexpr,
     BT: tl.constexpr, S: tl.constexpr,
-    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr
+    IS_VARLEN: tl.constexpr, USE_GATE: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -74,7 +74,7 @@ def parallel_path_bwd_intra_chunk_kernel(
     if USE_GATE:
         p_gq_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
         b_gq_cumsum = tl.load(p_gq_cumsum, boundary_check=(0, ))
-        b_dgq = tl.zeros([BT, ], dtype=tl.float32)
+        b_dgq = tl.zeros([BT ], dtype=tl.float32)
     else:
         b_dgq = None
 
@@ -106,7 +106,7 @@ def parallel_path_bwd_intra_chunk_kernel(
             dv + ((offset + tl.arange(0, BT)) * HQ * V)[:, None] + tl.arange(0, BV)[None, :],
             b_dv.to(dv.dtype.element_ty),
             mask=mask[:, None],
-            sem='relaxed'
+            sem='relaxed',
         )
         p_v = tl.make_block_ptr(v, (T, V), (V*H, 1), (offset, 0), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))

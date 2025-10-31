@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -15,7 +13,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -25,7 +23,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
     ],
     key=['BK', 'BT'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_fwd_A_kernel_intra_sub_intra(
@@ -53,7 +51,7 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    GATHER_SUPPORTED: tl.constexpr
+    GATHER_SUPPORTED: tl.constexpr,
 ):
     i_t, i_b, i_h = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
@@ -150,7 +148,7 @@ def chunk_dplr_fwd_intra(
     ge: torch.Tensor,
     scale: float,
     chunk_size: int,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     B, T, H, K = k.shape
     BT = chunk_size
@@ -194,6 +192,6 @@ def chunk_dplr_fwd_intra(
         BT=BT,
         BC=BT,
         BK=BK,
-        GATHER_SUPPORTED=is_gather_supported
+        GATHER_SUPPORTED=is_gather_supported,
     )
     return Aab, Aqk, Aak, Aqb, qg, kg, ag, bg

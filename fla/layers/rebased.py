@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 """
@@ -6,8 +5,6 @@ https://github.com/corl-team/rebased/blob/main/flash_linear_attention/fla/layers
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -27,14 +24,14 @@ class ReBasedLinearAttention(nn.Module):
         feature_dim: int = 16,
         num_key_value_heads: int = 16,
         num_heads: int = 16,
-        use_gamma: Optional[bool] = True,
-        use_beta: Optional[bool] = True,
-        normalize: Optional[bool] = True,
+        use_gamma: bool | None = True,
+        use_beta: bool | None = True,
+        normalize: bool | None = True,
         causal: bool = True,
         eps: float = 1e-5,
         mode: str = "parallel",
-        layer_idx: Optional[int] = None,
-        **kwargs
+        layer_idx: int | None = None,
+        **kwargs,
     ) -> ReBasedLinearAttention:
         super().__init__()
         self.hidden_size = hidden_size
@@ -102,7 +99,7 @@ class ReBasedLinearAttention(nn.Module):
         hidden_states: torch.Tensor,
         filters: torch.Tensor = None,
         *args,
-        **kwargs
+        **kwargs,
     ):
         """
         x (torch.Tensor): tensor of shape (b, d, t)

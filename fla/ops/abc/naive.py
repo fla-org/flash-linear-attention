@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 from einops import repeat
@@ -11,10 +9,10 @@ def naive_recurrent_abc(
     k: torch.Tensor,
     v: torch.Tensor,
     s: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    scale: Optional[int] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: Optional[bool] = False
+    g: torch.Tensor | None = None,
+    scale: int | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
 ) -> torch.Tensor:
     dtype = q.dtype
 
@@ -72,7 +70,7 @@ def naive_cumsum_abc(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    s: torch.Tensor
+    s: torch.Tensor,
 ) -> torch.Tensor:
     """
     A simple implementation of vanilla ABC that is more aligned with the descriptions in the paper.

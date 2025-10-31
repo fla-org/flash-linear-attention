@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 from einops import repeat
@@ -11,10 +9,10 @@ def naive_recurrent_gsa(
     k: torch.Tensor,
     v: torch.Tensor,
     s: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    scale: Optional[int] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: Optional[bool] = False
+    g: torch.Tensor | None = None,
+    scale: int | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
 ) -> torch.Tensor:
     dtype = q.dtype
     q, k, v, s, g = map(lambda x: x.transpose(1, 2).contiguous().float(), (q, k, v, s, g))

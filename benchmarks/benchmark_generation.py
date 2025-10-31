@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2024, Songlin Yang, Yu Zhang.
 
 import argparse
@@ -41,7 +40,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(
         args.path,
         trust_remote_code=True,
-        add_eos_token=False
+        add_eos_token=False,
     )
     tokenizer.pad_token_id = tokenizer.eos_token_id
     print(f"{tokenizer}")
@@ -50,7 +49,7 @@ if __name__ == "__main__":
         args.path,
         device_map={"": device},
         torch_dtype=dtype,
-        use_cache=not args.no_cache
+        use_cache=not args.no_cache,
     )
     if args.compile:
         print("Compiling the model")
@@ -79,7 +78,7 @@ if __name__ == "__main__":
             do_sample=True,
             temperature=args.temperature,
             top_p=args.topp,
-            repetition_penalty=args.repetition_penalty
+            repetition_penalty=args.repetition_penalty,
         )
     torch.cuda.synchronize()
     elapsed = time.time() - start

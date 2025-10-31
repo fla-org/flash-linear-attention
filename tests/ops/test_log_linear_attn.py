@@ -1,5 +1,4 @@
 import os
-from typing import List
 
 import numpy as np
 import pytest
@@ -31,7 +30,7 @@ def test_chunk(
     L = int(np.log2(T) + 1)
     x = torch.randn(B, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
-        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4
+        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
@@ -68,7 +67,7 @@ def test_chunk_bwd(
     L = int(np.log2(T) + 1)
     x = torch.randn(B, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
-        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4
+        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
@@ -111,7 +110,7 @@ def test_chunk_bwd(
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -123,7 +122,7 @@ def test_chunk_varlen(
     L = int(np.ceil(np.log2(T)) + 1)
     x = torch.randn(1, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
-        torch.randn(1, T, H, dtype=torch.float32, device=device) - 4
+        torch.randn(1, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(1, T, 1, D, dtype=dtype, device=device)

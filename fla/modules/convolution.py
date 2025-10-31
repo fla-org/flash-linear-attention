@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import math
 import warnings
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -41,7 +39,7 @@ except ImportError:
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D', 'W', 'NB'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def causal_conv1d_fwd_kernel(
@@ -140,7 +138,7 @@ def causal_conv1d_fwd_kernel(
     'HAS_BIAS': lambda args: args['db'] is not None,
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE': lambda args: args['dht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -149,7 +147,7 @@ def causal_conv1d_fwd_kernel(
         for num_warps in [4, 8, 16, 32]
     ],
     key=['D', 'W', 'NB'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def causal_conv1d_bwd_kernel(
@@ -405,10 +403,10 @@ def causal_conv1d_fwd(
     weight: torch.Tensor,
     bias: torch.Tensor,
     residual: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    activation: Optional[str] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    activation: str | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -455,12 +453,12 @@ def causal_conv1d_bwd(
     x: torch.Tensor,
     dy: torch.Tensor,
     dht: torch.Tensor,
-    weight: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-    residual: Optional[torch.Tensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    activation: Optional[str] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    activation: str | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ):
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -483,7 +481,7 @@ def causal_conv1d_bwd(
             initial_state=initial_state,
             activation=None,
             cu_seqlens=cu_seqlens,
-            output_final_state=False
+            output_final_state=False,
         )
     dx = torch.empty_like(x)
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
@@ -526,7 +524,7 @@ def causal_conv1d_bwd(
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit
 def causal_conv1d_states_fwd_kernel(
@@ -571,8 +569,8 @@ def causal_conv1d_states_fwd_kernel(
 def causal_conv1d_update_states(
     x: torch.Tensor,
     state_len: int,
-    initial_state: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     B, T, D, W = *x.shape, state_len
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
@@ -590,7 +588,7 @@ def causal_conv1d_update_states(
         D=D,
         W=W,
         BW=BW,
-        BD=BD
+        BD=BD,
     )
     return final_state
 
@@ -599,10 +597,10 @@ def causal_conv1d_update_states(
 def causal_conv1d_update(
     x: torch.Tensor,
     cache: torch.Tensor,
-    residual: Optional[torch.Tensor] = None,
-    weight: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-    activation: Optional[str] = None
+    residual: torch.Tensor | None = None,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    activation: str | None = None,
 ) -> torch.Tensor:
     shape = x.shape
     if weight is not None and x.shape[-1] != weight.shape[0]:
@@ -640,13 +638,13 @@ class CausalConv1dFunction(torch.autograd.Function):
     def forward(
         ctx,
         x: torch.Tensor,
-        weight: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
-        residual: Optional[torch.Tensor] = None,
-        initial_state: Optional[torch.Tensor] = None,
-        output_final_state: Optional[bool] = False,
-        activation: Optional[str] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        weight: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+        initial_state: torch.Tensor | None = None,
+        output_final_state: bool | None = False,
+        activation: str | None = None,
+        cu_seqlens: torch.Tensor | None = None,
     ):
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
@@ -665,7 +663,7 @@ class CausalConv1dFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def backward(ctx, dy: torch.Tensor, dht: Optional[torch.Tensor] = None):
+    def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
@@ -684,14 +682,14 @@ class CausalConv1dFunction(torch.autograd.Function):
 @input_guard
 def causal_conv1d(
     x: torch.Tensor,
-    weight: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-    residual: Optional[torch.Tensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: Optional[bool] = False,
-    activation: Optional[str] = None,
-    backend: Optional[str] = 'triton',
-    cu_seqlens: Optional[torch.Tensor] = None,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
+    activation: str | None = None,
+    backend: str | None = 'triton',
+    cu_seqlens: torch.Tensor | None = None,
     **kwargs,
 ):
     """
@@ -753,7 +751,7 @@ def causal_conv1d(
     # NOTE: No need to provide this arg if `cu_seqlens` is passed.
     # This arg is just for BC, and will be removed in the future.
     # [B, T]
-    seq_idx = kwargs.get('seq_idx', None)
+    seq_idx = kwargs.get('seq_idx')
     if cu_seqlens is not None and seq_idx is None:
         seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
 
@@ -824,10 +822,10 @@ class ShortConvolution(nn.Conv1d):
         hidden_size: int,
         kernel_size: int,
         bias: bool = False,
-        activation: Optional[str] = 'silu',
-        backend: Optional[str] = 'triton',
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        activation: str | None = 'silu',
+        backend: str | None = 'triton',
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
         **kwargs,
     ):
         super().__init__(
@@ -851,7 +849,7 @@ class ShortConvolution(nn.Conv1d):
         if 'use_fast_conv1d' in kwargs:
             warnings.warn(
                 "The `use_fast_conv1d` parameter is deprecated and will be ignored. "
-                "Please use the `backend` parameter instead."
+                "Please use the `backend` parameter instead.",
             )
         import os
         self.backend = os.environ.get('FLA_CONV_BACKEND', backend)
@@ -862,7 +860,7 @@ class ShortConvolution(nn.Conv1d):
                 warnings.warn(
                     "The `backend` parameter is set to `cuda`, but `causal_conv1d_fn` is not available. "
                     "Switching to the Triton implementation instead. "
-                    "Consider installing `causal_conv1d` to enable the CUDA backend."
+                    "Consider installing `causal_conv1d` to enable the CUDA backend.",
                 )
                 self.backend = 'triton'
 
@@ -889,13 +887,13 @@ class ShortConvolution(nn.Conv1d):
     def forward(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-        mask: Optional[torch.Tensor] = None,
-        cache: Optional[torch.Tensor] = None,
+        residual: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
+        cache: torch.Tensor | None = None,
         output_final_state: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x (`torch.Tensor`):
@@ -931,7 +929,7 @@ class ShortConvolution(nn.Conv1d):
                 residual=residual,
                 cache=cache,
                 output_final_state=output_final_state,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             return y, cache
 
@@ -946,7 +944,7 @@ class ShortConvolution(nn.Conv1d):
                 "The CUDA backend does not support both `cu_seqlens` and `cache` being provided, "
                 "or both `cu_seqlens` and `output_final_state` being provided. "
                 "Switching to the Triton backend instead. ",
-                stacklevel=2
+                stacklevel=2,
             )
             self.backend = 'triton'
 
@@ -960,7 +958,7 @@ class ShortConvolution(nn.Conv1d):
             activation=self.activation,
             backend=self.backend,
             cu_seqlens=cu_seqlens,
-            **kwargs
+            **kwargs,
         )
 
     def step(
@@ -969,7 +967,7 @@ class ShortConvolution(nn.Conv1d):
         residual: torch.Tensor,
         cache: torch.Tensor,
         output_final_state: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         B, _, D, W = *x.shape, self.kernel_size[0]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1

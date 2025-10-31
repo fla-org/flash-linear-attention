@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -46,7 +45,7 @@ def causal_conv1d_ref_torch(
     out = out[..., :seqlen]
     if output_final_state:
         final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(
-            dtype_in
+            dtype_in,
         )  # (batch, dim, width - 1)
         if final_states_out is not None:
             final_states_out.copy_(final_states)
@@ -110,7 +109,7 @@ def causal_conv1d_update_ref_torch(x, conv_state, weight, bias=None, activation=
             (2, 64, 128, 3, None, True, False, torch.float16),
             (2, 128, 128, 4, None, False, False, torch.float16),
         ]
-    ]
+    ],
 )
 def test_conv(
     B: int,
@@ -120,7 +119,7 @@ def test_conv(
     activation: str,
     has_bias: bool,
     has_residual: bool,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -175,7 +174,7 @@ def test_conv(
             (4, 500, 128, 3, None, True, False, torch.float16),
             (4, 1024, 1024, 4, None, False, False, torch.float16),
         ]
-    ]
+    ],
 )
 def test_conv_varlen(
     N: int,
@@ -185,13 +184,13 @@ def test_conv_varlen(
     activation: str,
     has_bias: bool,
     has_residual: bool,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
         torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
-        torch.tensor([T], dtype=torch.long)
+        torch.tensor([T], dtype=torch.long),
     ], 0).to(device).sort()[0]
 
     x = torch.randn(1, T, D).to(device, dtype).requires_grad_(True)
@@ -208,9 +207,9 @@ def test_conv_varlen(
                 bias=bias,
                 activation=activation,
             ),
-            "b t d -> b d t"
+            "b t d -> b d t",
         ) + (residual[:, bos:eos] if has_residual else torch.zeros_like(x[:, bos:eos]))
-        for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:])
+        for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
     ], 1)
     ref.backward(dy)
     ref_dx, x.grad = x.grad, None
@@ -252,7 +251,7 @@ def test_conv_varlen(
             (2, 64, 128, 3, None, True, False, torch.float16),
             (2, 128, 128, 4, None, False, False, torch.float16),
         ]
-    ]
+    ],
 )
 @torch.no_grad
 def test_conv_decoding(
@@ -263,7 +262,7 @@ def test_conv_decoding(
         activation: str,
         has_bias: bool,
         has_residual: bool,
-        dtype: torch.dtype
+        dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -325,7 +324,7 @@ def test_conv_decoding(
             (2, 4, 128, 4, "swish", True, True, torch.float32, 'triton'),
             (2, 2, 128, 3, "swish", True, True, torch.float32, 'triton'),
         ]
-    ]
+    ],
 )
 @torch.no_grad
 def test_conv_with_cache_prefill_fwd(
@@ -353,7 +352,7 @@ def test_conv_with_cache_prefill_fwd(
         activation=activation,
         backend=backend,
         device=device,
-        dtype=dtype
+        dtype=dtype,
     )
 
     cache = torch.randn(B, D, W - 1).to(device, dtype)
@@ -381,7 +380,7 @@ def test_conv_with_cache_prefill_fwd(
         torch.testing.assert_close(
             cache_out[:, :, -p],
             expected,
-            atol=1e-3, rtol=1e-3
+            atol=1e-3, rtol=1e-3,
         )
 
 
@@ -390,7 +389,7 @@ def test_conv_with_cache_prefill_fwd(
     [
         pytest.param(
             *test,
-            id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test)
+            id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test),
         )
         for test in [
             (3, 128, 64, 4, "swish", True, True, torch.float32, 'triton'),
@@ -400,7 +399,7 @@ def test_conv_with_cache_prefill_fwd(
             (2,   3,  64, 4, "swish", True, True, torch.float32, 'triton'),  # T < W
             (2,   3,  64, 3, None,  False, True, torch.float32, 'cuda'),     # T < W
         ]
-    ]
+    ],
 )
 @torch.no_grad
 def test_conv_varlen_with_cache_prefill_fwd(
@@ -435,12 +434,12 @@ def test_conv_varlen_with_cache_prefill_fwd(
         activation=activation,
         backend=backend,
         device=device,
-        dtype=dtype
+        dtype=dtype,
     )
 
     cache = torch.randn(N, D, W - 1).to(device, dtype)
     ref_list = []
-    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)):
         xi = x[:, bos:eos, :].transpose(1, 2)  # (1, D, l)
         ci = cache[i:i + 1]                    # (1, D, W-1)
         refi = causal_conv1d_ref_torch(
@@ -465,7 +464,7 @@ def test_conv_varlen_with_cache_prefill_fwd(
 
     assert_close("varlen y", ref, tri, 1e-3)
 
-    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)):
         length = eos - bos
         for p in range(1, W):
             if p <= length:
@@ -476,7 +475,7 @@ def test_conv_varlen_with_cache_prefill_fwd(
                 cache_out[i, :, -p],
                 expected,
                 atol=1e-3,
-                rtol=1e-3
+                rtol=1e-3,
             )
 
 
@@ -496,7 +495,7 @@ def test_conv_varlen_with_cache_prefill_fwd(
             (2, 128, 4, False, False, None, torch.float32, 'cuda'),
             (2, 128, 4, False, False, None, torch.float32, 'triton'),
         ]
-    ]
+    ],
 )
 @torch.no_grad
 def test_conv_decoding_with_cache(
@@ -523,7 +522,7 @@ def test_conv_decoding_with_cache(
         activation=activation,
         backend=backend,
         device=device,
-        dtype=dtype
+        dtype=dtype,
     )
 
     state = torch.randn(B, D, W).to(device, dtype)
@@ -554,9 +553,9 @@ def test_conv_decoding_with_cache(
             (2, 64, 128, 3, True, True, "swish", torch.float32),
             (2, 128, 128, 4, False, True, "swish", torch.float32),
             (2, 64, 128, 3, True, False, "swish", torch.float32),
-            (2, 128, 128, 4, False, False, "swish", torch.float32)
+            (2, 128, 128, 4, False, False, "swish", torch.float32),
         ]
-    ]
+    ],
 )
 @torch.no_grad
 def test_mixed_backend(
@@ -589,7 +588,7 @@ def test_mixed_backend(
         x[:, :T],
         residual=residual[:, :T] if has_residual else None,
         cache=cache,
-        output_final_state=True
+        output_final_state=True,
     )
 
     conv.backend = "triton"
@@ -597,7 +596,7 @@ def test_mixed_backend(
         x[:, T:],
         residual=residual[:, T:] if has_residual else None,
         cache=final_state,
-        output_final_state=True
+        output_final_state=True,
     )
 
     conv.backend = "triton"
@@ -612,7 +611,7 @@ def test_mixed_backend(
         x[:, :T],
         residual=residual[:, :T] if has_residual else None,
         cache=cache,
-        output_final_state=True
+        output_final_state=True,
     )
 
     conv.backend = "cuda"
@@ -620,7 +619,7 @@ def test_mixed_backend(
         x[:, T:],
         residual=residual[:, T:] if has_residual else None,
         cache=final_state,
-        output_final_state=True
+        output_final_state=True,
     )
 
     y_mixed2 = torch.cat([y_triton_prefill, y_cuda_decode], dim=1)
@@ -642,7 +641,7 @@ def test_mixed_backend(
             (2, 128, 4096, 4, True, True, "swish", torch.float32),
             (2, 128, 8192, 4, True, True, "swish", torch.float32),
         ]
-    ]
+    ],
 )
 def test_conv_cache_backward(
     B: int,
@@ -710,5 +709,5 @@ def test_conv_cache_backward(
     grads_tri = get_grads(triton_func, *inputs)
 
     names = ["x", "weight", "bias", "residual", "cache"]
-    for name, g_ref, g_tri in zip(names, grads_ref, grads_tri):
+    for name, g_ref, g_tri in zip(names, grads_ref, grads_tri, strict=False):
         assert_close(name, g_ref, g_tri, ratio=1e-3)

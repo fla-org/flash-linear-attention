@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2024, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 
@@ -12,14 +10,14 @@ def fused_recurrent_gla(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    gk: Optional[torch.Tensor] = None,
-    gv: Optional[torch.Tensor] = None,
-    scale: Optional[int] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    gk: torch.Tensor | None = None,
+    gv: torch.Tensor | None = None,
+    scale: int | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -86,12 +84,12 @@ def fused_recurrent_gla(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5

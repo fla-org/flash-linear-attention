@@ -1,5 +1,5 @@
 import math
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
@@ -39,14 +39,14 @@ def hmamba_chunk_scan_combined(
     dl: torch.Tensor,
     L: torch.Tensor,
     chunk_size: int,
-    D: Optional[torch.Tensor] = None,
-    z: Optional[torch.Tensor] = None,
-    dt_bias: Optional[torch.Tensor] = None,
-    initial_states: Optional[LogLinearAttentionState] = None,
-    seq_idx: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    D: torch.Tensor | None = None,
+    z: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
+    initial_states: LogLinearAttentionState | None = None,
+    seq_idx: torch.Tensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     dt_softplus: bool = False,
-    dt_limit: Tuple[float, float] = (0.0, float("inf")),
+    dt_limit: tuple[float, float] = (0.0, float("inf")),
     return_final_states: bool = False,
 ):
     if z is not None:
@@ -107,16 +107,16 @@ def hmamba_split_conv1d_scan_combined(
     L: torch.Tensor,
     D: torch.Tensor,
     chunk_size: int,
-    initial_states: Optional[torch.Tensor] = None,
-    seq_idx: Optional[torch.Tensor] = None,
-    dt_limit: Tuple[float, float] = (0.0, float("inf")),
+    initial_states: torch.Tensor | None = None,
+    seq_idx: torch.Tensor | None = None,
+    dt_limit: tuple[float, float] = (0.0, float("inf")),
     return_final_states: bool = False,
     activation: str = "silu",
-    rmsnorm_weight: Optional[torch.Tensor] = None,
+    rmsnorm_weight: torch.Tensor | None = None,
     rmsnorm_eps: float = 1e-6,
-    outproj_weight: Optional[torch.Tensor] = None,
-    outproj_bias: Optional[torch.Tensor] = None,
-    headdim: Optional[int] = None,
+    outproj_weight: torch.Tensor | None = None,
+    outproj_bias: torch.Tensor | None = None,
+    headdim: int | None = None,
     ngroups: int = 1,
     norm_before_gate: bool = True,
 ) -> torch.Tensor:
@@ -257,7 +257,7 @@ class LogLinearMamba2(nn.Module):
         rms_norm: bool = True,
         chunk_size: int = 64,
         time_step_rank: float = 256,
-        time_step_limit: Tuple[float, float] = (0.0, float("inf")),
+        time_step_limit: tuple[float, float] = (0.0, float("inf")),
         time_step_min: float = 0.001,
         time_step_max: float = 0.1,
         use_bias: bool = True,
@@ -329,13 +329,13 @@ class LogLinearMamba2(nn.Module):
         self.L._no_weight_decay = True
 
         self.norm = RMSNormGated(
-            self.intermediate_size, eps=self.layer_norm_epsilon, norm_before_gate=False
+            self.intermediate_size, eps=self.layer_norm_epsilon, norm_before_gate=False,
         )
         self.D = nn.Parameter(torch.ones(self.num_heads))
         self.D._no_weight_decay = True
 
         self.out_proj = nn.Linear(
-            self.intermediate_size, self.hidden_size, bias=use_bias
+            self.intermediate_size, self.hidden_size, bias=use_bias,
         )
         self.use_bias = use_bias
 
@@ -345,15 +345,15 @@ class LogLinearMamba2(nn.Module):
                 "`(selective_state_update, causal_conv1d_fn, causal_conv1d_update)` is None. "
                 "Falling back to the naive implementation. "
                 "To install follow https://github.com/state-spaces/mamba/#installation and"
-                "https://github.com/Dao-AILab/causal-conv1d"
+                "https://github.com/Dao-AILab/causal-conv1d",
             )
 
     def cuda_kernels_forward(
         self,
         hidden_states: torch.Tensor,
         cache_params: Optional["LogLinearMamba2Cache"] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        cache_position: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ):
         if attention_mask is not None:
             # only supporting this in decoding
@@ -484,7 +484,7 @@ class LogLinearMamba2(nn.Module):
         # Fused calculations or step by step if no initialized cache is found
         else:
             A = -torch.exp(
-                self.A_log.float()
+                self.A_log.float(),
             )  # (num_heads) or (intermediate_size, state_size)
             dt_limit_kwargs = (
                 {}
@@ -637,8 +637,8 @@ class LogLinearMamba2(nn.Module):
         self,
         hidden_states,
         cache_params: Optional["LogLinearMamba2Cache"] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        cache_position: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ):
         if "cuda" in self.in_proj.weight.device.type:
             return self.cuda_kernels_forward(

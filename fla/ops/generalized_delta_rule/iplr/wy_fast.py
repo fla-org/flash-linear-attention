@@ -1,8 +1,6 @@
 
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -15,7 +13,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -23,7 +21,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_warps in [1, 2, 4, 8, 16]
     ],
     key=['BK'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk32(
@@ -70,7 +68,7 @@ def prepare_wy_repr_fwd_kernel_chunk32(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -78,7 +76,7 @@ def prepare_wy_repr_fwd_kernel_chunk32(
         for num_warps in [1, 2, 4, 8, 16]
     ],
     key=['BK'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk64(
@@ -151,7 +149,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -159,7 +157,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
         for num_warps in NUM_WARPS
     ],
     key=['BT', 'BK', 'BV'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def wu_fwd_kernel(
@@ -221,9 +219,9 @@ def prepare_wy_repr_fwd(
     b: torch.Tensor,
     v: torch.Tensor,
     k: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K = a.shape
     BT = chunk_size
 
@@ -254,7 +252,7 @@ def prepare_wy_repr_fwd(
         k=k,
         A=A,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
     )
     return w, u, A
 
@@ -264,9 +262,9 @@ def wu_fwd(
     v: torch.Tensor,
     k: torch.Tensor,
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *a.shape, v.shape[-1]
     BT = chunk_size
 

@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Optional
 
 import torch
 
@@ -21,7 +19,7 @@ def chunk_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     # obtain WY representation. u is actually the new v.
     w, u, A = prepare_wy_repr_fwd(
@@ -37,7 +35,7 @@ def chunk_delta_rule_fwd(
         g=None,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
 
     o = chunk_fwd_o(
@@ -47,7 +45,7 @@ def chunk_delta_rule_fwd(
         h=h,
         g=None,
         scale=scale,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     return o, A, final_state
 
@@ -62,14 +60,14 @@ def chunk_delta_rule_bwd(
     initial_state: torch.Tensor,
     do: torch.Tensor,
     dht: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
         beta=beta,
         A=A,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -86,7 +84,7 @@ def chunk_delta_rule_bwd(
         do=do,
         g=None,
         scale=scale,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
@@ -98,7 +96,7 @@ def chunk_delta_rule_bwd(
         do=do,
         dv=dv,
         scale=scale,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     dq, dk, dw, _ = chunk_bwd_dqkwg(
         q=q,
@@ -111,7 +109,7 @@ def chunk_delta_rule_bwd(
         dh=dh,
         g=None,
         scale=scale,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     dk2, dv, db = prepare_wy_repr_bwd(
         k=k,
@@ -120,7 +118,7 @@ def chunk_delta_rule_bwd(
         A=A,
         dw=dw,
         du=dv,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     dk.add_(dk2)
     return dq, dk, dv, db, dh0
@@ -141,7 +139,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         use_qk_l2norm_in_kernel: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -171,7 +169,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
     def backward(
         ctx,
         do: torch.Tensor,
-        dht: torch.Tensor
+        dht: torch.Tensor,
     ):
         q, q_rstd, k, k_rstd, v, beta, A, initial_state = ctx.saved_tensors
 
@@ -185,7 +183,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             do=do,
             dht=dht,
-            cu_seqlens=ctx.cu_seqlens
+            cu_seqlens=ctx.cu_seqlens,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -203,7 +201,7 @@ def chunk_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     head_first: bool = False,
 ):
     r"""
@@ -276,25 +274,25 @@ def chunk_delta_rule(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     scale = k.shape[-1] ** -0.5 if scale is None else scale
     o, final_state = ChunkDeltaRuleFunction.apply(

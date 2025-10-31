@@ -1,16 +1,17 @@
-# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Union
+from typing import Any
 
 import numpy as np
 import torch
 from datasets import Dataset, IterableDataset
-from flame.logging import get_logger
 from transformers import PreTrainedTokenizer
+
+from flame.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -24,7 +25,7 @@ class HuggingfaceDataset(IterableDataset):
         context_len: int = 2048,
         rank: int = 0,
         world_size: int = 1,
-        buffer_size: int = 1024
+        buffer_size: int = 1024,
     ) -> HuggingfaceDataset:
 
         self.dataset = dataset
@@ -91,12 +92,12 @@ class HuggingfaceDataset(IterableDataset):
             texts.append(sample['text'])
             states.append(self.data.state_dict())
             if len(texts) == batch_size:
-                for s, tokenized in zip(states, self.tokenizer(texts, return_attention_mask=False)['input_ids']):
+                for s, tokenized in zip(states, self.tokenizer(texts, return_attention_mask=False)['input_ids'], strict=False):
                     self.states = s
                     yield tokenized
                 texts, states = [], []
         if len(texts) > 0:
-            for s, tokenized in zip(states, self.tokenizer(texts, return_attention_mask=False)['input_ids']):
+            for s, tokenized in zip(states, self.tokenizer(texts, return_attention_mask=False)['input_ids'], strict=False):
                 self.states = s
                 yield tokenized
 
@@ -116,7 +117,7 @@ class HuggingfaceDataset(IterableDataset):
         low: int,
         high: int,
         batch_size: int = 1024,
-        g: torch.Generator = torch.Generator()
+        g: torch.Generator = torch.Generator(),
     ) -> Iterable[int]:
         indices = torch.empty(batch_size, dtype=torch.long)
         while True:
@@ -141,7 +142,7 @@ class HuggingfaceDataset(IterableDataset):
             'rand_id': self.rand_id,
             'token_id': self.token_id,
             'rng_state': self.rng_state,
-            'epoch': self._epoch
+            'epoch': self._epoch,
         }
 
     def load_state_dict(self, state_dict):
@@ -178,17 +179,17 @@ class DataCollatorForLanguageModeling:
 
     def __call__(
         self,
-        examples: List[Union[List[int], Dict[str, Any]]]
-    ) -> Dict[str, Any]:
-        if not isinstance(examples[0], Dict):
+        examples: list[list[int] | dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not isinstance(examples[0], dict):
             examples = [{'input_ids': example} for example in examples]
 
-        def tensorize(example: Dict[str, Any]) -> Dict[str, Any]:
+        def tensorize(example: dict[str, Any]) -> dict[str, Any]:
             tensorized = {}
             for key in ['input_ids', 'offsets']:
                 if key not in example:
                     continue
-                if isinstance(example[key], List):
+                if isinstance(example[key], list):
                     tensorized[key] = torch.tensor(example[key], dtype=torch.long)
                 elif isinstance(example[key], np.ndarray):
                     tensorized[key] = torch.from_numpy(example[key])
@@ -210,14 +211,14 @@ class DataCollatorForLanguageModeling:
                 if self.tokenizer._pad_token is None:
                     raise ValueError(
                         f"You are attempting to pad samples but the tokenizer you are using "
-                        f"({self.tokenizer.__class__.__name__}) does not have a pad token."
+                        f"({self.tokenizer.__class__.__name__}) does not have a pad token.",
                     )
                 batch = self.tokenizer.pad(examples, return_tensors=self.return_tensors, return_attention_mask=False)
         else:
             if len(examples) > 1:
                 raise ValueError("The batch size must be 1 for variable length inputs.")
             batch = {
-                'input_ids': torch.cat([example['input_ids'] for example in examples], dim=0).unsqueeze(0)
+                'input_ids': torch.cat([example['input_ids'] for example in examples], dim=0).unsqueeze(0),
             }
             if 'offsets' in examples[0]:
                 batch['offsets'] = torch.cat([example['offsets'] for example in examples], dim=0).unsqueeze(0)

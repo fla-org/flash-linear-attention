@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # code adapted from
 # https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
 
-from typing import Optional
 
 import torch
 import triton
@@ -21,7 +19,7 @@ from fla.utils import autotune_cache_kwargs, input_guard
 #       provided configs
 @triton.heuristics({
     'HAS_ALPHA': lambda args: args['alpha'] is not None,
-    'HAS_BETA': lambda args: args['beta'] is not None
+    'HAS_BETA': lambda args: args['beta'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -44,7 +42,7 @@ from fla.utils import autotune_cache_kwargs, input_guard
         # triton.Config({'BM': 128, 'BK': 64, 'BN': 32, 'G': 4}, num_stages=4, num_warps=4)
     ],
     key=['M', 'N', 'K'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def matmul_kernel(
@@ -190,7 +188,7 @@ def matmul(a, b, activation=''):
 
     B, M, K = a.shape[0], a.shape[1], a.shape[2]
     K_b, N = b.shape
-    assert K == K_b, f"Incompatible K dimension: A {K} vs B {K_b}"
+    assert K_b == K, f"Incompatible K dimension: A {K} vs B {K_b}"
     c = a.new_empty(B, M, N)
 
     def grid(meta): return (B, triton.cdiv(M, meta['BM']), triton.cdiv(N, meta['BN']))
@@ -212,8 +210,8 @@ def addmm(
     x: torch.Tensor,
     a: torch.Tensor,
     b: torch.Tensor,
-    alpha: Optional[float] = None,
-    beta: Optional[float] = None,
+    alpha: float | None = None,
+    beta: float | None = None,
 ) -> torch.Tensor:
     assert a.dim() in [2, 3], "a must be 2D or 3D"
     assert b.dim() == 2, "b must be 2D"
@@ -228,7 +226,7 @@ def addmm(
 
     B, M, K = a.shape[0], a.shape[1], a.shape[2]
     K_b, N = b.shape
-    assert K == K_b, f"Incompatible K dimension: A {K} vs B {K_b}"
+    assert K_b == K, f"Incompatible K dimension: A {K} vs B {K_b}"
     c = a.new_empty(B, M, N)
 
     def grid(meta): return (B, triton.cdiv(M, meta['BM']), triton.cdiv(N, meta['BN']))

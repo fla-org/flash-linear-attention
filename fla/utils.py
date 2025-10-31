@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import contextlib
 import functools
@@ -7,9 +6,10 @@ import logging
 import os
 import sys
 import warnings
+from collections.abc import Callable
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 import torch
 import triton
@@ -40,7 +40,7 @@ def check_environments():
         logger.warning(
             "Detected Windows operating system. Triton does not have an official Windows release, "
             "thus FLA will not be adapted for Windows, and any potential errors will not be fixed. "
-            "Please consider using a Linux environment for compatibility."
+            "Please consider using a Linux environment for compatibility.",
         )
 
     triton_version = version.parse(triton.__version__)
@@ -50,7 +50,7 @@ def check_environments():
         logger.warning(
             f"Current Triton version {triton_version} is below the recommended 3.2.0 version. "
             "Errors may occur and these issues will not be fixed. "
-            "Please consider upgrading Triton."
+            "Please consider upgrading Triton.",
         )
 
     # Check Python version
@@ -60,7 +60,7 @@ def check_environments():
     if py_version < required_py_version:
         logger.warning(
             f"Current Python version {py_version} is below the recommended 3.11 version. "
-            "It is recommended to upgrade to Python 3.11 or higher for the best experience."
+            "It is recommended to upgrade to Python 3.11 or higher for the best experience.",
         )
 
     return None
@@ -94,7 +94,7 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
 
 
 def tensor_cache(
-    fn: Callable[..., torch.Tensor]
+    fn: Callable[..., torch.Tensor],
 ) -> Callable[..., torch.Tensor]:
     """
     A decorator that caches the most recent result of a function with tensor inputs.
@@ -111,8 +111,8 @@ def tensor_cache(
         Callable[..., torch.Tensor]:
             A wrapped version of the input function with single-entry caching.
     """
-    last_args: Optional[Tuple] = None
-    last_kwargs: Optional[Dict] = None
+    last_args: tuple | None = None
+    last_kwargs: dict | None = None
     last_result: Any = None
 
     @functools.wraps(fn)
@@ -121,7 +121,7 @@ def tensor_cache(
 
         if last_args is not None and last_kwargs is not None:
             if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
-                if all(a is b for a, b in zip(args, last_args)) and \
+                if all(a is b for a, b in zip(args, last_args, strict=False)) and \
                         all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()):
                     return last_result
 
@@ -133,7 +133,7 @@ def tensor_cache(
 
 
 def input_guard(
-    fn: Callable[..., torch.Tensor]
+    fn: Callable[..., torch.Tensor],
 ) -> Callable[..., torch.Tensor]:
     """
     A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
@@ -195,11 +195,11 @@ class Action(Enum):
 def deprecate_kwarg(
     old_name: str,
     version: str,
-    new_name: Optional[str] = None,
+    new_name: str | None = None,
     warn_if_greater_or_equal_version: bool = False,
     raise_if_greater_or_equal_version: bool = False,
     raise_if_both_names: bool = False,
-    additional_message: Optional[str] = None,
+    additional_message: str | None = None,
 ):
     """
     Decorator to notify users about deprecated keyword arguments, replacing them with a new name if specified.
@@ -345,7 +345,7 @@ def checkpoint(fn):
     return wrapper
 
 
-@lru_cache(maxsize=None)
+@functools.cache
 def check_pytorch_version(version_s: str = '2.4') -> bool:
     return version.parse(torch.__version__) >= version.parse(version_s)
 
@@ -354,7 +354,7 @@ def _cpu_device_warning():
     warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=1)
 
 
-@lru_cache(maxsize=None)
+@functools.cache
 def get_multiprocessor_count(tensor_idx: int = 0) -> int:
     try:
         return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
@@ -366,7 +366,7 @@ def get_multiprocessor_count(tensor_idx: int = 0) -> int:
             return 1
 
 
-@lru_cache(maxsize=None)
+@functools.cache
 def get_available_device() -> str:
     try:
         return triton.runtime.driver.active.get_current_target().backend
@@ -410,7 +410,7 @@ if is_nvidia and not is_tf32_supported:
 if is_tma_supported:
     logger.info('TMA is supported, using TMA by default.')
 
-    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+    def alloc_fn(size: int, alignment: int, stream: int | None):
         return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
 
     triton.set_allocator(alloc_fn)
@@ -441,7 +441,7 @@ class Backend(Enum):
             return cls.DEFAULT.value
 
 
-@lru_cache(maxsize=None)
+@functools.cache
 def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
     try:
         device_shared_mem_list = get_all_max_shared_mem()

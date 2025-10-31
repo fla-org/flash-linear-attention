@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 
 import argparse
 import math
+from collections.abc import Iterator
 from functools import partial
-from typing import Any, Dict, Iterator, List
+from typing import Any
 
 import torch
 from datasets import Dataset, load_dataset
@@ -21,7 +21,7 @@ class PerplexityEvaluator:
         device: str = "cuda",
         block_size: int = 32768,
         bucket_size: int = 2048,
-        batch_size: int = 1
+        batch_size: int = 1,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -33,18 +33,18 @@ class PerplexityEvaluator:
 
     @staticmethod
     def preprocess(
-        examples: Dict[str, List[Any]],
+        examples: dict[str, list[Any]],
         tokenizer: PreTrainedTokenizer,
-        column_name: str = 'text'
-    ) -> Dict[str, List[List[int]]]:
+        column_name: str = 'text',
+    ) -> dict[str, list[list[int]]]:
         """Preprocess text data"""
         tokenized = tokenizer(examples[column_name])
         return {
             'input_ids': tokenized['input_ids'],
-            'length': [len(ids) for ids in tokenized['input_ids']]
+            'length': [len(ids) for ids in tokenized['input_ids']],
         }
 
-    def batchify(self, dataset: Dataset, tokens_per_batch: int) -> Iterator[List[torch.Tensor]]:
+    def batchify(self, dataset: Dataset, tokens_per_batch: int) -> Iterator[list[torch.Tensor]]:
         """Split dataset into batches of exactly block_size length"""
         current_tokens = []  # Buffer to store all tokens
 
@@ -75,7 +75,7 @@ class PerplexityEvaluator:
                     current_tokens = current_tokens[self.block_size:]
                 yield batch
 
-    def process_batch(self, batch: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def process_batch(self, batch: list[torch.Tensor]) -> dict[str, torch.Tensor]:
         """Process a single batch of data"""
         # Stack the tensors - no need for padding since all sequences are block_size
         input_ids = torch.stack(batch).to(self.device)
@@ -95,7 +95,7 @@ class PerplexityEvaluator:
         # Calculate next token prediction labels
         next_token_labels = torch.cat((
             input_ids[..., 1:],
-            torch.full_like(input_ids[:, :1], self.tokenizer.eos_token_id)
+            torch.full_like(input_ids[:, :1], self.tokenizer.eos_token_id),
         ), -1)
 
         # Calculate negative log likelihood
@@ -106,10 +106,10 @@ class PerplexityEvaluator:
             'loss': outputs['loss'],
             'nlls': nlls,
             'labels': next_token_labels,
-            'blocks': blocks
+            'blocks': blocks,
         }
 
-    def evaluate(self, dataset: Dataset) -> Dict[str, Any]:
+    def evaluate(self, dataset: Dataset) -> dict[str, Any]:
         """Evaluate perplexity on the entire dataset"""
         total_loss = 0
         total_tokens = 0
@@ -149,18 +149,18 @@ class PerplexityEvaluator:
             total_loss += batch_outputs['loss'].item() * labels.ne(self.loss_fct.ignore_index).sum()
 
             # Update progress bar
-            ppls = [f"{math.exp(loss / toks):6.2f}" for loss, toks in zip(block_loss, block_tokens)]
+            ppls = [f"{math.exp(loss / toks):6.2f}" for loss, toks in zip(block_loss, block_tokens, strict=False)]
             bar.set_description_str(f"[{total_tokens:10} tokens, {total_sentences:8} sentences] " + ' '.join(ppls))
 
         # Calculate final results
         final_ppl = math.exp(total_loss / total_tokens)
-        block_ppls = [math.exp(loss / toks) for loss, toks in zip(block_loss, block_tokens)]
+        block_ppls = [math.exp(loss / toks) for loss, toks in zip(block_loss, block_tokens, strict=False)]
 
         return {
             'perplexity': final_ppl,
             'block_perplexities': block_ppls,
             'total_tokens': total_tokens,
-            'total_sentences': total_sentences
+            'total_sentences': total_sentences,
         }
 
 
@@ -188,7 +188,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.path)
     model = AutoModelForCausalLM.from_pretrained(
         args.path,
-        device_map={"": device}
+        device_map={"": device},
     ).bfloat16().eval()
     print(f"{model}")
 
@@ -198,7 +198,7 @@ def main():
     dataset = dataset.map(
         partial(PerplexityEvaluator.preprocess, tokenizer=tokenizer, column_name=args.column_name),
         batched=True,
-        num_proc=32
+        num_proc=32,
     )
     print(dataset)
     print("batch_size", args.batch_size,
@@ -212,7 +212,7 @@ def main():
         device=device,
         block_size=args.block_size,
         bucket_size=args.bucket_size,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
     )
 
     with torch.no_grad():

@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 from einops import rearrange
@@ -21,7 +19,7 @@ def chunk_gated_delta_product_ref(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ):
     assert q.dtype != torch.float32, "ChunkGatedDeltaProductFunction does not support float32. Please use bfloat16."

@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # ["You Only Scan Once: Efficient Multi-dimension Sequential Modeling with LightNet"](https://arxiv.org/abs/2405.21022)
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -28,15 +27,15 @@ class LightNetAttention(nn.Module):
         self,
         mode: str = 'chunk',
         hidden_size: int = 1024,
-        num_heads: Optional[int] = None,
-        expand_ratio: Optional[int] = 128,
+        num_heads: int | None = None,
+        expand_ratio: int | None = 128,
         use_short_conv: bool = False,
         conv_size: int = 4,
         conv_bias: bool = False,
         gate_low_rank_dim: int = 128,
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-5,
-        layer_idx: int = None
+        layer_idx: int = None,
     ) -> LightNetAttention:
         super().__init__()
 
@@ -95,24 +94,24 @@ class LightNetAttention(nn.Module):
 
         self.g_proj = nn.Sequential(
             nn.Linear(hidden_size, gate_low_rank_dim, bias=False),
-            nn.Linear(gate_low_rank_dim, hidden_size, bias=False)
+            nn.Linear(gate_low_rank_dim, hidden_size, bias=False),
         )
         self.g_norm = FusedRMSNormGated(
             hidden_size=hidden_size,
             elementwise_affine=elementwise_affine,
-            eps=norm_eps
+            eps=norm_eps,
         )
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -127,7 +126,7 @@ class LightNetAttention(nn.Module):
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
@@ -138,21 +137,21 @@ class LightNetAttention(nn.Module):
                 mask=conv_mask,
                 cache=conv_state_q,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_k,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
                 mask=conv_mask,
                 cache=conv_state_v,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
         else:
             q = self.q_proj(hidden_states)
@@ -202,7 +201,7 @@ class LightNetAttention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=q.shape[1]
+                offset=q.shape[1],
             )
 
         o = rms_norm_swish_gate_linear(
@@ -211,7 +210,7 @@ class LightNetAttention(nn.Module):
             self.g_norm.weight,
             self.g_norm.bias,
             self.o_proj.weight,
-            self.o_proj.bias
+            self.o_proj.bias,
         )
         return o, None, past_key_values
 

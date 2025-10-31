@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Optional
 
 import torch
 
@@ -28,8 +26,8 @@ def chunk_dplr_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
     gi, ge = chunk_rwkv6_fwd_cumsum(gk, chunk_size, cu_seqlens=cu_seqlens)
 
@@ -54,7 +52,7 @@ def chunk_dplr_fwd(
         A_ak=A_ak,
         v=v,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
     )
     del A_ab, A_ak
     h, v_new, final_state = chunk_dplr_fwd_h(
@@ -67,7 +65,7 @@ def chunk_dplr_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
     )
     del u, kg, bg, gi
 
@@ -79,7 +77,7 @@ def chunk_dplr_fwd(
         A_qb=A_qb,
         h=h,
         cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
     )
     del v_new, h, A_qk, A_qb
 
@@ -102,7 +100,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         chunk_size = 16
         o, final_state = chunk_dplr_fwd(
@@ -116,7 +114,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
         ctx.save_for_backward(q, k, v, a, b, gk, initial_state)
         ctx.cu_seqlens = cu_seqlens
@@ -130,7 +128,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
     def backward(
         ctx,
         do: torch.Tensor,
-        dht: torch.Tensor
+        dht: torch.Tensor,
     ):
         q, k, v, a, b, gk, initial_state = ctx.saved_tensors
         chunk_size = ctx.chunk_size
@@ -157,7 +155,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             A_ak=A_ak,
             v=v,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
         del A_ab
         h, v_new, _ = chunk_dplr_fwd_h(
@@ -169,7 +167,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             gk=gi,
             initial_state=initial_state,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
         del u
         # ******* end of recomputation *******
@@ -183,7 +181,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             A_qb=A_qb,
             scale=scale,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
 
         dh, dh0, dv_new = chunk_dplr_bwd_dhu(
@@ -196,7 +194,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             do=do,
             dv=dv_new_intra,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
 
         dv = chunk_dplr_bwd_dv(
@@ -205,7 +203,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             do=do,
             dh=dh,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
         del A_qk
 
@@ -235,7 +233,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             du=dv_new,
             dv0=dv,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
         )
         del A_ak
 
@@ -271,10 +269,10 @@ def chunk_dplr_delta_rule(
     a: torch.Tensor,
     b: torch.Tensor,
     gk: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     head_first: bool = False,
 ):
     r"""
@@ -316,32 +314,32 @@ def chunk_dplr_delta_rule(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
     if q.dtype == torch.float32:
         warnings.warn(
             """ChunkDeltaRuleFunction does not support float32 on some platforms. Please use bfloat16/float16.
             If you want to use float32, please solve the issue by yourself.""",
             category=RuntimeWarning,
-            stacklevel=2
+            stacklevel=2,
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     scale = k.shape[-1] ** -0.5 if scale is None else scale
     o, final_state = ChunkDPLRDeltaRuleFunction.apply(
