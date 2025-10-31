@@ -400,6 +400,7 @@ def causal_conv1d_update_kernel(
         tl.store(p_cache, b_cache, boundary_check=(0, 1))
 
 
+@input_guard
 def causal_conv1d_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -410,15 +411,6 @@ def causal_conv1d_fwd(
     activation: Optional[str] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    # triton kernel expects contiguous memory layout
-    x = x.contiguous()
-    if residual is not None:
-        residual = residual.contiguous()
-    if weight is not None:
-        weight = weight.contiguous()
-    if bias is not None:
-        bias = bias.contiguous()
-
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
