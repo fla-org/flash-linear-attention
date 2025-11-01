@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -30,7 +28,7 @@ def chunk_abc_fwd_kernel_h(
     NT: tl.constexpr,
     NORMK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    STORE_FINAL_STATE: tl.constexpr
+    STORE_FINAL_STATE: tl.constexpr,
 ):
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
@@ -88,7 +86,7 @@ def chunk_abc_fwd_kernel_intra_K(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BV: tl.constexpr,
-    NC: tl.constexpr
+    NC: tl.constexpr,
 ):
     i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t, i_i = i_c // NC, i_c % NC
@@ -142,7 +140,7 @@ def chunk_abc_fwd_kernel_K(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr
+    NT: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_p = tl.maximum(i_t * BT - 1, 0)
@@ -197,7 +195,7 @@ def chunk_abc_fwd_kernel_intra_V(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BK: tl.constexpr,
-    NC: tl.constexpr
+    NC: tl.constexpr,
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
@@ -258,7 +256,7 @@ def chunk_abc_fwd_kernel_V(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr
+    NT: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_p = tl.maximum(i_t * BT - 1, 0)
@@ -309,7 +307,7 @@ def chunk_abc_bwd_kernel_dh(
     BK: tl.constexpr,
     BV: tl.constexpr,
     NT: tl.constexpr,
-    NORMK: tl.constexpr
+    NORMK: tl.constexpr,
 ):
     i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
@@ -374,7 +372,7 @@ def chunk_abc_bwd_kernel_V(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr
+    NT: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_p = tl.maximum(i_t * BT - 1, 0)
@@ -436,7 +434,7 @@ def chunk_abc_bwd_kernel_V(
 
     p_dq = tl.make_block_ptr(dq + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_dk = tl.make_block_ptr(dk + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    p_dA = tl.make_block_ptr(dA + i_bh * T * BT, (T, BT,), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_dA = tl.make_block_ptr(dA + i_bh * T * BT, (T, BT), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
@@ -461,7 +459,7 @@ def chunk_abc_bwd_kernel_intra_V(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BK: tl.constexpr,
-    NC: tl.constexpr
+    NC: tl.constexpr,
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t, i_i = i_c // NC, i_c % NC
@@ -553,7 +551,7 @@ def chunk_abc_bwd_kernel_intra_K(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BV: tl.constexpr,
-    NC: tl.constexpr
+    NC: tl.constexpr,
 ):
     i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t, i_i, i_j = i_c // (NC * NC), (i_c % (NC * NC)) // NC, (i_c % (NC * NC)) % NC
@@ -620,7 +618,7 @@ def chunk_abc_bwd_kernel_K(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    NT: tl.constexpr
+    NT: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_p = tl.maximum(i_t * BT - 1, 0)
@@ -631,7 +629,7 @@ def chunk_abc_bwd_kernel_K(
 
     p_q = tl.make_block_ptr(q + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k + i_bh * T*K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    p_A = tl.make_block_ptr(A + (i_k*n_bh+i_bh) * T * BT, (T, BT, ), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_A = tl.make_block_ptr(A + (i_k*n_bh+i_bh) * T * BT, (T, BT ), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
 
     # [BT, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -676,7 +674,7 @@ def chunk_abc_bwd_kernel_K(
         # [BT, BV]
         b_dv = b_v * tl.dot(b_k, b_dh, allow_tf32=False)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-    p_dA = tl.make_block_ptr(dA + i_bh * T * BT, (T, BT, ), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    p_dA = tl.make_block_ptr(dA + i_bh * T * BT, (T, BT ), (BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     # [BT, BT]
     b_dA = tl.load(p_dA, boundary_check=(0, 1))
     # [BT, BK]
@@ -701,7 +699,7 @@ def chunk_abc_bwd_kernel_intra_KV(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BV: tl.constexpr,
-    NC: tl.constexpr
+    NC: tl.constexpr,
 ):
     i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t, i_i = i_c // NC, i_c % NC
@@ -753,12 +751,12 @@ def chunk_abc_bwd_kernel_rcum_inter(
     S: tl.constexpr,
     BT: tl.constexpr,
     BS: tl.constexpr,
-    NT: tl.constexpr
+    NT: tl.constexpr,
 ):
     i_m, i_bh = tl.program_id(0), tl.program_id(1)
 
-    b_sp = tl.zeros([BS,], dtype=tl.float32)
-    b_zp = tl.full([BS,], float('inf'), dtype=tl.float32)
+    b_sp = tl.zeros([BS], dtype=tl.float32)
+    b_zp = tl.full([BS], float('inf'), dtype=tl.float32)
     for i_t in range(NT - 1, -1, -1):
         p_s = tl.make_block_ptr(s + i_bh * T*S, (T, S), (S, 1), (i_t * BT, i_m * BS), (BT, BS), (1, 0))
         p_z = tl.make_block_ptr(z + i_bh * T*S, (T, S), (S, 1), (i_t * BT, i_m * BS), (BT, BS), (1, 0))
@@ -790,7 +788,7 @@ def chunk_abc_bwd_kernel_rcum_intra(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BS: tl.constexpr,
-    NC: tl.constexpr
+    NC: tl.constexpr,
 ):
     i_s, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_t, i_i = i_c // NC, i_c % NC
@@ -851,7 +849,7 @@ class ChunkABCFunction(torch.autograd.Function):
             grid = (B * H,)
             logcumsumexp_fwd_kernel[grid](
                 s, z,
-                T=T, S=S
+                T=T, S=S,
             )
             return z
 
@@ -866,7 +864,7 @@ class ChunkABCFunction(torch.autograd.Function):
                 USE_INITIAL_STATE=h0 is not None,
                 STORE_FINAL_STATE=ht is not None,
                 num_warps=num_warps,
-                num_stages=num_stages
+                num_stages=num_stages,
             )
             return h
 
@@ -882,7 +880,7 @@ class ChunkABCFunction(torch.autograd.Function):
             B=B, H=H, T=T, K=K, V=M, BT=BT, BK=BK, BV=BM, NT=NT,
             normk=False,
             h0=initial_state[0] if initial_state is not None else None,
-            ht=final_state[0] if final_state is not None else None
+            ht=final_state[0] if final_state is not None else None,
         )
         ok1 = torch.empty_like(s)
         Ak = q.new_empty(B, H, T, BT)
@@ -892,7 +890,7 @@ class ChunkABCFunction(torch.autograd.Function):
             scale=scale,
             T=T, K=K, V=M, BT=BT, BK=BK, BV=BM, NT=NT,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         ok0 = torch.empty_like(s)
         grid = (NM, NT * NC, B * H)
@@ -900,7 +898,7 @@ class ChunkABCFunction(torch.autograd.Function):
             s, z, ok0, Ak,
             T=T, V=M, BT=BT, BC=BC, BV=BM, NC=NC,
             num_warps=2,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         ok = ok0.add_(ok1)
 
@@ -915,7 +913,7 @@ class ChunkABCFunction(torch.autograd.Function):
             B=B, H=H, T=T, K=M, V=V, BT=BT, BK=BM, BV=BV, NT=NT,
             normk=True,
             h0=initial_state[1] if initial_state is not None else None,
-            ht=final_state[1] if final_state is not None else None
+            ht=final_state[1] if final_state is not None else None,
         )
         Av = q.new_zeros(NM, B, H, T, BT)
         grid = (NM, NT * NC * NC, B * H)
@@ -924,7 +922,7 @@ class ChunkABCFunction(torch.autograd.Function):
             scale=scale,
             T=T, K=M, BT=BT, BC=BC, BK=BM, NC=NC,
             num_warps=2,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         Av = Av.sum(0)
         ov = torch.empty_like(v)
@@ -940,7 +938,7 @@ class ChunkABCFunction(torch.autograd.Function):
             BV=BV,
             NT=NT,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         ctx.save_for_backward(q, k, v, s, z, ok, p, hk, hv, Av)
         ctx.BT = BT
@@ -970,7 +968,7 @@ class ChunkABCFunction(torch.autograd.Function):
                 T=T, K=K, V=V, BT=BT, BK=BK, BV=BV, NT=NT,
                 NORMK=normk,
                 num_warps=num_warps,
-                num_stages=num_stages
+                num_stages=num_stages,
             )
             return dh
 
@@ -981,14 +979,14 @@ class ChunkABCFunction(torch.autograd.Function):
                 s, z, ss, doo,
                 T=T, S=S, BT=BT, BS=BS, NT=NT,
                 num_warps=num_warps,
-                num_stages=num_stages
+                num_stages=num_stages,
             )
             grid = (NS, NT * NC, B * H)
             chunk_abc_bwd_kernel_rcum_intra[grid](
                 s, z, ss, doo,
                 T=T, S=S, BT=BT, BC=BC, BS=BS, NC=NC,
                 num_warps=num_warps,
-                num_stages=num_stages
+                num_stages=num_stages,
             )
             return doo
 
@@ -998,7 +996,7 @@ class ChunkABCFunction(torch.autograd.Function):
             qv, z, dov,
             B=B, H=H, T=T, K=M, V=V, BT=BT, BK=BM, BV=BV, NT=NT,
             scale=scale,
-            normk=True
+            normk=True,
         )
         dp1 = torch.empty_like(p)
         dsv1 = torch.empty_like(s, dtype=torch.float)
@@ -1010,7 +1008,7 @@ class ChunkABCFunction(torch.autograd.Function):
             scale=scale,
             T=T, K=M, V=V, BT=BT, BK=BM, BV=BV, NT=NT,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         dv = dv.sum(0)
         dp0 = torch.empty_like(p)
@@ -1020,7 +1018,7 @@ class ChunkABCFunction(torch.autograd.Function):
             qv, s, z, dAv, dp0, dsv0,
             T=T, K=M, BT=BT, BC=BC, BK=BM, NC=NC,
             num_warps=2,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         dp = dp1.add_(dp0)
         dsv = dsv1.add_(dsv0)
@@ -1034,7 +1032,7 @@ class ChunkABCFunction(torch.autograd.Function):
             q, z, dok,
             B=B, H=H, T=T, K=K, V=M, BT=BT, BK=BK, BV=BM, NT=NT,
             scale=scale,
-            normk=False
+            normk=False,
         )
         dAk = q.new_zeros(NM, B, H, T, BT)
         grid = (NM, NT * NC * NC, B * H)
@@ -1043,7 +1041,7 @@ class ChunkABCFunction(torch.autograd.Function):
             scale=scale,
             T=T, V=M, BT=BT, BC=BC, BV=BM, NC=NC,
             num_warps=2,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         dAk = dAk.sum(0)
 
@@ -1057,7 +1055,7 @@ class ChunkABCFunction(torch.autograd.Function):
             scale=scale,
             T=T, K=K, V=M, BT=BT, BK=BK, BV=BM, NT=NT,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         Ak = Ak.sum(0)
         dsk1 = dsk1.sum(0)
@@ -1067,7 +1065,7 @@ class ChunkABCFunction(torch.autograd.Function):
             s, z, Ak, dok, dsk0,
             T=T, V=M, BT=BT, BC=BC, BV=BM, NC=NC,
             num_warps=2,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         ds = dsv.add_(dsk1.add_(dsk0))
         ds -= bwd_post(s, z, ok * dok + p * dp, B, H, T, M, BT, BC, BM, NT, NC, NM)
@@ -1081,10 +1079,10 @@ def chunk_abc(
     k: torch.Tensor,
     v: torch.Tensor,
     s: torch.Tensor,
-    initial_state: Optional[Tuple[torch.Tensor]] = None,
+    initial_state: tuple[torch.Tensor] | None = None,
     output_final_state: bool = False,
-    head_first: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    head_first: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):

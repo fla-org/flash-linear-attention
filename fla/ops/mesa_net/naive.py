@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
@@ -59,7 +58,7 @@ def naive_mesa_net_exact(q, k, v, g, lamb, beta, h_kk_init=None, h_kv_init=None)
         h_kk_all[:, i] = h_kk
         h_kv_all[:, i] = h_kv
 
-    q_star_gold = torch.linalg.solve(h_kk_all + torch.diag_embed(lamb)[None, None, ...,], q)
+    q_star_gold = torch.linalg.solve(h_kk_all + torch.diag_embed(lamb)[None, None, ...], q)
     o_gold = (q_star_gold[..., :, None] * h_kv_all).sum(-2)
     return o_gold, h_kk, h_kv
 

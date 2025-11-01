@@ -2,17 +2,17 @@ import ast
 import os
 import sys
 from collections import defaultdict
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "False").lower() in ("true", "1", "yes")
 DEBUG_TEST_FILE = os.environ.get("DEBUG_TEST_FILE", "NULL").lower()
 
 
-@lru_cache(maxsize=None)
+@cache
 def parse_file(file_path):
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             return ast.parse(f.read(), filename=file_path)
     except (SyntaxError, FileNotFoundError, UnicodeDecodeError):
         return None

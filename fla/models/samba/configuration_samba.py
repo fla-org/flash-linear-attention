@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 
 import math
 import warnings
-from typing import Dict, Optional
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -34,15 +32,15 @@ class SambaConfig(PretrainedConfig):
         time_step_init_scheme: str = "random",
         time_step_floor: float = 1e-4,
         max_position_embeddings: int = 2048,
-        attn: Optional[Dict] = {
+        attn: dict | None = {
             'layers': (1, 3, 5, 7, 9, 11, 13, 15, 17),
             'num_heads': 18,
             'num_kv_heads': 18,
             'qkv_bias': False,
             'window_size': 2048,
-            'rope_theta': 10000.
+            'rope_theta': 10000.,
         },
-        hidden_ratio: Optional[int] = 4,
+        hidden_ratio: int | None = 4,
         rescale_prenorm_residual: bool = False,
         use_cache: bool = True,
         fuse_norm: bool = True,
@@ -90,13 +88,13 @@ class SambaConfig(PretrainedConfig):
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
             )
         if fuse_linear_cross_entropy:
             warnings.warn(
                 "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
                 "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting."
+                "If you observe issues like loss divergence, consider disabling this setting.",
             )
 
         super().__init__(
@@ -104,5 +102,5 @@ class SambaConfig(PretrainedConfig):
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
             tie_word_embeddings=tie_word_embeddings,
-            **kwargs
+            **kwargs,
         )

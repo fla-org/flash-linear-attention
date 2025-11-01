@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -22,7 +20,7 @@ class LinearAttention(nn.Module):
         expand_k: float = 1.0,
         expand_v: float = 1.0,
         num_heads: int = 8,
-        num_kv_heads: Optional[int] = None,
+        num_kv_heads: int | None = None,
         feature_map: str = 'elementwise_product',
         tie_feature_map_qk: bool = False,
         output_norm: str = 'rmsnorm',
@@ -31,7 +29,7 @@ class LinearAttention(nn.Module):
         do_feature_map_norm: bool = False,
         elementwise_affine: bool = True,
         norm_eps: float = 1e-5,
-        **kwargs
+        **kwargs,
     ):
         super().__init__()
 
@@ -113,7 +111,7 @@ class LinearAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        **kwargs
+        **kwargs,
     ) -> torch.Tensor:
         mode = self.mode
         q = self.q_proj(hidden_states)

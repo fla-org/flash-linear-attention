@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -23,7 +22,7 @@ try:
 except ImportError:
     warnings.warn(
         "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
-        category=ImportWarning
+        category=ImportWarning,
     )
     flash_attn_func = None
 
@@ -36,13 +35,13 @@ class Attention(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 32,
-        num_kv_heads: Optional[int] = None,
+        num_kv_heads: int | None = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
-        window_size: Optional[int] = None,
-        rope_theta: Optional[float] = 10000.,
-        max_position_embeddings: Optional[int] = None,
-        layer_idx: int = None
+        window_size: int | None = None,
+        rope_theta: float | None = 10000.,
+        max_position_embeddings: int | None = None,
+        layer_idx: int = None,
     ):
         super().__init__()
 
@@ -80,12 +79,12 @@ class Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -103,7 +102,7 @@ class Attention(nn.Module):
             q, k = self.q_norm(q), self.k_norm(k)
 
         # equivalent to cu_seqlens in `flash_attn`
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
 
         seqlen_offset, max_seqlen = 0, q_len
         if past_key_values is not None:
@@ -125,7 +124,7 @@ class Attention(nn.Module):
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
                 offset=q_len,
-                cache_kwargs=dict(window_size=self.window_size)
+                cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']
             if cache_has_content:
                 k, v = k_cached, v_cached
@@ -146,7 +145,7 @@ class Attention(nn.Module):
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlen_k,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
             o = pad_input(o, indices_q, batch_size, q_len)
         elif cu_seqlens is not None:
@@ -157,13 +156,13 @@ class Attention(nn.Module):
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             ).unsqueeze(0)
         else:
             o = flash_attn_func(
                 q, k, v,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)

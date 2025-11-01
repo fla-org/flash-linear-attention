@@ -68,11 +68,27 @@ ignore = [
     "E501",
     "E741",
     "B023",
+    "B006",
+    "B007",
     "B008",
+    "B028",
+    "B904",
+    "C408",
+    "C416",
+    "C417",
+    "T201",
+    "TC002",
+    "TC003",
+    "SIM102",
     "SIM108",
+    "SIM118",
+    "SIM211",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "fla/utils.py" = ["TCH004"]
 "evals/harness.py" = ["I", "TCH"]
+"tests/*/*.py" = ["UP030"]
+"scripts/*.py" = ["C414"]
+"egacy/training/flame/*.py" = ["C408"]

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 from .naive import naive_deltaformer_attn
 from .parallel import deltaformer_attn

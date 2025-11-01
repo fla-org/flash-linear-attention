@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -15,7 +14,7 @@ from fla.utils import assert_close, device
         (2, 500, 128, False),
         (2, 512, 128, True),
         (3, 2048, 1200, True),
-    ]
+    ],
 )
 def test_sigmoid(B: int, T: int, D: int, compile: bool):
     torch.manual_seed(42)
@@ -38,7 +37,7 @@ def test_sigmoid(B: int, T: int, D: int, compile: bool):
         (2, 500, 128, 0.5, False),
         (2, 512, 128, 0.5, True),
         (3, 2048, 1200, 2.0, True),
-    ]
+    ],
 )
 def test_logsigmoid(B: int, T: int, D: int, temperature: float, compile: bool):
     torch.manual_seed(42)
@@ -61,7 +60,7 @@ def test_logsigmoid(B: int, T: int, D: int, temperature: float, compile: bool):
         (2, 500, 128, True),
         (2, 512, 128, False),
         (3, 2048, 1200, False),
-    ]
+    ],
 )
 def test_swish(B: int, T: int, D: int, compile: bool):
     torch.manual_seed(42)
@@ -84,7 +83,7 @@ def test_swish(B: int, T: int, D: int, compile: bool):
         (2, 500, 128, True),
         (2, 512, 128, False),
         (3, 2048, 1200, False),
-    ]
+    ],
 )
 def test_swiglu(B: int, T: int, D: int, compile: bool):
     torch.manual_seed(42)
@@ -110,7 +109,7 @@ def test_swiglu(B: int, T: int, D: int, compile: bool):
         (1, 1, 64, 32, False),
         (2, 500, 128, 64, True),
         (3, 2048, 1200, 600, False),
-    ]
+    ],
 )
 def test_swiglu_linear(B: int, T: int, D: int, O: int, compile: bool):  # noqa: E741
     torch.manual_seed(42)

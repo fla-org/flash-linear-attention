@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -12,10 +10,10 @@ def naive_chunk_simple_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     chunk_size: int = 64,
-    scale: Optional[float] = None,
+    scale: float | None = None,
 ):
     q, k, v, g = map(lambda x: rearrange(x, 'b t h ... -> b h t ...').to(torch.float32), [q, k, v, g])
     if scale is None:
@@ -60,9 +58,9 @@ def naive_recurrent_simple_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = True
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = True,
 ):
     dtype = q.dtype
     q, k, v, g = map(lambda x: x.transpose(1, 2).float(), (q, k, v, g))
@@ -96,7 +94,7 @@ def naive_parallel_simple_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
-    scale: Optional[float] = None
+    scale: float | None = None,
 ):
     q, k, v, g = map(lambda x: rearrange(x, 'b t h ... -> b h t ...').to(torch.float32), [q, k, v, g])
     if scale is None:

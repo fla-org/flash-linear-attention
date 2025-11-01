@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # "Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence"[https://arxiv.org/abs/2404.05892]
@@ -7,7 +6,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -35,10 +34,10 @@ class RWKV6Attention(nn.Module):
         proj_low_rank_dim: int = 32,
         gate_low_rank_dim: int = 64,
         fuse_norm: bool = True,
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
-        **kwargs
+        **kwargs,
     ) -> RWKV6Attention:
         super().__init__()
 
@@ -65,7 +64,7 @@ class RWKV6Attention(nn.Module):
         self.x_proj = nn.Sequential(
             LerpLinear(hidden_size, proj_low_rank_dim * 5),
             nn.Tanh(),
-            nn.Linear(proj_low_rank_dim * 5, hidden_size, bias=False)
+            nn.Linear(proj_low_rank_dim * 5, hidden_size, bias=False),
         )
         self.x_bias = nn.Parameter(torch.zeros(5, hidden_size))
 
@@ -92,7 +91,7 @@ class RWKV6Attention(nn.Module):
             "According to Bo, you are using a potentially buggy FLA implementation of RWKV. "
             "If you plan to report any numbers based on this implementation, we strongly recommend "
             "cross-checking with the official repo: https://github.com/BlinkDL/RWKV-LM. "
-            "Bo may disagree with results reported from this version."
+            "Bo may disagree with results reported from this version.",
         )
 
     def _initialize_weights(self, module: nn.Module):
@@ -109,13 +108,13 @@ class RWKV6Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-        **kwargs
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        cu_seqlens: torch.LongTensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -196,7 +195,7 @@ class RWKV6Attention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=hidden_states[:, -1],
                 layer_idx=self.layer_idx,
-                offset=r.shape[2]
+                offset=r.shape[2],
             )
 
         o = self.g_norm(rearrange(o, '... h d -> ... (h d)')) * self.gate_fn(g)
@@ -212,8 +211,8 @@ class LoRA(nn.Module):
         input_dim: int,
         output_dim: int,
         low_rank_dim: int,
-        bias: Optional[bool] = True,
-        activation: Optional[str] = 'tanh'
+        bias: bool | None = True,
+        activation: str | None = 'tanh',
     ):
         super().__init__()
 
@@ -236,7 +235,7 @@ class LoRA(nn.Module):
         self.lora = nn.Sequential(
             nn.Linear(input_dim, low_rank_dim, bias=False),
             self.activation,
-            nn.Linear(low_rank_dim, output_dim, bias=bias)
+            nn.Linear(low_rank_dim, output_dim, bias=bias),
         )
         try:
             from transformers.modeling_utils import _init_weights
@@ -298,7 +297,7 @@ class LerpLinear(nn.Module):
         self,
         input_dim: int,
         output_dim: int,
-        low_rank_dim: Optional[int] = None
+        low_rank_dim: int | None = None,
     ):
         super().__init__()
 
@@ -320,8 +319,8 @@ class LerpLinear(nn.Module):
         s += ")"
         return s
 
-    def forward(self, x: torch.Tensor, delta: Optional[torch.Tensor] = None,
-                cu_seqlens: Optional[torch.LongTensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, delta: torch.Tensor | None = None,
+                cu_seqlens: torch.LongTensor | None = None) -> torch.Tensor:
         if delta is None:
             delta = token_shift(x, cu_seqlens)
         return self.linear(x + delta * self.mu)
@@ -333,7 +332,7 @@ class DDLerpLinear(nn.Module):
         self,
         input_dim: int,
         output_dim: int,
-        low_rank_dim: Optional[int] = None
+        low_rank_dim: int | None = None,
     ):
         super().__init__()
 
@@ -355,8 +354,8 @@ class DDLerpLinear(nn.Module):
         return s
 
     def forward(self, x: torch.Tensor, mu: torch.Tensor,
-                delta: Optional[torch.Tensor] = None,
-                cu_seqlens: Optional[torch.LongTensor] = None) -> torch.Tensor:
+                delta: torch.Tensor | None = None,
+                cu_seqlens: torch.LongTensor | None = None) -> torch.Tensor:
         if delta is None:
             delta = token_shift(x, cu_seqlens)
         return self.linear(x + delta * mu)

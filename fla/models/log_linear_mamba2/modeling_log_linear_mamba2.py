@@ -1,6 +1,5 @@
 import math
 import warnings
-from typing import Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -23,7 +22,7 @@ class LogLinearMamba2Cache(Mamba2Cache):
         config: LogLinearMamba2Config,
         batch_size: int,
         dtype: torch.dtype = torch.float16,
-        device: Optional[str] = None,
+        device: str | None = None,
     ):
         self.dtype = dtype
         self.conv_kernel_size = config.conv_kernel
@@ -43,36 +42,34 @@ class LogLinearMamba2Cache(Mamba2Cache):
             )
             for i in range(config.num_hidden_layers)
         }
-        self.hssm_states = {
-            i: None for i in range(config.num_hidden_layers)
-        }
+        self.hssm_states = dict.fromkeys(range(config.num_hidden_layers))
 
     def update_conv_state(
-        self, layer_idx: int, new_conv_state: torch.Tensor, cache_init: bool = False
+        self, layer_idx: int, new_conv_state: torch.Tensor, cache_init: bool = False,
     ) -> torch.Tensor:
         if new_conv_state.dtype != self.conv_states[layer_idx].dtype:
             warnings.warn(
                 f"`new_conv_state.dtype` ({new_conv_state.dtype}) does not match the cache's dtype "
                 f"({self.conv_states[layer_idx].dtype}), casting.",
-                stacklevel=2
+                stacklevel=2,
             )
             new_conv_state = new_conv_state.to(dtype=self.conv_states[layer_idx].dtype)
 
         if cache_init:
             self.conv_states[layer_idx] = new_conv_state.to(
-                self.conv_states[layer_idx].device
+                self.conv_states[layer_idx].device,
             )
         else:
             self.conv_states[layer_idx] = self.conv_states[layer_idx].roll(
-                shifts=-1, dims=-1
+                shifts=-1, dims=-1,
             )
             self.conv_states[layer_idx][:, :, -1] = new_conv_state[:, 0, :].to(
-                self.conv_states[layer_idx].device
+                self.conv_states[layer_idx].device,
             )
         return self.conv_states[layer_idx]
 
     def update_hssm_state(
-        self, layer_idx: int, new_hssm_state: LogLinearAttentionState
+        self, layer_idx: int, new_hssm_state: LogLinearAttentionState,
     ) -> LogLinearAttentionState:
         self.hssm_states[layer_idx] = new_hssm_state
         return self.hssm_states[layer_idx]
@@ -124,9 +121,9 @@ class LogLinearMamba2Block(nn.Module):
     def forward(
         self,
         hidden_states,
-        cache_params: Optional[LogLinearMamba2Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        cache_params: LogLinearMamba2Cache | None = None,
+        cache_position: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ):
         residual = hidden_states
         hidden_states = self.mixer_norm(hidden_states)
@@ -138,7 +135,7 @@ class LogLinearMamba2Block(nn.Module):
         )
         if self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(
-                hidden_states, residual=residual, prenorm=True
+                hidden_states, residual=residual, prenorm=True,
             )
         else:
             hidden_states = residual + hidden_states
@@ -192,7 +189,7 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
                     math.log(self.config.time_step_max)
                     - math.log(self.config.time_step_min)
                 )
-                + math.log(self.config.time_step_min)
+                + math.log(self.config.time_step_min),
             ).clamp(min=self.config.time_step_floor)
 
             # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
@@ -202,7 +199,7 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
                     module.dt_bias.copy_(inv_dt)
                 else:
                     logger.warning_once(
-                        "`dt_bias` is a DTensor, skipping initialization"
+                        "`dt_bias` is a DTensor, skipping initialization",
                     )
             module.dt_bias._no_reinit = True
 
@@ -244,7 +241,7 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
                 nn.init.kaiming_uniform_(p, a=math.sqrt(5))
                 with torch.no_grad():
                     p /= math.sqrt(
-                        num_residuals_per_layer * self.config.num_hidden_layers
+                        num_residuals_per_layer * self.config.num_hidden_layers,
                     )
 
 
@@ -257,7 +254,7 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
             [
                 LogLinearMamba2Block(config, layer_idx=idx)
                 for idx in range(config.num_hidden_layers)
-            ]
+            ],
         )
 
         self.gradient_checkpointing = False
@@ -280,16 +277,16 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.LongTensor] = None,
-        cache_params: Optional[LogLinearMamba2Cache] = None,
-        use_cache: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        inputs_embeds: torch.LongTensor | None = None,
+        cache_params: LogLinearMamba2Cache | None = None,
+        use_cache: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[Tuple, Mamba2Output]:
+    ) -> tuple | Mamba2Output:
         output_hidden_states = (
             output_hidden_states
             if output_hidden_states is not None
@@ -306,7 +303,7 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
 
         if (input_ids is None) ^ (inputs_embeds is not None):  # ^ is python for xor
             raise ValueError(
-                "You must specify exactly one of input_ids or inputs_embeds"
+                "You must specify exactly one of input_ids or inputs_embeds",
             )
 
         if inputs_embeds is None:
@@ -324,7 +321,7 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
                     dtype=inputs_embeds.dtype,
                 )
                 cache_position = torch.arange(
-                    0, self.config.conv_kernel, device=inputs_embeds.device
+                    0, self.config.conv_kernel, device=inputs_embeds.device,
                 )
             elif cache_position is None:
                 # cases when we do manual forward instead of using `model.generate` which will initiate
@@ -333,7 +330,7 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
                 raise ValueError(
                     "You have to specify the `cache_position` manually when `use_cache=True` and `cache_params` is passed, "
                     "you don't have to pass a `cache_params` if you are in prefilling stage because in that case it will "
-                    "be initialized for you automatically"
+                    "be initialized for you automatically",
                 )
         else:
             cache_params = None
@@ -406,18 +403,18 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_params: Optional[LogLinearMamba2Cache] = None,
-        labels: Optional[torch.LongTensor] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        logits_to_keep: Optional[int] = 0,
+        input_ids: torch.LongTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        cache_params: LogLinearMamba2Cache | None = None,
+        labels: torch.LongTensor | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        use_cache: bool | None = None,
+        cache_position: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        logits_to_keep: int | None = 0,
         **kwargs,  # for now we need this for generation
-    ) -> Union[Tuple, Mamba2CausalLMOutput]:
+    ) -> tuple | Mamba2CausalLMOutput:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
@@ -446,7 +443,7 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
             logits = self.lm_head(
                 hidden_states
                 if logits_to_keep is None
-                else hidden_states[:, -logits_to_keep:]
+                else hidden_states[:, -logits_to_keep:],
             )
         if labels is not None:
             if getattr(self, "criterion", None) is None:
@@ -468,7 +465,7 @@ class LogLinearMamba2ForCausalLM(LogLinearMamba2PreTrainedModel):
             )
             if fuse_linear_and_cross_entropy:
                 loss = criterion(
-                    hidden_states, labels, self.lm_head.weight, self.lm_head.bias
+                    hidden_states, labels, self.lm_head.weight, self.lm_head.bias,
                 )
             else:
                 loss = criterion(logits.view(labels.numel(), -1), labels.view(-1))

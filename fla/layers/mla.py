@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 """ Implementing the Deepseek Multi Latent Attention (MLA) module. Reference:
@@ -10,7 +9,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -30,7 +29,7 @@ try:
 except ImportError:
     warnings.warn(
         "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
-        category=ImportWarning
+        category=ImportWarning,
     )
     flash_attn_func = None
 
@@ -52,17 +51,17 @@ class MultiheadLatentAttention(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 16,
-        q_lora_rank: Optional[int] = 1536,  # q lora rank is optional, None indicates no q lora
+        q_lora_rank: int | None = 1536,  # q lora rank is optional, None indicates no q lora
         qk_rope_head_dim: int = 64,
         kv_lora_rank: int = 512,  # following the original Deepseek paper
         v_head_dim: int = 128,
         qk_nope_head_dim: int = 128,
-        qk_head_dim: Optional[int] = 192,  # qk_nope_head_dim + qk_rope_head_dim
-        window_size: Optional[int] = None,
+        qk_head_dim: int | None = 192,  # qk_nope_head_dim + qk_rope_head_dim
+        window_size: int | None = None,
         rope_theta: float = 10000.,
-        max_position_embeddings: Optional[int] = None,
-        rope_scaling: Optional[dict] = None,
-        layer_idx: int = None
+        max_position_embeddings: int | None = None,
+        rope_scaling: dict | None = None,
+        layer_idx: int = None,
     ) -> MultiheadLatentAttention:
         super().__init__()
 
@@ -95,7 +94,7 @@ class MultiheadLatentAttention(nn.Module):
             self.q_proj = nn.Sequential(
                 nn.Linear(hidden_size, q_lora_rank, bias=False),
                 RMSNorm(q_lora_rank),
-                nn.Linear(q_lora_rank, self.num_heads * self.qk_head_dim, bias=False)
+                nn.Linear(q_lora_rank, self.num_heads * self.qk_head_dim, bias=False),
             )
         else:
             self.q_proj = nn.Linear(hidden_size, self.num_heads * self.qk_head_dim, bias=False)
@@ -104,7 +103,7 @@ class MultiheadLatentAttention(nn.Module):
         self.kv_proj = nn.Sequential(
             nn.Linear(hidden_size, self.kv_lora_rank, bias=False),
             RMSNorm(self.kv_lora_rank),
-            nn.Linear(self.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim), bias=False)
+            nn.Linear(self.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim), bias=False),
         )
 
         self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, hidden_size, bias=False)
@@ -122,12 +121,12 @@ class MultiheadLatentAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.Tensor | None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         # if attention_mask is not None, this is doing inference
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -160,9 +159,9 @@ class MultiheadLatentAttention(nn.Module):
 
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
-        cu_seqlens = kwargs.get("cu_seqlens", None)
+        cu_seqlens = kwargs.get("cu_seqlens")
         q_rot, k_rot = self.rotary(
-            q_rot, k_rot, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+            q_rot, k_rot, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens,
         )
 
         k_rot = repeat(k_rot, 'b t 1 d -> b t h d', h=self.num_heads)
@@ -199,7 +198,7 @@ class MultiheadLatentAttention(nn.Module):
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlen_k,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
             o = pad_input(o, indices_q, batch_size, q_len)
         elif cu_seqlens is not None:
@@ -210,13 +209,13 @@ class MultiheadLatentAttention(nn.Module):
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             ).unsqueeze(0)
         else:
             o = flash_attn_func(
                 q, k, v,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
 
         if self.qk_head_dim != self.v_head_dim:

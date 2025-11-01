@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 import torch.nn.functional as F
@@ -8,7 +7,7 @@ from fla.ops.titans.log_impl import combine_params_log
 
 def cal_n(theta, eta, seq_len):
     n = torch.zeros(*theta.shape, seq_len, dtype=theta.dtype).to(
-        theta.device
+        theta.device,
     )  # [batch_size, num_heads, seq_len, seq_len]
 
     # 1. deal with diagonal elements
@@ -115,7 +114,7 @@ def combine_params(theta, alpha, eta, seq_len):
 
 
 def titans_linear(
-    q, k, v, w, b, theta, alpha, eta, eps, chunk_size, initial_state, output_final_state
+    q, k, v, w, b, theta, alpha, eta, eps, chunk_size, initial_state, output_final_state,
 ):
     """
     Implementation of Titans Linear function based on the update rules:
@@ -200,7 +199,7 @@ def titans_linear(
 
     # Stack outputs along sequence dimension
     output = torch.stack(outputs, dim=-2).squeeze(
-        -3
+        -3,
     )  # (batch_size, num_heads, seq_len, dim)
 
     if output_final_state:
@@ -209,7 +208,7 @@ def titans_linear(
 
 
 def chunk_titans_linear(
-    q, k, v, w, b, theta, alpha, eta, eps, chunk_size, initial_state, output_final_state
+    q, k, v, w, b, theta, alpha, eta, eps, chunk_size, initial_state, output_final_state,
 ):
     B, H, T, D = q.shape
     num_batch = T // chunk_size
@@ -227,7 +226,7 @@ def chunk_titans_linear(
     # [num_heads, 1, head_dim]
     if initial_state is None:
         M_prev = torch.zeros((B, H, D, D), device=v.device, dtype=v.dtype).to(
-            torch.float32
+            torch.float32,
         )
     else:
         M_prev = initial_state
@@ -244,7 +243,7 @@ def chunk_titans_linear(
 
         # beta, beta_T, f, f_T, g, G, m_T, n = combine_params(theta_i, alpha_i, eta_i, chunk_size)
         beta, beta_T, f, f_T, g, G, m_T, n = combine_params_log(
-            theta_i, alpha_i, eta_i, chunk_size
+            theta_i, alpha_i, eta_i, chunk_size,
         )
 
         m_T = m_T.unsqueeze(-1).unsqueeze(-1)

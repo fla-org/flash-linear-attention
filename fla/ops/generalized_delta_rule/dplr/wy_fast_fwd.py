@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -13,7 +11,7 @@ from fla.utils import autotune_cache_kwargs, is_gather_supported, use_cuda_graph
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -22,7 +20,7 @@ from fla.utils import autotune_cache_kwargs, is_gather_supported, use_cuda_graph
     ],
     key=['BT'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk32(
@@ -58,7 +56,7 @@ def prepare_wy_repr_fwd_kernel_chunk32(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -68,7 +66,7 @@ def prepare_wy_repr_fwd_kernel_chunk32(
     ],
     key=['BC'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk64(
@@ -81,7 +79,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
     BT: tl.constexpr,
     BC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    GATHER_SUPPORTED: tl.constexpr = is_gather_supported
+    GATHER_SUPPORTED: tl.constexpr = is_gather_supported,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -138,7 +136,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -148,7 +146,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     use_cuda_graph=use_cuda_graph,
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def wu_fwd_kernel(
@@ -212,9 +210,9 @@ def wu_fwd(
     v: torch.Tensor,
     A_ak: torch.Tensor,
     A_ab_inv: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *ag.shape, v.shape[-1]
     BT = chunk_size
 
@@ -250,9 +248,9 @@ def prepare_wy_repr_fwd(
     v: torch.Tensor,
     A_ak: torch.Tensor,
     A_ab: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, _ = ag.shape
     BT = chunk_size
 
@@ -277,7 +275,7 @@ def prepare_wy_repr_fwd(
         A_ak=A_ak,
         A_ab_inv=A_ab_inv,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
     )
     return w, u, A_ab_inv
 

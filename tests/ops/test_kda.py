@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -18,7 +16,7 @@ from fla.utils import assert_close, device, is_intel_alchemist
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test)
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
         )
         for test in [
             (1, 64, 1, 64, 1, 1, torch.float),
@@ -26,7 +24,7 @@ from fla.utils import assert_close, device, is_intel_alchemist
             (4, 1024, 4, 128, 0.1, 1, torch.float),
             (4, 1024, 4, 128, 1, 10, torch.float),
         ]
-    ]
+    ],
 )
 def test_naive_chunk(
     B: int,
@@ -79,7 +77,7 @@ def test_naive_chunk(
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm_in_kernel{}-{}".format(*test)
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
             (1, 64, 1, 64, 1, 1, False, torch.float),
@@ -87,7 +85,7 @@ def test_naive_chunk(
             (3, 1000, 4, 100, 0.1, 1, True, torch.float),
             (4, 1024, 4, 128, 0.1, 1, False, torch.float),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
@@ -142,7 +140,7 @@ def test_fused_recurrent(
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}-tma{}".format(*test)
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}-tma{}".format(*test),
         )
         for test in [
             (1, 63, 1, 64, 1, 1, 0, False, torch.float16, True),
@@ -154,7 +152,7 @@ def test_fused_recurrent(
             (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16, False),
             (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16, True),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -166,7 +164,7 @@ def test_chunk(
     mask_p: float,
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
-    tma: bool
+    tma: bool,
 ):
     torch.manual_seed(42)
     if not tma:
@@ -234,17 +232,17 @@ def test_chunk(
             (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
             (4, 256, 0, [0, 15, 100, 300, 1200, 4096], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
     mask_p: float,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -328,7 +326,7 @@ def test_chunk_varlen(
             (4, 128, 8, 64, True),
             (4, 128, 8, 128, True),
         ]
-    ]
+    ],
 )
 def test_kda_gate(
     B: int,

@@ -143,7 +143,9 @@ class KimiDeltaAttention(nn.Module):
         self.b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
 
         self.A_log = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)))
+        self.A_log._no_weight_decay = True
         self.dt_bias = nn.Parameter(torch.zeros(self.key_dim, dtype=torch.float32))
+        self.dt_bias._no_weight_decay = True
 
         self.g_proj = nn.Sequential(
             nn.Linear(hidden_size, self.head_v_dim, bias=False),
@@ -217,7 +219,7 @@ class KimiDeltaAttention(nn.Module):
         q, k = (rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim) for x in (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 
-        # for multi-value attention, we repeat the inputs for simplicity. 
+        # for multi-value attention, we repeat the inputs for simplicity.
         if self.num_v_heads > self.num_heads:
             q, k, g = (repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads) for x in (q, k, g))
             beta = repeat(beta, '... h -> ... (h g)', g=self.num_v_heads // self.num_heads)

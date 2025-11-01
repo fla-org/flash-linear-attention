@@ -1,5 +1,4 @@
 
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
@@ -119,7 +118,7 @@ def _parallel_rebased_bwd_dq(
     BTL: tl.constexpr,
     BTS: tl.constexpr,
     BK: tl.constexpr,
-    BV: tl.constexpr
+    BV: tl.constexpr,
 ):
     p_do = tl.make_block_ptr(do + i_bh * T*V, (T, V), (V, 1), (i_c*BTL, i_v*BV), (BTL, BV), (1, 0))
     p_q = tl.make_block_ptr(q + (i_bh) * T*K, (T, K), (K, 1), (i_c*BTL, i_k*BK), (BTL, BK), (1, 0))
@@ -286,7 +285,7 @@ def parallel_rebased_bwd_kernel(
     BTL: tl.constexpr,
     BTS: tl.constexpr,
     BK: tl.constexpr,
-    BV: tl.constexpr
+    BV: tl.constexpr,
 ):
     i_kv, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     NV = tl.cdiv(V, BV)
@@ -314,7 +313,7 @@ def parallel_rebased_bwd_kernel(
         BTL=BTL,
         BTS=BTS,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     tl.debug_barrier()
     _parallel_rebased_bwd_dkv(
@@ -339,7 +338,7 @@ def parallel_rebased_bwd_kernel(
         BTL=BTL,
         BTS=BTS,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
 
 
@@ -382,7 +381,7 @@ class ParallelBasedFunction(torch.autograd.Function):
             BK=BK,
             BV=BV,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         ctx.save_for_backward(q, k, v)
         ctx.scale = scale
@@ -431,7 +430,7 @@ class ParallelBasedFunction(torch.autograd.Function):
             BK=BK,
             BV=BV,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
 
         return dq.sum(0).to(q.dtype), dk.sum(0).to(k.dtype), dv.sum(0).to(v.dtype), None
@@ -445,7 +444,7 @@ def parallel_rebased(
     use_scale: bool = True,
     use_normalize: bool = True,
     return_both: bool = False,
-    head_first: bool = False
+    head_first: bool = False,
 ):
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if use_scale:

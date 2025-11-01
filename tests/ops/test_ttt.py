@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -24,7 +22,7 @@ from fla.utils import assert_close, check_shared_mem, device
             (3, 2000, 4, 128, 0.1, torch.float16),
             (4, 2048, 8, 64, 0.1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -112,7 +110,7 @@ def test_chunk(
             (3, 2000, 4, 128, 0.1, torch.float16),
             (4, 2048, 8, 64, 0.1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_fused_chunk(
     B: int,
@@ -198,16 +196,16 @@ def test_fused_chunk(
             (3, 64, [0, 256, 500, 900, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set"
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set",
 )
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     if D > 64 and check_shared_mem('hopper') is False:

@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -28,7 +27,7 @@ try:
 except ImportError:
     warnings.warn(
         "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
-        category=ImportWarning
+        category=ImportWarning,
     )
     flash_attn_func = None
 
@@ -54,15 +53,15 @@ class RodimusAttention(nn.Module):
         block_type: str = 'rodimus',
         mode: str = 'chunk',
         hidden_size: int = 1024,
-        input_gate_low_rank: Optional[Union[float, str]] = 'auto',
+        input_gate_low_rank: float | str | None = 'auto',
         expand_ratio: int = 64,
         use_short_conv: bool = True,
         conv_size: int = 4,
         conv_bias: bool = True,
         norm_eps: float = 1e-5,
-        k_norm_eps: Optional[float] = None,
+        k_norm_eps: float | None = None,
         residual_in_fp32: bool = True,
-        layer_idx: int = None
+        layer_idx: int = None,
     ):
         super().__init__()
 
@@ -97,7 +96,7 @@ class RodimusAttention(nn.Module):
                 hidden_size=self.d_inner,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu'
+                activation='silu',
             )
 
         self.residual_weight = nn.Parameter(torch.ones(
@@ -117,12 +116,12 @@ class RodimusAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        **kwargs: Unpack[Dict]
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -138,7 +137,7 @@ class RodimusAttention(nn.Module):
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
         if attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
@@ -153,7 +152,7 @@ class RodimusAttention(nn.Module):
                 x=hidden_states,
                 cache=conv_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
             )
         else:
             shift_hidden_states = hidden_states
@@ -220,7 +219,7 @@ class RodimusAttention(nn.Module):
                     recurrent_state=recurrent_state,
                     conv_state=conv_state if self.use_short_conv else None,
                     layer_idx=self.layer_idx,
-                    offset=q_len
+                    offset=q_len,
                 )
             else:
                 rodimus_caches = (recurrent_state, conv_state if self.use_short_conv else None)
@@ -248,9 +247,9 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: int = 2048,
-        rope_theta: Optional[float] = 10000.,
-        max_position_embeddings: Optional[int] = None,
-        layer_idx: int = None
+        rope_theta: float | None = 10000.,
+        max_position_embeddings: int | None = None,
+        layer_idx: int = None,
     ):
         super().__init__()
 
@@ -279,13 +278,13 @@ class SlidingWindowSharedKeyAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        rodimus_caches = kwargs.get('rodimus_caches', None)
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
+        rodimus_caches = kwargs.get('rodimus_caches')
 
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
@@ -304,7 +303,7 @@ class SlidingWindowSharedKeyAttention(nn.Module):
             q, k = self.q_norm(q), self.k_norm(k)
 
         # equivalent to cu_seqlens in `flash_attn`
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
 
         seqlen_offset, max_seqlen = 0, q.shape[1]
         if past_key_values is not None:
@@ -333,7 +332,7 @@ class SlidingWindowSharedKeyAttention(nn.Module):
                 attn_state=[k.flatten(-2, -1), v.flatten(-2, -1)],
                 layer_idx=self.layer_idx,
                 offset=q_len,
-                cache_kwargs=dict(window_size=self.window_size)
+                cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']
             if cache_has_content:
                 k, v = k_cached, v_cached
@@ -351,7 +350,7 @@ class SlidingWindowSharedKeyAttention(nn.Module):
                 q=q,
                 states=(k, v),
                 attention_mask=attention_mask[:, -max(self.window_size, q_len):],
-                q_len=q_len
+                q_len=q_len,
             )
             cu_seqlens_q, cu_seqlens_k = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
@@ -362,7 +361,7 @@ class SlidingWindowSharedKeyAttention(nn.Module):
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_k=max_seqlen_k,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
             o = pad_input(o, indices_q, batch_size, q_len)
         elif cu_seqlens is not None:
@@ -373,13 +372,13 @@ class SlidingWindowSharedKeyAttention(nn.Module):
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             ).unsqueeze(0)
         else:
             o = flash_attn_func(
                 q, k, v,
                 causal=True,
-                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0)
+                window_size=(-1, -1) if self.window_size is None else (self.window_size-1, 0),
             )
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o.to(dtype=self.o_proj.weight.dtype))

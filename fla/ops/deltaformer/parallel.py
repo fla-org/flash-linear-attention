@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import math
 import warnings
-from typing import Optional
 
 import torch
 import triton
@@ -16,7 +14,7 @@ try:
 except ImportError:
     warnings.warn(
         "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
-        category=ImportWarning
+        category=ImportWarning,
     )
     flash_attn_func = None
 
@@ -31,7 +29,7 @@ def parallel_deltaformer_chunk_fwd(
     v: torch.Tensor,
     u: torch.Tensor,
     qk_scale: float,
-    beta: torch.Tensor
+    beta: torch.Tensor,
 ):
     C, H, D = q.size()
     T, _H, _D = k.size()
@@ -49,7 +47,7 @@ def parallel_deltaformer_bwd_u_chunk(
     lse: torch.Tensor,
     grad_v: torch.Tensor,
     fa_scale: float,
-    beta: torch.Tensor
+    beta: torch.Tensor,
 ):
     C, H, D = q.size()
     T, _H, _D = k.size()
@@ -60,7 +58,7 @@ def parallel_deltaformer_bwd_u_chunk(
 
     parallel_deltaformer_bwd_kernel_u[grid](
         grad_u, q, k, grad_v, lse, beta,
-        H, T, C, D, fa_scale
+        H, T, C, D, fa_scale,
     )
     return grad_u
 
@@ -73,7 +71,7 @@ def parallel_deltaformer_bwd_qk(
     grad_v: torch.Tensor,
     qk_scale: float,
     fa_scale: float,
-    beta: torch.Tensor
+    beta: torch.Tensor,
 ):
     T, H, D = k.size()
     row_dot_sum = torch.empty_like(lse)
@@ -84,7 +82,7 @@ def parallel_deltaformer_bwd_qk(
     parallel_deltaformer_bwd_kernel_row_sum[grid_bp](
         row_dot_sum, q, k, grad_v, u, lse,
         H, T, D,
-        fa_scale
+        fa_scale,
     )
     grad_k = torch.empty_like(k)
     grad_q = torch.empty_like(q)
@@ -92,7 +90,7 @@ def parallel_deltaformer_bwd_qk(
     parallel_deltaformer_bwd_kernel_qk[grid_bp](
         grad_q, grad_k, q, k, grad_v, u, lse, beta, row_dot_sum,
         H, T, D,
-        fa_scale, qk_scale
+        fa_scale, qk_scale,
     )
     return grad_q, grad_k, row_dot_sum
 
@@ -105,7 +103,7 @@ def parallel_deltaformer_kernel(
     w: torch.Tensor,
     lse: torch.Tensor,
     qk_scale: float,
-    beta: torch.Tensor
+    beta: torch.Tensor,
 ) -> None:
     C, H, D = q.size()
     T, _H, _D = k.size()
@@ -115,7 +113,7 @@ def parallel_deltaformer_kernel(
 
     parallel_deltaformer_fwd_kernel[grid](
         q, k, v, u, w, lse, beta,
-        H, T, C, D, qk_scale
+        H, T, C, D, qk_scale,
     )
 
 
@@ -226,7 +224,7 @@ def parallel_deltaformer_fwd_kernel(
         strides=(H,),
         offsets=(pid_c * BLOCK_C,),
         block_shape=(BLOCK_C,),
-        order=(0,)
+        order=(0,),
     )
     beta = tl.load(beta_ptr, boundary_check=(0,))
     acc = acc * beta[:, None]
@@ -265,7 +263,7 @@ def parallel_deltaformer_fwd_kernel(
             strides=(H * C, 1),
             offsets=(pid_c * BLOCK_C, kv_i - (T - C)),
             block_shape=(BLOCK_C, BLOCK_T),
-            order=(1, 0)
+            order=(1, 0),
         )
         tl.store(w_blk_ptr, p.to(w_ptr.dtype.element_ty), boundary_check=(0, 1))
 
@@ -666,9 +664,9 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
         qo: torch.Tensor,
         ko: torch.Tensor,
         vo: torch.Tensor,
-        betao: Optional[torch.Tensor] = None,
+        betao: torch.Tensor | None = None,
         C: int = BLOCK_SIZE_C,
-        cu_seqlens: Optional[torch.LongTensor] = None
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         B, T, H, D = ko.size()
         C = min(C, T)
@@ -696,7 +694,7 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
     @staticmethod
     def backward(
         ctx,
-        grad_u: torch.Tensor
+        grad_u: torch.Tensor,
     ):
         if getattr(ctx, 'cu_seqlens', None) is not None:
             cu = ctx.cu_seqlens
@@ -823,11 +821,11 @@ class ParallelDeltaformerFunction(torch.autograd.Function):
         qo: torch.Tensor,
         ko: torch.Tensor,
         vo: torch.Tensor,
-        betao: Optional[torch.Tensor],
+        betao: torch.Tensor | None,
         C: int,
         need_aux: bool,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        cu_seqlens: torch.LongTensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         B, T_max, H, D = ko.size()
         C = min(C, T_max)
         qk_scale = 1.0 / math.sqrt(D)
@@ -944,9 +942,9 @@ def deltaformer_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    beta: Optional[torch.Tensor] = None,
-    attention_mask: Optional[torch.LongTensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    beta: torch.Tensor | None = None,
+    attention_mask: torch.LongTensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     C: int = BLOCK_SIZE_C,
 ) -> torch.Tensor:
     if flash_attn_func is None:
@@ -968,7 +966,7 @@ def deltaformer_attn(
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             causal=True,
-            window_size=(-1, -1)
+            window_size=(-1, -1),
         )
         o = pad_input(o, indices_q, B, T)
     elif cu_seqlens is not None:
@@ -980,7 +978,7 @@ def deltaformer_attn(
             max_seqlen_q=max_seqlen,
             max_seqlen_k=max_seqlen,
             causal=True,
-            window_size=(-1, -1)
+            window_size=(-1, -1),
         ).unsqueeze(0)
     else:
         o = flash_attn_func(q, k, u, causal=True, window_size=(-1, -1))

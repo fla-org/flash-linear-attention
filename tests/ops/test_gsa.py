@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -27,11 +25,11 @@ from fla.utils import assert_close, check_shared_mem, device, device_platform
             (2, 1024, 8, 128, 64, 0.1, torch.float16),
             (2, 1024, 8, 128, 64, 10, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_fused_recurrent(
     B: int,
@@ -40,7 +38,7 @@ def test_fused_recurrent(
     D: int,
     M: int,
     gate_logit_normalizer: float,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -106,18 +104,18 @@ def test_fused_recurrent(
             (4, 64, 64, [0, 1, 100, 300, 1200, 2048], torch.float16),
             (4, 128, 64, [0, 200, 512, 1200, 2048], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_fused_recurrent_varlen(
     H: int,
     D: int,
     M: int,
-    cu_seqlens: List[int],
-    dtype: torch.dtype
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -145,7 +143,7 @@ def test_fused_recurrent_varlen(
             s[:, cu_seqlens[i]:cu_seqlens[i+1]],
             g[:, cu_seqlens[i]:cu_seqlens[i+1]],
             initial_state=(hk0[i:i+1], hv0[i:i+1]),
-            output_final_state=True
+            output_final_state=True,
         )
         refs.append(ref)
         ref_hkts.append(ref_hkt)
@@ -205,11 +203,11 @@ def test_fused_recurrent_varlen(
             (2, 1024, 4, 128, 128, 1, torch.float16),
             (2, 1024, 4, 128, 64, 10, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk(
     B: int,
@@ -262,7 +260,7 @@ def test_chunk(
         g=g,
         scale=D**-0.5,
         initial_state=(hk0, hv0),
-        output_final_state=True
+        output_final_state=True,
     )
     ((tri * do).sum() + (tri_hkt * dhkt).sum() + (tri_hvt * dhvt).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
@@ -294,21 +292,21 @@ def test_chunk(
             (4, 64, 64, [0, 256, 500, 1000], torch.float16),
             (4, 100, 64, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
     M: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     if (D > 64 or M > 64) and check_shared_mem('hopper') is False:
@@ -392,11 +390,11 @@ def test_chunk_varlen(
             (2, 200, 8, 2, 64, 64, torch.float),
             (2, 256, 16, 4, 128, 64, torch.float),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_inference(
     B: int,
@@ -405,7 +403,7 @@ def test_inference(
     H: int,
     D: int,
     M: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -427,7 +425,7 @@ def test_inference(
             s[:, i:i+1],
             g[:, i:i+1],
             initial_state=h0,
-            output_final_state=True
+            output_final_state=True,
         )
         tri[:, i] = o.squeeze(1)
         assert_close(f'o{i}', ref[:, i], tri[:, i], 0.005)

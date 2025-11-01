@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -31,7 +29,7 @@ def reversed_cumsum(x, dim=-1):
             (3, 1024, 6, 500, torch.float),
             (4, 2048, 8, 1024, torch.float),
         ]
-    ]
+    ],
 )
 def test_global_cumsum(
     B: int,
@@ -63,16 +61,16 @@ def test_global_cumsum(
             (4, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
             (2, 1024, [0, 200, 512, 1200, 2048], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_global_cumsum_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -80,12 +78,12 @@ def test_global_cumsum_varlen(
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
     s = torch.randn(1, T, H, dtype=dtype).to(device)
-    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
+    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
     tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     assert_close('global_cumsum', ref, tri, 1e-3)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
-    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
+    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
     tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     assert_close('global_cumsum', ref, tri, 1e-3)
 
@@ -101,7 +99,7 @@ def test_global_cumsum_varlen(
             (3, 1024, 6, 500, torch.float),
             (4, 2048, 8, 1024, torch.float),
         ]
-    ]
+    ],
 )
 def test_global_reversed_cumsum(
     B: int,
@@ -133,16 +131,16 @@ def test_global_reversed_cumsum(
             (4, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
             (2, 1024, [0, 200, 512, 1200, 2048], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_global_reversed_cumsum_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -150,12 +148,12 @@ def test_global_reversed_cumsum_varlen(
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
     s = torch.randn(1, T, H, dtype=dtype).to(device)
-    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
+    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
     tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
     assert_close('global_reversed_cumsum', ref, tri, 1e-3)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
-    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])], 1).to(dtype)
+    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
     tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
     assert_close('global_reversed_cumsum', ref, tri, 1e-3)
 
@@ -171,7 +169,7 @@ def test_global_reversed_cumsum_varlen(
             (3, 1024, 6, 64, 500, torch.float),
             (4, 2048, 8, 128, 1024, torch.float),
         ]
-    ]
+    ],
 )
 def test_local_cumsum(
     B: int,
@@ -204,17 +202,17 @@ def test_local_cumsum(
             (4, 128, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
             (2, 128, 1024, [0, 200, 512, 1200, 2048], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_local_cumsum_varlen(
     H: int,
     C: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -224,7 +222,7 @@ def test_local_cumsum_varlen(
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([
         torch.cat([s[:, i:min(end, i+C), :].float().cumsum(1) for i in range(start, end, C)], 1)
-        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
     ], 1)
     tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     assert_close('local_cumsum', ref, tri, 1e-3)
@@ -232,7 +230,7 @@ def test_local_cumsum_varlen(
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
     ref = torch.cat([
         torch.cat([s[:, i:min(end, i+C), :].float().cumsum(1) for i in range(start, end, C)], 1)
-        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
     ], 1)
     tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     assert_close('local_cumsum', ref, tri, 1e-3)
@@ -249,7 +247,7 @@ def test_local_cumsum_varlen(
             (3, 1024, 6, 64, 500, torch.float),
             (4, 2048, 8, 128, 1024, torch.float),
         ]
-    ]
+    ],
 )
 def test_mean_pooling(
     B: int,
@@ -286,17 +284,17 @@ def test_mean_pooling(
             (4, 128, 500, [0, 1, 100, 300, 1200, 2048], torch.float16),
             (2, 128, 1024, [0, 200, 512, 1200, 2048], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_mean_pooling_varlen(
     H: int,
     C: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -306,7 +304,7 @@ def test_mean_pooling_varlen(
     x = torch.randn(1, T, H, D, dtype=dtype).to(device).requires_grad_(True)
     ref = torch.cat([
         torch.cat([x[:, i:min(end, i+C), :].float().mean(1, True) for i in range(start, end, C)], 1)
-        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
     ], 1).to(dtype)
     do = torch.randn_like(ref)
     ref.backward(do)
@@ -331,7 +329,7 @@ def test_mean_pooling_varlen(
             (3, 1024, 6, 500, 'right', torch.float),
             (4, 2048, 8, 1024, 'left', torch.float),
         ]
-    ]
+    ],
 )
 def test_pack_sequence(
     B: int,
@@ -344,7 +342,7 @@ def test_pack_sequence(
     torch.manual_seed(42)
     x = torch.randn(B, T, H, D, dtype=dtype).to(device).requires_grad_(True)
     cu_seqlens = torch.cat(
-        [torch.tensor([0])]+[torch.randint(0, T, (1,)).clamp(min=1) for _ in range(B)]
+        [torch.tensor([0])]+[torch.randint(0, T, (1,)).clamp(min=1) for _ in range(B)],
     ).cumsum(-1).to(device)
     lens = prepare_lens(cu_seqlens)
 
@@ -375,7 +373,7 @@ def test_pack_sequence(
             (3, 1024, 6, 500, 'right', torch.float),
             (4, 2048, 8, 1024, 'left', torch.float),
         ]
-    ]
+    ],
 )
 def test_unpack_sequence(
     B: int,
@@ -387,7 +385,7 @@ def test_unpack_sequence(
 ):
     torch.manual_seed(42)
     cu_seqlens = torch.cat(
-        [torch.tensor([0])]+[torch.randint(0, T, (1,)).clamp(min=1) for _ in range(B)]
+        [torch.tensor([0])]+[torch.randint(0, T, (1,)).clamp(min=1) for _ in range(B)],
     ).cumsum(-1).to(device)
     lens = prepare_lens(cu_seqlens)
     desired_shape = (B, lens.max().item() + torch.randint(0, 10, (1,)).item(), H, D)
@@ -395,7 +393,7 @@ def test_unpack_sequence(
     x = torch.randn(cu_seqlens[-1].item(), H, D, dtype=dtype).to(device).requires_grad_(True)
     ref = torch.zeros(desired_shape, device=device, dtype=dtype)
     dy = torch.randn_like(ref)
-    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())):
+    for i, (bos, eos) in enumerate(zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False)):
         length = eos - bos
         if padding_side == 'left':
             ref[i, -length:] = x[bos:eos]

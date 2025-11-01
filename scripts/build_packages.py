@@ -15,7 +15,7 @@ def extract_dependencies():
     script_dir = Path(__file__).parent
     setup_py = script_dir.parent / 'setup.py'
 
-    with open(setup_py, 'r', encoding='utf-8') as f:
+    with open(setup_py, encoding='utf-8') as f:
         tree = ast.parse(f.read(), filename=str(setup_py))
 
     all_deps = []
@@ -32,7 +32,7 @@ def extract_dependencies():
                     ])
                 elif (keyword.arg == 'extras_require' and
                       isinstance(keyword.value, ast.Dict)):
-                    for key_node, val_node in zip(keyword.value.keys, keyword.value.values):
+                    for key_node, val_node in zip(keyword.value.keys, keyword.value.values, strict=False):
                         if (isinstance(key_node, ast.Constant) and
                             isinstance(key_node.value, str) and
                                 isinstance(val_node, (ast.List, ast.Tuple))):
@@ -121,7 +121,7 @@ def build_split_packages():
 
     # Get current version
     init_file = root_dir / 'fla' / '__init__.py'
-    with open(init_file, 'r', encoding='utf-8') as f:
+    with open(init_file, encoding='utf-8') as f:
         content = f.read()
     version_match = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]\s*$", content, re.MULTILINE)
     if not version_match:

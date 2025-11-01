@@ -1,4 +1,3 @@
-from typing import Optional
 
 import torch
 import triton
@@ -9,7 +8,7 @@ from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -17,7 +16,7 @@ from fla.utils import autotune_cache_kwargs
         for num_warps in [1, 2, 4, 8]
     ],
     key=['B', 'H', 'BT', 'IS_VARLEN'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_comba_cumsum_scalar_fwd_kernel(
@@ -61,9 +60,9 @@ def chunk_comba_cumsum_scalar_fwd_kernel(
 def chunk_comba_cumsum_scalar_fwd(
     g: torch.Tensor,
     chunk_size: int,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -85,13 +84,13 @@ def chunk_comba_cumsum_scalar_fwd(
         B=B,
         H=H,
         BT=BT,
-        HEAD_FIRST=head_first
+        HEAD_FIRST=head_first,
     )
     return g0, g1
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -99,7 +98,7 @@ def chunk_comba_cumsum_scalar_fwd(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['B', 'H', 'BT', 'IS_VARLEN'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_comba_cumsum_scalar_bwd_kernel(
@@ -147,9 +146,9 @@ def chunk_comba_cumsum_scalar_bwd_kernel(
 def chunk_comba_cumsum_scalar_bwd(
     dg0: torch.Tensor,
     chunk_size: int,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = dg0.shape

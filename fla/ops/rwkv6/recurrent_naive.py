@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 
@@ -11,9 +9,9 @@ def naive_recurrent_rwkv6(
     v: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: Optional[bool] = False
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
 ):
     orig_dtype = q.dtype
     B, H, T, K, V = *q.shape, v.shape[-1]
@@ -50,7 +48,7 @@ def naive_recurrent_rwkv6_bwd(
     u: torch.Tensor,
     o: torch.Tensor,
     do: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None
+    initial_state: torch.Tensor | None = None,
 ):
     q, k, v, w, u, o, do = (x.to(dtype=torch.float32) for x in (q, k, v, w, u, o, do))
     B, H, T, K, V = q.shape[0], q.shape[1], q.shape[2], q.shape[3], v.shape[-1]

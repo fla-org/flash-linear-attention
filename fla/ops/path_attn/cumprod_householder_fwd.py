@@ -85,7 +85,7 @@ def chunk_cumprod_householder_fwd_fn(
     w2: torch.Tensor,
     S: int,  # split size, aka large chunk size
     BT: int,  # small chunk size
-    cu_seqlens: torch.Tensor = None
+    cu_seqlens: torch.Tensor = None,
 ):
     B, T, H, K = k.shape
 
@@ -114,6 +114,6 @@ def chunk_cumprod_householder_fwd_fn(
         T=T, S=S,
         # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
         num_warps=8 if K == 128 else 4,
-        num_stages=3 if check_shared_mem('ampere') else 1
+        num_stages=3 if check_shared_mem('ampere') else 1,
     )
     return k_new, hc_suffix, hc_whole

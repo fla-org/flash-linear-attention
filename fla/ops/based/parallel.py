@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -291,13 +289,13 @@ def parallel_based_bwd_kernel(
     _parallel_based_bwd_dq(
         i_bh, i_c, i_k, i_v,
         q, k, v, do, dz, dq,
-        scale, T, B, H, BTL, BTS, BK, BV, K, V
+        scale, T, B, H, BTL, BTS, BK, BV, K, V,
     )
     tl.debug_barrier()
     _parallel_based_bwd_dkv(
         i_bh, i_c, i_k, i_v,
         q, k, v, do, dz, dk, dv,
-        scale, T, B, H, BTL, BTS, BK, BV, K, V
+        scale, T, B, H, BTL, BTS, BK, BV, K, V,
     )
 
 
@@ -336,7 +334,7 @@ class ParallelBasedFunction(torch.autograd.Function):
             BK=BK,
             BV=BV,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
         ctx.save_for_backward(q, k, v)
         ctx.scale = scale
@@ -378,7 +376,7 @@ class ParallelBasedFunction(torch.autograd.Function):
             BK=BK,
             BV=BV,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
 
         return dq.sum(0).to(q.dtype), dk.sum(0).to(k.dtype), dv.sum(0).to(v.dtype), None
@@ -391,9 +389,9 @@ def parallel_based(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = None,
+    scale: float | None = None,
     use_norm: bool = True,
-    head_first: bool = False
+    head_first: bool = False,
 ):
     assert q.shape[-1] <= 128, "only support feature dim up to 128"
     if scale is None:

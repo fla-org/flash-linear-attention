@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -24,7 +22,7 @@ from fla.utils import autotune_cache_kwargs
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'BT', 'IS_VARLEN'],
-    **autotune_cache_kwargs
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_scaled_dot_kkt_fwd_kernel(
@@ -77,11 +75,11 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 
 def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    beta: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-    output_dtype: torch.dtype = torch.float32
+    output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.

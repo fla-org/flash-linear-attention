@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
@@ -76,7 +75,7 @@ def transform_q_fwd_fn(
     cu_seqlens,
     BT,
     BS,
-    S
+    S,
 ):
     B, T, HQ, K = q.shape
     H = w1.shape[-2]
@@ -103,6 +102,6 @@ def transform_q_fwd_fn(
         BT=BT,
         S=S,
         NUM_BLOCKS=num_blocks,
-        num_warps=8 if (BT == 128 and K == 128) else 4
+        num_warps=8 if (BT == 128 and K == 128) else 4,
     )
     return q_new

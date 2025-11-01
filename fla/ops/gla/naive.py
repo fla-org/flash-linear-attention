@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import torch
 
@@ -14,8 +12,8 @@ def naive_recurrent_gla(
     k: torch.Tensor,
     v: torch.Tensor,
     gk: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
-    output_final_state: bool = False
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
 ):
     dtype = q.dtype
     q, k, v, gk = map(lambda x: x.transpose(1, 2).float(), (q, k, v, gk))

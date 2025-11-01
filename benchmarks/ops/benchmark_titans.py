@@ -49,7 +49,7 @@ for causal in causal_vals:
             H = dim // headdim
 
             q = torch.randn(
-                B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype
+                B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype,
             )
             k = F.normalize(
                 torch.randn(B, H, seqlen, headdim, device=device, dtype=dtype),
@@ -57,21 +57,21 @@ for causal in causal_vals:
                 dim=-1,
             ).requires_grad_(True)
             v = torch.randn(
-                B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype
+                B, H, seqlen, headdim, device=device, requires_grad=True, dtype=dtype,
             )
             w = torch.randn(seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             b = torch.randn(seqlen, headdim, device=device, requires_grad=True, dtype=dtype)
             theta = torch.rand(
-                B, H, seqlen, 1, dtype=dtype, device=device, requires_grad=True
+                B, H, seqlen, 1, dtype=dtype, device=device, requires_grad=True,
             )
             alpha = torch.rand(
-                B, H, seqlen, 1, dtype=dtype, device=device, requires_grad=True
+                B, H, seqlen, 1, dtype=dtype, device=device, requires_grad=True,
             )
             eta = torch.rand(
-                B, H, seqlen, 1, dtype=dtype, device=device, requires_grad=True
+                B, H, seqlen, 1, dtype=dtype, device=device, requires_grad=True,
             )
             o2, _ = chunk_titans_linear_ref(
-                q, k, v, w, b, theta, alpha, eta, chunk_size=16, use_chunk=False
+                q, k, v, w, b, theta, alpha, eta, chunk_size=16, use_chunk=False,
             )
             o2.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
@@ -90,7 +90,7 @@ for causal in causal_vals:
             time_f_b[config, "naive_titans"] = f_b
 
             o3, _ = chunk_titans_linear_ref(
-                q, k, v, w, b, theta, alpha, eta, chunk_size=16, use_chunk=True
+                q, k, v, w, b, theta, alpha, eta, chunk_size=16, use_chunk=True,
             )
             o3.sum().backward(retain_graph=True)
             f_b = time_fwd_bwd(
@@ -113,7 +113,7 @@ for causal in causal_vals:
             for method in methods:
                 # time_f_b[config, method] = time_f[config, method] + time_b[config, method]
                 print(
-                    f"{method:>50} fwd + bwd:\t {time_f_b[config, method] * 1000:>6.4f} ms "
+                    f"{method:>50} fwd + bwd:\t {time_f_b[config, method] * 1000:>6.4f} ms ",
                 )
 
                 # speed_f[config, method] = efficiency(

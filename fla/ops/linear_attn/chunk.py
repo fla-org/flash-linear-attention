@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 
@@ -14,12 +12,12 @@ def chunk_linear_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     normalize: bool = True,
-    head_first: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    head_first: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -51,7 +49,7 @@ def chunk_linear_attn(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first:
         if q.shape[1] < q.shape[2]:
@@ -59,7 +57,7 @@ def chunk_linear_attn(
                 f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
                 "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
                 "when head_first=False was specified. "
-                "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+                "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -69,7 +67,7 @@ def chunk_linear_attn(
         v=v,
         scale=scale,
         initial_state=initial_state,
-        output_final_state=output_final_state
+        output_final_state=output_final_state,
     )
     if normalize:
         o = normalize_output(q * scale, k, o)

@@ -3,5 +3,5 @@ from .fused_recurrent import fused_recurrent_kda
 
 __all__ = [
     "chunk_kda",
-    "fused_recurrent_kda"
+    "fused_recurrent_kda",
 ]

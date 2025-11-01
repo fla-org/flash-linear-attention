@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import pytest
 import torch
@@ -19,7 +18,7 @@ from fla.utils import assert_close, device
             (2, 2, 2048, 1200, True,  "sigmoid", False),
             (2, 2, 50,   50,  False, "sigmoid", False),
         ]
-    ]
+    ],
 )
 def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: bool, activation: str, bias: bool):
     torch.manual_seed(42)
@@ -67,7 +66,7 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
             (2, 2, 2048, 1200, "silu"),
             (2, 2, 50,   50,  "sigmoid"),
         ]
-    ]
+    ],
 )
 def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     torch.manual_seed(42)

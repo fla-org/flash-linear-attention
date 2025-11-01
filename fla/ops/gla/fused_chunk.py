@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Tuple
 
 import torch
 import torch.nn.functional as F
@@ -27,7 +25,7 @@ def prepare_qg_kg(
     T,
     K: tl.constexpr,
     BT: tl.constexpr,
-    BK: tl.constexpr
+    BK: tl.constexpr,
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     p_q = q + i_bh * T*K + i_c * BT * K + i_k * BK + tl.arange(0, BK)
@@ -68,7 +66,7 @@ def bwd_decay_global_cumsum(
     T,
     K: tl.constexpr,
     BT: tl.constexpr,
-    BK: tl.constexpr
+    BK: tl.constexpr,
 ):
     i_k, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     p_q = q + i_bh * T*K + i_k * BK + tl.arange(0, BK) + (i_c * BT + BT - 1) * K
@@ -130,7 +128,7 @@ def fused_chunk_gla_fwd_kernel(
     BV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    CHECK: tl.constexpr
+    CHECK: tl.constexpr,
 ):
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
@@ -196,7 +194,7 @@ def fused_chunk_gla_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
-    CHECK: tl.constexpr
+    CHECK: tl.constexpr,
 ):
     i_v, i_k, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     # [BV, BK]
@@ -282,7 +280,7 @@ def fwd_inner_chunk(
     T,  # T
     K: tl.constexpr,  # K
     BT: tl.constexpr,  # BLOCK SIZE along the sequence dimension, a.k.a. chunk size
-    BK: tl.constexpr  # BLOCK SIZE along the K dimension
+    BK: tl.constexpr,  # BLOCK SIZE along the K dimension
 ):
 
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -395,7 +393,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
             K=K,
             BT=BT,
             BK=BK,
-            num_warps=1
+            num_warps=1,
         )
 
         if output_final_state:
@@ -412,7 +410,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
                 "which is known to have some weird compiler issues (refer to https://github.com/openai/triton/issues/2852) "
                 "that lead to significant precision loss. "
                 "We've add some initial condition checks to resolve this, sadly at the sacrifice of the speed. "
-                "For optimal performance, it is recommended to install Triton>=2.2.0 (if possible)."
+                "For optimal performance, it is recommended to install Triton>=2.2.0 (if possible).",
             )
             CHECK = True
 
@@ -431,7 +429,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
             STORE_FINAL_STATE=output_final_state,
             CHECK=CHECK,
             num_warps=num_warps,
-            num_stages=num_stages
+            num_stages=num_stages,
         )
 
         o = o.sum(0)
@@ -454,7 +452,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
             BT=BT,
             BK=BK,
             num_stages=3,
-            num_warps=4
+            num_warps=4,
         )
         A = A.sum(0)
         o2 = A @ v2
@@ -493,7 +491,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
             K=K,
             BT=BT,
             BK=BK,
-            num_warps=1
+            num_warps=1,
         )
 
         BK, BV = min(max(triton.next_power_of_2(K), 16), 64), min(max(triton.next_power_of_2(V), 16), 64)
@@ -558,7 +556,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
             BT=BT,
             BK=BK,
             num_warps=1,
-            num_stages=3
+            num_stages=3,
         )
 
         BK = min(max(triton.next_power_of_2(K), 16), 32)
@@ -579,7 +577,7 @@ class FusedChunkGLAFunction(torch.autograd.Function):
             BT=BT,
             BK=BK,
             num_warps=1,
-            num_stages=1
+            num_stages=1,
         )
         dg = rearrange(dg, 'b h (n c) d -> b h n c d', c=BT)
 
@@ -617,11 +615,11 @@ def fused_chunk_gla(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     head_first: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     if head_first:
         warnings.warn(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
         q, k, v, g = map(lambda x: rearrange(x, 'b h t ... -> b t h ...'), (q, k, v, g))
     if not head_first and q.shape[1] < q.shape[2]:
@@ -629,7 +627,7 @@ def fused_chunk_gla(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
     if scale == -1:
         scale = q.shape[-1] ** -0.5

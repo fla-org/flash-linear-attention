@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 from einops import rearrange
@@ -10,7 +9,7 @@ def naive_chunk_rwkv6(
     v: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    chunk_size: int = 32
+    chunk_size: int = 32,
 ):
     assert q.shape[-2] % chunk_size == 0
     orig_dtype = q.dtype

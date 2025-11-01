@@ -134,6 +134,6 @@ def chunk_cumprod_householder_bwd_fn(
         T=T, S=S,
         # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
         num_warps=8 if K == 128 else 4,
-        num_stages=2 if check_shared_mem('ampere') else 1
+        num_stages=2 if check_shared_mem('ampere') else 1,
     )
     return dw1, dw2, dk_new

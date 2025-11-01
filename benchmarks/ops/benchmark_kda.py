@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import os
 
@@ -32,7 +31,7 @@ from fla.ops.kda import chunk_kda
         # name for the plot. Used also as a file name for saving the plot.
         plot_name="Performance",
         args={},
-    )
+    ),
 )
 def benchmark(T, provider):
     from fla.utils import device
@@ -68,7 +67,7 @@ def benchmark(T, provider):
                 beta=beta,
                 use_qk_l2norm_in_kernel=True,
             )[0].backward(do),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider_base == 'attn':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -80,7 +79,7 @@ def benchmark(T, provider):
                 k=k,
                 v=v,
             ).backward(do),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider_base == 'comba':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -99,7 +98,7 @@ def benchmark(T, provider):
                 beta=beta,
                 use_qk_l2norm_in_kernel=True,
             )[0].backward(do),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider_base == 'kda':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -116,7 +115,7 @@ def benchmark(T, provider):
                 beta=beta,
                 use_qk_l2norm_in_kernel=True,
             )[0].backward(do),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
     elif provider_base == 'dplr':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -135,7 +134,7 @@ def benchmark(T, provider):
                 b=b,
                 gk=g,
             )[0].backward(do),
-            quantiles=quantiles
+            quantiles=quantiles,
         )
 
     # Restore original TMA environment variable

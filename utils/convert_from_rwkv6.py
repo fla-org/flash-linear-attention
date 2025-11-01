@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 # scripts for converting pretrained hf model weights to fla style
 # calling the code to make conversions for RWKV/rwkv-6-world-7b would achieve the following results:
@@ -42,7 +41,7 @@ def sizeof_fmt(num, suffix='B'):
 def convert(
     rwkv6: str,
     config: str,
-    output: str
+    output: str,
 ):
     torch.manual_seed(1)
     AutoTokenizer.from_pretrained(rwkv6, trust_remote_code=True).save_pretrained(output)

@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import warnings
-from typing import Optional
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -16,18 +14,18 @@ class BitNetConfig(PretrainedConfig):
         hidden_size: int = 2048,
         num_hidden_layers: int = 24,
         num_heads: int = 32,
-        num_kv_heads: Optional[int] = None,
-        window_size: Optional[int] = None,
-        rope_theta: Optional[float] = 10000.,
+        num_kv_heads: int | None = None,
+        window_size: int | None = None,
+        rope_theta: float | None = 10000.,
         max_position_embeddings: int = 2048,
-        hidden_ratio: Optional[int] = 4,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = 4,
+        intermediate_size: int | None = None,
         hidden_act: str = "swish",
         initializer_range: float = 0.02,
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
         use_cache: bool = True,
-        pad_token_id: Optional[int] = None,
+        pad_token_id: int | None = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
@@ -65,13 +63,13 @@ class BitNetConfig(PretrainedConfig):
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
             )
         if fuse_linear_cross_entropy:
             warnings.warn(
                 "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
                 "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting."
+                "If you observe issues like loss divergence, consider disabling this setting.",
             )
 
         super().__init__(

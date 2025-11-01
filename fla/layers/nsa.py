@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -26,15 +25,15 @@ class NativeSparseAttention(nn.Module):
         self,
         hidden_size: int = 2048,
         num_heads: int = 64,
-        num_kv_heads: Optional[int] = 4,
+        num_kv_heads: int | None = 4,
         head_dim: int = 64,
         qkv_bias: bool = False,
-        block_size: Optional[int] = 64,
-        block_counts: Optional[Union[torch.LongTensor, int]] = 16,
-        window_size: Optional[int] = 512,
-        rope_theta: Optional[float] = 10000.,
-        max_position_embeddings: Optional[int] = None,
-        layer_idx: int = None
+        block_size: int | None = 64,
+        block_counts: torch.LongTensor | int | None = 16,
+        window_size: int | None = 512,
+        rope_theta: float | None = 10000.,
+        max_position_embeddings: int | None = None,
+        layer_idx: int = None,
     ):
         super().__init__()
 
@@ -67,12 +66,12 @@ class NativeSparseAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        attention_mask: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -88,7 +87,7 @@ class NativeSparseAttention(nn.Module):
         g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=3)
         g_cmp, g_slc, g_swa = g.sigmoid().unbind(-1)
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
 
         seqlen_offset, max_seqlen = 0, seq_len
         if past_key_values is not None:
@@ -110,7 +109,7 @@ class NativeSparseAttention(nn.Module):
                 attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
                 layer_idx=self.layer_idx,
                 offset=seq_len,
-                cache_kwargs=dict(window_size=self.window_size)
+                cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']
             if cache_has_content:
                 k, v = k_cached, v_cached

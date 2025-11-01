@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 
-from typing import Optional
 
 import pytest
 import torch
@@ -86,9 +84,9 @@ def recurrence_iplr_delta_rule_ref(
     v,
     a,
     b,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = True,
-    scale: Optional[float] = None
+    scale: float | None = None,
 ):
     orig_dtype = q.dtype
     if scale is None:
@@ -127,7 +125,7 @@ def recurrence_iplr_delta_rule_ref(
             (2, 1024, 8, 128, 0.1, torch.float),
             (4, 2048, 8, 64, 0.1, torch.float),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
@@ -192,9 +190,9 @@ def test_fused_recurrent(
             (2, 1000, 3, 64, 0.1, torch.float16),
             (2, 1024, 4, 100, 1, torch.float16),
             (3, 1024, 4, 128, 0.1, torch.float16),
-            (4, 2048, 8, 64, 0.1, torch.float16)
+            (4, 2048, 8, 64, 0.1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,

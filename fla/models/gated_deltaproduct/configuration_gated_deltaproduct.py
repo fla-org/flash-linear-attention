@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import warnings
-from typing import Dict, Optional
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -21,12 +19,12 @@ class GatedDeltaProductConfig(PretrainedConfig):
         use_output_gate: bool = True,
         use_short_conv: bool = True,
         max_position_embeddings: int = 2048,
-        hidden_ratio: Optional[int] = 4,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = 4,
+        intermediate_size: int | None = None,
         hidden_act: str = "swish",
         num_hidden_layers: int = 21,
         norm_eps: float = 1e-6,
-        attn: Optional[Dict] = None,
+        attn: dict | None = None,
         use_cache: bool = True,
         pad_token_id: int = None,
         bos_token_id: int = 1,
@@ -72,13 +70,13 @@ class GatedDeltaProductConfig(PretrainedConfig):
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
             )
         if fuse_linear_cross_entropy:
             warnings.warn(
                 "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
                 "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting."
+                "If you observe issues like loss divergence, consider disabling this setting.",
             )
 
         # DeltaProduct specific
@@ -87,7 +85,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         self.use_forget_gate = use_forget_gate
 
         if attn is not None:
-            if not isinstance(attn, Dict):
+            if not isinstance(attn, dict):
                 raise ValueError("attn must be a dictionary")
             if 'layers' not in attn:
                 raise ValueError("Layer indices must be provided to initialize hybrid attention layers")

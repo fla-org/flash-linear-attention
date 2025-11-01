@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -141,7 +139,7 @@ def chunk_dplr_delta_rule_ref(
             (4, 2048, 8, 64, 0.1, torch.float),
             (2, 1024, 8, 128, 1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_recurrent_fwd(
     B: int,
@@ -203,7 +201,7 @@ def test_recurrent_fwd(
             (2, 1024, 8, 128, 0.1, torch.float),
             (4, 2048, 8, 64, 0.1, torch.float),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
@@ -265,13 +263,13 @@ def test_fused_recurrent(
             (2, 1024, 4, 128, 0.1, 1, 0, torch.float16),
             (2, 1024, 4, 128, 0.1, 1, 0.5, torch.float16),
             (2, 1024, 4, 128, 0.1, 10, 0, torch.float16),
-            (4, 2048, 8, 64, 0.1, 1, 0, torch.float16)
+            (4, 2048, 8, 64, 0.1, 1, 0, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk(
     B: int,
@@ -352,17 +350,17 @@ def test_chunk(
             (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
             (4, 100, 0, [0, 15, 100, 300, 1111, 1599, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
     mask_p: float,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)

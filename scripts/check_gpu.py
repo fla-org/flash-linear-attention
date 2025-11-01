@@ -11,7 +11,7 @@ def get_xpu_memory_usage():
             ["xpu-smi", "stats", "-d", "0"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         return extract_gpu_memory_used(result.stdout)
     except subprocess.CalledProcessError as e:
@@ -40,7 +40,7 @@ def get_nvgpu_memory_usage():
     result = subprocess.run(
         ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
         capture_output=True,
-        text=True
+        text=True,
     )
     memory_used = int(result.stdout.strip())
     return memory_used

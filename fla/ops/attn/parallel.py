@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Optional
 
 import torch
 import triton
@@ -149,7 +147,7 @@ def parallel_attn_bwd_kernel_preprocess(
     do,
     delta,
     B: tl.constexpr,
-    V: tl.constexpr
+    V: tl.constexpr,
 ):
     i_n = tl.program_id(0)
     o_d = tl.arange(0, B)
@@ -192,7 +190,7 @@ def parallel_attn_bwd_kernel_dq(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_G: tl.constexpr
+    USE_G: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -225,7 +223,7 @@ def parallel_attn_bwd_kernel_dq(
     # [BT, BK]
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     if USE_G:
-        b_dg = tl.zeros([BT, ], dtype=tl.float32)
+        b_dg = tl.zeros([BT ], dtype=tl.float32)
         p_gq = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
         b_gq = tl.load(p_gq, boundary_check=(0,)).to(tl.float32)
     else:
@@ -327,7 +325,7 @@ def parallel_attn_bwd_kernel_dkv(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -359,7 +357,7 @@ def parallel_attn_bwd_kernel_dkv(
     if USE_G:
         p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
         b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
-        b_dg = tl.zeros([BT,], dtype=tl.float32)
+        b_dg = tl.zeros([BT], dtype=tl.float32)
     else:
         b_gk = None
         b_dg = None
@@ -446,7 +444,7 @@ def parallel_attn_fwd(
     v: torch.Tensor,
     g_cumsum: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -505,7 +503,7 @@ def parallel_attn_fwd(
 
 def parallel_attn_bwd_preprocess(
     o: torch.Tensor,
-    do: torch.Tensor
+    do: torch.Tensor,
 ):
     V = o.shape[-1]
     delta = torch.empty_like(o[..., 0], dtype=torch.float)
@@ -529,7 +527,7 @@ def parallel_attn_bwd(
     do: torch.Tensor,
     scale: float = None,
     chunk_size: int = 128,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -679,10 +677,10 @@ def parallel_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    g: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    head_first: bool = False,
 ) -> torch.Tensor:
     r"""
     Args:
@@ -712,14 +710,14 @@ def parallel_attn(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
     if scale is None:
         scale = k.shape[-1] ** -0.5

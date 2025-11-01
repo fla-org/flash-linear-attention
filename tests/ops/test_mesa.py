@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List, Tuple
 
 import pytest
 import torch
@@ -21,20 +19,20 @@ from fla.utils import assert_close, device, device_platform, is_intel_alchemist
             (2, 1024, 8, 128, [0.8, 0.99], torch.float16),
             (2, 1024, 8, 128, [0.01, 0.1], torch.float16),
             (2, 1024, 8, 128, [1, 1], torch.float16),
-            (4, 2048, 8, 64, [0.8, 0.99], torch.float16)
+            (4, 2048, 8, 64, [0.8, 0.99], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk(
     B: int,
     T: int,
     H: int,
     D: int,
-    gate_range: Tuple[float, float],
+    gate_range: tuple[float, float],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -112,17 +110,17 @@ def test_chunk(
             (4, 64, [0.01, 0.1], [0, 256, 500, 1000], torch.float16),
             (4, 100, [1, 1], [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
-    gate_range: Tuple[float, float],
-    cu_seqlens: List[int],
+    gate_range: tuple[float, float],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
@@ -183,7 +181,7 @@ def test_chunk_varlen(
             g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
             lamb=lamb,
             h_kk_init=h_kk_init[i],
-            h_kv_init=h_kv_init[i]
+            h_kv_init=h_kv_init[i],
         )
         ref.append(ref_i)
         ref_h_kk_t.append(ref_h_kk_i)
@@ -221,13 +219,13 @@ def test_chunk_varlen(
             (2, 8, 128, [0.95, 0.99], 5, torch.float16),
             (2, 8, 128, [0.95, 0.99], 30, torch.float16),
         ]
-    ]
+    ],
 )
 def test_decoding_one_step(
     B: int,
     H: int,
     D: int,
-    gate_range: Tuple[float, float],
+    gate_range: tuple[float, float],
     max_CG_step: int,
     dtype: torch.dtype,
 ):

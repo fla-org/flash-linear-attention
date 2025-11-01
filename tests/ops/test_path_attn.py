@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -74,11 +72,11 @@ def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
             (2, 2000, 1, 4, 64, False, torch.bfloat16),
             (1, 4000, 1, 2, 128, False, torch.bfloat16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     is_intel_alchemist,
-    reason="Intel Triton Failure"
+    reason="Intel Triton Failure",
 )
 def test_parallel(
     B: int,
@@ -87,7 +85,7 @@ def test_parallel(
     T: int,
     D: int,
     use_forget_gate: bool,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -145,23 +143,23 @@ def test_parallel(
             (2, 4, 64, False, [0, 841, 889, 2000, 3000, 4096], torch.float16),
             (2, 16, 128, True, [0, 500, 1023, 2000, 3000, 4096], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv("SKIP_TEST_CHUNK_VARLEN") == "0",
-    reason="Skipping test because TEST_CHUNK_VARLEN is enabled"
+    reason="Skipping test because TEST_CHUNK_VARLEN is enabled",
 )
 @pytest.mark.skipif(
     is_intel_alchemist,
-    reason="Intel Triton Failure"
+    reason="Intel Triton Failure",
 )
 def test_parallel_varlen(
     H: int,
     HQ: int,
     D: int,
     use_forget_gate: bool,
-    cu_seqlens: List[int],
-    dtype: torch.dtype
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -180,11 +178,11 @@ def test_parallel_varlen(
     do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
     scale = D ** -0.5
     ref = torch.zeros(1, T, HQ, D, device=device, dtype=dtype)
-    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
         g_segment = torch.zeros(1, eos - bos, HQ, device=device, dtype=torch.float) if g is None else g[:, bos:eos]
         ref[:, bos:eos] = naive_path_attn(
             q[:, bos:eos], k[:, bos:eos], v[:, bos:eos],
-            w[:, bos:eos], beta[:, bos:eos], g_segment, scale
+            w[:, bos:eos], beta[:, bos:eos], g_segment, scale,
         )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None

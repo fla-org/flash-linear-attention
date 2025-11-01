@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -14,7 +12,7 @@ from fla.utils import assert_close, device, device_platform
 
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason="Intel Triton Failure"
+    reason="Intel Triton Failure",
 )
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'gate_logit_normalizer', 'dtype'),
@@ -29,7 +27,7 @@ from fla.utils import assert_close, device, device_platform
             (4, 2048, 4, 64, 1, torch.float16),
             (4, 2048, 4, 256, 1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -116,12 +114,12 @@ def test_chunk(
             (4, 64, [0, 256, 500, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)

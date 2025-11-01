@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 
 import torch
 import triton
@@ -55,7 +54,7 @@ def fwdbwd(fn, *args):
         ylabel="Time (ms)",
         plot_name="activation_performance",
         args={},
-    )
+    ),
 )
 def benchmark(B, T, D, provider):
     requires_grad = True
@@ -94,7 +93,7 @@ def benchmark(B, T, D, provider):
 
     ms, min_ms, max_ms = triton.testing.do_bench(
         fn_to_call,
-        quantiles=[0.5, 0.2, 0.8]
+        quantiles=[0.5, 0.2, 0.8],
     )
     return ms, min_ms, max_ms
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang, Yuqi Pan
 
 import torch
@@ -17,7 +16,7 @@ def ttt_linear(
     mini_batch_size: int,
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
-    output_final_state: bool
+    output_final_state: bool,
 ):
     B, H, T, D = q.shape
     BT = mini_batch_size
