@@ -29,7 +29,7 @@ This repo aims at providing a collection of efficient Triton-based implementatio
 
 ## News
 
-- **$\texttt{[2025-10]}$:** 🌑 Add Kimi Delta Attention implementation to `fla`.
+- **$\texttt{[2025-10]}$:** 🌑 Add Kimi Delta Attention implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
 - **$\texttt{[2025-09]}$:** 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
 - **$\texttt{[2025-09]}$:** 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more infos!
 - **$\texttt{[2025-08]}$:** 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
@@ -88,6 +88,7 @@ Roughly sorted according to the timeline supported in `fla`. The recommended tra
 | 2025 |         | MoM                  | [MoM: Linear Sequence Modeling with Mixture-of-Memories](https://arxiv.org/abs/2502.13685)                                                    | [official](https://github.com/OpenSparseLLMs/MoM)                                               |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/mom.py)          |
 | 2025 |         | Log-Linear Attention | [Log-Linear Attention](https://arxiv.org/abs/2506.04761)                                                                                      | [official](https://github.com/HanGuo97/log-linear-attention)                                    |      [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/log_linear_attn)       |
 | 2025 |         | DeltaFormer          | [Understanding Transformer from the Perspective of Associative Memory](https://arxiv.org/abs/2505.19488v1)                                    |                                                                                                 |     [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/deltaformer.py)      |
+| 2025 |         | KDA                  | [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)                                              |                                                                                                 |            [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/kda)             |
 
 ## Installation
 
@@ -519,9 +520,25 @@ If you find this repository helpful, please cite our work:
   year   = {2024}
 }
 
+@misc{zhang2025kda,
+    title         = {Kimi Linear: An Expressive, Efficient Attention Architecture},
+    author        = {Zhang, Yu  and Lin, Zongyu  and Yao, Xingcheng  and Hu, Jiaxi  and Meng, Fanqing  and Liu, Chengyin  and Men, Xin  and Yang, Songlin  and Li, Zhiyuan  and Li, Wentao  and Lu, Enzhe  and Liu, Weizhou  and Chen, Yanru  and Xu, Weixin  and Yu, Longhui  and Wang, Yejie  and Fan, Yu  and Zhong, Longguang  and Yuan, Enming  and Zhang, Dehao  and Zhang, Yizhi  and T. Liu, Y.  and Wang, Haiming  and Fang, Shengjun  and He, Weiran  and Liu, Shaowei  and Li, Yiwei  and Su, Jianlin  and Qiu, Jiezhong  and Pang, Bo  and Yan, Junjie  and Jiang, Zhejun  and Huang, Weixiao  and Yin, Bohong  and You, Jiacheng  and Wei, Chu  and Wang, Zhengtao  and Hong, Chao  and Chen, Yutian  and Chen, Guanduo  and Wang, Yucheng  and Zheng, Huabin  and Wang, Feng  and Liu, Yibo  and Dong, Mengnan  and Zhang, Zheng  and Pan, Siyuan  and Wu, Wenhao  and Wu, Yuhao  and Guan, Longyu  and Tao, Jiawen  and Fu, Guohong  and Xu, Xinran  and Wang, Yuzhi  and Lai, Guokun  and Wu, Yuxin  and Zhou, Xinyu  and Yang, Zhilin  and Du, Yulun},
+    year          = {2025},
+    eprint        = {2510.26692},
+    archivePrefix = {arXiv},
+    primaryClass  = {cs.CL}
+}
+
+@inproceedings{yang2025path,
+  title     = {PaTH Attention: Position Encoding via Accumulating Householder Transformations},
+  author    = {Yang, Songlin  and Shen, Yikang and Wen, Kaiyue and Tan, Shawn  and Mishra, Mayank  and Ren, Liliang  and Panda, Rameswar  and Kim, Yoon},
+  booktitle = {Proceedings of NeurIPS},
+  year      = {2025}
+}
+
 @inproceedings{yang2024gdn,
   title     = {Gated Delta Networks: Improving Mamba2 with Delta Rule},
-  author    = {Songlin Yang and Jan Kautz and Ali Hatamizadeh},
+  author    = {Yang, Songlin  and Kautz, Jan  and Hatamizadeh, Ali},
   booktitle = {Proceedings of ICLR},
   year      = {2025}
 }
@@ -558,7 +575,6 @@ If you find this repository helpful, please cite our work:
 ## Star History
 
 [![Stargazers repo roster for @fla-org/flash-linear-attention](https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=fla-org&repo=flash-linear-attention)](https://github.com/fla-org/flash-linear-attention/stargazers)
-
 
 [![Star History Chart](https://api.star-history.com/svg?repos=fla-org/flash-linear-attention&type=Date)](https://star-history.com/#fla-org/flash-linear-attention&Date)
 
