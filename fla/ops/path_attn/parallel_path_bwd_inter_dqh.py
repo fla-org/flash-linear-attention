@@ -118,9 +118,9 @@ def parallel_path_bwd_dq_kernel(
                 b_A = b_A + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
             b_A = exp2(b_A * sm_scale - b_l[:, None])
             b_A = tl.where(m_t[:, None], b_A, 0)
-            p_v = tl.make_block_ptr(v, (V, T), (1, V*H), (0, offset), (BK, BS), (0, 1))
+            p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (offset, 0), (BS, BV), (1, 0))
             b_v = tl.load(p_v, boundary_check=(0, 1))
-            b_dp = tl.dot(b_do, b_v.to(b_do.dtype))
+            b_dp = tl.dot(b_do, tl.trans(b_v).to(b_do.dtype))
             b_dA = (b_dp - b_delta[:, None]) * b_A * scale
             b_dq += tl.dot(b_dA.to(b_k.dtype), b_k)
             if USE_GATE:
