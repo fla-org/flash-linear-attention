@@ -29,7 +29,7 @@ def fused_recurrent_kda(
             values of shape `[B, T, HV, V]`.
             GVA is applied if `HV > H`.
         g (torch.Tensor):
-            g (decays) of shape `[B, T, HV]`.
+            g (decays) of shape `[B, T, HV, K]`.
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
         scale (Optional[float]):
