@@ -55,11 +55,6 @@ class ChunkGatedDeltaRuleFunctionCP(torch.autograd.Function):
                 )
             else:
                 h0_local = torch.empty((B, H, K, V), dtype=torch.float32, device=device)
-                # Synchronize before communication
-                # torch.cuda.synchronize()
-                # dist.recv(h0_local, src=cp_rank - 1, group=cp_group)
-                # torch.cuda.synchronize()
-
                 recv_req = dist.irecv(h0_local, src=cp_rank - 1, group=cp_group)
                 recv_req.wait()
         else:
