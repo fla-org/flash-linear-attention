@@ -198,7 +198,9 @@ def prepare_wy_repr_bwd_kernel(
         b_A += tl.dot(b_kb, tl.trans(b_k))
         b_dkb = tl.dot(b_dA, b_k)
         b_db += tl.sum(b_dkb * b_k, 1)
-        b_dk += tl.dot(tl.trans(b_dA), b_kb)
+        b_dA_trans = tl.trans(b_dA)
+        b_dk_tmp = tl.dot(b_dA_trans, b_kb)
+        b_dk += b_dk_tmp
         b_dk += b_dkb * b_b[:, None]
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
