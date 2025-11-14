@@ -183,6 +183,7 @@ def kda_gate_bwd_kernel(
     BH: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_B: tl.constexpr,
+    HAS_GB: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
     n_t = i_t * BT
@@ -197,14 +198,6 @@ def kda_gate_bwd_kernel(
                 block_shape=(BT, BH),
                 order=(1, 0),
             )
-            gb_ptr = tl.make_block_ptr(
-                base=gb,
-                shape=(T, H),
-                strides=(H, 1),
-                offsets=(i_t * BT, 0),
-                block_shape=(BT, BH),
-                order=(1, 0),
-            )
             db_ptr = tl.make_block_ptr(
                 base=db,
                 shape=(T, H),
@@ -213,10 +206,22 @@ def kda_gate_bwd_kernel(
                 block_shape=(BT, BH),
                 order=(1, 0),
             )
-            b_val = tl.load(b_ptr, boundary_check=(0, 1)).to(tl.float32)
-            gb_val = tl.load(gb_ptr, boundary_check=(0, 1)).to(tl.float32)
-            b_sig = tl.sigmoid(b_val)
-            b_db = gb_val * b_sig * (1.0 - b_sig)
+            if HAS_GB:
+                gb_ptr = tl.make_block_ptr(
+                    base=gb,
+                    shape=(T, H),
+                    strides=(H, 1),
+                    offsets=(i_t * BT, 0),
+                    block_shape=(BT, BH),
+                    order=(1, 0),
+                )
+                b_val = tl.load(b_ptr, boundary_check=(0, 1)).to(tl.float32)
+                gb_val = tl.load(gb_ptr, boundary_check=(0, 1)).to(tl.float32)
+                b_sig = tl.sigmoid(b_val)
+                b_db = gb_val * b_sig * (1.0 - b_sig)
+            else:
+                # No grad
+                b_db = tl.zeros((BT, BH), dtype=tl.float32)
             tl.store(db_ptr, b_db.to(db_ptr.dtype.element_ty), boundary_check=(0, 1))
             return
         else:
@@ -363,10 +368,9 @@ def kda_gate_bwd(
 
     db = None
     b_flat = None
-    gb_flat = None
+    gb_flat = gb.view(-1, H) if gb is not None else None
     if b is not None:
         b_flat = b.view(-1, H)
-        gb_flat = gb.view(-1, H)
         db = torch.empty_like(gb_flat, dtype=b.dtype)
 
     grid = (triton.cdiv(T, BT), H + 1)
@@ -383,6 +387,7 @@ def kda_gate_bwd(
         BH=triton.next_power_of_2(H),
         HAS_BIAS=g_bias is not None,
         HAS_B=b is not None,
+        HAS_GB=gb is not None,
     )
 
     dA = dA.sum(0).view(A_ori_shape).type_as(A)
@@ -437,7 +442,7 @@ class KDAGateFunction(torch.autograd.Function):
 def fused_kda_gate(g: torch.Tensor, A: torch.Tensor, head_k_dim: int,
                    g_bias: torch.Tensor | None = None,
                    b: torch.Tensor | None = None,
-                   beta: float = 1.0, threshold: float = 20.0) -> torch.Tensor:
+                   beta: float = 1.0, threshold: float = 20.0) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Fused KDA gate computation with autograd support.
 
