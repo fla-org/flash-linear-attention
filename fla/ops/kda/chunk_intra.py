@@ -114,7 +114,7 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_kda_fwd_kernel_intra_sub_inter_below_sm90(
+def chunk_kda_fwd_kernel_intra_sub_inter_low_resource(
     q,
     k,
     g,
@@ -539,11 +539,11 @@ def chunk_kda_fwd_intra(
     Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
     grid = (NT, NC * NC, B * H)
 
-    if check_shared_mem('hopper'):
+    if check_shared_mem('ampere'):
         chunk_kda_inter_kernel = chunk_kda_fwd_kernel_intra_sub_inter
         BK0 = BK
     else:
-        chunk_kda_inter_kernel = chunk_kda_fwd_kernel_intra_sub_inter_below_sm90
+        chunk_kda_inter_kernel = chunk_kda_fwd_kernel_intra_sub_inter_low_resource
         BK0 = 64
 
     chunk_kda_inter_kernel[grid](
