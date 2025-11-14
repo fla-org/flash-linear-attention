@@ -19,6 +19,7 @@ def kda_gate_ref(
     A: torch.Tensor,
     head_k_dim: int,
     g_bias: torch.Tensor | None = None,
+    b: torch.Tensor | None = None,
     beta=1.0, threshold=20.0,
 ) -> torch.Tensor:
     """
@@ -34,6 +35,7 @@ def kda_gate_ref(
         g: Input tensor of shape [..., num_heads * head_k_dim]
         A: Parameter tensor of shape [num_heads] or [1, 1, num_heads, 1]
         g_bias : Optional bias tensor added to g before activation, shape [num_heads * head_k_dim]
+        b: Optional tensor to compute sigmoid gate, shape [..., num_heads]
         head_k_dim: Dimension of each head
 
     Returns:
@@ -50,7 +52,7 @@ def kda_gate_ref(
     A_exp = -A.float().exp().unsqueeze(-1)  # [H, 1]
     g_softplus = F.softplus(g.float(), beta, threshold)      # [..., H, D]
 
-    return A_exp * g_softplus
+    return A_exp * g_softplus, b.float().sigmoid() if b is not None else None
 
 
 @triton.autotune(
@@ -67,17 +69,46 @@ def kda_gate_ref(
 def kda_gate_fwd_kernel(
     g, A, y,
     g_bias,
+    b,
+    b_sigmoid,
     beta: tl.constexpr,
     threshold: tl.constexpr,
     T,
     H,
     D: tl.constexpr,
     BT: tl.constexpr,
+    BH: tl.constexpr,
     BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_B: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
     n_t = i_t * BT
+
+    if i_h == H:
+        if not HAS_B:
+            return
+        else:
+            b_ptr = tl.make_block_ptr(
+                base=b,
+                shape=(T, H),
+                strides=(H, 1),
+                offsets=(i_t * BT, 0),
+                block_shape=(BT, BH),
+                order=(1, 0),
+            )
+            b_sigmoid_ptr = tl.make_block_ptr(
+                base=b_sigmoid,
+                shape=(T, H),
+                strides=(H, 1),
+                offsets=(i_t * BT, 0),
+                block_shape=(BT, BH),
+                order=(1, 0),
+            )
+            b_val = tl.load(b_ptr, boundary_check=(0, 1)).to(tl.float32)
+            b_sig = tl.sigmoid(b_val)
+            tl.store(b_sigmoid_ptr, b_sig, boundary_check=(0, 1))
+            return
 
     b_a = tl.load(A + i_h).to(tl.float32)
     b_a = -tl.exp(b_a)
@@ -138,6 +169,9 @@ def kda_gate_bwd_kernel(
     dy,
     dg,
     dA,
+    b,
+    gb,
+    db,
     g_bias,
     beta: tl.constexpr,
     threshold: tl.constexpr,
@@ -146,10 +180,47 @@ def kda_gate_bwd_kernel(
     D: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
+    BH: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_B: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
     n_t = i_t * BT
+
+    if i_h == H:
+        if HAS_B:
+            b_ptr = tl.make_block_ptr(
+                base=b,
+                shape=(T, H),
+                strides=(H, 1),
+                offsets=(i_t * BT, 0),
+                block_shape=(BT, BH),
+                order=(1, 0),
+            )
+            gb_ptr = tl.make_block_ptr(
+                base=gb,
+                shape=(T, H),
+                strides=(H, 1),
+                offsets=(i_t * BT, 0),
+                block_shape=(BT, BH),
+                order=(1, 0),
+            )
+            db_ptr = tl.make_block_ptr(
+                base=db,
+                shape=(T, H),
+                strides=(H, 1),
+                offsets=(i_t * BT, 0),
+                block_shape=(BT, BH),
+                order=(1, 0),
+            )
+            b_val = tl.load(b_ptr, boundary_check=(0, 1)).to(tl.float32)
+            gb_val = tl.load(gb_ptr, boundary_check=(0, 1)).to(tl.float32)
+            b_sig = tl.sigmoid(b_val)
+            b_db = gb_val * b_sig * (1.0 - b_sig)
+            tl.store(db_ptr, b_db.to(db_ptr.dtype.element_ty), boundary_check=(0, 1))
+            return
+        else:
+            return
 
     a_h = tl.load(A + i_h).to(tl.float32)
     neg_exp_a = -tl.exp(a_h)
@@ -214,6 +285,7 @@ def kda_gate_fwd(
     A: torch.Tensor,
     head_k_dim: int,
     g_bias: torch.Tensor | None = None,
+    b: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
 ) -> torch.Tensor:
@@ -221,6 +293,8 @@ def kda_gate_fwd(
     Forward pass for KDA gate:
       input g: [..., H*D]
       param A: [H] or [1, 1, H, 1]
+      input g_bias: optional bias added to g before activation, shape [H*D]
+      input b: shape [..., H]
       beta: softplus beta parameter
       threshold: softplus threshold parameter
       return  : [..., H, D]
@@ -234,19 +308,31 @@ def kda_gate_fwd(
     assert H * head_k_dim == HD
 
     y = torch.empty_like(g, dtype=torch.float32)
+    if b is not None:
+        assert b.shape[-1] == H
+        b_flat = b.view(-1, H)
+        b_sigmoid = torch.empty_like(b_flat, dtype=torch.float32)
+    else:
+        b_flat = None
+        b_sigmoid = None
 
-    def grid(meta): return (triton.cdiv(T, meta['BT']), H)
+
+    def grid(meta): return (triton.cdiv(T, meta['BT']), H+1)
 
     kda_gate_fwd_kernel[grid](
         g, A, y, g_bias,
+        b_flat, b_sigmoid,
         beta, threshold,
         T, H, head_k_dim,
+        BH=triton.next_power_of_2(H),
         BD=triton.next_power_of_2(head_k_dim),
         HAS_BIAS=g_bias is not None,
+        HAS_B=b is not None,
     )
 
     y = y.view(*orig_shape, H, head_k_dim)
-    return y
+    b_sigmoid = b_sigmoid.view(*orig_shape, H) if b is not None else None
+    return y, b_sigmoid
 
 
 def kda_gate_bwd(
@@ -255,9 +341,11 @@ def kda_gate_bwd(
     A: torch.Tensor,            # [H]
     head_k_dim: int,
     g_bias: torch.Tensor | None = None,
+    b: torch.Tensor | None = None,
+    gb: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
 
     g_flat = g.view(-1, g.shape[-1])
     T = g_flat.shape[0]
@@ -273,20 +361,38 @@ def kda_gate_bwd(
     NT = triton.cdiv(T, BT)
     dA = torch.empty((NT, H), dtype=torch.float32, device=g.device)
 
-    grid = (triton.cdiv(T, BT), H)
+    db = None
+    b_flat = None
+    gb_flat = None
+    if b is not None:
+        b_flat = b.view(-1, H)
+        gb_flat = gb.view(-1, H)
+        db = torch.empty_like(gb_flat, dtype=b.dtype)
+
+    grid = (triton.cdiv(T, BT), H + 1)
     kda_gate_bwd_kernel[grid](
-        g_flat, A, dy, dg, dA, g_bias,
+        g_flat, A, dy, dg, dA,
+        b_flat,
+        gb_flat,
+        db,
+        g_bias,
         beta, threshold,
         T, H, D,
         BT=BT,
         BD=triton.next_power_of_2(D),
+        BH=triton.next_power_of_2(H),
         HAS_BIAS=g_bias is not None,
+        HAS_B=b is not None,
     )
 
     dA = dA.sum(0).view(A_ori_shape).type_as(A)
     dgbias = dg.sum(0).type_as(g_bias) if g_bias is not None else None
     dg = dg.view(g.shape).type_as(g)
-    return dg, dA, dgbias
+
+    if b is not None:
+        db = db.view(b.shape)
+
+    return dg, dA, dgbias, db
 
 
 class KDAGateFunction(torch.autograd.Function):
@@ -302,31 +408,35 @@ class KDAGateFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, g: torch.Tensor, A: torch.Tensor, head_k_dim: int,
                 g_bias: torch.Tensor | None = None,
+                b: torch.Tensor | None = None,
                 beta: float = 1.0,
                 threshold: float = 20.0) -> torch.Tensor:
         ctx.save_for_backward(g, A)
         ctx.g_bias = g_bias
+        ctx.b = b
         ctx.head_k_dim = head_k_dim
         ctx.beta = beta
         ctx.threshold = threshold
 
-        return kda_gate_fwd(g, A, head_k_dim, g_bias, beta, threshold)
+        return kda_gate_fwd(g, A, head_k_dim, g_bias, b, beta, threshold)
 
     @input_guard
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None, None, None]:
+    def backward(ctx, grad_output: torch.Tensor, gb: torch.Tensor | None = None):
         g, A = ctx.saved_tensors
         head_k_dim = ctx.head_k_dim
         beta = ctx.beta
         threshold = ctx.threshold
         g_bias = ctx.g_bias
+        b = ctx.b
 
-        grad_g, grad_A, grad_gbias = kda_gate_bwd(grad_output, g, A, head_k_dim, g_bias, beta, threshold)
-        return grad_g, grad_A, None, grad_gbias, None, None
+        grad_g, grad_A, grad_gbias, grad_b = kda_gate_bwd(grad_output, g, A, head_k_dim, g_bias, b, gb, beta, threshold)
+        return grad_g, grad_A, None, grad_gbias, grad_b, None, None
 
 
 def fused_kda_gate(g: torch.Tensor, A: torch.Tensor, head_k_dim: int,
                    g_bias: torch.Tensor | None = None,
+                   b: torch.Tensor | None = None,
                    beta: float = 1.0, threshold: float = 20.0) -> torch.Tensor:
     """
     Fused KDA gate computation with autograd support.
@@ -345,4 +455,5 @@ def fused_kda_gate(g: torch.Tensor, A: torch.Tensor, head_k_dim: int,
     Returns:
         Output tensor of shape [..., num_heads, head_k_dim]
     """
-    return KDAGateFunction.apply(g, A, head_k_dim, g_bias, beta, threshold)
+    g_out, b_sigmoid = KDAGateFunction.apply(g, A, head_k_dim, g_bias, b, beta, threshold)
+    return (g_out, b_sigmoid) if b is not None else g_out

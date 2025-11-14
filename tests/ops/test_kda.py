@@ -310,21 +310,20 @@ def test_chunk_varlen(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'use_bias'),
+    ('B', 'T', 'H', 'D', 'use_bias', 'use_b'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-b{}".format(*test))
         for test in [
-            (1, 2, 2, 12, False),
-            (1, 32, 2, 16, False),
-            (2, 64, 4, 32, False),
-            (4, 128, 8, 64, False),
-            (4, 128, 8, 128, False),
-            # Add bias tests
-            (1, 2, 2, 12, True),
-            (1, 32, 2, 16, True),
-            (2, 64, 4, 32, True),
-            (4, 128, 8, 64, True),
-            (4, 128, 8, 128, True),
+            (1, 2, 2, 12, False, False),
+            (1, 32, 2, 16, False, False),
+            (2, 64, 4, 32, False, False),
+            (4, 128, 8, 64, False, False),
+            (4, 128, 8, 128, False, False),
+            (1, 2, 2, 12, True, True),
+            (1, 32, 2, 16, True, True),
+            (2, 64, 4, 32, True, True),
+            (4, 128, 8, 64, True, True),
+            (4, 128, 8, 128, True, True),
         ]
     ],
 )
@@ -334,46 +333,60 @@ def test_kda_gate(
     H: int,
     D: int,
     use_bias: bool,
+    use_b: bool,
 ):
-    """Test kda gate forward and backward pass - reference vs Triton implementation"""
     torch.manual_seed(42)
-
     g = torch.randn(B, T, H * D, dtype=torch.float32)
     # Ensure some values are > 20 to test the threshold logic in softplus
     g = g * 30  # Scale up to get values > 20
     A = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
     g_bias = torch.randn(H * D, dtype=torch.float32) if use_bias else None
-
-    # Move to device and set requires_grad
+    b = torch.randn(B, T, H, dtype=torch.float32) if use_b else None
     g, A = map(lambda x: x.to(device).requires_grad_(True), (g, A))
     if g_bias is not None:
         g_bias = g_bias.to(device).requires_grad_(True)
-
-    # Create gradient output
+    if b is not None:
+        b = b.to(device).requires_grad_(True)
     do = torch.randn_like(g).view(B, T, H, D)
+    db = torch.randn_like(b) if b is not None else None
 
-    # Reference implementation
-    ref = kda_gate_ref(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
-    # Triton implementation
-    tri = fused_kda_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
+    ref, b_sigmoid_ref = kda_gate_ref(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None, b.clone() if b is not None else None)
+    if b is None:
+        tri = fused_kda_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
+    else:
+        tri, b_sigmoid_tri = fused_kda_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None, b.clone())
 
-    # Backward pass
-    ((ref * do).sum()).backward(retain_graph=True)
+    if b is None:
+        ((ref * do).sum()).backward(retain_graph=True)
+    else:
+        ((ref * do).sum() + (b_sigmoid_ref * db).sum()).backward(retain_graph=True)
     ref_dg, ref_dA = g.grad, A.grad
     ref_dgbias = g_bias.grad if g_bias is not None else None
+    ref_db = b.grad if b is not None else None
     g.grad = A.grad = None
     if g_bias is not None:
         g_bias.grad = None
+    if b is not None:
+        b.grad = None
 
-    ((tri * do).sum()).backward(retain_graph=True)
+    if b is None:
+        ((tri * do).sum()).backward(retain_graph=True)
+    else:
+        ((tri * do).sum() + (b_sigmoid_tri * db).sum()).backward(retain_graph=True)
     tri_dg, tri_dA = g.grad, A.grad
+    tri_db = b.grad if b is not None else None
     tri_dgbias = g_bias.grad if g_bias is not None else None
     g.grad = A.grad = None
     if g_bias is not None:
         g_bias.grad = None
+    if b is not None:
+        b.grad = None
 
     assert_close('o', ref, tri, 1e-4)
     assert_close('dg', ref_dg, tri_dg, 1e-4)
     assert_close('dA', ref_dA, tri_dA, 1e-4)
     if use_bias:
         assert_close('dgbias', ref_dgbias, tri_dgbias, 1e-4)
+    if use_b:
+        assert_close('b', b_sigmoid_ref, b_sigmoid_tri, 1e-4)
+        assert_close('db', ref_db, tri_db, 1e-4)
