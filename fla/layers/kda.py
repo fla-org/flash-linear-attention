@@ -213,8 +213,8 @@ class KimiDeltaAttention(nn.Module):
             v = F.silu(self.v_proj(hidden_states))
 
         g = self.f_proj(hidden_states)
-        g = fused_kda_gate(g, self.A_log, self.head_k_dim, g_bias=self.dt_bias)
-        beta = self.b_proj(hidden_states).sigmoid()
+        beta = self.b_proj(hidden_states)
+        g, beta = fused_kda_gate(g, self.A_log, self.head_k_dim, g_bias=self.dt_bias, b=beta)
 
         q, k = (rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim) for x in (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
