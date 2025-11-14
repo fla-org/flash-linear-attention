@@ -21,7 +21,7 @@ def kda_gate_ref(
     g_bias: torch.Tensor | None = None,
     b: torch.Tensor | None = None,
     beta=1.0, threshold=20.0,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Torch reference implementation for KDA gate computation.
 
