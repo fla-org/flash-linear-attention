@@ -86,9 +86,7 @@ def kda_gate_fwd_kernel(
     n_t = i_t * BT
 
     if i_h == H:
-        if not HAS_B:
-            return
-        else:
+        if HAS_B:
             b_ptr = tl.make_block_ptr(
                 base=b,
                 shape=(T, H),
@@ -108,7 +106,7 @@ def kda_gate_fwd_kernel(
             b_val = tl.load(b_ptr, boundary_check=(0, 1)).to(tl.float32)
             b_sig = tl.sigmoid(b_val)
             tl.store(b_sigmoid_ptr, b_sig, boundary_check=(0, 1))
-            return
+        return
 
     b_a = tl.load(A + i_h).to(tl.float32)
     b_a = -tl.exp(b_a)
@@ -223,9 +221,7 @@ def kda_gate_bwd_kernel(
                 # No grad
                 b_db = tl.zeros((BT, BH), dtype=tl.float32)
             tl.store(db_ptr, b_db.to(db_ptr.dtype.element_ty), boundary_check=(0, 1))
-            return
-        else:
-            return
+        return
 
     a_h = tl.load(A + i_h).to(tl.float32)
     neg_exp_a = -tl.exp(a_h)
