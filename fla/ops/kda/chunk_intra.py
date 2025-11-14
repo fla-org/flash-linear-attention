@@ -169,10 +169,12 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
     m_j = o_j < max_j
 
     # [BC, BC, BK]
-    b_ktg = b_kt_block[None, :, :] * exp(b_g[:, None, :] - b_gk_block[None, :, :])
+    
     m_Aqk = o_i[:, None, None] >= o_j[None, :, None]
     m_Aqk = m_Aqk & m_j[None, :, None]
-    b_Aqk = tl.sum(b_q[:, None, :] * b_ktg * m_Aqk, -1) * scale
+    b_ktg = tl.where(m_Aqk, exp(b_g[:, None, :] - b_gk_block[None, :, :]), 0.)
+    b_ktg = b_kt_block[None, :, :] * b_ktg
+    b_Aqk = tl.sum(b_q[:, None, :] * b_ktg, -1) * scale
     b_Aqk = tl.where(m_j[None, :], b_Aqk, 0.)
 
     m_Akk = o_i[:, None, None] > o_j[None, :, None]
