@@ -24,9 +24,10 @@ def chunk_kda_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     chunk_size = 64
-    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens)
+    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     # the intra Aqk is kept in fp32
     # the computation has very marginal effect on the entire throughput
     Aqk, Akk = chunk_kda_fwd_intra(
@@ -36,6 +37,7 @@ def chunk_kda_fwd(
         beta=beta,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         output_dtype=torch.float32,
     )
     w, u, _, kg = recompute_w_u_fwd(
@@ -45,6 +47,7 @@ def chunk_kda_fwd(
         A=Akk,
         gk=g,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=kg,
@@ -54,6 +57,7 @@ def chunk_kda_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     o = chunk_gla_fwd_o_gk(
@@ -65,6 +69,7 @@ def chunk_kda_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return g, o, Aqk, Akk, final_state
 
@@ -82,6 +87,7 @@ def chunk_kda_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     chunk_size = 64
     w, u, qg, kg = recompute_w_u_fwd(
@@ -92,6 +98,7 @@ def chunk_kda_bwd(
         A=Akk,
         gk=g,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=kg,
@@ -101,6 +108,7 @@ def chunk_kda_bwd(
         initial_state=initial_state,
         output_final_state=False,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -110,6 +118,7 @@ def chunk_kda_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -123,6 +132,7 @@ def chunk_kda_bwd(
         dv=dv,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     # dq dk in fp32
@@ -132,6 +142,7 @@ def chunk_kda_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     dq, dk, dw, dg = chunk_kda_bwd_dqkwg(
         q=q,
@@ -146,6 +157,7 @@ def chunk_kda_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     dk2, dv, db, dg2, dAkk = prepare_wy_repr_bwd(
         k=k,
@@ -156,6 +168,7 @@ def chunk_kda_bwd(
         dw=dw,
         du=dv,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dq, dk2, db, dg2 = chunk_kda_bwd_intra(
         q=q,
@@ -170,6 +183,7 @@ def chunk_kda_bwd(
         dg=dg2,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     dk.add_(dk2)
     dg.add_(dg2)
@@ -193,6 +207,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -209,8 +224,9 @@ class ChunkKDAFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, Aqk, Akk, initial_state, cu_seqlens)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, Aqk, Akk, initial_state, cu_seqlens, chunk_indices)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
@@ -223,7 +239,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        q, q_rstd, k, k_rstd, v, g, beta, Aqk, Akk, initial_state, cu_seqlens = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, g, beta, Aqk, Akk, initial_state, cu_seqlens, chunk_indices = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0 = chunk_kda_bwd(
             q=q,
             k=k,
@@ -237,11 +253,12 @@ class ChunkKDAFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
 
 
 @torch.compiler.disable
@@ -256,6 +273,7 @@ def chunk_kda(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     **kwargs,
 ):
     r"""
@@ -284,6 +302,8 @@ def chunk_kda(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        chunk_indices (torch.LongTensor):
+            Chunk indices used for variable-length training,
 
     Returns:
         o (torch.Tensor):
@@ -352,5 +372,6 @@ def chunk_kda(
         output_final_state,
         use_qk_l2norm_in_kernel,
         cu_seqlens,
+        chunk_indices,
     )
     return o, final_state

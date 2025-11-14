@@ -392,6 +392,7 @@ def chunk_kda_fwd_intra(
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -423,7 +424,8 @@ def chunk_kda_fwd_intra(
     B, T, H, K = k.shape
     assert K <= 256
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BC = min(16, BT)
@@ -472,6 +474,7 @@ def chunk_kda_fwd_intra(
     Akk = solve_tril(
         A=Akk,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         output_dtype=k.dtype,
     )
     return Aqk, Akk
@@ -490,13 +493,15 @@ def chunk_kda_bwd_intra(
     dg: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K = k.shape
     BT = chunk_size
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
@@ -533,6 +538,6 @@ def chunk_kda_bwd_intra(
     dq = dq2
     dk = dk2
     db = db2.sum(0).add_(db)
-    dg = chunk_local_cumsum(dg2.add_(dg), chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens)
+    dg = chunk_local_cumsum(dg2.add_(dg), chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
 
     return dq, dk2, db, dg

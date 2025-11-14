@@ -35,7 +35,7 @@ def prepare_position_ids_kernel(
 
 @tensor_cache
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
-    return cu_seqlens[1:] - cu_seqlens[:-1]
+    return torch.diff(cu_seqlens)
 
 
 @tensor_cache
@@ -63,7 +63,7 @@ def prepare_cu_seqlens_from_mask(
 def prepare_lens_from_cu_seqlens(
     cu_seqlens: torch.LongTensor,
 ) -> torch.LongTensor:
-    return cu_seqlens[1:] - cu_seqlens[:-1]
+    return torch.diff(cu_seqlens)
 
 
 @tensor_cache

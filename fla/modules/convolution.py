@@ -407,7 +407,8 @@ def causal_conv1d_fwd(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     activation: str | None = None,
-    cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -415,7 +416,8 @@ def causal_conv1d_fwd(
     B, T, D, W = *x.shape, weight.shape[1]
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
     BW = triton.next_power_of_2(W)
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
 
@@ -460,6 +462,7 @@ def causal_conv1d_bwd(
     initial_state: torch.Tensor | None = None,
     activation: str | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -468,7 +471,8 @@ def causal_conv1d_bwd(
     W = weight.shape[1] if weight is not None else None
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
     BW = triton.next_power_of_2(W)
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
 
@@ -646,9 +650,11 @@ class CausalConv1dFunction(torch.autograd.Function):
         output_final_state: bool | None = False,
         activation: str | None = None,
         cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
     ):
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
+        ctx.chunk_indices = chunk_indices
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
         y, final_state = causal_conv1d_fwd(
             x=x,
@@ -659,6 +665,7 @@ class CausalConv1dFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             activation=activation,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
         return y, final_state
 
@@ -676,8 +683,9 @@ class CausalConv1dFunction(torch.autograd.Function):
             initial_state=initial_state,
             activation=ctx.activation,
             cu_seqlens=ctx.cu_seqlens,
+            chunk_indices=ctx.chunk_indices,
         )
-        return dx, dw, db, dr, dh0, None, None, None
+        return dx, dw, db, dr, dh0, None, None, None, None
 
 
 @input_guard
@@ -691,6 +699,7 @@ def causal_conv1d(
     activation: str | None = None,
     backend: str | None = 'triton',
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     **kwargs,
 ):
     """
@@ -722,6 +731,8 @@ def causal_conv1d(
             Default: `'triton'`.
         cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths (optional)
+        chunk_indices (Optional[torch.LongTensor]):
+            Chunk indices for variable-length sequences (optional)
 
     Returns:
         Tuple of (output, final_state).
@@ -738,6 +749,7 @@ def causal_conv1d(
             output_final_state,
             activation,
             cu_seqlens,
+            chunk_indices,
         )
         return y, final_state
 
@@ -893,6 +905,7 @@ class ShortConvolution(nn.Conv1d):
         cache: torch.Tensor | None = None,
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -911,6 +924,8 @@ class ShortConvolution(nn.Conv1d):
             cu_seqlens (Optional[torch.LongTensor]):
                 Cumulative sequence lengths for each batch. Used for varlen. Default: `None`.
                 Shape: [B+1]
+            chunk_indices (Optional[torch.LongTensor]):
+                Chunk indices for variable-length sequences. Default: `None`.
 
         Returns:
             Tensor of shape `[B, T, D]`.
@@ -959,6 +974,7 @@ class ShortConvolution(nn.Conv1d):
             activation=self.activation,
             backend=self.backend,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
             **kwargs,
         )
 
