@@ -136,21 +136,21 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype', 'tma'),
+    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype', 'tma', 'triltf32'),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}-tma{}".format(*test),
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}-tma{}-triltf32{}".format(*test),
         )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, False, torch.float16, True),
-            (2, 500, 3, 60, 1, 1, 0, False, torch.float16, True),
-            (2, 1000, 3, 64, 0.1, 1, 0.5, False, torch.float16, False),
-            (3, 1024, 4, 100, 1, 0.1, 0, False, torch.float16, False),
-            (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16, True),
-            (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16, True),
-            (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16, False),
-            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16, True),
+            (1, 63, 1, 64, 1, 1, 0, False, torch.float16, True, True),
+            (2, 500, 3, 60, 1, 1, 0, False, torch.float16, True, False),
+            (2, 1000, 3, 64, 0.1, 1, 0.5, False, torch.float16, False, True),
+            (3, 1024, 4, 100, 1, 0.1, 0, False, torch.float16, False, False),
+            (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16, True, True),
+            (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16, True, True),
+            (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16, False, True),
+            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16, True, True),
         ]
     ],
 )
@@ -165,12 +165,17 @@ def test_chunk(
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
     tma: bool,
+    triltf32: bool,
 ):
     torch.manual_seed(42)
     if not tma:
         os.environ['FLA_USE_TMA'] = '0'
     else:
         os.environ['FLA_USE_TMA'] = '1'
+    if triltf32:
+        os.environ['FLA_TRIL_PRECISION'] = 'tf32x3'
+    else:
+        os.environ['FLA_TRIL_PRECISION'] = 'ieee'
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
@@ -219,18 +224,19 @@ def test_chunk(
     assert_close('dg', ref_dg, tri_dg, 0.02)
     assert_close('db', ref_db, tri_db, 0.02)
     assert_close('dh0', ref_dh0, tri_dh0, 0.008)
-
+    os.environ['FLA_USE_TMA'] = '0'
+    os.environ['FLA_TRIL_PRECISION'] = 'ieee'
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype', 'use_tma'),
+    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype', 'tma', 'triltf32'),
     [
-        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}-tma{}".format(*test))
+        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}-tma{}-triltf32{}".format(*test))
         for test in [
-            (4, 60, 0, [0, 15], torch.float16, True),
-            (4, 64, 0, [0, 256, 500, 1000], torch.float16, True),
-            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False),
-            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True),
-            (4, 256, 0, [0, 15, 100, 300, 1200, 4096], torch.float16, False),
+            (4, 60, 0, [0, 15], torch.float16, True, False),
+            (4, 64, 0, [0, 256, 500, 1000], torch.float16, True, False),
+            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, True),
+            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, True),
+            (4, 256, 0, [0, 15, 100, 300, 1200, 4096], torch.float16, False, True),
         ]
     ],
 )
@@ -244,12 +250,17 @@ def test_chunk_varlen(
     mask_p: float,
     cu_seqlens: list[int],
     dtype: torch.dtype,
-    use_tma: bool,
+    tma: bool,
+    triltf32: bool,
 ):
-    if not use_tma:
+    if not tma:
         os.environ['FLA_USE_TMA'] = '0'
     else:
         os.environ['FLA_USE_TMA'] = '1'
+    if triltf32:
+        os.environ['FLA_TRIL_PRECISION'] = 'tf32x3'
+    else:
+        os.environ['FLA_TRIL_PRECISION'] = 'ieee'
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments
@@ -313,6 +324,7 @@ def test_chunk_varlen(
     assert_close('db', ref_db, tri_db, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
     os.environ['FLA_USE_TMA'] = '0'
+    os.environ['FLA_TRIL_PRECISION'] = 'ieee'
 
 
 @pytest.mark.parametrize(
