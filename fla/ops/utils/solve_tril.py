@@ -8,20 +8,19 @@ import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import make_tensor_descriptor
-from fla.utils import autotune_cache_kwargs, input_guard, is_amd, is_tma_supported
+from fla.utils import autotune_cache_kwargs, input_guard, is_tma_supported
 
 FLA_TRIL_PRECISION = os.environ.get('FLA_TRIL_PRECISION', 'ieee')
-ALLOWED_TRIL_PRECISIONS = ['ieee', 'tf32'] if is_amd else ['ieee', 'tf32', 'tf32x3']
-assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, \
-    f'FLA_TRIL_PRECISION must be one of {ALLOWED_TRIL_PRECISIONS}, but got {FLA_TRIL_PRECISION}'
-
+assert FLA_TRIL_PRECISION in ['ieee', 'tf32', 'tf32x3'], \
+    f"FLA_TRIL_PRECISION must be one of 'ieee', 'tf32', or 'tf32x3', but got {FLA_TRIL_PRECISION}"
+DOT_PRECISION_AUTOTUNE_LIST = ["ieee"] if not is_tma_supported else list({"ieee", FLA_TRIL_PRECISION})
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': 'ieee'}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
     ],
@@ -85,9 +84,10 @@ def solve_tril_16x16_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4, 5]
+        for DOT_PRECISION in DOT_PRECISION_AUTOTUNE_LIST
     ],
     key=['H', 'BT', 'IS_VARLEN'],
     **autotune_cache_kwargs,
@@ -173,9 +173,10 @@ def merge_16x16_to_32x32_inverse_kernel(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4, 5]
+        for DOT_PRECISION in DOT_PRECISION_AUTOTUNE_LIST
     ],
     key=['H', 'BT', 'IS_VARLEN'],
     **autotune_cache_kwargs,
@@ -379,6 +380,5 @@ def solve_tril(
         H=H,
         BT=BT,
         USE_TMA=is_tma_supported,
-        DOT_PRECISION=FLA_TRIL_PRECISION,
     )
     return Ai
