@@ -223,6 +223,7 @@ def chunk_kda_bwd_kernel_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
+    USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -269,17 +270,30 @@ def chunk_kda_bwd_kernel_intra(
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(0, i_i):
-            p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
-            p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
-            p_dAqk = tl.make_block_ptr(dAqk, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
-            p_dAkk = tl.make_block_ptr(dAkk, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
-            # [BC, BK]
-            b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
+            if not USE_TMA:
+                p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
+                p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
+                p_dAqk = tl.make_block_ptr(dAqk, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
+                p_dAkk = tl.make_block_ptr(dAkk, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
+                # [BC, BK]
+                b_k = tl.load(p_k, boundary_check=(0, 1))
+                b_gk = tl.load(p_gk, boundary_check=(0, 1))
+                # [BC, BC]
+                b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
+                b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
+            else:
+                desc_k = make_tensor_descriptor(k, [T, K], [H*K, 1], [BC, BK])
+                desc_g = make_tensor_descriptor(g, [T, K], [H*K, 1], [BC, BK])
+                desc_dAqk = make_tensor_descriptor(dAqk, [T, BT], [H*BT, 1], [BC, BC])
+                desc_dAkk = make_tensor_descriptor(dAkk, [T, BT], [H*BT, 1], [BC, BC])
+                # [BC, BK]
+                b_k = desc_k.load([i_t * BT + i_j * BC, i_k * BK])
+                b_gk = desc_g.load([i_t * BT + i_j * BC, i_k * BK])
+                # [BC, BC]
+                b_dAqk = desc_dAqk.load([i_t * BT + i_i * BC, i_j * BC])
+                b_dAkk = desc_dAkk.load([i_t * BT + i_i * BC, i_j * BC])
+
             b_kg = b_k * exp(b_gn[None, :] - b_gk)
-            # [BC, BC]
-            b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
-            b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
             # [BC, BK]
             b_dq2 += tl.dot(b_dAqk, b_kg)
             b_dk2 += tl.dot(b_dAkk, b_kg)
@@ -292,10 +306,16 @@ def chunk_kda_bwd_kernel_intra(
     p_kj = k + (i_t * BT + i_i * BC) * H*K + o_k
     p_gkj = g + (i_t * BT + i_i * BC) * H*K + o_k
 
-    p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-    b_q = tl.load(p_q, boundary_check=(0, 1))
-    b_k = tl.load(p_k, boundary_check=(0, 1))
+    if not USE_TMA:
+        p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+    else:
+        desc_q = make_tensor_descriptor(q, [T, K], [H*K, 1], [BC, BK])
+        desc_k = make_tensor_descriptor(k, [T, K], [H*K, 1], [BC, BK])
+        b_q = desc_q.load([i_t * BT + i_i * BC, i_k * BK])
+        b_k = desc_k.load([i_t * BT + i_i * BC, i_k * BK])
 
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # [BC]
@@ -315,16 +335,25 @@ def chunk_kda_bwd_kernel_intra(
     b_db = tl.sum(b_dk2 * b_k, 1)
     b_dk2 *= b_b[:, None]
 
-    p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
-    p_dq2 = tl.make_block_ptr(dq2, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+    if not USE_TMA:
+        p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        p_dq2 = tl.make_block_ptr(dq2, (T, K), (H*K, 1), (i_t * BT + i_i * BC, i_k * BK), (BC, BK), (1, 0))
+        b_dq = tl.load(p_dq, boundary_check=(0, 1))
+    else:
+        desc_dq = make_tensor_descriptor(dq, [T, K], [H*K, 1], [BC, BK])
+        desc_dq2 = make_tensor_descriptor(dq2, [T, K], [H*K, 1], [BC, BK])
+        b_dq = desc_dq.load([i_t * BT + i_i * BC, i_k * BK])
+
     p_db = tl.make_block_ptr(db, (T,), (H,), (i_t * BT + i_i * BC,), (BC,), (0,))
 
     b_dg = b_q * b_dq2
-    b_dq2 = b_dq2 + tl.load(p_dq, boundary_check=(0, 1))
-    tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), boundary_check=(0, 1))
+    b_dq2 = b_dq2 + b_dq
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
+    if not USE_TMA:
+        tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), boundary_check=(0, 1))
+    else:
+        desc_dq2.store([i_t * BT + i_i * BC, i_k * BK], b_dq2.to(b_dq.dtype))
 
-    tl.debug_barrier()
     b_dkt = tl.zeros([BC, BK], dtype=tl.float32)
 
     NC = min(NC, tl.cdiv(T - i_t * BT, BC))
@@ -333,27 +362,42 @@ def chunk_kda_bwd_kernel_intra(
         # [BK,]
         b_gn = tl.load(p_gn, mask=m_k, other=0)
         for i_j in range(i_i + 1, NC):
-            p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
-            p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
-            p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k*BK), (BC, BK), (1, 0))
             p_b = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT + i_j * BC,), (BC,), (0,))
-            p_dAqk = tl.make_block_ptr(dAqk, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
-            p_dAkk = tl.make_block_ptr(dAkk, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
             # [BC]
             b_b = tl.load(p_b, boundary_check=(0,))
-            # [BC, BK]
-            b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_kb = tl.load(p_k, boundary_check=(0, 1)) * b_b[:, None]
-            b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            # [BC, BC]
-            b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
-            b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
+            if not USE_TMA:
+                p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t*BT+i_j*BC, i_k*BK), (BC, BK), (1, 0))
+                p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k * BK), (BC, BK), (1, 0))
+                p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + i_j * BC, i_k*BK), (BC, BK), (1, 0))
+                p_dAqk = tl.make_block_ptr(dAqk, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
+                p_dAkk = tl.make_block_ptr(dAkk, (BT, T), (1, H*BT), (i_i * BC, i_t * BT + i_j * BC), (BC, BC), (0, 1))
+                # [BC, BK]
+                b_q = tl.load(p_q, boundary_check=(0, 1))
+                b_kb = tl.load(p_k, boundary_check=(0, 1)) * b_b[:, None]
+                b_gk = tl.load(p_gk, boundary_check=(0, 1))
+                # [BC, BC]
+                b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
+                b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
+            else:
+                desc_q = make_tensor_descriptor(q, [T, K], [H*K, 1], [BC, BK])
+                desc_k = make_tensor_descriptor(k, [T, K], [H*K, 1], [BC, BK])
+                desc_g = make_tensor_descriptor(g, [T, K], [H*K, 1], [BC, BK])
+                desc_dAqk = make_tensor_descriptor(dAqk, [BT, T], [1, H*BT], [BC, BC])
+                desc_dAkk = make_tensor_descriptor(dAkk, [BT, T], [1, H*BT], [BC, BC])
+                # [BC, BK]
+                b_q = desc_q.load([i_t * BT + i_j * BC, i_k * BK])
+                b_kb = desc_k.load([i_t * BT + i_j * BC, i_k * BK]) * b_b[:, None]
+                b_gk = desc_g.load([i_t * BT + i_j * BC, i_k * BK])
+                # [BC, BC]
+                b_dAqk = desc_dAqk.load([i_i * BC, i_t * BT + i_j * BC])
+                b_dAkk = desc_dAkk.load([i_i * BC, i_t * BT + i_j * BC])
 
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
             # [BC, BK]
-            b_qg = b_q * tl.where(m_j[:, None], exp(b_gk - b_gn[None, :]), 0)
-            b_kbg = b_kb * tl.where(m_j[:, None], exp(b_gk - b_gn[None, :]), 0)
+            b_gkn = tl.where(m_j[:, None], exp(b_gk - b_gn[None, :]), 0)
+            b_qg = b_q * b_gkn
+            b_kbg = b_kb * b_gkn
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dkt += tl.dot(b_dAqk, b_qg)
@@ -510,11 +554,12 @@ def chunk_kda_bwd_intra(
     B, T, H, K = k.shape
     BT = chunk_size
     BC = min(16, BT)
-    BK = min(64, triton.next_power_of_2(K))
+    BK = min(32, triton.next_power_of_2(K))
 
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    # NC = 4
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
 
@@ -546,6 +591,7 @@ def chunk_kda_bwd_intra(
         BC=BC,
         BK=BK,
         NC=NC,
+        USE_TMA=is_tma_supported,
     )
     dq = dq2
     dk = dk2
