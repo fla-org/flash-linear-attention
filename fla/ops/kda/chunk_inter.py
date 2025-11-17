@@ -6,8 +6,8 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.ops.utils.op import exp, make_tensor_descriptor
+from fla.utils import autotune_cache_kwargs, check_shared_mem, is_tma_supported
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -51,6 +51,7 @@ def chunk_kda_bwd_kernel_inter(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    USE_TMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -91,29 +92,46 @@ def chunk_kda_bwd_kernel_inter(
     b_dgk = tl.zeros([BK], dtype=tl.float32)
 
     for i_v in range(tl.cdiv(V, BV)):
-        p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-        p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-        # [BT, BV]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1))
-        # [BV, BK]
-        b_h = tl.load(p_h, boundary_check=(0, 1))
-        b_dh = tl.load(p_dh, boundary_check=(0, 1))
+        if not USE_TMA:
+            p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+            p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+            p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            # [BT, BV]
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+            b_do = tl.load(p_do, boundary_check=(0, 1))
+            b_dv = tl.load(p_dv, boundary_check=(0, 1))
+            # [BV, BK]
+            b_h = tl.load(p_h, boundary_check=(0, 1))
+            b_dh = tl.load(p_dh, boundary_check=(0, 1))
+        else:
+            desc_v = make_tensor_descriptor(v, [T, V], [H*V, 1], [BT, BV])
+            desc_do = make_tensor_descriptor(do, [T, V], [H*V, 1], [BT, BV])
+            desc_h = make_tensor_descriptor(h, [V, K], [1, V], [BV, BK])
+            desc_dh = make_tensor_descriptor(dh, [V, K], [1, V], [BV, BK])
+            desc_dv = make_tensor_descriptor(dv, [T, V], [H*V, 1], [BT, BV])
+            # [BT, BV]
+            b_v = desc_v.load([i_t * BT, i_v * BV])
+            b_do = desc_do.load([i_t * BT, i_v * BV])
+            b_dv = desc_dv.load([i_t * BT, i_v * BV])
+            # [BV, BK]
+            b_h = desc_h.load([i_v * BV, i_k * BK])
+            b_dh = desc_dh.load([i_v * BV, i_k * BK])
 
         # [BK]
         b_dgk += tl.sum(b_h * b_dh, axis=0)
         # [BT, BK]
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
-
-        p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        b_dv = tl.load(p_dv, boundary_check=(0, 1))
         b_dw += tl.dot(b_dv.to(b_v.dtype), b_h.to(b_v.dtype))
 
-    p_dw = tl.make_block_ptr(dw, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
+    if not USE_TMA:
+        p_dw = tl.make_block_ptr(dw, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
+    else:
+        desc_dw = make_tensor_descriptor(dw, [T, K], [H*K, 1], [BT, BK])
+        desc_dw.store([i_t * BT, i_k * BK], -b_dw.to(b_dw.dtype))
 
     b_dgk *= exp(b_gn)
     b_dq *= scale
@@ -184,5 +202,6 @@ def chunk_kda_bwd_dqkwg(
         K=K,
         V=V,
         BT=BT,
+        USE_TMA=is_tma_supported,
     )
     return dq, dk, dw, dg
