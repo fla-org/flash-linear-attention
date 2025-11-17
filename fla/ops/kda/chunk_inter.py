@@ -7,7 +7,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, make_tensor_descriptor
-from fla.utils import autotune_cache_kwargs, check_shared_mem, is_tma_supported
+from fla.utils import FLA_USE_TMA, autotune_cache_kwargs, check_shared_mem
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -202,6 +202,6 @@ def chunk_kda_bwd_dqkwg(
         K=K,
         V=V,
         BT=BT,
-        USE_TMA=is_tma_supported,
+        USE_TMA=FLA_USE_TMA,
     )
     return dq, dk, dw, dg

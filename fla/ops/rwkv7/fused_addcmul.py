@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 from packaging.version import Version
 
-from fla.utils import autotune_cache_kwargs, check_pytorch_version, input_guard, is_amd, use_cuda_graph
+from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs, check_pytorch_version, input_guard, is_amd
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
         for BT in [2, 4, 8]
     ],
     key=['BD'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -101,7 +101,7 @@ def fused_addcmul_fwd_kernel(
         for BT in [2, 4, 8]
     ],
     key=['BD'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit

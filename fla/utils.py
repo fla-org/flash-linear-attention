@@ -393,22 +393,22 @@ is_intel = (device_platform == 'xpu')
 is_nvidia = (device_platform == 'cuda')
 is_intel_alchemist = (is_intel and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
 is_nvidia_hopper = (is_nvidia and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] >= 9))
-use_cuda_graph = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
+USE_CUDA_GRAPH = (is_nvidia and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
 
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
-is_tf32_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
-is_gather_supported = hasattr(triton.language, 'gather')
-is_tma_supported = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 9) \
+HAS_TF32_SUPPORT = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 8)
+HAS_GATHER_SUPPORT = hasattr(triton.language, 'gather')
+FLA_USE_TMA = (is_nvidia and torch.cuda.get_device_capability(0)[0] >= 9) \
     and os.environ.get('FLA_USE_TMA', '0') == '1' and \
     (hasattr(triton.language, '_experimental_make_tensor_descriptor') or hasattr(triton.language, 'make_tensor_descriptor'))
 
-if is_nvidia and not is_tf32_supported:
+if is_nvidia and not HAS_TF32_SUPPORT:
     # Make old card happy, since triton will use tf32 by default.
     # This is a workaround for old nvidia card.
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
-if is_tma_supported:
-    logger.info('TMA is supported, using TMA by default.')
+if FLA_USE_TMA:
+    logger.info('FLA_USE_TMA is enabled, using TMA for better performance.')
 
     def alloc_fn(size: int, alignment: int, stream: int | None):
         return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)

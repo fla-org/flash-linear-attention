@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.libdevice as tldevice
 
-from fla.utils import is_gather_supported
+from fla.utils import HAS_GATHER_SUPPORT
 
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     exp = tldevice.fast_expf
@@ -25,7 +25,7 @@ def safe_exp(x):
     return exp(tl.where(x <= 0, x, float('-inf')))
 
 
-if not is_gather_supported:
+if not HAS_GATHER_SUPPORT:
     @triton.jit
     def gather(src, index, axis, _builder=None):
         """

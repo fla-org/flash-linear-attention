@@ -7,7 +7,7 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices, solve_tril
 from fla.ops.utils.op import exp, make_tensor_descriptor
-from fla.utils import autotune_cache_kwargs, is_tma_supported
+from fla.utils import FLA_USE_TMA, autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -506,7 +506,7 @@ def chunk_kda_fwd_intra(
         BT=BT,
         BC=BC,
         NC=NC,
-        USE_TMA=is_tma_supported,
+        USE_TMA=FLA_USE_TMA,
     )
 
     grid = (NT, NC, B * H)
@@ -591,7 +591,7 @@ def chunk_kda_bwd_intra(
         BC=BC,
         BK=BK,
         NC=NC,
-        USE_TMA=is_tma_supported,
+        USE_TMA=FLA_USE_TMA,
     )
     dq = dq2
     dk = dk2
