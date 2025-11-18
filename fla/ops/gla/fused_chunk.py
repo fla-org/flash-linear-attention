@@ -43,7 +43,7 @@ def prepare_qg_kg(
         b_k = tl.load(p_k, mask=mask, other=0)
         b_g = tl.load(p_g, mask=mask, other=0).to(tl.float32)
         b_q *= exp(b_g) * scale
-        b_k *= exp(last_decay - b_g)
+        b_k *= safe_exp(last_decay - b_g)
         tl.store(p_kg, b_k.to(p_kg.dtype.element_ty), mask=mask)
         tl.store(p_qg, b_q.to(p_qg.dtype.element_ty), mask=mask)
         p_q += K
