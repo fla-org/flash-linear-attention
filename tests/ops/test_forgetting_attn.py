@@ -1,4 +1,4 @@
-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import pytest
 import torch
@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
-from fla.utils import assert_close, check_shared_mem, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, check_shared_mem, device
 
 
 def naive_forgetting_attn(
@@ -97,7 +97,7 @@ def test_parallel(
     ],
 )
 @pytest.mark.skipif(
-    is_intel_alchemist,
+    IS_INTEL_ALCHEMIST,
     reason="Intel Triton Failure",
 )
 def test_parallel_varlen(

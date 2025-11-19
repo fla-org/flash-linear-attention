@@ -1,13 +1,12 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import gather
-from fla.utils import autotune_cache_kwargs, is_gather_supported, use_cuda_graph
+from fla.utils import IS_GATHER_SUPPORTED, USE_CUDA_GRAPH, autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -19,7 +18,7 @@ from fla.utils import autotune_cache_kwargs, is_gather_supported, use_cuda_graph
         for num_warps in [1, 2, 4, 8, 16]
     ],
     key=['BT'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -65,7 +64,7 @@ def prepare_wy_repr_fwd_kernel_chunk32(
         for num_stages in [2, 3, 4]
     ],
     key=['BC'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -79,7 +78,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
     BT: tl.constexpr,
     BC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    GATHER_SUPPORTED: tl.constexpr = is_gather_supported,
+    GATHER_SUPPORTED: tl.constexpr = IS_GATHER_SUPPORTED,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -145,7 +144,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

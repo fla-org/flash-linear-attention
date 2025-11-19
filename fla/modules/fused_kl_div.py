@@ -1,4 +1,4 @@
-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import torch
 import torch.nn as nn
@@ -7,14 +7,14 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import input_guard, is_amd
+from fla.utils import IS_AMD, input_guard
 
 # The hard limit of TRITON_MAX_TENSOR_NUMEL is 1048576
 # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/language/core.py#L19
 # However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
-STATIC_WARPS = 32 if not is_amd else 16
+STATIC_WARPS = 32 if not IS_AMD else 16
 
 
 @triton.jit

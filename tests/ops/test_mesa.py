@@ -1,3 +1,4 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
 
@@ -6,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step, naive_mesa_net_decoding_one_step, naive_mesa_net_exact
-from fla.utils import assert_close, device, device_platform, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
@@ -123,7 +124,7 @@ def test_chunk_varlen(
     cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -229,7 +230,7 @@ def test_decoding_one_step(
     max_CG_step: int,
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     torch.set_default_device(device)

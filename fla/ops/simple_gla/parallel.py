@@ -10,18 +10,18 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cumsum import chunk_global_cumsum, chunk_local_cumsum
 from fla.ops.utils.op import exp
 from fla.utils import (
+    IS_INTEL_ALCHEMIST,
+    IS_NVIDIA_HOPPER,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
     check_shared_mem,
     input_guard,
-    is_intel_alchemist,
-    is_nvidia_hopper,
 )
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
-triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
-NUM_WARPS = [2, 4, 8] if is_nvidia_hopper else [2, 4, 8, 16]
+triton_config = {'grf_mode': 'large'} if IS_INTEL_ALCHEMIST else {}
+NUM_WARPS = [2, 4, 8] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 
 
 @triton.heuristics({

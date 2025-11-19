@@ -1,14 +1,13 @@
 # Copyright (c) 2023-2024, Songlin Yang, Yu Zhang
 
-
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, is_amd
+from fla.utils import IS_AMD, autotune_cache_kwargs
 
-NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
 
 
 @triton.autotune(

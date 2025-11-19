@@ -1,3 +1,4 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
 
@@ -7,7 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 def recurrent_gated_delta_rule_ref(
@@ -211,7 +212,7 @@ def test_chunk(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
     q = torch.rand(B, T, H, D, dtype=dtype)
@@ -287,7 +288,7 @@ def test_chunk_varlen(
     cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'

@@ -1,15 +1,14 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, gather
-from fla.utils import autotune_cache_kwargs, is_amd, is_gather_supported, use_cuda_graph
+from fla.utils import IS_AMD, IS_GATHER_SUPPORTED, USE_CUDA_GRAPH, autotune_cache_kwargs
 
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
 @triton.heuristics({
@@ -22,7 +21,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
         for num_stages in [2, 3, 4]
     ],
     key=['BK', 'BT'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -192,6 +191,6 @@ def chunk_dplr_fwd_intra(
         BT=BT,
         BC=BT,
         BK=BK,
-        GATHER_SUPPORTED=is_gather_supported,
+        GATHER_SUPPORTED=IS_GATHER_SUPPORTED,
     )
     return Aab, Aqk, Aak, Aqb, qg, kg, ag, bg

@@ -1,13 +1,12 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, check_shared_mem, is_tf32_supported
+from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
@@ -20,7 +19,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem, is_tf32_supported
         triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
-        for DOT_PRECISION in (["tf32x3", "ieee"] if is_tf32_supported else ["ieee"])
+        for DOT_PRECISION in (["tf32x3", "ieee"] if IS_TF32_SUPPORTED else ["ieee"])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,

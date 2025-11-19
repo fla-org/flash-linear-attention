@@ -8,12 +8,13 @@ import triton.language as tl
 
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import make_tensor_descriptor
-from fla.utils import autotune_cache_kwargs, input_guard, is_tma_supported
+from fla.utils import IS_TMA_SUPPORTED, autotune_cache_kwargs, input_guard
 
 FLA_TRIL_PRECISION = os.environ.get('FLA_TRIL_PRECISION', 'ieee')
 assert FLA_TRIL_PRECISION in ['ieee', 'tf32', 'tf32x3'], \
     f"FLA_TRIL_PRECISION must be one of 'ieee', 'tf32', or 'tf32x3', but got {FLA_TRIL_PRECISION}"
-DOT_PRECISION_AUTOTUNE_LIST = ["ieee"] if not is_tma_supported else list({"ieee", FLA_TRIL_PRECISION})
+DOT_PRECISION_AUTOTUNE_LIST = ["ieee"] if not IS_TMA_SUPPORTED else list({"ieee", FLA_TRIL_PRECISION})
+
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
@@ -379,6 +380,6 @@ def solve_tril(
         T=T,
         H=H,
         BT=BT,
-        USE_TMA=is_tma_supported,
+        USE_TMA=IS_TMA_SUPPORTED,
     )
     return Ai

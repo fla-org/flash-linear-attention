@@ -11,10 +11,10 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.utils import prepare_chunk_indices, prepare_sequence_ids
-from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard, is_amd
+from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
-STATIC_WARPS = 32 if not is_amd else 16
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
+STATIC_WARPS = 32 if not IS_AMD else 16
 
 
 try:

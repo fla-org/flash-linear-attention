@@ -1,3 +1,5 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+#
 # modified from https://github.com/mdy666/mdy_triton/blob/e0a856347bd988e05e0152332bba35f1d33c5b1f/others/grpo/grpo_loss.ipynb
 # XHS ID: blueeeee
 
@@ -54,9 +56,9 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import autotune_cache_kwargs, input_guard, is_amd
+from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
-NUM_WARPS_AUTOTUNE = [4, 8, 16] if is_amd else [4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
 
 @triton.autotune(

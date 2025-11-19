@@ -1,3 +1,4 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # Code adapted from
 # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/fused_linear_cross_entropy.py
@@ -15,7 +16,7 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 from fla.ops.utils import logsumexp_fwd
 from fla.ops.utils.op import exp
-from fla.utils import input_guard, is_amd
+from fla.utils import IS_AMD, input_guard
 
 try:
     from torch.distributed.tensor import DTensor
@@ -27,7 +28,7 @@ except (ImportError, AttributeError):
 # However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
-STATIC_WARPS = 32 if not is_amd else 16
+STATIC_WARPS = 32 if not IS_AMD else 16
 
 
 @triton.jit

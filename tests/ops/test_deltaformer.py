@@ -1,11 +1,11 @@
-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import pytest
 import torch
 
 from fla.ops.deltaformer import deltaformer_attn
 from fla.ops.deltaformer.naive import naive_deltaformer_attn
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -21,7 +21,7 @@ from fla.utils import assert_close, device, is_intel_alchemist
     ],
 )
 @pytest.mark.skipif(
-    is_intel_alchemist,
+    IS_INTEL_ALCHEMIST,
     reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
 )
 def test_deltaformer_attn(
@@ -77,7 +77,7 @@ def test_deltaformer_attn(
     ],
 )
 @pytest.mark.skipif(
-    is_intel_alchemist,
+    IS_INTEL_ALCHEMIST,
     reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
 )
 def test_deltaformer_attn_varlen(

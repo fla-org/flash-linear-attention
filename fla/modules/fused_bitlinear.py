@@ -1,9 +1,9 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
+#
 # Implementations of BitLinear layer with fused LayerNorm and quantized Linear layer.
 # [The Era of 1-bit LLMs: All Large Language Models are in 1.58 Bits](https://arxiv.org/abs/2402.17764)
 # [Scalable MatMul-free Language Modeling](https://arxiv.org/abs/2406.02528)
-
+#
 # Code adapted from https://github.com/ridgerchu/matmulfreellm/
 
 from __future__ import annotations
@@ -17,9 +17,9 @@ import triton
 import triton.language as tl
 
 from fla.modules.layernorm import RMSNorm
-from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard, is_amd, require_version
+from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard, require_version
 
-NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
 
 
 def activation_quant(x):
