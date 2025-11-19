@@ -141,11 +141,6 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
     if i_t * BT + i_i * BC >= T:
         return
 
-    o_i = tl.arange(0, BC)
-    o_A = (i_t * BT + i_i * BC + o_i) * H*BT + i_i * BC
-    m_I = (o_i[:, None] == o_i)[:, None, :]
-    m_A = (i_t * BT + i_i * BC + o_i) < T
-
     q += (bos * H + i_h) * K
     k += (bos * H + i_h) * K
     g += (bos * H + i_h) * K
@@ -165,6 +160,10 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
     # [BC]
     b_beta = tl.load(p_b, boundary_check=(0,))
 
+    o_i = tl.arange(0, BC)
+    o_j = tl.arange(0, 4)
+    # [BC, 1, BC]
+    m_I = (o_i[:, None] == o_i)[:, None, :]
     for j in range(0, min(BC, T - i_t * BT - i_i * BC), 4):
         p_kt = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT + i_i * BC + j), (BK, 4), (0, 1))
         p_gk = tl.make_block_ptr(g, (K, T), (1, H*K), (0, i_t * BT + i_i * BC + j), (BK, 4), (0, 1))
@@ -176,17 +175,15 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
         # [BK, 4 * BC]
         b_ktg = tl.reshape(b_kt[:, :, None] * exp(b_g[:, None, :] - b_gk[:, :, None]), (BK, 4 * BC))
         b_ktg = b_ktg.to(b_q.dtype)
+
+        m_Aqk = m_I & (o_i[:, None] >= (j + o_j))[:, :, None]
+        m_Akk = m_I & (o_i[:, None] > (j + o_j))[:, :, None]
         # [BC, 4]
-        b_Aqk = tl.sum(tl.where(m_I, tl.reshape(tl.dot(b_q, b_ktg), (BC, 4, BC)) * scale, 0), 2)
-        b_Akk = tl.sum(tl.where(m_I, tl.reshape(tl.dot(b_k, b_ktg), (BC, 4, BC)), 0), 2) * b_beta[:, None]
+        b_Aqk = tl.sum(tl.where(m_Aqk, tl.reshape(tl.dot(b_q, b_ktg), (BC, 4, BC)), 0), 2) * scale
+        b_Akk = tl.sum(tl.where(m_Akk, tl.reshape(tl.dot(b_k, b_ktg), (BC, 4, BC)), 0), 2) * b_beta[:, None]
 
         tl.store(p_Aqk, b_Aqk.to(p_Aqk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk, b_Akk.to(p_Akk.dtype.element_ty), boundary_check=(0, 1))
-
-    tl.debug_barrier()
-    b_A = tl.zeros([BC, BC], dtype=tl.float32)
-    tl.store(Aqk + o_A[:, None] + o_i, b_A, mask=m_A[:, None] & (o_i[:, None] < o_i))
-    tl.store(Akk + o_A[:, None] + o_i, b_A, mask=m_A[:, None] & (o_i[:, None] <= o_i))
 
 
 @triton.heuristics({
