@@ -1,3 +1,4 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
 
@@ -11,7 +12,7 @@ from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
 from fla.ops.rwkv7.fused_recurrent import fused_mul_recurrent_rwkv7
 from fla.ops.rwkv7.gate_output_correction import gate_output_correction, gate_output_correction_ref
-from fla.utils import assert_close, device, is_nvidia_hopper
+from fla.utils import IS_NVIDIA_HOPPER, assert_close, device
 
 
 @pytest.mark.parametrize("B", [2])
@@ -149,7 +150,7 @@ def test_fused_rwkv7_addcmul(
     dtype: torch.dtype,
     use_g: bool,
 ):
-    if T == 128 * 1024 and not is_nvidia_hopper:
+    if T == 128 * 1024 and not IS_NVIDIA_HOPPER:
         pytest.skip("Skipping test for T=131072 on non-Hopper GPUs")
     hidden_size = H*D
     hidden_states = torch.randn(B, T, hidden_size).to(device).to(dtype).requires_grad_()

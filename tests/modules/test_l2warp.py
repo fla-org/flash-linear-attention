@@ -1,3 +1,4 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import pytest
 import torch
@@ -6,7 +7,7 @@ import torch.nn.functional as F
 
 from fla.modules import FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp as standalone_l2_warp
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -16,7 +17,7 @@ from fla.utils import assert_close, device, is_intel_alchemist
 @pytest.mark.parametrize("V", [2000])
 @pytest.mark.parametrize("l2_penalty_factor", [1e-4, 1])
 @pytest.mark.skipif(
-    is_intel_alchemist is True,
+    IS_INTEL_ALCHEMIST is True,
     reason="Intel Triton Failure",
 )
 def test_fused_linear_cross_entropy_l2_warp(

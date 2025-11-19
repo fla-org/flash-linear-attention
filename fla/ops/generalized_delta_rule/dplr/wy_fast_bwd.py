@@ -1,15 +1,14 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import autotune_cache_kwargs, check_shared_mem, is_intel_alchemist, use_cuda_graph
+from fla.utils import IS_INTEL_ALCHEMIST, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
-triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
+triton_config = {'grf_mode': 'large'} if IS_INTEL_ALCHEMIST else {}
 
 
 @triton.heuristics({
@@ -22,7 +21,7 @@ triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])

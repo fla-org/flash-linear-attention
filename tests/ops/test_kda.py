@@ -1,3 +1,4 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
 
@@ -8,7 +9,7 @@ import torch.nn.functional as F
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.gate import fused_kda_gate, kda_gate_ref
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -36,7 +37,7 @@ def test_naive_chunk(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
     q = torch.rand(B, T, H, D, dtype=dtype)
@@ -98,7 +99,7 @@ def test_fused_recurrent(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
     q = torch.rand(B, T, H, D, dtype=dtype)
@@ -356,7 +357,8 @@ def test_kda_gate(
     do = torch.randn_like(g).view(B, T, H, D)
     db = torch.randn_like(b) if b is not None else None
 
-    ref, b_sigmoid_ref = kda_gate_ref(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None, b.clone() if b is not None else None)
+    ref, b_sigmoid_ref = kda_gate_ref(g.clone(), A.clone(), D, g_bias.clone(
+    ) if g_bias is not None else None, b.clone() if b is not None else None)
     if b is None:
         tri = fused_kda_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
     else:

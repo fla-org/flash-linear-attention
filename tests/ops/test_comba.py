@@ -1,3 +1,4 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
 
@@ -8,7 +9,7 @@ from einops import rearrange
 
 from fla.ops.comba import chunk_comba, fused_recurrent_comba
 from fla.ops.comba.utils import chunk_comba_cumsum_scalar_fwd
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 def cumsum_comba_local_fwd_reference(s, reverse=False, chunk_size=128):
@@ -219,7 +220,7 @@ def test_chunk(
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
     q = torch.randn(B, T, H, D, dtype=dtype)
@@ -300,7 +301,7 @@ def test_chunk_varlen(
     cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'

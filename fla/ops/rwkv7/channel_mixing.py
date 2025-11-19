@@ -1,3 +1,5 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
 import logging
 
 import torch
@@ -5,12 +7,12 @@ import triton
 import triton.language as tl
 
 from fla.utils import (
+    USE_CUDA_GRAPH,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
     check_pytorch_version,
     input_guard,
-    use_cuda_graph,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,7 +27,7 @@ if not check_pytorch_version('2.4'):
         for block_size in [128, 256, 512, 1024, 2048, 4096, 8192]
     ],
     key=['hidden_dim'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -192,7 +194,7 @@ def relu_square_bwd_kernel(
         for block_size in [128, 256, 512, 1024, 2048, 4096, 8192]
     ],
     key=['hidden_dim'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit

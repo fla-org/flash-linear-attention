@@ -1,6 +1,5 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 import torch.nn.functional as F
 import triton
@@ -8,10 +7,10 @@ import triton.language as tl
 from einops import rearrange
 
 from fla.ops.utils.op import log
-from fla.utils import autotune_cache_kwargs, input_guard, is_amd
+from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
 
 def kda_gate_ref(
@@ -316,7 +315,6 @@ def kda_gate_fwd(
     else:
         b_flat = None
         b_sigmoid = None
-
 
     def grid(meta): return (triton.cdiv(T, meta['BT']), H+1)
 

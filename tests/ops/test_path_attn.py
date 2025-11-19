@@ -1,3 +1,4 @@
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import os
 
@@ -7,7 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.ops.path_attn.parallel import parallel_path_attention
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
@@ -75,7 +76,7 @@ def naive_path_attn(q, k, v, w, beta, g, scale, BT=64):
     ],
 )
 @pytest.mark.skipif(
-    is_intel_alchemist,
+    IS_INTEL_ALCHEMIST,
     reason="Intel Triton Failure",
 )
 def test_parallel(
@@ -150,7 +151,7 @@ def test_parallel(
     reason="Skipping test because TEST_CHUNK_VARLEN is enabled",
 )
 @pytest.mark.skipif(
-    is_intel_alchemist,
+    IS_INTEL_ALCHEMIST,
     reason="Intel Triton Failure",
 )
 def test_parallel_varlen(
