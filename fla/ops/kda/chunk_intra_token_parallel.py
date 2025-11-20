@@ -169,7 +169,7 @@ def chunk_kda_fwd_intra_token_parallel(
 ) -> None:
     """
     Token-parallel implementation: each token gets its own thread block.
-    Only supports fixed-length sequences (cu_seqlens=None).
+    Supports both fixed-length and variable-length sequences.
     Reduces wasted computation on padding.
 
     Writes directly to Aqk and Akk tensors (in-place).
