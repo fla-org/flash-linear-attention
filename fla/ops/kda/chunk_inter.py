@@ -118,7 +118,8 @@ def chunk_kda_bwd_kernel_inter(
     b_dgk *= exp(b_gn)
     b_dq *= scale
     b_dq = b_dq * exp(b_g)
-    b_dk = b_dk * exp(b_gn[None, :] - b_g)
+    m_t = i_t * BT + tl.arange(0, BT) < T
+    b_dk = b_dk * tl.where(m_t[:, None], exp(b_gn[None, :] - b_g), 0)
 
     p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
