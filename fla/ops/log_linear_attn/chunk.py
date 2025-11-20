@@ -273,7 +273,8 @@ def chunkwise_fwd_kernel(
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
 
-        b_s = (tl.dot(b_q, b_k) * tl.where((i_idx >= j_idx) & (i_t * BT + o_i < T)[:, None], tl.exp(b_g[:, None] - b_g[None, :]), 0)).to(
+        m_t = i_t * BT + o_i < T
+        b_s = (tl.dot(b_q, b_k) * tl.where((i_idx >= j_idx) & m_t[:, None] & m_t[None, :], tl.exp(b_g[:, None] - b_g[None, :]), 0)).to(
             b_q.dtype,
         ) * b_h
 
