@@ -9,7 +9,7 @@ import triton.language as tl
 from einops import reduce
 
 from fla.ops.utils import chunk_local_cumsum
-from fla.ops.utils.op import safe_exp
+from fla.ops.utils.op import exp
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 BLOCK_K = 64
@@ -273,7 +273,7 @@ def chunkwise_fwd_kernel(
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
 
-        b_s = (tl.dot(b_q, b_k) * safe_exp(b_g[:, None] - b_g[None, :])).to(
+        b_s = (tl.dot(b_q, b_k) * tl.where((i_idx >= j_idx) & (i_t * BT + o_i < T)[:, None], tl.exp(b_g[:, None] - b_g[None, :]), 0)).to(
             b_q.dtype,
         ) * b_h
 
@@ -1216,6 +1216,8 @@ def chunkwise_bwd_kernel_dkg(
         bos, eos = i_n * T, i_n * T + T
 
     o_i = tl.arange(0, BT)
+    o_t = i_t * BT + o_i
+    m_t = o_t < T
 
     p_dh = tl.make_block_ptr(
         dh + ((i_n * NT + i_t) * H + i_h) * K * V,
@@ -1250,7 +1252,7 @@ def chunkwise_bwd_kernel_dkg(
     b_dg_last = tl.load(p_dg_last)
 
     b_dg_last *= tl.exp(b_g_last)
-    b_dk = safe_exp(b_g_last - b_g)[:, None] * tl.dot(b_v, b_dh).to(b_v.dtype)
+    b_dk = tl.where(m_t, exp(b_g_last - b_g), 0)[:, None] * tl.dot(b_v, b_dh).to(b_v.dtype)
     b_dg = tl.load(p_dg, boundary_check=(0,))
     b_dg -= tl.sum(b_k * b_dk, axis=1)
     b_dg_last += tl.sum(b_dk * b_k)
@@ -1300,6 +1302,9 @@ def chunkwise_bwd_kernel_dv(
     else:
         bos, eos = i_n * T, i_n * T + T
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+
     p_dh = tl.make_block_ptr(
         dh + ((i_n * NT + i_t) * H + i_h) * K * V,
         (K, V),
@@ -1320,7 +1325,7 @@ def chunkwise_bwd_kernel_dv(
     b_dh = tl.load(p_dh, boundary_check=(0, 1))
     b_g = tl.load(p_g, boundary_check=(0,))
     b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_dv = safe_exp(-b_g + b_g_last)[:, None] * tl.dot(b_k, b_dh).to(b_k.dtype)
+    b_dv = tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None] * tl.dot(b_k, b_dh).to(b_k.dtype)
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -1411,7 +1416,8 @@ def chunkwise_bwd_kernel_diag(
     b_dg = tl.load(p_dg, boundary_check=(0,))
 
     b_s = (tl.dot(b_k, b_q)).to(b_q.dtype)
-    b_a = safe_exp(b_g[:, None] - b_g[None, :])
+    # Apply causal mask
+    b_a = tl.where((i_idx >= j_idx) & (i_t * BT + o_i < T)[:, None], tl.exp(b_g[:, None] - b_g[None, :]), 0)
     b_dv += tl.dot((b_s * tl.trans(b_a * b_h)).to(b_do.dtype), b_do)
     b_ds = tl.dot(b_do, b_v) * b_a
     b_dl = b_ds * tl.trans(b_s)

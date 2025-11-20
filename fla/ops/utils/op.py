@@ -20,11 +20,6 @@ else:
     log2 = tl.log2
 
 
-@triton.jit
-def safe_exp(x):
-    return exp(tl.where(x <= 0, x, float('-inf')))
-
-
 if not IS_GATHER_SUPPORTED:
     @triton.jit
     def gather(src, index, axis, _builder=None):
