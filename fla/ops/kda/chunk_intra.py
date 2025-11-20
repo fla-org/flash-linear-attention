@@ -4,7 +4,6 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices, solve_tril
 from fla.ops.utils.op import exp
 from fla.utils import autotune_cache_kwargs
@@ -89,14 +88,14 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
         b_Akk += tl.dot(b_k, b_ktg)
 
         b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_qg = b_q * exp(b_g - b_gn[None, :]) * scale
+        b_qg = b_q * exp(b_g - b_gn[None, :])
         b_Aqk += tl.dot(b_qg, b_ktg)
-
+    b_Aqk *= scale
     b_Akk *= b_b[:, None]
 
     p_Akk = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
-    tl.store(p_Akk, b_Akk.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     p_Aqk = tl.make_block_ptr(Aqk, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, i_j * BC), (BC, BC), (1, 0))
+    tl.store(p_Akk, b_Akk.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Aqk, b_Aqk.to(Aqk.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -105,10 +104,11 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
+        triton.Config({'BM': BM}, num_warps=num_warps)
+        for BM in [2, 4, 8]
         for num_warps in [1, 2, 4, 8]
     ],
-    key=["BK", "BT"],
+    key=["BT", "BK"],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -127,10 +127,11 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
     K: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
+    BM: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_m, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -139,14 +140,8 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    if i_t * BT + i_i * BC >= T:
+    if i_t * BT + i_m * BM >= T:
         return
-
-    o_i = tl.arange(0, BC)
-    o_k = tl.arange(0, BK)
-    m_k = o_k < K
-    m_A = (i_t * BT + i_i * BC + o_i) < T
-    o_A = (i_t * BT + i_i * BC + o_i) * H*BT + i_i * BC
 
     q += (bos * H + i_h) * K
     k += (bos * H + i_h) * K
@@ -155,33 +150,50 @@ def chunk_kda_fwd_kernel_intra_sub_intra(
     Aqk += (bos * H + i_h) * BT
     Akk += (bos * H + i_h) * BT
 
-    p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
-    p_g = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + i_i * BC, 0), (BC, BK), (1, 0))
+    p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT + i_m * BM, 0), (BM, BK), (1, 0))
+    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + i_m * BM, 0), (BM, BK), (1, 0))
+    p_g = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + i_m * BM, 0), (BM, BK), (1, 0))
+    p_b = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT + i_m * BM,), (BM,), (0,))
+    # [BM, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_k = tl.load(p_k, boundary_check=(0, 1))
     b_g = tl.load(p_g, boundary_check=(0, 1))
+    # [BM]
+    b_b = tl.load(p_b, boundary_check=(0,))
 
-    b_k = b_k * tl.load(beta + (i_t * BT + i_i * BC + o_i) * H, mask=m_A, other=0)[:, None]
+    o_i = tl.arange(0, BM)
+    # [BM, BM, BK]
+    b_gqk = exp(b_g[:, None, :] - b_g)
+    b_kgt = b_k * b_gqk
+    # [BM, BM]
+    b_Aqk = tl.sum(b_q[:, None, :] * b_kgt, 2) * scale
+    b_Akk = tl.sum(b_k[:, None, :] * b_kgt, 2) * b_b[:, None]
+    b_Aqk = tl.where(o_i[:, None] >= o_i, b_Aqk, 0.)
+    b_Akk = tl.where(o_i[:, None] > o_i, b_Akk, 0.)
 
-    p_kt = k + (i_t * BT + i_i * BC) * H*K + o_k
-    p_gk = g + (i_t * BT + i_i * BC) * H*K + o_k
+    p_Aqk = tl.make_block_ptr(Aqk, (T, BT), (H*BT, 1), (i_t * BT + i_m * BM, i_m * BM), (BM, BM), (1, 0))
+    p_Akk = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_t * BT + i_m * BM, i_m * BM), (BM, BM), (1, 0))
+    tl.store(p_Aqk, b_Aqk.to(p_Aqk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk, b_Akk.to(p_Akk.dtype.element_ty), boundary_check=(0, 1))
 
-    for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
-        b_kt = tl.load(p_kt, mask=m_k, other=0).to(tl.float32)
-        b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_ktg = b_kt[None, :] * exp(b_g - b_gk[None, :])
-        b_Aqk = tl.sum(b_q * b_ktg, 1) * scale
-        b_Akk = tl.sum(b_k * b_ktg, 1)
-        tl.store(Aqk + o_A + j, b_Aqk, mask=m_A)
-        tl.store(Akk + o_A + j, b_Akk, mask=m_A)
-        p_kt += H*K
-        p_gk += H*K
+    NM: tl.constexpr = tl.cdiv(BC, BM)
+    for j in range((i_m // NM) * BC, i_m * BM - 1, BM):
+        p_kt = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT + j, 0), (BM, BK), (1, 0))
+        p_gk = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT + j, 0), (BM, BK), (1, 0))
+        # [BM, BK]
+        b_kt = tl.load(p_kt, boundary_check=(0, 1))
+        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        # [BM, BM, BK]
+        b_gqk = exp(b_g[:, None, :] - b_gk)
+        b_kgt = b_kt * b_gqk
+        # [BM, BM]
+        b_Aqk = tl.sum(b_q[:, None, :] * b_kgt, 2) * scale
+        b_Akk = tl.sum(b_k[:, None, :] * b_kgt, 2) * b_b[:, None]
 
-    tl.debug_barrier()
-    b_A = tl.zeros([BC, BC], dtype=tl.float32)
-    tl.store(Aqk + o_A[:, None] + o_i, b_A, mask=m_A[:, None] & (o_i[:, None] < o_i))
-    tl.store(Akk + o_A[:, None] + o_i, b_A, mask=m_A[:, None] & (o_i[:, None] <= o_i))
+        p_Aqk = tl.make_block_ptr(Aqk, (T, BT), (H*BT, 1), (i_t * BT + i_m * BM, j), (BM, BM), (1, 0))
+        p_Akk = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_t * BT + i_m * BM, j), (BM, BM), (1, 0))
+        tl.store(p_Aqk, b_Aqk.to(p_Aqk.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_Akk, b_Akk.to(p_Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -401,7 +413,6 @@ def chunk_kda_fwd_intra(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype = torch.float32,
-    use_token_parallel: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -422,8 +433,6 @@ def chunk_kda_fwd_intra(
             The chunk size. Default: 64.
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float32`
-        use_token_parallel (bool):
-            Whether to use token-parallel implementation for sub_intra. Default: `True`.
 
     Returns:
         Aqk (torch.Tensor):
@@ -464,40 +473,24 @@ def chunk_kda_fwd_intra(
         NC=NC,
     )
 
-    if use_token_parallel:
-        # Token-parallel implementation for sub_intra (each token gets its own block)
-        chunk_kda_fwd_intra_token_parallel(
-            q=q,
-            k=k,
-            gk=gk,
-            beta=beta,
-            Aqk=Aqk,
-            Akk=Akk,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            chunk_size=BT,
-        )
-    else:
-        # Original sub-chunk based implementation
-        grid = (NT, NC, B * H)
-        chunk_kda_fwd_kernel_intra_sub_intra[grid](
-            q=q,
-            k=k,
-            g=gk,
-            beta=beta,
-            Aqk=Aqk,
-            Akk=Akk,
-            scale=scale,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            T=T,
-            H=H,
-            K=K,
-            BT=BT,
-            BC=BC,
-            BK=BK,
-        )
-
+    def grid(meta): return (triton.cdiv(BT, meta['BM']), NT, B * H)
+    chunk_kda_fwd_kernel_intra_sub_intra[grid](
+        q=q,
+        k=k,
+        g=gk,
+        beta=beta,
+        Aqk=Aqk,
+        Akk=Akk,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        BC=BC,
+        BK=BK,
+    )
     Akk = solve_tril(
         A=Akk,
         cu_seqlens=cu_seqlens,
