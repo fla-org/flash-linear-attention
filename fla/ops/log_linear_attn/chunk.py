@@ -273,7 +273,8 @@ def chunkwise_fwd_kernel(
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
 
-        b_s = (tl.dot(b_q, b_k) * tl.where((i_idx >= j_idx) & (i_t * BT + o_i < T)[:, None], tl.exp(b_g[:, None] - b_g[None, :]), 0)).to(
+        m_t = i_t * BT + o_i < T
+        b_s = (tl.dot(b_q, b_k) * tl.where((i_idx >= j_idx) & m_t[:, None] & m_t[None, :], tl.exp(b_g[:, None] - b_g[None, :]), 0)).to(
             b_q.dtype,
         ) * b_h
 
@@ -1416,8 +1417,9 @@ def chunkwise_bwd_kernel_diag(
     b_dg = tl.load(p_dg, boundary_check=(0,))
 
     b_s = (tl.dot(b_k, b_q)).to(b_q.dtype)
-    # Apply causal mask
-    b_a = tl.where((i_idx >= j_idx) & (i_t * BT + o_i < T)[:, None], tl.exp(b_g[:, None] - b_g[None, :]), 0)
+    # Apply causal and padding masks
+    m_t = i_t * BT + o_i < T
+    b_a = tl.where((i_idx >= j_idx) & m_t[:, None] & m_t[None, :], tl.exp(b_g[:, None] - b_g[None, :]), 0)
     b_dv += tl.dot((b_s * tl.trans(b_a * b_h)).to(b_do.dtype), b_do)
     b_ds = tl.dot(b_do, b_v) * b_a
     b_dl = b_ds * tl.trans(b_s)
