@@ -4,6 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices, solve_tril
 from fla.ops.utils.op import exp
 from fla.utils import autotune_cache_kwargs
@@ -400,6 +401,7 @@ def chunk_kda_fwd_intra(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     output_dtype: torch.dtype = torch.float32,
+    use_token_parallel: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -420,6 +422,8 @@ def chunk_kda_fwd_intra(
             The chunk size. Default: 64.
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float32`
+        use_token_parallel (bool):
+            Whether to use token-parallel implementation for sub_intra. Default: `True`.
 
     Returns:
         Aqk (torch.Tensor):
@@ -460,24 +464,40 @@ def chunk_kda_fwd_intra(
         NC=NC,
     )
 
-    grid = (NT, NC, B * H)
-    chunk_kda_fwd_kernel_intra_sub_intra[grid](
-        q=q,
-        k=k,
-        g=gk,
-        beta=beta,
-        Aqk=Aqk,
-        Akk=Akk,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        T=T,
-        H=H,
-        K=K,
-        BT=BT,
-        BC=BC,
-        BK=BK,
-    )
+    if use_token_parallel:
+        # Token-parallel implementation for sub_intra (each token gets its own block)
+        chunk_kda_fwd_intra_token_parallel(
+            q=q,
+            k=k,
+            gk=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akk=Akk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=BT,
+        )
+    else:
+        # Original sub-chunk based implementation
+        grid = (NT, NC, B * H)
+        chunk_kda_fwd_kernel_intra_sub_intra[grid](
+            q=q,
+            k=k,
+            g=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akk=Akk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            K=K,
+            BT=BT,
+            BC=BC,
+            BK=BK,
+        )
+
     Akk = solve_tril(
         A=Akk,
         cu_seqlens=cu_seqlens,
