@@ -475,7 +475,7 @@ def chunk_kda_fwd_intra(
             Akk=Akk,
             scale=scale,
             cu_seqlens=cu_seqlens,
-            chunk_size=BT
+            chunk_size=BT,
         )
     else:
         # Original sub-chunk based implementation
@@ -497,7 +497,7 @@ def chunk_kda_fwd_intra(
             BC=BC,
             BK=BK,
         )
-    
+
     Akk = solve_tril(
         A=Akk,
         cu_seqlens=cu_seqlens,
