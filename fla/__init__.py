@@ -26,6 +26,7 @@ from fla.layers import (
     RodimusAttention,
     RWKV6Attention,
     RWKV7Attention,
+    StickBreakingAttention,
 )
 from fla.models import (
     ABCForCausalLM,
@@ -74,6 +75,8 @@ from fla.models import (
     RWKV6Model,
     RWKV7ForCausalLM,
     RWKV7Model,
+    StickBreakingAttentionForCausalLM,
+    StickBreakingAttentionModel,
     TransformerForCausalLM,
     TransformerModel,
 )
@@ -105,6 +108,7 @@ __all__ = [
     'RodimusAttention', 'RodimusForCausalLM', 'RodimusModel',
     'RWKV6Attention', 'RWKV6ForCausalLM', 'RWKV6Model',
     'RWKV7Attention', 'RWKV7ForCausalLM', 'RWKV7Model',
+    'StickBreakingAttention', 'StickBreakingAttentionForCausalLM', 'StickBreakingAttentionModel',
 ]
 
 __version__ = '0.4.1'
