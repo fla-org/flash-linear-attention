@@ -1,4 +1,3 @@
-
 import argparse
 import time
 
@@ -41,7 +40,7 @@ def prepare_inputs(
         ], 0).sort()[0].to(dtype=torch.int32, device=device)
         if context_len is not None:
             cu_seqlens = torch.cat(
-                [torch.arange(i, j, context_len) for i, j in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False)] +
+                [torch.arange(i, j, context_len) for i, j in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())] +
                 [torch.tensor([len(tokens[0])])],
             ).to(dtype=torch.int32, device=device)
     else:
@@ -56,6 +55,7 @@ def profile(
     seq_len: int = 2048,
     context_len: int = 2048,
     varlen: bool = False,
+    num_heads: int | None = None,
     warmup_steps: int = 16,
     steps: int = 32,
     total_steps: int = 1024,
@@ -68,6 +68,8 @@ def profile(
 ):
     device = torch.device('cuda')
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
+    if num_heads is not None:
+        config.num_heads = num_heads
     model = AutoModelForCausalLM.from_config(config).cuda().to(dtype)
     if compile:
         print("Compiling the model")
@@ -141,6 +143,7 @@ if __name__ == "__main__":
     parser.add_argument("--seq_len", default=2048, type=int)
     parser.add_argument("--context_len", default=None, type=int)
     parser.add_argument("--varlen", action='store_true')
+    parser.add_argument("--num_heads", default=None, type=int)
     parser.add_argument("--warmup_steps", default=64, type=int)
     parser.add_argument("--steps", default=256, type=int)
     parser.add_argument("--compile", action='store_true')
@@ -151,6 +154,7 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         context_len=args.context_len,
         varlen=args.varlen,
+        num_heads=args.num_heads,
         warmup_steps=args.warmup_steps,
         steps=args.steps,
         compile=args.compile,
