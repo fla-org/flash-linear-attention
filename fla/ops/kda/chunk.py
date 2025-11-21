@@ -357,8 +357,8 @@ def chunk_kda(
     if initial_state is not None:
         assert initial_state.dtype == torch.float32, "initial_state must be in float32."
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
-    assert beta.shape == (q.shape[0], q.shape[1], q.shape[2]), "beta must be of shape (batch size, seq len, num of head)."
-    assert v.shape == (q.shape[0], q.shape[1], q.shape[2], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
+    assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."
+    assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkKDAFunction.apply(
