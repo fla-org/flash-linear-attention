@@ -105,7 +105,7 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
 @triton.autotune(
     configs=[
         triton.Config({'BM': BM}, num_warps=num_warps)
-        for BM in [2, 4, 8]
+        for BM in [1, 2, 4, 8]
         for num_warps in [1, 2, 4, 8]
     ],
     key=["BT", "BK"],
