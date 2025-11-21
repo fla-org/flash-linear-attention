@@ -56,6 +56,7 @@ def profile(
     context_len: int = 2048,
     varlen: bool = False,
     num_heads: int | None = None,
+    num_hidden_layers: int | None = None,
     warmup_steps: int = 16,
     steps: int = 32,
     total_steps: int = 1024,
@@ -70,6 +71,8 @@ def profile(
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
     if num_heads is not None:
         config.num_heads = num_heads
+    if num_hidden_layers is not None:
+        config.num_hidden_layers = num_hidden_layers
     model = AutoModelForCausalLM.from_config(config).cuda().to(dtype)
     if compile:
         print("Compiling the model")
@@ -144,6 +147,7 @@ if __name__ == "__main__":
     parser.add_argument("--context_len", default=None, type=int)
     parser.add_argument("--varlen", action='store_true')
     parser.add_argument("--num_heads", default=None, type=int)
+    parser.add_argument("--num_hidden_layers", default=None, type=int)
     parser.add_argument("--warmup_steps", default=64, type=int)
     parser.add_argument("--steps", default=256, type=int)
     parser.add_argument("--compile", action='store_true')
@@ -155,6 +159,7 @@ if __name__ == "__main__":
         context_len=args.context_len,
         varlen=args.varlen,
         num_heads=args.num_heads,
+        num_hidden_layers=args.num_hidden_layers,
         warmup_steps=args.warmup_steps,
         steps=args.steps,
         compile=args.compile,
