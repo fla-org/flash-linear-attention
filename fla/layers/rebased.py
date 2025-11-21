@@ -60,8 +60,24 @@ class ReBasedLinearAttention(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, **kwargs):
         mode = self.mode
-        q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
-        q, k, v = map(lambda x: rearrange(x, "... (h d) -> ... h d", d=self.head_dim), [q, k, v])
+        q = rearrange(
+            self.q_proj(hidden_states),
+            "... (h d) -> ... h d",
+            h=self.num_heads,
+            d=self.feature_dim,
+        )
+        k = rearrange(
+            self.k_proj(hidden_states),
+            "... (h d) -> ... h d",
+            h=self.num_heads,
+            d=self.feature_dim,
+        )
+        v = rearrange(
+            self.v_proj(hidden_states),
+            "... (h d) -> ... h d",
+            h=self.num_key_value_heads,
+            d=self.head_dim,
+        )
         q, k = self.feature_map(q, flatten=(mode != 'parallel')), self.feature_map(k, flatten=(mode != 'parallel'))
         if mode == "fused_chunk":
             o = fused_chunk_linear_attn(
@@ -89,6 +105,7 @@ class ReBasedLinearAttention(nn.Module):
                 use_scale=True,
                 use_normalize=True,
             )
+        o = rearrange(o, "... h d -> ... (h d)")
         o = self.o_proj(o)
         o = self.dropout(o)
         return o
