@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from einops import rearrange
+from einops import rearrange, repeat
 
 from fla.modules.feature_map import RebasedFeatureMap
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn
@@ -16,6 +16,17 @@ from fla.ops.rebased import parallel_rebased
 
 
 class ReBasedLinearAttention(nn.Module):
+    r"""
+    Implementation of ReBased linear attention with optional grouped keys/values.
+
+    Args:
+        hidden_size (int): Model hidden size.
+        feature_dim (int): Dimensionality of the learnable quadratic feature map per head.
+        num_heads (int): Number of query heads.
+        num_key_value_heads (int): Number of unique key/value heads (GQA). Must divide `num_heads`.
+            When smaller than `num_heads`, keys and values are projected once per KV head and then
+            shared across ``num_heads // num_key_value_heads`` query heads.
+    """
 
     def __init__(
         self,
@@ -39,10 +50,16 @@ class ReBasedLinearAttention(nn.Module):
         self.mode = mode
         assert self.mode in ["fused_chunk", "parallel", 'chunk']
 
+        if hidden_size % num_heads != 0:
+            raise ValueError("`hidden_size` must be divisible by `num_heads`.")
+        if num_heads % num_key_value_heads != 0:
+            raise ValueError("`num_heads` must be divisible by `num_key_value_heads`.")
+
         self.feature_dim = feature_dim
-        self.num_key_value_heads = num_key_value_heads
         self.num_heads = num_heads
-        self.head_dim = self.hidden_size // self.num_key_value_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.num_kv_groups = self.num_heads // self.num_key_value_heads
+        self.head_dim = self.hidden_size // self.num_heads
         self.use_gamma = use_gamma
         self.use_beta = use_beta
         self.normalize = normalize
@@ -53,7 +70,7 @@ class ReBasedLinearAttention(nn.Module):
 
         self.feature_map = RebasedFeatureMap(self.feature_dim, use_gamma, use_beta, normalize)
         self.q_proj = nn.Linear(self.hidden_size, self.feature_dim * self.num_heads, bias=False)
-        self.k_proj = nn.Linear(self.hidden_size, self.feature_dim * self.num_heads, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, self.feature_dim * self.num_key_value_heads, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.dropout = nn.Identity()
@@ -69,7 +86,7 @@ class ReBasedLinearAttention(nn.Module):
         k = rearrange(
             self.k_proj(hidden_states),
             "... (h d) -> ... h d",
-            h=self.num_heads,
+            h=self.num_key_value_heads,
             d=self.feature_dim,
         )
         v = rearrange(
@@ -78,7 +95,11 @@ class ReBasedLinearAttention(nn.Module):
             h=self.num_key_value_heads,
             d=self.head_dim,
         )
-        q, k = self.feature_map(q, flatten=(mode != 'parallel')), self.feature_map(k, flatten=(mode != 'parallel'))
+        q = self.feature_map(q, flatten=(mode != 'parallel'))
+        k = self.feature_map(k, flatten=(mode != 'parallel'))
+        if self.num_kv_groups > 1:
+            k = repeat(k, "... h d -> ... (h g) d", g=self.num_kv_groups)
+            v = repeat(v, "... h d -> ... (h g) d", g=self.num_kv_groups)
         if mode == "fused_chunk":
             o = fused_chunk_linear_attn(
                 q=q,
