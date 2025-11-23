@@ -451,8 +451,8 @@ def chunk_kda_fwd_intra(
     NC = triton.cdiv(BT, BC)
     BK = max(triton.next_power_of_2(K), 16)
 
-    Aqk = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
-    Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=output_dtype)
+    Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
+    Akk = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
     grid = (NT, NC * NC, B * H)
 
     chunk_kda_fwd_kernel_intra_sub_inter[grid](
