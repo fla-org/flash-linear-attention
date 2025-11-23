@@ -56,6 +56,7 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
     tl.static_assert(NC <= 4, "This kernel is specialized for NC <= 4")
 
     i_ti = i_t * BT + i_i * BC
+    i_tn = i_ti + BC2
     if i_ti >= T:
         return
 
@@ -119,12 +120,12 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
             b_Aqk2 += tl.dot(b_qg, b_ktg2)
             b_Akk2 += tl.dot(b_kg, b_ktg2)
 
-        # [BK,]
-        b_gn2 = tl.load(g + (i_ti + BC2) * H*K + o_k, mask=m_k, other=0)
-        b_gqk2 = exp(b_g - b_gn2[None, :])
-        b_ktg = tl.trans(b_k * exp(b_gn2[None, :] - b_g))
-        b_Aqk += tl.dot(b_q * b_gqk2, b_ktg)
-        b_Akk += tl.dot(b_k * b_gqk2, b_ktg)
+        if i_tn < T:
+            b_gn2 = tl.load(g + i_tn * H*K + o_k, mask=m_k, other=0)
+            b_gqk2 = exp(b_g - b_gn2[None, :])
+            b_ktg = tl.trans(b_k * exp(b_gn2[None, :] - b_g))
+            b_Aqk += tl.dot(b_q * b_gqk2, b_ktg)
+            b_Akk += tl.dot(b_k * b_gqk2, b_ktg)
 
     if i_i > 0:
         p_Aqk0 = tl.make_block_ptr(Aqk, (T, BT), (H*BT, 1), (i_t * BT + i_i * BC, 0), (BC, BC), (1, 0))
@@ -142,6 +143,8 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
         tl.store(p_Aqk2, (b_Aqk2 * scale).to(Aqk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_Akk2, (b_Akk2 * b_b[:, None]).to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
+    if i_tn >= T:
+        return
     o_i = tl.arange(0, BC)
     m_A = (o_i >= BC2)[:, None] & (o_i < BC2)
 
