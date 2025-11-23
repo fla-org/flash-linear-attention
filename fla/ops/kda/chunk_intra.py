@@ -53,8 +53,9 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    tl.static_assert(NC <= 4, "This kernel is specialized for NC <= 4")
+
     i_ti = i_t * BT + i_i * BC
-    i_tn = i_ti
     if i_ti >= T:
         return
 
@@ -88,7 +89,7 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
         # [BK,]
-        b_gn = tl.load(g + i_tn * H*K + o_k, mask=m_k, other=0)
+        b_gn = tl.load(g + i_ti * H*K + o_k, mask=m_k, other=0)
         # [BC, BK]
         b_gqk = exp(b_g - b_gn[None, :])
         b_qg = b_q * b_gqk
@@ -119,7 +120,7 @@ def chunk_kda_fwd_kernel_intra_sub_inter(
             b_Akk2 += tl.dot(b_kg, b_ktg2)
 
         # [BK,]
-        b_gn2 = tl.load(g + (i_tn + BC2) * H*K + o_k, mask=m_k, other=0)
+        b_gn2 = tl.load(g + (i_ti + BC2) * H*K + o_k, mask=m_k, other=0)
         b_gqk2 = exp(b_g - b_gn2[None, :])
         b_ktg = tl.trans(b_k * exp(b_gn2[None, :] - b_g))
         b_Aqk += tl.dot(b_q * b_gqk2, b_ktg)
