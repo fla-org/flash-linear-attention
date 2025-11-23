@@ -36,6 +36,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     H: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
+    BC: tl.constexpr,
     BH: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -71,7 +72,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         bos = tl.load(cu_seqlens + i_n).to(tl.int32)
         eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         i_t = i_tg - bos
-        T = eos - bos # Current sequence length
+        T = eos - bos  # Current sequence length
 
         # Safety check
         if i_t >= T or i_tg >= eos:
@@ -85,8 +86,6 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         if i_t >= T:
             return
 
-    # Find which sub-chunk (BC=16) this token belongs to
-    BC: tl.constexpr = 16
     i_chunk = i_t // BT  # which BT=64 chunk
     i_subchunk = (i_t % BT) // BC  # which BC=16 sub-chunk within the BT chunk
 
@@ -103,18 +102,15 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
 
     # Load q[i_t, h:h+BH, :] - shape [BH, K]
     # For varlen, we use global offset: bos + i_t = i_tg
-    p_q = tl.make_block_ptr(q + (bos + i_t) * H * K, (H, K), (K, 1),
-                            (i_h_start, 0), (BH, BK), (0, 1))
+    p_q = tl.make_block_ptr(q + (bos + i_t) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
     b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
 
     # Load g[i_t, h:h+BH, :]
-    p_g = tl.make_block_ptr(g + (bos + i_t) * H * K, (H, K), (K, 1),
-                            (i_h_start, 0), (BH, BK), (0, 1))
+    p_g = tl.make_block_ptr(g + (bos + i_t) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
 
     # Load k[i_t, h:h+BH, :] and beta[i_t, h:h+BH]
-    p_k = tl.make_block_ptr(k + (bos + i_t) * H * K, (H, K), (K, 1),
-                            (i_h_start, 0), (BH, BK), (0, 1))
+    p_k = tl.make_block_ptr(k + (bos + i_t) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
     b_k_self = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
 
     p_beta = beta + (bos + i_t) * H + i_h_start + o_h
@@ -124,28 +120,25 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     for j in range(subchunk_start, tl.minimum(i_t + 1, subchunk_end)):
 
         # Load k[j, h:h+BH, :] with pointer arithmetic
-        p_k_j = tl.make_block_ptr(k + (bos + j) * H * K, (H, K), (K, 1),
-                                  (i_h_start, 0), (BH, BK), (0, 1))
-        b_k_j = tl.load(p_k_j, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
+        p_kj = tl.make_block_ptr(k + (bos + j) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
+        b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
 
         # Load g[j, h:h+BH, :]
-        p_g_j = tl.make_block_ptr(g + (bos + j) * H * K, (H, K), (K, 1),
-                                  (i_h_start, 0), (BH, BK), (0, 1))
-        b_g_j = tl.load(p_g_j, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
+        p_gj = tl.make_block_ptr(g + (bos + j) * H * K, (H, K), (K, 1), (i_h_start, 0), (BH, BK), (0, 1))
+        b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)  # [BH, BK]
 
         # Compute gated key for all BH heads: [BH, BK]
         if USE_EXP2:
-            b_k_j_gated = b_k_j * exp2(b_g - b_g_j)
+            b_kgj = b_kj * exp2(b_g - b_gj)
         else:
-            b_k_j_gated = b_k_j * exp(b_g - b_g_j)
+            b_kgj = b_kj * exp(b_g - b_gj)
 
         # Apply mask for valid K dimension
-        b_k_j_gated = tl.where(m_k[None, :], b_k_j_gated, 0.0)
+        b_kgj = tl.where(m_k[None, :], b_kgj, 0.0)
 
-        # Compute Aqk and Akk for all BH heads: [BH]
-        b_Aqk = tl.sum(b_q * b_k_j_gated, axis=1) * scale  # [BH]
+        b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale  # [BH]
         # Akk: only accumulate if j < i_t
-        b_Akk = tl.sum(b_k_self * b_k_j_gated, axis=1) * tl.where(j < i_t, 1.0, 0.0)  # [BH]
+        b_Akk = tl.sum(b_k_self * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)  # [BH]
 
         # Store with [B, T, H, BT] layout (no transpose needed later)
         j_pos = j % BT
@@ -165,6 +158,7 @@ def chunk_kda_fwd_intra_token_parallel(
     scale: float,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    sub_chunk_size: int = 16,
     use_exp2: bool = False,
 ) -> None:
     """
@@ -187,6 +181,7 @@ def chunk_kda_fwd_intra_token_parallel(
     """
     B, T, H, K = q.shape
     BT = chunk_size
+    BC = sub_chunk_size
 
     # Grid: (total_tokens, H/BH) - each token gets its own block
     if cu_seqlens is not None:
@@ -215,5 +210,6 @@ def chunk_kda_fwd_intra_token_parallel(
         H=H,
         K=K,
         BT=BT,
+        BC=BC,
         USE_EXP2=use_exp2,
     )
