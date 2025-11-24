@@ -36,6 +36,7 @@ NUM_REG: tl.constexpr = tl.constexpr(_NUM_REG)
 
 @triton.jit
 def softplus(x):
+    # equivalent to:
     # return tl.where(x < 15.0, tl.math.log2(1 + tl.math.exp2(x)), x)
     return tl.inline_asm_elementwise(
         asm=asm_str,

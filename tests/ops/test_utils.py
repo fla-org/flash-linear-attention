@@ -78,12 +78,18 @@ def test_global_cumsum_varlen(
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
     s = torch.randn(1, T, H, dtype=dtype).to(device)
-    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
+    ref = torch.cat([
+        s[:, start:end].float().cumsum(1)
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+    ], 1).to(dtype)
     tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     assert_close('global_cumsum', ref, tri, 1e-3)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
-    ref = torch.cat([s[:, start:end].float().cumsum(1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
+    ref = torch.cat([
+        s[:, start:end].float().cumsum(1)
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+        ], 1).to(dtype)
     tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     assert_close('global_cumsum', ref, tri, 1e-3)
 
@@ -148,12 +154,14 @@ def test_global_reversed_cumsum_varlen(
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
 
     s = torch.randn(1, T, H, dtype=dtype).to(device)
-    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
+    ref = torch.cat([reversed_cumsum(s[:, start:end], 1)
+                    for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
     tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
     assert_close('global_reversed_cumsum', ref, tri, 1e-3)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
-    ref = torch.cat([reversed_cumsum(s[:, start:end], 1) for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
+    ref = torch.cat([reversed_cumsum(s[:, start:end], 1)
+                    for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
     tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
     assert_close('global_reversed_cumsum', ref, tri, 1e-3)
 
