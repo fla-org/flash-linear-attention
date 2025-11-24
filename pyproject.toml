@@ -61,7 +61,6 @@ select = [
     "I",    # isort
     "C4",   # flake8-comprehensions
     "TCH",  # flake8-type-checking
-    "COM",  # flake8-commas
     "T",    # flake8-debugger
 ]
 ignore = [
@@ -71,7 +70,6 @@ ignore = [
     "B006",
     "B007",
     "B008",
-    "B028",
     "B904",
     "B905",
     "C408",
@@ -84,7 +82,9 @@ ignore = [
     "SIM108",
     "SIM118",
     "SIM211",
+    "COM812",
 ]
+extend-select = ["RUF022"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
