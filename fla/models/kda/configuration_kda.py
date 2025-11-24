@@ -32,6 +32,7 @@ class KDAConfig(PretrainedConfig):
         tie_word_embeddings: bool = False,
         initializer_range: float = 0.02,
         fuse_norm: bool = True,
+        fuse_conv_l2: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
         use_l2warp: bool = False,
@@ -58,6 +59,7 @@ class KDAConfig(PretrainedConfig):
         self.initializer_range = initializer_range
 
         self.fuse_norm = fuse_norm
+        self.fuse_conv_l2 = fuse_conv_l2
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
         self.use_l2warp = use_l2warp

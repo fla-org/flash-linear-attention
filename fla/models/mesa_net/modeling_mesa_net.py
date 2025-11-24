@@ -66,6 +66,7 @@ class MesaNetBlock(GradientCheckpointingLayer):
                 layer_idx=layer_idx,
                 max_cg_step_training=config.max_cg_step_training,
                 max_cg_step_decoding=config.max_cg_step_decoding,
+                fuse_conv_l2=config.fuse_conv_l2,
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = MesaNetMLP(

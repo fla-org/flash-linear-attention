@@ -66,6 +66,7 @@ class MesaNet(nn.Module):
         lambda_lower_bound: float = 0.25,
         max_cg_step_training: int = 30,
         max_cg_step_decoding: int = 30,
+        fuse_conv_l2: bool = True,
         **kwargs,
     ) -> MesaNet:
         super().__init__()
@@ -86,6 +87,7 @@ class MesaNet(nn.Module):
         self.lambda_lower_bound = lambda_lower_bound
         self.max_cg_step_training = max_cg_step_training
         self.max_cg_step_decoding = max_cg_step_decoding
+        self.fuse_conv_l2 = fuse_conv_l2
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
@@ -106,12 +108,16 @@ class MesaNet(nn.Module):
             kernel_size=conv_size,
             bias=self.conv_bias,
             activation='silu',
+            norm='l2' if self.fuse_conv_l2 else None,
+            norm_eps=norm_eps,
         )
         self.k_conv1d = ShortConvolution(
             hidden_size=self.key_dim,
             kernel_size=conv_size,
             bias=self.conv_bias,
             activation='silu',
+            norm='l2' if self.fuse_conv_l2 else None,
+            norm_eps=norm_eps,
         )
         if use_output_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
@@ -154,12 +160,14 @@ class MesaNet(nn.Module):
             cache=conv_state_q,
             output_final_state=use_cache,
             cu_seqlens=cu_seqlens,
+            head_dim=self.head_k_dim if self.fuse_conv_l2 else None,
         )
         k, conv_state_k = self.k_conv1d(
             x=self.k_proj(hidden_states),
             cache=conv_state_k,
             output_final_state=use_cache,
             cu_seqlens=cu_seqlens,
+            head_dim=self.head_k_dim if self.fuse_conv_l2 else None,
         )
         v = self.v_proj(hidden_states)
 
@@ -184,13 +192,14 @@ class MesaNet(nn.Module):
                 lamb=lamb,
                 output_final_state=use_cache,
                 max_CG_iteration=self.max_cg_step_training,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
                 cu_seqlens=cu_seqlens,
             )
         # decoding
         else:
-            q = l2_norm(q)
-            k = l2_norm(k)
+            if not self.fuse_conv_l2:
+                q = l2_norm(q)
+                k = l2_norm(k)
             o, h_kk, h_kv = mesa_net_decoding_one_step(
                 q=q.squeeze(0),
                 k=k.squeeze(0),

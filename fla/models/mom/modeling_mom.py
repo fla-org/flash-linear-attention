@@ -147,6 +147,7 @@ class MomBlock(GradientCheckpointingLayer):
                     capacity=config.capacity,
                     shared_mem=config.shared_mem,
                     single_kv_proj=config.single_kv_proj,
+                    fuse_conv_l2=config.fuse_conv_l2,
                 )
             else:
                 raise NotImplementedError(f"The MoM backend {config.mom_backend} is not currently supported.")

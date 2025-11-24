@@ -41,6 +41,7 @@ class MomConfig(PretrainedConfig):
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_conv_l2: bool = True,
         vocab_size: int = 32000,
         **kwargs,
     ):
@@ -75,6 +76,7 @@ class MomConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.fuse_conv_l2 = fuse_conv_l2
         self.vocab_size = vocab_size
 
         if self.mom_backend not in ['gated_deltanet']:

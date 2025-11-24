@@ -66,6 +66,7 @@ class DeltaNetBlock(GradientCheckpointingLayer):
                 qk_norm=config.qk_norm,
                 qk_activation=config.qk_activation,
                 norm_eps=config.norm_eps,
+                fuse_conv_l2=config.fuse_conv_l2,
                 layer_idx=layer_idx,
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)

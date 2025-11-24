@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
+from fla.ops.convolution.fused_short_conv import fused_short_conv
 from fla.ops.utils import prepare_chunk_indices, prepare_sequence_ids
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
@@ -836,6 +837,8 @@ class ShortConvolution(nn.Conv1d):
         kernel_size: int,
         bias: bool = False,
         activation: str | None = 'silu',
+        norm: str | None = None,
+        norm_eps: float = 1e-5,
         backend: str | None = 'triton',
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
@@ -854,10 +857,16 @@ class ShortConvolution(nn.Conv1d):
 
         self.hidden_size = hidden_size
         self.activation = None
+        self.norm = norm
+        self.norm_eps = norm_eps
 
         if activation is not None:
             assert activation in ['silu', 'swish'], f"Activation `{activation}` not supported yet."
             self.activation = activation
+
+        if norm is not None:
+            assert norm == 'l2', f"Normalization `{norm}` not supported yet."
+            assert backend == 'triton', "Fused normalization only supported with Triton backend."
 
         if 'use_fast_conv1d' in kwargs:
             warnings.warn(
@@ -906,6 +915,7 @@ class ShortConvolution(nn.Conv1d):
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        head_dim: int | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -926,6 +936,8 @@ class ShortConvolution(nn.Conv1d):
                 Shape: [B+1]
             chunk_indices (Optional[torch.LongTensor]):
                 Chunk indices for variable-length sequences. Default: `None`.
+            head_dim (Optional[int]):
+                The head dimension for L2 normalization. Default: `None`.
 
         Returns:
             Tensor of shape `[B, T, D]`.
@@ -946,6 +958,7 @@ class ShortConvolution(nn.Conv1d):
                 cache=cache,
                 output_final_state=output_final_state,
                 cu_seqlens=cu_seqlens,
+                head_dim=head_dim,
             )
             return y, cache
 
@@ -963,6 +976,24 @@ class ShortConvolution(nn.Conv1d):
                 stacklevel=2,
             )
             self.backend = 'triton'
+
+        if self.norm is not None:
+            if head_dim is None:
+                raise ValueError("`head_dim` must be provided when using fused normalization.")
+            return fused_short_conv(
+                x=x,
+                weight=rearrange(self.weight, "d 1 w -> d w"),
+                bias=self.bias,
+                residual=residual,
+                initial_state=cache,
+                output_final_state=output_final_state,
+                activation=self.activation,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                use_norm=True,
+                norm_eps=self.norm_eps,
+                head_dim=head_dim,
+            )
 
         return causal_conv1d(
             x=x,
@@ -985,6 +1016,7 @@ class ShortConvolution(nn.Conv1d):
         cache: torch.Tensor,
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        head_dim: int | None = None,
     ):
         B, _, D, W = *x.shape, self.kernel_size[0]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -992,7 +1024,7 @@ class ShortConvolution(nn.Conv1d):
             cache = x.new_zeros(N, D, W)
         # NOTE: we follow the fast mode that updates the cache in-place
         if self.backend == 'triton':
-            return causal_conv1d_update(
+            y, cache = causal_conv1d_update(
                 x=x,
                 cache=cache,
                 residual=residual,
@@ -1000,6 +1032,14 @@ class ShortConvolution(nn.Conv1d):
                 bias=self.bias,
                 activation=self.activation,
             )
+            if self.norm is not None:
+                if head_dim is None:
+                    raise ValueError("`head_dim` must be provided when using fused normalization.")
+                y = rearrange(y, '... (h d) -> ... h d', d=head_dim)
+                norm = y.norm(p=2, dim=-1, keepdim=True)
+                y = y / (norm + self.norm_eps)
+                y = rearrange(y, '... h d -> ... (h d)')
+            return y, cache
 
         shape = x.shape
         x = x.squeeze(0) if cu_seqlens is not None else x.squeeze(1)
@@ -1017,6 +1057,13 @@ class ShortConvolution(nn.Conv1d):
         y = y.view(shape)
         if residual is not None:
             y.add_(residual)
+        if self.norm is not None:
+            if head_dim is None:
+                raise ValueError("`head_dim` must be provided when using fused normalization.")
+            y = rearrange(y, '... (h d) -> ... h d', d=head_dim)
+            norm = y.norm(p=2, dim=-1, keepdim=True)
+            y = y / (norm + self.norm_eps)
+            y = rearrange(y, '... h d -> ... (h d)')
         return y, cache
 
     @property
