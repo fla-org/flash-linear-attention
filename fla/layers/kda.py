@@ -214,9 +214,8 @@ class KimiDeltaAttention(nn.Module):
 
         g = self.f_proj(hidden_states)
         beta = self.b_proj(hidden_states)
-        g, beta = fused_kda_gate(g, self.A_log, self.head_k_dim, g_bias=self.dt_bias, b=beta)
 
-        q, k = (rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim) for x in (q, k))
+        q, k, g = (rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim) for x in (q, k, g))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 
         # for multi-value attention, we repeat the inputs for simplicity.
@@ -235,12 +234,16 @@ class KimiDeltaAttention(nn.Module):
                 v=v,
                 g=g,
                 beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
+            g, beta = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias, beta=beta)
             o, recurrent_state = fused_recurrent_kda(
                 q=q,
                 k=k,

@@ -317,9 +317,9 @@ def test_chunk_varlen(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'use_bias', 'use_b'),
+    ('B', 'T', 'H', 'D', 'HAS_BIAS', 'HAS_BETA'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-b{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-beta{}".format(*test))
         for test in [
             (1, 2, 2, 12, False, False),
             (1, 32, 2, 16, False, False),
@@ -339,62 +339,67 @@ def test_kda_gate(
     T: int,
     H: int,
     D: int,
-    use_bias: bool,
-    use_b: bool,
+    HAS_BIAS: bool,
+    HAS_BETA: bool,
 ):
     torch.manual_seed(42)
-    g = torch.randn(B, T, H * D, dtype=torch.float32)
-    # Ensure some values are > 20 to test the threshold logic in softplus
-    g = g * 30  # Scale up to get values > 20
-    A = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
-    g_bias = torch.randn(H * D, dtype=torch.float32) if use_bias else None
-    b = torch.randn(B, T, H, dtype=torch.float32) if use_b else None
-    g, A = map(lambda x: x.to(device).requires_grad_(True), (g, A))
-    if g_bias is not None:
-        g_bias = g_bias.to(device).requires_grad_(True)
-    if b is not None:
-        b = b.to(device).requires_grad_(True)
+    g = torch.randn(B, T, H, D, dtype=torch.float32) * 10
+    A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
+    dt_bias = torch.randn(H * D, dtype=torch.float32) if HAS_BIAS else None
+    beta = torch.randn(B, T, H, dtype=torch.float32) if HAS_BETA else None
+    g, A_log = map(lambda x: x.to(device).requires_grad_(True), (g, A_log))
+    if dt_bias is not None:
+        dt_bias = dt_bias.to(device).requires_grad_(True)
+    if beta is not None:
+        beta = beta.to(device).requires_grad_(True)
     do = torch.randn_like(g).view(B, T, H, D)
-    db = torch.randn_like(b) if b is not None else None
+    db = torch.randn_like(beta) if beta is not None else None
 
-    ref, b_sigmoid_ref = kda_gate_ref(g.clone(), A.clone(), D, g_bias.clone(
-    ) if g_bias is not None else None, b.clone() if b is not None else None)
-    if b is None:
-        tri = fused_kda_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None)
-    else:
-        tri, b_sigmoid_tri = fused_kda_gate(g.clone(), A.clone(), D, g_bias.clone() if g_bias is not None else None, b.clone())
-
-    if b is None:
+    ref, ref_b = kda_gate_ref(
+        g.clone(),
+        A_log.clone(),
+        dt_bias.clone() if dt_bias is not None else None,
+        beta.clone() if beta is not None else None
+    )
+    tri, tri_b = fused_kda_gate(
+        g.clone(),
+        A_log.clone(),
+        dt_bias.clone() if dt_bias is not None else None,
+        beta.clone() if beta is not None else None
+    )
+    if beta is None:
         ((ref * do).sum()).backward(retain_graph=True)
     else:
-        ((ref * do).sum() + (b_sigmoid_ref * db).sum()).backward(retain_graph=True)
-    ref_dg, ref_dA = g.grad, A.grad
-    ref_dgbias = g_bias.grad if g_bias is not None else None
-    ref_db = b.grad if b is not None else None
-    g.grad = A.grad = None
-    if g_bias is not None:
-        g_bias.grad = None
-    if b is not None:
-        b.grad = None
+        ((ref * do).sum() + (ref_b * db).sum()).backward(retain_graph=True)
 
-    if b is None:
+    ref_dg, ref_dA = g.grad, A_log.grad
+    ref_dbias = dt_bias.grad if dt_bias is not None else None
+    ref_dbeta = beta.grad if beta is not None else None
+    g.grad = A_log.grad = None
+    if dt_bias is not None:
+        dt_bias.grad = None
+    if beta is not None:
+        beta.grad = None
+
+    if beta is None:
         ((tri * do).sum()).backward(retain_graph=True)
     else:
-        ((tri * do).sum() + (b_sigmoid_tri * db).sum()).backward(retain_graph=True)
-    tri_dg, tri_dA = g.grad, A.grad
-    tri_db = b.grad if b is not None else None
-    tri_dgbias = g_bias.grad if g_bias is not None else None
-    g.grad = A.grad = None
-    if g_bias is not None:
-        g_bias.grad = None
-    if b is not None:
-        b.grad = None
+        ((tri * do).sum() + (tri_b * db).sum()).backward(retain_graph=True)
+    tri_dg, tri_dA = g.grad, A_log.grad
+    tri_dbeta = beta.grad if beta is not None else None
+    tri_dbias = dt_bias.grad if dt_bias is not None else None
+    g.grad = A_log.grad = None
+    if dt_bias is not None:
+        dt_bias.grad = None
+    if beta is not None:
+        beta.grad = None
 
     assert_close('o', ref, tri, 1e-4)
+    if HAS_BETA:
+        assert_close('beta', ref_b, tri_b, 1e-4)
     assert_close('dg', ref_dg, tri_dg, 1e-4)
     assert_close('dA', ref_dA, tri_dA, 1e-4)
-    if use_bias:
-        assert_close('dgbias', ref_dgbias, tri_dgbias, 1e-4)
-    if use_b:
-        assert_close('b', b_sigmoid_ref, b_sigmoid_tri, 1e-4)
-        assert_close('db', ref_db, tri_db, 1e-4)
+    if HAS_BIAS:
+        assert_close('dbias', ref_dbias, tri_dbias, 1e-4)
+    if HAS_BETA:
+        assert_close('dbeta', ref_dbeta, tri_dbeta, 1e-4)
