@@ -48,12 +48,10 @@ def naive_kda_gate(
     return g, beta
 
 
-@triton.heuristics(
-    {
-        "HAS_BIAS": lambda args: args["dt_bias"] is not None,
-        "HAS_BETA": lambda args: args["beta"] is not None,
-    }
-)
+@triton.heuristics({
+    "HAS_BIAS": lambda args: args["dt_bias"] is not None,
+    "HAS_BETA": lambda args: args["beta"] is not None,
+})
 @triton.autotune(
     configs=[
         triton.Config({"BT": BT}, num_warps=num_warps, num_stages=num_stages)
@@ -101,12 +99,10 @@ def kda_gate_fwd_kernel(
         tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), boundary_check=(0,))
 
 
-@triton.heuristics(
-    {
-        "HAS_BIAS": lambda args: args["dt_bias"] is not None,
-        "HAS_BETA": lambda args: args["beta"] is not None,
-    }
-)
+@triton.heuristics({
+    "HAS_BIAS": lambda args: args["dt_bias"] is not None,
+    "HAS_BETA": lambda args: args["beta"] is not None,
+})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
