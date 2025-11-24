@@ -67,6 +67,7 @@ class GatedDeltaProductBlock(GradientCheckpointingLayer):
                 allow_neg_eigval=config.allow_neg_eigval,
                 num_householder=config.num_householder,
                 layer_idx=layer_idx,
+                fuse_conv_l2=config.fuse_conv_l2,
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = GatedDeltaProductMLP(

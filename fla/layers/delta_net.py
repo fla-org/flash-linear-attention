@@ -87,7 +87,8 @@ class DeltaNet(nn.Module):
         qk_activation: str = 'silu',
         qk_norm: str = 'l2',
         norm_eps: float = 1e-5,
-        fuse_norm: bool = True,
+        fuse_conv_l2: bool = True,
+        fuse_norm: bool | None = None,
         **kwargs,
     ) -> DeltaNet:
         super().__init__()
@@ -95,7 +96,14 @@ class DeltaNet(nn.Module):
         self.mode = mode
         self.qk_activation = qk_activation
         self.qk_norm = qk_norm
-        self.fuse_norm = fuse_norm and (qk_norm == 'l2')
+        if fuse_norm is not None:
+            warnings.warn(
+                "`fuse_norm` is deprecated for DeltaNet; use `fuse_conv_l2` to control the fused "
+                "ShortConvolution + L2 kernel.",
+                stacklevel=2,
+            )
+            fuse_conv_l2 = fuse_norm
+        self.fuse_conv_l2 = fuse_conv_l2 and use_short_conv and (qk_norm == 'l2')
 
         assert self.qk_activation in ['silu', 'relu', 'elu', 'identity']
         assert self.qk_norm in ['l2', 'sum']
@@ -138,7 +146,7 @@ class DeltaNet(nn.Module):
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu' if qk_activation == 'silu' else None,
-                norm='l2' if self.fuse_norm else None,
+                norm='l2' if self.fuse_conv_l2 else None,
                 norm_eps=norm_eps,
             )
             self.k_conv1d = ShortConvolution(
@@ -146,7 +154,7 @@ class DeltaNet(nn.Module):
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu' if qk_activation == 'silu' else None,
-                norm='l2' if self.fuse_norm else None,
+                norm='l2' if self.fuse_conv_l2 else None,
                 norm_eps=norm_eps,
             )
             self.v_conv1d = ShortConvolution(
@@ -206,14 +214,14 @@ class DeltaNet(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_dim=self.head_k_dim if self.fuse_norm else None
+                head_dim=self.head_k_dim if self.fuse_conv_l2 else None
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                head_dim=self.head_k_dim if self.fuse_norm else None
+                head_dim=self.head_k_dim if self.fuse_conv_l2 else None
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
@@ -260,7 +268,7 @@ class DeltaNet(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2' and not self.fuse_norm),
+                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2' and not self.fuse_conv_l2),
             )
         elif mode == 'chunk':
             o, recurrent_state = chunk_delta_rule(
@@ -271,7 +279,7 @@ class DeltaNet(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2' and not self.fuse_norm),
+                use_qk_l2norm_in_kernel=(self.qk_norm == 'l2' and not self.fuse_conv_l2),
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

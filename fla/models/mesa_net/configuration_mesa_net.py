@@ -39,6 +39,7 @@ class MesaNetConfig(PretrainedConfig):
         vocab_size: int = 32000,
         max_cg_step_training: int = 30,
         max_cg_step_decoding: int = 30,
+        fuse_conv_l2: bool = True,
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -68,6 +69,7 @@ class MesaNetConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.max_cg_step_training = max_cg_step_training
         self.max_cg_step_decoding = max_cg_step_decoding
+        self.fuse_conv_l2 = fuse_conv_l2
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(

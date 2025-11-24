@@ -100,6 +100,7 @@ class GatedDeltaNet(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        fuse_conv_l2: bool = True,
         **kwargs,
     ) -> GatedDeltaNet:
         super().__init__()
@@ -113,6 +114,7 @@ class GatedDeltaNet(nn.Module):
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
+        self.fuse_conv_l2 = fuse_conv_l2 and self.use_short_conv
 
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -174,12 +176,16 @@ class GatedDeltaNet(nn.Module):
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
+                norm='l2' if self.fuse_conv_l2 else None,
+                norm_eps=norm_eps,
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
+                norm='l2' if self.fuse_conv_l2 else None,
+                norm_eps=norm_eps,
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
@@ -239,12 +245,14 @@ class GatedDeltaNet(nn.Module):
                 cache=conv_state_q,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_k_dim if self.fuse_conv_l2 else None,
             )
             k, conv_state_k = self.k_conv1d(
                 x=self.k_proj(hidden_states),
                 cache=conv_state_k,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_k_dim if self.fuse_conv_l2 else None,
             )
             v, conv_state_v = self.v_conv1d(
                 x=self.v_proj(hidden_states),
@@ -280,7 +288,7 @@ class GatedDeltaNet(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gated_delta_rule(
@@ -292,7 +300,7 @@ class GatedDeltaNet(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

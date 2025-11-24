@@ -289,6 +289,7 @@ class MomAttention(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        fuse_conv_l2: bool = True,
         num_memories: int = 8,
         topk: int = 2,
         capacity: float = 1.0,
@@ -312,6 +313,7 @@ class MomAttention(nn.Module):
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
+        self.fuse_conv_l2 = fuse_conv_l2 and self.use_short_conv
 
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -381,12 +383,16 @@ class MomAttention(nn.Module):
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
+                norm='l2' if self.fuse_conv_l2 else None,
+                norm_eps=norm_eps,
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
                 activation='silu',
+                norm='l2' if self.fuse_conv_l2 else None,
+                norm_eps=norm_eps,
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
@@ -513,6 +519,7 @@ class MomAttention(nn.Module):
                 cache=conv_q,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
+                head_dim=self.head_qk_dim if self.fuse_conv_l2 else None,
             )
             conv_state_q[0] = self.handle_recurrent_state(
                 conv_state_q[0],
@@ -533,6 +540,7 @@ class MomAttention(nn.Module):
                 cache=conv_k,
                 output_final_state=use_cache,
                 cu_seqlens=conv_cu_seqlens,
+                head_dim=self.head_qk_dim if self.fuse_conv_l2 else None,
             )
             conv_state_k[0] = self.handle_recurrent_state(
                 conv_state_k[0],
@@ -580,7 +588,7 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(
@@ -605,7 +613,7 @@ class MomAttention(nn.Module):
                 beta=cu_beta,
                 initial_state=memories,
                 output_final_state=use_cache,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(
@@ -684,12 +692,14 @@ class MomAttention(nn.Module):
                 cache=conv_state_q[1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_qk_dim if self.fuse_conv_l2 else None,
             )
             k, conv_state_k[1] = self.k_conv1d(
                 x=self.shared_k(hidden_states),
                 cache=conv_state_k[1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                head_dim=self.head_qk_dim if self.fuse_conv_l2 else None,
             )
             v, conv_state_v[1] = self.v_conv1d(
                 x=self.shared_v(hidden_states),
@@ -716,7 +726,7 @@ class MomAttention(nn.Module):
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state[-1] = fused_recurrent_gated_delta_rule(
@@ -728,7 +738,7 @@ class MomAttention(nn.Module):
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not self.fuse_conv_l2,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
