@@ -1,6 +1,5 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -9,6 +8,7 @@ from fla.ops.common.chunk_o import chunk_bwd_dv_local
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_inter import chunk_kda_bwd_dqkwg
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
+from fla.ops.kda.gate import kda_gate_bwd, kda_gate_fwd
 from fla.ops.kda.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
@@ -25,9 +25,8 @@ def chunk_kda_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
-    chunk_size = 64
-    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     # the intra Aqk is kept in fp32
     # the computation has very marginal effect on the entire throughput
     Aqk, Akk = chunk_kda_fwd_intra(
@@ -71,7 +70,7 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
-    return g, o, Aqk, Akk, final_state
+    return o, Aqk, Akk, final_state
 
 
 def chunk_kda_bwd(
@@ -88,8 +87,8 @@ def chunk_kda_bwd(
     dht: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
-    chunk_size = 64
     w, u, qg, kg = recompute_w_u_fwd(
         q=q,
         k=k,
@@ -191,7 +190,6 @@ def chunk_kda_bwd(
 
 
 class ChunkKDAFunction(torch.autograd.Function):
-
     @staticmethod
     @input_guard
     @autocast_custom_fwd
@@ -202,19 +200,32 @@ class ChunkKDAFunction(torch.autograd.Function):
         v: torch.Tensor,
         g: torch.Tensor,
         beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
+        use_gate_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ):
+        g_org = None
+        if use_gate_in_kernel:
+            g_org = g
+            g, _ = kda_gate_fwd(
+                g=g_org,
+                A_log=A_log,
+                dt_bias=dt_bias,
+            )
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
 
-        g, o, Aqk, Akk, final_state = chunk_kda_fwd(
+        chunk_size = 64
+        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+        o, Aqk, Akk, final_state = chunk_kda_fwd(
             q=q,
             k=k,
             v=v,
@@ -226,9 +237,15 @@ class ChunkKDAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, Aqk, Akk, initial_state, cu_seqlens, chunk_indices)
+        if use_gate_in_kernel:
+            g = None
+        ctx.save_for_backward(
+            q, q_rstd, k, k_rstd, v, g, g_org, beta, A_log, dt_bias, Aqk, Akk, initial_state, cu_seqlens, chunk_indices
+        )
+        ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+        ctx.use_gate_in_kernel = use_gate_in_kernel
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -239,7 +256,16 @@ class ChunkKDAFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        q, q_rstd, k, k_rstd, v, g, beta, Aqk, Akk, initial_state, cu_seqlens, chunk_indices = ctx.saved_tensors
+        (q, q_rstd, k, k_rstd, v, g, g_org, beta, A_log, dt_bias, Aqk, Akk, initial_state, cu_seqlens, chunk_indices) = (
+            ctx.saved_tensors
+        )
+        if ctx.use_gate_in_kernel:
+            g, _ = kda_gate_fwd(
+                g=g_org,
+                A_log=A_log,
+                dt_bias=dt_bias,
+            )
+            g = chunk_local_cumsum(g, chunk_size=ctx.chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
         dq, dk, dv, db, dg, dh0 = chunk_kda_bwd(
             q=q,
             k=k,
@@ -254,11 +280,24 @@ class ChunkKDAFunction(torch.autograd.Function):
             dht=dht,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            chunk_size=ctx.chunk_size,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
+        dA, dbias = None, None
+        if ctx.use_gate_in_kernel:
+            dg, dA, dbias, _ = kda_gate_bwd(
+                g=g_org,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                dyg=dg,
+                dyb=db,
+            )
+            dA = dA.to(A_log)
+            if dt_bias is not None:
+                dbias = dbias.to(dt_bias)
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), dA, dbias, None, dh0, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -272,6 +311,7 @@ def chunk_kda(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    use_gate_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     **kwargs,
@@ -299,6 +339,14 @@ def chunk_kda(
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q,k tensor internally. Default: `False`.
+        use_gate_in_kernel (bool):
+            Whether to compute the log-space KDA decay internally.
+            - If `True`: The passed `g` acts as the raw input for `-exp(A_log).unsqueeze(-1) * softplus(g + dt_bias)`.
+              The passed `beta` of shape `[B, T, H]` acts as the inputs for `beta.sigmoid()`.
+              Note that as part of the input arguments,
+              `A_log` (shape `[H]`) and the optional `dt_bias` (shape `[H * K]`) should be provided.
+            - If `False`, `g` is expected to be the pre-computed decay value.
+            Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -321,12 +369,13 @@ def chunk_kda(
         >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> k = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device='cuda')
-        >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
-        >>> g = F.logsigmoid(torch.rand(B, T, H, K, dtype=torch.bfloat16, device='cuda'))
+        >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda')
+        >>> g = torch.rand(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
         >>> o, ht = chunk_kda(
             q, k, v, g, beta,
             use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
             initial_state=h0,
             output_final_state=True
         )
@@ -337,6 +386,7 @@ def chunk_kda(
         >>> o, ht = chunk_kda(
             q, k, v, g, beta,
             use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
             initial_state=h0,
             output_final_state=True,
             cu_seqlens=cu_seqlens
@@ -356,9 +406,15 @@ def chunk_kda(
             )
     if initial_state is not None:
         assert initial_state.dtype == torch.float32, "initial_state must be in float32."
+
+    A_log, dt_bias = None, None
+    if use_gate_in_kernel:
+        assert "A_log" in kwargs, "A_log must be provided when use_gate_in_kernel=True."
+        A_log, dt_bias = kwargs["A_log"], kwargs.get("dt_bias")
+
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
-    assert beta.shape == (q.shape[0], q.shape[1], q.shape[2]), "beta must be of shape (batch size, seq len, num of head)."
-    assert v.shape == (q.shape[0], q.shape[1], q.shape[2], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
+    assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."
+    assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkKDAFunction.apply(
@@ -367,10 +423,13 @@ def chunk_kda(
         v,
         g,
         beta,
+        A_log,
+        dt_bias,
         scale,
         initial_state,
         output_final_state,
         use_qk_l2norm_in_kernel,
+        use_gate_in_kernel,
         cu_seqlens,
         chunk_indices,
     )
