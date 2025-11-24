@@ -1,6 +1,5 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -214,11 +213,10 @@ class ChunkKDAFunction(torch.autograd.Function):
         g_org = None
         if use_gate_in_kernel:
             g_org = g
-            g, beta = kda_gate_fwd(
+            g, _ = kda_gate_fwd(
                 g=g_org,
                 A_log=A_log,
                 dt_bias=dt_bias,
-                beta=beta,
             )
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -289,11 +287,10 @@ class ChunkKDAFunction(torch.autograd.Function):
             dk = l2norm_bwd(k, k_rstd, dk)
         dA, dbias = None, None
         if ctx.use_gate_in_kernel:
-            dg, dA, dbias, db = kda_gate_bwd(
+            dg, dA, dbias, _ = kda_gate_bwd(
                 g=g_org,
                 A_log=A_log,
                 dt_bias=dt_bias,
-                beta=beta,
                 dyg=dg,
                 dyb=db,
             )

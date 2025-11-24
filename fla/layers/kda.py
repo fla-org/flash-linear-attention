@@ -213,7 +213,7 @@ class KimiDeltaAttention(nn.Module):
             v = F.silu(self.v_proj(hidden_states))
 
         g = self.f_proj(hidden_states)
-        beta = self.b_proj(hidden_states)
+        beta = self.b_proj(hidden_states).sigmoid()
 
         q, k, g = (rearrange(x, "... (h d) -> ... h d", d=self.head_k_dim) for x in (q, k, g))
         v = rearrange(v, "... (h d) -> ... h d", d=self.head_v_dim)
@@ -243,7 +243,7 @@ class KimiDeltaAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
         elif mode == "fused_recurrent":
-            g, beta = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias, beta=beta)
+            g, _ = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias, beta=beta)
             o, recurrent_state = fused_recurrent_kda(
                 q=q,
                 k=k,

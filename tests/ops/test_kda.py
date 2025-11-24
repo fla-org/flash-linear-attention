@@ -195,12 +195,10 @@ def test_chunk(
     else:
         g = F.logsigmoid(g) / gate_logit_normalizer
         g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.randn(B, T, H, dtype=dtype)
+    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     if use_gate_in_kernel:
         A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
-    else:
-        beta = beta.sigmoid()
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
     do = torch.randn_like(v)
@@ -211,7 +209,7 @@ def test_chunk(
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
         g=(naive_kda_gate(g, A_log, dt_bias)[0] if use_gate_in_kernel else g.clone()),
-        beta=(beta.sigmoid().clone() if use_gate_in_kernel else beta.clone()),
+        beta=beta.clone(),
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
