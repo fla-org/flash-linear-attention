@@ -4,8 +4,7 @@
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.ops.common.chunk_delta_h import (chunk_gated_delta_rule_bwd_dhu,
-                                          chunk_gated_delta_rule_fwd_h)
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dv_local
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_inter import chunk_kda_bwd_dqkwg
@@ -193,7 +192,6 @@ def chunk_kda_bwd(
 
 
 class ChunkKDAFunction(torch.autograd.Function):
-
     @staticmethod
     @input_guard
     @autocast_custom_fwd
@@ -243,21 +241,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         if use_gate_in_kernel:
             g = None
         ctx.save_for_backward(
-            q,
-            q_rstd,
-            k,
-            k_rstd,
-            v,
-            g,
-            g_org,
-            beta,
-            A_log,
-            dt_bias,
-            Aqk,
-            Akk,
-            initial_state,
-            cu_seqlens,
-            chunk_indices
+            q, q_rstd, k, k_rstd, v, g, g_org, beta, A_log, dt_bias, Aqk, Akk, initial_state, cu_seqlens, chunk_indices
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -272,23 +256,9 @@ class ChunkKDAFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        (
-            q,
-            q_rstd,
-            k,
-            k_rstd,
-            v,
-            g,
-            g_org,
-            beta,
-            A_log,
-            dt_bias,
-            Aqk,
-            Akk,
-            initial_state,
-            cu_seqlens,
-            chunk_indices
-        ) = ctx.saved_tensors
+        (q, q_rstd, k, k_rstd, v, g, g_org, beta, A_log, dt_bias, Aqk, Akk, initial_state, cu_seqlens, chunk_indices) = (
+            ctx.saved_tensors
+        )
         if ctx.use_gate_in_kernel:
             g, _ = kda_gate_fwd(
                 g=g_org,
@@ -438,8 +408,8 @@ def chunk_kda(
 
     A_log, dt_bias = None, None
     if use_gate_in_kernel:
-        assert 'A_log' in kwargs, "A_log must be provided when use_gate_in_kernel=True."
-        A_log, dt_bias = kwargs['A_log'], kwargs.get('dt_bias')
+        assert "A_log" in kwargs, "A_log must be provided when use_gate_in_kernel=True."
+        A_log, dt_bias = kwargs["A_log"], kwargs.get("dt_bias")
 
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."

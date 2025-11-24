@@ -13,7 +13,7 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
+    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
     [
         pytest.param(
             *test,
@@ -38,7 +38,7 @@ def test_naive_chunk(
 ):
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
-        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
 
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
@@ -69,12 +69,12 @@ def test_naive_chunk(
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'use_qk_l2norm_in_kernel', 'dtype'),
+    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
     [
         pytest.param(
             *test,
@@ -100,7 +100,7 @@ def test_fused_recurrent(
 ):
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
-        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
 
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
@@ -132,12 +132,12 @@ def test_fused_recurrent(
         output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
-    assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype', 'tma'),
+    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "mask_p", "use_qk_l2norm_in_kernel", "dtype", "tma"),
     [
         pytest.param(
             *test,
@@ -169,9 +169,9 @@ def test_chunk(
 ):
     torch.manual_seed(42)
     if not tma:
-        os.environ['FLA_USE_TMA'] = '0'
+        os.environ["FLA_USE_TMA"] = "0"
     else:
-        os.environ['FLA_USE_TMA'] = '1'
+        os.environ["FLA_USE_TMA"] = "1"
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
@@ -212,18 +212,18 @@ def test_chunk(
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
 
-    assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
-    assert_close('dq', ref_dq, tri_dq, 0.008)
-    assert_close('dk', ref_dk, tri_dk, 0.008)
-    assert_close('dv', ref_dv, tri_dv, 0.008)
-    assert_close('dg', ref_dg, tri_dg, 0.02)
-    assert_close('db', ref_db, tri_db, 0.02)
-    assert_close('dh0', ref_dh0, tri_dh0, 0.008)
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.008)
+    assert_close("dk", ref_dk, tri_dk, 0.008)
+    assert_close("dv", ref_dv, tri_dv, 0.008)
+    assert_close("dg", ref_dg, tri_dg, 0.02)
+    assert_close("db", ref_db, tri_db, 0.02)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype', 'use_tma'),
+    ("H", "D", "mask_p", "cu_seqlens", "dtype", "use_tma"),
     [
         pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}-tma{}".format(*test))
         for test in [
@@ -236,8 +236,8 @@ def test_chunk(
     ],
 )
 @pytest.mark.skipif(
-    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
+    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
+    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set",
 )
 def test_chunk_varlen(
     H: int,
@@ -248,11 +248,11 @@ def test_chunk_varlen(
     use_tma: bool,
 ):
     if not use_tma:
-        os.environ['FLA_USE_TMA'] = '0'
+        os.environ["FLA_USE_TMA"] = "0"
     else:
-        os.environ['FLA_USE_TMA'] = '1'
+        os.environ["FLA_USE_TMA"] = "1"
     torch.manual_seed(42)
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
     # randomly split the sequence into N segments
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     T = cu_seqlens[-1]
@@ -289,11 +289,11 @@ def test_chunk_varlen(
     ref_ht = []
     for i in range(N):
         ref_i, ref_ht_i = naive_recurrent_kda(
-            q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            beta=beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            q=q[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+            k=k[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+            v=v[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+            beta=beta[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+            g=g[:, cu_seqlens[i] : cu_seqlens[i + 1]],
             initial_state=h0[i],
             output_final_state=True,
         )
@@ -305,19 +305,19 @@ def test_chunk_varlen(
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
 
-    assert_close('o', ref, tri, 0.005)
-    assert_close('ht', ref_ht, tri_ht, 0.005)
-    assert_close('dq', ref_dq, tri_dq, 0.007)
-    assert_close('dk', ref_dk, tri_dk, 0.008)
-    assert_close('dv', ref_dv, tri_dv, 0.007)
-    assert_close('dg', ref_dg, tri_dg, 0.015)
-    assert_close('db', ref_db, tri_db, 0.015)
-    assert_close('dh0', ref_dh0, tri_dh0, 0.007)
-    os.environ['FLA_USE_TMA'] = '0'
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.007)
+    assert_close("dk", ref_dk, tri_dk, 0.008)
+    assert_close("dv", ref_dv, tri_dv, 0.007)
+    assert_close("dg", ref_dg, tri_dg, 0.015)
+    assert_close("db", ref_db, tri_db, 0.015)
+    assert_close("dh0", ref_dh0, tri_dh0, 0.007)
+    os.environ["FLA_USE_TMA"] = "0"
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'HAS_BIAS', 'HAS_BETA'),
+    ("B", "T", "H", "D", "HAS_BIAS", "HAS_BETA"),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-beta{}".format(*test))
         for test in [
@@ -356,16 +356,10 @@ def test_kda_gate(
     db = torch.randn_like(beta) if beta is not None else None
 
     ref, ref_b = kda_gate_ref(
-        g.clone(),
-        A_log.clone(),
-        dt_bias.clone() if dt_bias is not None else None,
-        beta.clone() if beta is not None else None
+        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None, beta.clone() if beta is not None else None
     )
     tri, tri_b = fused_kda_gate(
-        g.clone(),
-        A_log.clone(),
-        dt_bias.clone() if dt_bias is not None else None,
-        beta.clone() if beta is not None else None
+        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None, beta.clone() if beta is not None else None
     )
     if beta is None:
         ((ref * do).sum()).backward(retain_graph=True)
@@ -394,12 +388,12 @@ def test_kda_gate(
     if beta is not None:
         beta.grad = None
 
-    assert_close('o', ref, tri, 1e-4)
+    assert_close("o", ref, tri, 1e-4)
     if HAS_BETA:
-        assert_close('beta', ref_b, tri_b, 1e-4)
-    assert_close('dg', ref_dg, tri_dg, 1e-4)
-    assert_close('dA', ref_dA, tri_dA, 1e-4)
+        assert_close("beta", ref_b, tri_b, 1e-4)
+    assert_close("dg", ref_dg, tri_dg, 1e-4)
+    assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
-        assert_close('dbias', ref_dbias, tri_dbias, 1e-4)
+        assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
     if HAS_BETA:
-        assert_close('dbeta', ref_dbeta, tri_dbeta, 1e-4)
+        assert_close("dbeta", ref_dbeta, tri_dbeta, 1e-4)

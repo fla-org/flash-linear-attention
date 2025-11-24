@@ -64,7 +64,7 @@ class KimiDeltaAttention(nn.Module):
         head_dim: int = 128,
         num_heads: int = 16,
         num_v_heads: int = None,
-        mode: str = 'chunk',
+        mode: str = "chunk",
         use_short_conv: bool = True,
         allow_neg_eigval: bool = False,
         conv_size: int = 4,
@@ -110,7 +110,7 @@ class KimiDeltaAttention(nn.Module):
                 f"expand_v={expand_v} does not produce an integer value when multiplied by head_dim={head_dim}. "
                 f"Resulting head_v_dim would be {head_dim * expand_v}, which is invalid for FusedRMSNormGated.",
             )
-        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
+        assert mode in ["chunk", "fused_recurrent"], f"Not supported mode `{mode}`."
 
         self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
@@ -121,19 +121,19 @@ class KimiDeltaAttention(nn.Module):
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu',
+                activation="silu",
             )
             self.k_conv1d = ShortConvolution(
                 hidden_size=self.key_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu',
+                activation="silu",
             )
             self.v_conv1d = ShortConvolution(
                 hidden_size=self.value_dim,
                 kernel_size=conv_size,
                 bias=conv_bias,
-                activation='silu',
+                activation="silu",
             )
 
         self.f_proj = nn.Sequential(
@@ -151,7 +151,7 @@ class KimiDeltaAttention(nn.Module):
             nn.Linear(hidden_size, self.head_v_dim, bias=False),
             nn.Linear(self.head_v_dim, self.value_dim, bias=True),
         )
-        self.o_norm = FusedRMSNormGated(self.head_v_dim, activation='sigmoid', eps=norm_eps)
+        self.o_norm = FusedRMSNormGated(self.head_v_dim, activation="sigmoid", eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
     def forward(
@@ -172,15 +172,15 @@ class KimiDeltaAttention(nn.Module):
 
         batch_size, q_len, _ = hidden_states.shape
         # change to inference mode.
-        mode = 'fused_recurrent' if (q_len <= 64 and not self.training) else self.mode
+        mode = "fused_recurrent" if (q_len <= 64 and not self.training) else self.mode
         if self.training:
-            assert mode == 'chunk', "Only chunk mode is supported in training."
+            assert mode == "chunk", "Only chunk mode is supported in training."
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
             last_state = past_key_values[self.layer_idx]
 
-        cu_seqlens = kwargs.get('cu_seqlens')
+        cu_seqlens = kwargs.get("cu_seqlens")
         if attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
@@ -188,7 +188,7 @@ class KimiDeltaAttention(nn.Module):
         if self.use_short_conv:
             conv_state_q, conv_state_k, conv_state_v = None, None, None
             if last_state is not None:
-                conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
+                conv_state_q, conv_state_k, conv_state_v = last_state["conv_state"]
             q, conv_state_q = self.q_conv1d(
                 x=self.q_proj(hidden_states),
                 cache=conv_state_q,
@@ -215,19 +215,19 @@ class KimiDeltaAttention(nn.Module):
         g = self.f_proj(hidden_states)
         beta = self.b_proj(hidden_states)
 
-        q, k, g = (rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim) for x in (q, k, g))
-        v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
+        q, k, g = (rearrange(x, "... (h d) -> ... h d", d=self.head_k_dim) for x in (q, k, g))
+        v = rearrange(v, "... (h d) -> ... h d", d=self.head_v_dim)
 
         # for multi-value attention, we repeat the inputs for simplicity.
         if self.num_v_heads > self.num_heads:
-            q, k, g = (repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads) for x in (q, k, g))
-            beta = repeat(beta, '... h -> ... (h g)', g=self.num_v_heads // self.num_heads)
+            q, k, g = (repeat(x, "... h d -> ... (h g) d", g=self.num_v_heads // self.num_heads) for x in (q, k, g))
+            beta = repeat(beta, "... h -> ... (h g)", g=self.num_v_heads // self.num_heads)
 
         if self.allow_neg_eigval:
-            beta = beta * 2.
+            beta = beta * 2.0
 
-        recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        if mode == 'chunk':
+        recurrent_state = last_state["recurrent_state"] if last_state is not None else None
+        if mode == "chunk":
             o, recurrent_state = chunk_kda(
                 q=q,
                 k=k,
@@ -242,7 +242,7 @@ class KimiDeltaAttention(nn.Module):
                 use_gate_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
-        elif mode == 'fused_recurrent':
+        elif mode == "fused_recurrent":
             g, beta = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias, beta=beta)
             o, recurrent_state = fused_recurrent_kda(
                 q=q,
@@ -266,8 +266,8 @@ class KimiDeltaAttention(nn.Module):
                 offset=q_len,
             )
 
-        o = self.o_norm(o, rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim))
-        o = rearrange(o, 'b t h d -> b t (h d)')
+        o = self.o_norm(o, rearrange(self.g_proj(hidden_states), "... (h d) -> ... h d", d=self.head_v_dim))
+        o = rearrange(o, "b t h d -> b t (h d)")
         o = self.o_proj(o)
         if attention_mask is not None:
             o = pad_input(o.squeeze(0), indices, batch_size, q_len)

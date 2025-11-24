@@ -6,8 +6,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.softplus import softplus
-from fla.utils import (IS_AMD, autocast_custom_bwd, autocast_custom_fwd,
-                       autotune_cache_kwargs, input_guard)
+from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
@@ -49,18 +48,20 @@ def kda_gate_ref(
     return g, beta
 
 
-@triton.heuristics({
-    'HAS_BIAS': lambda args: args['dt_bias'] is not None,
-    'HAS_BETA': lambda args: args['beta'] is not None,
-})
+@triton.heuristics(
+    {
+        "HAS_BIAS": lambda args: args["dt_bias"] is not None,
+        "HAS_BETA": lambda args: args["beta"] is not None,
+    }
+)
 @triton.autotune(
     configs=[
-        triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({"BT": BT}, num_warps=num_warps, num_stages=num_stages)
         for BT in BT_LIST_AUTOTUNE
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3]
     ],
-    key=['H', 'D'],
+    key=["H", "D"],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -83,34 +84,50 @@ def kda_gate_fwd_kernel(
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H*D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_yg = tl.make_block_ptr(yg + i_h * D, (T, D), (H*D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_yg = tl.make_block_ptr(yg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     # [BT, BD]
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H*D,), (1,), (i_h * D,), (BD,), (0,))
+        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
     b_yg = -tl.exp(b_A) * softplus(b_g)
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
 
     if HAS_BETA:
-        p_b = tl.make_block_ptr(beta + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,),)
-        p_yb = tl.make_block_ptr(yb + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,),)
+        p_b = tl.make_block_ptr(
+            beta + i_h,
+            (T,),
+            (H,),
+            (i_t * BT,),
+            (BT,),
+            (0,),
+        )
+        p_yb = tl.make_block_ptr(
+            yb + i_h,
+            (T,),
+            (H,),
+            (i_t * BT,),
+            (BT,),
+            (0,),
+        )
         b_yb = tl.sigmoid(tl.load(p_b, boundary_check=(0,)).to(tl.float32))
         tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), boundary_check=(0,))
 
 
-@triton.heuristics({
-    'HAS_BIAS': lambda args: args['dt_bias'] is not None,
-    'HAS_BETA': lambda args: args['beta'] is not None,
-})
+@triton.heuristics(
+    {
+        "HAS_BIAS": lambda args: args["dt_bias"] is not None,
+        "HAS_BETA": lambda args: args["beta"] is not None,
+    }
+)
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3]
     ],
-    key=['H', 'D'],
+    key=["H", "D"],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -137,16 +154,16 @@ def kda_gate_bwd_kernel(
     b_A = tl.load(A_log + i_h).to(tl.float32)
     b_A = -tl.exp(b_A)
 
-    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H*D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dg = tl.make_block_ptr(dg + i_h * D, (T, D), (H*D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    p_dyg = tl.make_block_ptr(dyg + i_h * D, (T, D), (H*D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_dg = tl.make_block_ptr(dg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_dyg = tl.make_block_ptr(dyg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
 
     # [BT, BD]
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
     b_dyg = tl.load(p_dyg, boundary_check=(0, 1)).to(tl.float32)
 
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H*D,), (1,), (i_h * D,), (BD,), (0,))
+        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
 
     # [BT, BD]
@@ -179,7 +196,9 @@ def kda_gate_fwd(
     yg = torch.empty_like(g, dtype=output_dtype)
     yb = torch.empty_like(beta, dtype=output_dtype) if beta is not None else None
 
-    def grid(meta): return (triton.cdiv(T, meta['BT']), H)
+    def grid(meta):
+        return (triton.cdiv(T, meta["BT"]), H)
+
     kda_gate_fwd_kernel[grid](
         g=g,
         A_log=A_log,
@@ -239,7 +258,6 @@ def kda_gate_bwd(
 
 
 class KDAGateFunction(torch.autograd.Function):
-
     @staticmethod
     @input_guard
     @autocast_custom_fwd
@@ -251,24 +269,14 @@ class KDAGateFunction(torch.autograd.Function):
         beta: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float32,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        yg, beta = kda_gate_fwd(
-            g=g,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            beta=beta,
-            output_dtype=output_dtype
-        )
+        yg, beta = kda_gate_fwd(g=g, A_log=A_log, dt_bias=dt_bias, beta=beta, output_dtype=output_dtype)
         ctx.save_for_backward(g, A_log, dt_bias, beta)
         return yg, beta
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
-    def backward(
-        ctx,
-        dyg: torch.Tensor,
-        dyb: torch.Tensor | None
-    ):
+    def backward(ctx, dyg: torch.Tensor, dyb: torch.Tensor | None):
         g, A_log, dt_bias, beta = ctx.saved_tensors
         dg, dA, dbias, dbeta = kda_gate_bwd(
             g=g,
