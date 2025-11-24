@@ -12,7 +12,7 @@ BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
 
-def kda_gate_ref(
+def naive_kda_gate(
     g: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None = None,
@@ -95,22 +95,8 @@ def kda_gate_fwd_kernel(
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
 
     if HAS_BETA:
-        p_b = tl.make_block_ptr(
-            beta + i_h,
-            (T,),
-            (H,),
-            (i_t * BT,),
-            (BT,),
-            (0,),
-        )
-        p_yb = tl.make_block_ptr(
-            yb + i_h,
-            (T,),
-            (H,),
-            (i_t * BT,),
-            (BT,),
-            (0,),
-        )
+        p_b = tl.make_block_ptr(beta + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        p_yb = tl.make_block_ptr(yb + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_yb = tl.sigmoid(tl.load(p_b, boundary_check=(0,)).to(tl.float32))
         tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), boundary_check=(0,))
 

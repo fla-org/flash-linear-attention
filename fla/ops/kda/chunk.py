@@ -26,9 +26,8 @@ def chunk_kda_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
-    chunk_size = 64
-    g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     # the intra Aqk is kept in fp32
     # the computation has very marginal effect on the entire throughput
     Aqk, Akk = chunk_kda_fwd_intra(
@@ -72,7 +71,7 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
-    return g, o, Aqk, Akk, final_state
+    return o, Aqk, Akk, final_state
 
 
 def chunk_kda_bwd(
@@ -89,8 +88,8 @@ def chunk_kda_bwd(
     dht: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ):
-    chunk_size = 64
     w, u, qg, kg = recompute_w_u_fwd(
         q=q,
         k=k,
@@ -226,7 +225,9 @@ class ChunkKDAFunction(torch.autograd.Function):
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
 
-        g, o, Aqk, Akk, final_state = chunk_kda_fwd(
+        chunk_size = 64
+        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+        o, Aqk, Akk, final_state = chunk_kda_fwd(
             q=q,
             k=k,
             v=v,
@@ -243,6 +244,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.save_for_backward(
             q, q_rstd, k, k_rstd, v, g, g_org, beta, A_log, dt_bias, Aqk, Akk, initial_state, cu_seqlens, chunk_indices
         )
+        ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.use_gate_in_kernel = use_gate_in_kernel
@@ -265,6 +267,7 @@ class ChunkKDAFunction(torch.autograd.Function):
                 A_log=A_log,
                 dt_bias=dt_bias,
             )
+            g = chunk_local_cumsum(g, chunk_size=ctx.chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
         dq, dk, dv, db, dg, dh0 = chunk_kda_bwd(
             q=q,
             k=k,
@@ -279,6 +282,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             dht=dht,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            chunk_size=ctx.chunk_size,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)

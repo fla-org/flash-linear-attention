@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
-from fla.ops.kda.gate import fused_kda_gate, kda_gate_ref
+from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
@@ -137,21 +137,33 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "mask_p", "use_qk_l2norm_in_kernel", "dtype", "tma"),
+    (
+        "B",
+        "T",
+        "H",
+        "D",
+        "scale",
+        "gate_logit_normalizer",
+        "mask_p",
+        "use_qk_l2norm_in_kernel",
+        "use_gate_in_kernel",
+        "dtype",
+        "tma",
+    ),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}-tma{}".format(*test),
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-qk_l2norm{}-gate{}-dtype{}-tma{}".format(*test),
         )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, False, torch.float16, True),
-            (2, 500, 3, 60, 1, 1, 0, False, torch.float16, True),
-            (2, 1000, 3, 64, 0.1, 1, 0.5, False, torch.float16, False),
-            (3, 1024, 4, 100, 1, 0.1, 0, False, torch.float16, False),
-            (4, 1024, 4, 128, 0.1, 1, 0, False, torch.float16, True),
-            (4, 1024, 4, 128, 0.1, 1, 0, True, torch.float16, True),
-            (2, 1500, 4, 128, 0.1, 10, 0, False, torch.float16, False),
-            (4, 2048, 8, 64, 0.1, 1, 0, False, torch.float16, True),
+            (1, 63, 1, 64, 1, 1, 0, False, False, torch.float16, True),
+            (2, 500, 3, 60, 1, 1, 0, False, False, torch.float16, True),
+            (2, 1000, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False),
+            (3, 1024, 4, 100, 1, 0.1, 0, False, False, torch.float16, False),
+            (4, 1024, 4, 128, 0.1, 1, 0, False, False, torch.float16, True),
+            (4, 1024, 4, 128, 0.1, 1, 0, True, False, torch.float16, True),
+            (2, 1500, 4, 128, 0.1, 10, 0, False, True, torch.float16, False),
+            (4, 2048, 8, 64, 0.1, 1, 0, False, True, torch.float16, True),
         ]
     ],
 )
@@ -164,6 +176,7 @@ def test_chunk(
     gate_logit_normalizer: float,
     mask_p: float,
     use_qk_l2norm_in_kernel: bool,
+    use_gate_in_kernel: bool,
     dtype: torch.dtype,
     tma: bool,
 ):
@@ -175,11 +188,21 @@ def test_chunk(
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
-    g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    g = torch.randn(B, T, H, D, dtype=torch.float)
+    if use_gate_in_kernel:
+        A_log = torch.randn(H, dtype=torch.float)
+        dt_bias = torch.randn(H * D, dtype=torch.float)
+    else:
+        g = F.logsigmoid(g) / gate_logit_normalizer
+        g = g * (torch.rand_like(g) > mask_p)
+    beta = torch.randn(B, T, H, dtype=dtype)
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    if use_gate_in_kernel:
+        A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
+    else:
+        beta = beta.sigmoid()
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
+
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
@@ -187,13 +210,16 @@ def test_chunk(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
-        g=g.clone(),
-        beta=beta.clone(),
+        g=(naive_kda_gate(g, A_log, dt_bias)[0] if use_gate_in_kernel else g.clone()),
+        beta=(beta.sigmoid().clone() if use_gate_in_kernel else beta.clone()),
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    if use_gate_in_kernel:
+        ref_dA, A_log.grad = A_log.grad, None
+        ref_dbias, dt_bias.grad = dt_bias.grad, None
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
 
@@ -203,12 +229,18 @@ def test_chunk(
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
+        A_log=(A_log.clone() if use_gate_in_kernel else None),
+        dt_bias=(dt_bias.clone() if use_gate_in_kernel else None),
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    if use_gate_in_kernel:
+        tri_dA, A_log.grad = A_log.grad, None
+        tri_dbias, dt_bias.grad = dt_bias.grad, None
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
 
@@ -219,6 +251,9 @@ def test_chunk(
     assert_close("dv", ref_dv, tri_dv, 0.008)
     assert_close("dg", ref_dg, tri_dg, 0.02)
     assert_close("db", ref_db, tri_db, 0.02)
+    if use_gate_in_kernel:
+        assert_close("dA", ref_dA, tri_dA, 0.001)
+        assert_close("dbias", ref_dbias, tri_dbias, 0.001)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 
 
@@ -231,7 +266,7 @@ def test_chunk(
             (4, 64, 0, [0, 256, 500, 1000], torch.float16, True),
             (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False),
             (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True),
-            (4, 256, 0, [0, 15, 100, 300, 1200, 4096], torch.float16, False),
+            (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False),
         ]
     ],
 )
@@ -355,7 +390,7 @@ def test_kda_gate(
     do = torch.randn_like(g).view(B, T, H, D)
     db = torch.randn_like(beta) if beta is not None else None
 
-    ref, ref_b = kda_gate_ref(
+    ref, ref_b = naive_kda_gate(
         g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None, beta.clone() if beta is not None else None
     )
     tri, tri_b = fused_kda_gate(
