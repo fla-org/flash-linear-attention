@@ -25,10 +25,10 @@ from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_gua
         for BT in [16, 32, 64]
         for num_warps in [4, 8, 16]
     ],
-    key=['D', 'NB', 'IS_RMS_NORM', 'STORE_RESIDUAL_OUT', 'HAS_RESIDUAL', 'HAS_WEIGHT'],
+    key=['D', 'IS_RMS_NORM', 'STORE_RESIDUAL_OUT', 'HAS_RESIDUAL', 'HAS_WEIGHT'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['NB'])
 def layer_norm_gated_fwd_kernel(
     x,  # pointer to the input
     g,  # pointer to the gate
@@ -195,10 +195,10 @@ def layer_norm_gated_fwd_kernel1(
         for BT in [16, 32, 64]
         for num_warps in [4, 8, 16]
     ],
-    key=['D', 'NB', 'IS_RMS_NORM', 'HAS_DRESIDUAL', 'HAS_WEIGHT'],
+    key=['D', 'IS_RMS_NORM', 'HAS_DRESIDUAL', 'HAS_WEIGHT'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['NB'])
 def layer_norm_gated_bwd_kernel(
     x,  # pointer to the input
     g,  # pointer to the gate
@@ -472,7 +472,7 @@ def layer_norm_gated_fwd(
     # heuristics for number of warps
 
     if D <= 512:
-        NB = triton.cdiv(T, 2048)
+        NB = triton.cdiv(T, 2048) # Fixed to prevent recompilation
         def grid(meta): return (triton.cdiv(T, meta['BT']),)
         layer_norm_gated_fwd_kernel[grid](
             x=x,
@@ -556,7 +556,7 @@ def layer_norm_gated_bwd(
     grid = (NS,)
 
     if D <= 512:
-        NB = triton.cdiv(T, 2048)
+        NB = triton.cdiv(T, 2048)  # Fixed to prevent recompilation
         layer_norm_gated_bwd_kernel[grid](
             x=x,
             g=g,

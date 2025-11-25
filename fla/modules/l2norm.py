@@ -1,14 +1,15 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+
 import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
 
-from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
+from fla.utils import autotune_cache_kwargs, input_guard, is_amd
 
 BT_LIST = [8, 16, 32, 64, 128]
-NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if is_amd else [1, 2, 4, 8, 16, 32]
 
 
 @triton.autotune(
@@ -77,19 +78,19 @@ def l2norm_bwd_kernel1(
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
-        for BT in BT_LIST
+        for num_warps in [2, 4, 8]
+        for BT in [16, 32, 64, 128]
     ],
-    key=['D', 'NB'],
+    key=['D'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T','NB'])
 def l2norm_fwd_kernel(
     x,
     y,
     rstd,
     eps,
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
@@ -111,20 +112,20 @@ def l2norm_fwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({'BT': BT}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
-        for BT in BT_LIST
+        for num_warps in [2, 4, 8]
+        for BT in [16, 32, 64, 128]
     ],
-    key=['D', 'NB'],
+    key=['D'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T','NB'])
 def l2norm_bwd_kernel(
     y,
     rstd,
     dy,
     dx,
     eps,
-    T: tl.constexpr,
+    T,
     D: tl.constexpr,
     BD: tl.constexpr,
     NB: tl.constexpr,
@@ -165,7 +166,7 @@ def l2norm_fwd(
 
     rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
     if D <= 512:
-        NB = triton.cdiv(T, 2048)
+        NB = triton.cdiv(T, 2048)  # Fixed to prevent recompilation
         def grid(meta): return (triton.cdiv(T, meta['BT']), )
         l2norm_fwd_kernel[grid](
             x=x,
@@ -209,7 +210,7 @@ def l2norm_bwd(
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
 
     if D <= 512:
-        NB = triton.cdiv(T, 2048)
+        NB = triton.cdiv(T, 2048) # Fixed to prevent recompilation
         def grid(meta): return (triton.cdiv(T, meta['BT']), )
         l2norm_bwd_kernel[grid](
             y=y,

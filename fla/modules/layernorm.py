@@ -182,10 +182,10 @@ class GroupNormRef(nn.Module):
         for BT in [32, 64, 128]
         for num_warps in [2, 4, 8]
     ],
-    key=['D', 'NB', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
+    key=['D', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['NB'])
 def layer_norm_fwd_kernel(
     x,  # pointer to the input
     y,  # pointer to the output
@@ -256,7 +256,7 @@ def layer_norm_fwd_kernel(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8, 16]
     ],
-    key=['D', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
+    key=['D','HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -329,10 +329,10 @@ def layer_norm_fwd_kernel1(
         for BT in [32, 64]
         for num_warps in [2, 4, 8]
     ],
-    key=['D', 'NB', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM'],
+    key=['D', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['NB'])
 def layer_norm_bwd_kernel(
     x,  # pointer to the input
     w,  # pointer to the weights
@@ -562,7 +562,7 @@ def layer_norm_fwd(
     # heuristics for number of warps
 
     if D <= 512:
-        NB = triton.cdiv(T, 2048)
+        NB = triton.cdiv(T, 2048)  # Fixed to prevent recompilation
         def grid(meta): return (triton.cdiv(T, meta['BT']), )
         layer_norm_fwd_kernel[grid](
             x,
@@ -651,7 +651,7 @@ def layer_norm_bwd(
     grid = (NS,)
 
     if D <= 512:
-        NB = triton.cdiv(T, 2048)
+        NB = triton.cdiv(T, 2048) # Fixed to prevent recompilation
         layer_norm_bwd_kernel[grid](
             x,
             weight,
