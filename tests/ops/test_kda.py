@@ -208,7 +208,7 @@ def test_chunk(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
-        g=(naive_kda_gate(g, A_log, dt_bias)[0] if use_gate_in_kernel else g.clone()),
+        g=(naive_kda_gate(g, A_log, dt_bias) if use_gate_in_kernel else g.clone()),
         beta=beta.clone(),
         scale=scale,
         initial_state=h0.clone(),
