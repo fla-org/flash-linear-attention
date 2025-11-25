@@ -208,7 +208,7 @@ def test_chunk(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
-        g=(naive_kda_gate(g, A_log, dt_bias)[0] if use_gate_in_kernel else g.clone()),
+        g=(naive_kda_gate(g, A_log, dt_bias) if use_gate_in_kernel else g.clone()),
         beta=beta.clone(),
         scale=scale,
         initial_state=h0.clone(),
@@ -322,11 +322,11 @@ def test_chunk_varlen(
     ref_ht = []
     for i in range(N):
         ref_i, ref_ht_i = naive_recurrent_kda(
-            q=q[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            k=k[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            v=v[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            beta=beta[:, cu_seqlens[i] : cu_seqlens[i + 1]],
-            g=g[:, cu_seqlens[i] : cu_seqlens[i + 1]],
+            q=q[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            v=v[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            beta=beta[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            g=g[:, cu_seqlens[i]: cu_seqlens[i + 1]],
             initial_state=h0[i],
             output_final_state=True,
         )
@@ -350,83 +350,62 @@ def test_chunk_varlen(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "HAS_BIAS", "HAS_BETA"),
+    ("B", "T", "H", "D", "HAS_BIAS"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-beta{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}".format(*test))
         for test in [
-            (1, 2, 2, 12, False, False),
-            (1, 32, 2, 16, False, False),
-            (2, 64, 4, 32, False, False),
-            (4, 128, 8, 64, False, False),
-            (4, 128, 8, 128, False, False),
-            (1, 2, 2, 12, True, True),
-            (1, 32, 2, 16, True, True),
-            (2, 64, 4, 32, True, True),
-            (4, 128, 8, 64, True, True),
-            (4, 128, 8, 128, True, True),
+            (1, 2, 2, 12, False),
+            (1, 32, 2, 16, False),
+            (2, 64, 4, 32, False),
+            (4, 128, 8, 64, False),
+            (4, 128, 8, 128, False),
+            (1, 2, 2, 12, True),
+            (1, 32, 2, 16, True),
+            (2, 64, 4, 32, True),
+            (4, 128, 8, 64, True),
+            (4, 128, 8, 128, True),
         ]
     ],
 )
-def test_kda_gate(
+def test_gate(
     B: int,
     T: int,
     H: int,
     D: int,
     HAS_BIAS: bool,
-    HAS_BETA: bool,
 ):
     torch.manual_seed(42)
     g = torch.randn(B, T, H, D, dtype=torch.float32) * 10
     A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
     dt_bias = torch.randn(H * D, dtype=torch.float32) if HAS_BIAS else None
-    beta = torch.randn(B, T, H, dtype=torch.float32) if HAS_BETA else None
     g, A_log = map(lambda x: x.to(device).requires_grad_(True), (g, A_log))
     if dt_bias is not None:
         dt_bias = dt_bias.to(device).requires_grad_(True)
-    if beta is not None:
-        beta = beta.to(device).requires_grad_(True)
     do = torch.randn_like(g).view(B, T, H, D)
-    db = torch.randn_like(beta) if beta is not None else None
 
-    ref, ref_b = naive_kda_gate(
-        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None, beta.clone() if beta is not None else None
+    ref = naive_kda_gate(
+        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
     )
-    tri, tri_b = fused_kda_gate(
-        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None, beta.clone() if beta is not None else None
+    tri = fused_kda_gate(
+        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
     )
-    if beta is None:
-        ((ref * do).sum()).backward(retain_graph=True)
-    else:
-        ((ref * do).sum() + (ref_b * db).sum()).backward(retain_graph=True)
+    (ref * do).sum().backward(retain_graph=True)
 
     ref_dg, ref_dA = g.grad, A_log.grad
     ref_dbias = dt_bias.grad if dt_bias is not None else None
-    ref_dbeta = beta.grad if beta is not None else None
     g.grad = A_log.grad = None
     if dt_bias is not None:
         dt_bias.grad = None
-    if beta is not None:
-        beta.grad = None
 
-    if beta is None:
-        ((tri * do).sum()).backward(retain_graph=True)
-    else:
-        ((tri * do).sum() + (tri_b * db).sum()).backward(retain_graph=True)
+    ((tri * do).sum()).backward(retain_graph=True)
     tri_dg, tri_dA = g.grad, A_log.grad
-    tri_dbeta = beta.grad if beta is not None else None
     tri_dbias = dt_bias.grad if dt_bias is not None else None
     g.grad = A_log.grad = None
     if dt_bias is not None:
         dt_bias.grad = None
-    if beta is not None:
-        beta.grad = None
 
     assert_close("o", ref, tri, 1e-4)
-    if HAS_BETA:
-        assert_close("beta", ref_b, tri_b, 1e-4)
     assert_close("dg", ref_dg, tri_dg, 1e-4)
     assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
-    if HAS_BETA:
-        assert_close("dbeta", ref_dbeta, tri_dbeta, 1e-4)

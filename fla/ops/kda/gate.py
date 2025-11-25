@@ -16,7 +16,6 @@ def naive_kda_gate(
     g: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None = None,
-    beta: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
@@ -31,12 +30,9 @@ def naive_kda_gate(
             Parameter tensor with `H` elements.
         dt_bias (torch.Tensor | None):
             Optional bias tensor added to `g` before activation, shape `[H * K]`.
-        beta (torch.Tensor | None):
-            Optional tensor with shape `[..., H]` to compute sigmoid gate.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor | None]:
-            Output tensor of shape `[..., H, K]` and sigmoid gate tensor of shape `[..., H]`.
+        Output tensor of shape `[..., H, K]` .
     """
     H, _ = g.shape[-2:]
     g = g.float()
@@ -44,8 +40,7 @@ def naive_kda_gate(
         g = g + dt_bias.view(H, -1)
 
     g = (-A_log.view(H, 1).float().exp() * F.softplus(g.float())).to(output_dtype)
-    beta = beta.float().sigmoid().to(output_dtype) if beta is not None else None
-    return g, beta
+    return g
 
 
 @triton.heuristics({
@@ -169,14 +164,12 @@ def kda_gate_fwd(
     g: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None = None,
-    beta: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     H, K = g.shape[-2:]
     T = g.numel() // (H * K)
 
     yg = torch.empty_like(g, dtype=output_dtype)
-    yb = torch.empty_like(beta, dtype=output_dtype) if beta is not None else None
 
     def grid(meta):
         return (triton.cdiv(T, meta["BT"]), H)
@@ -185,22 +178,21 @@ def kda_gate_fwd(
         g=g,
         A_log=A_log,
         dt_bias=dt_bias,
-        beta=beta,
+        beta=None,
         yg=yg,
-        yb=yb,
+        yb=None,
         T=T,
         H=H,
         D=K,
         BD=triton.next_power_of_2(K),
     )
-    return yg, yb
+    return yg
 
 
 def kda_gate_bwd(
     g: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None = None,
-    beta: torch.Tensor | None = None,
     dyg: torch.Tensor | None = None,
     dyb: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
@@ -211,19 +203,18 @@ def kda_gate_bwd(
 
     dg = torch.empty_like(g, dtype=torch.float32)
     dA = A_log.new_empty(NT, H, dtype=torch.float32)
-    dbeta = torch.empty_like(beta) if beta is not None else None
 
     grid = (triton.cdiv(T, BT), H)
     kda_gate_bwd_kernel[grid](
         g=g,
         A_log=A_log,
         dt_bias=dt_bias,
-        beta=beta,
+        beta=None,
         dyg=dyg,
         dyb=dyb,
         dg=dg,
         dA=dA,
-        dbeta=dbeta,
+        dbeta=None,
         T=T,
         H=H,
         D=K,
@@ -234,9 +225,8 @@ def kda_gate_bwd(
     dg = dg.view_as(g)
     dA = dA.sum(0).view_as(A_log)
     dbias = dg.view(-1, H * K).sum(0) if dt_bias is not None else None
-    dbeta = dbeta.view_as(beta) if beta is not None else None
 
-    return dg, dA, dbias, dbeta
+    return dg, dA, dbias
 
 
 class KDAGateFunction(torch.autograd.Function):
@@ -248,38 +238,37 @@ class KDAGateFunction(torch.autograd.Function):
         g: torch.Tensor,
         A_log: torch.Tensor,
         dt_bias: torch.Tensor | None = None,
-        beta: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float32,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        yg, beta = kda_gate_fwd(g=g, A_log=A_log, dt_bias=dt_bias, beta=beta, output_dtype=output_dtype)
-        ctx.save_for_backward(g, A_log, dt_bias, beta)
-        return yg, beta
+    ) -> torch.Tensor:
+        yg = kda_gate_fwd(
+            g=g,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            output_dtype=output_dtype
+        )
+        ctx.save_for_backward(g, A_log, dt_bias)
+        return yg
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
-    def backward(ctx, dyg: torch.Tensor, dyb: torch.Tensor | None):
-        g, A_log, dt_bias, beta = ctx.saved_tensors
-        dg, dA, dbias, dbeta = kda_gate_bwd(
+    def backward(ctx, dyg: torch.Tensor):
+        g, A_log, dt_bias = ctx.saved_tensors
+        dg, dA, dbias = kda_gate_bwd(
             g=g,
             A_log=A_log,
             dt_bias=dt_bias,
-            beta=beta,
             dyg=dyg,
-            dyb=dyb,
         )
         if dt_bias is not None:
             dbias = dbias.to(dt_bias)
-        if beta is not None:
-            dbeta = dbeta.to(beta)
-        return dg.to(g), dA.to(A_log), dbias, dbeta, None
+        return dg.to(g), dA.to(A_log), dbias, None
 
 
 def fused_kda_gate(
     g: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor | None = None,
-    beta: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
@@ -294,11 +283,8 @@ def fused_kda_gate(
             Parameter tensor with `H` elements.
         dt_bias (torch.Tensor | None):
             Optional bias tensor added to `g` before activation, shape `[H * K]`.
-        beta (torch.Tensor | None):
-            Optional tensor with shape `[..., H]` to compute sigmoid gate.
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor | None]:
-            Output tensor of shape `[..., H, K]` and sigmoid gate tensor of shape `[..., H]`.
+        Output tensor of shape `[..., H, K]`.
     """
-    return KDAGateFunction.apply(g, A_log, dt_bias, beta, output_dtype)
+    return KDAGateFunction.apply(g, A_log, dt_bias, output_dtype)
