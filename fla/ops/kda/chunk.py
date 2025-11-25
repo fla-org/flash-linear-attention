@@ -213,7 +213,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         g_org = None
         if use_gate_in_kernel:
             g_org = g
-            g, _ = kda_gate_fwd(
+            g = kda_gate_fwd(
                 g=g_org,
                 A_log=A_log,
                 dt_bias=dt_bias,
@@ -260,7 +260,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             ctx.saved_tensors
         )
         if ctx.use_gate_in_kernel:
-            g, _ = kda_gate_fwd(
+            g = kda_gate_fwd(
                 g=g_org,
                 A_log=A_log,
                 dt_bias=dt_bias,
@@ -287,7 +287,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             dk = l2norm_bwd(k, k_rstd, dk)
         dA, dbias = None, None
         if ctx.use_gate_in_kernel:
-            dg, dA, dbias, _ = kda_gate_bwd(
+            dg, dA, dbias = kda_gate_bwd(
                 g=g_org,
                 A_log=A_log,
                 dt_bias=dt_bias,
@@ -341,8 +341,8 @@ def chunk_kda(
             Whether to apply L2norm to the q,k tensor internally. Default: `False`.
         use_gate_in_kernel (bool):
             Whether to compute the log-space KDA decay internally.
-            - If `True`: The passed `g` acts as the raw input for `-exp(A_log).unsqueeze(-1) * softplus(g + dt_bias)`.
-              The passed `beta` of shape `[B, T, H]` acts as the inputs for `beta.sigmoid()`.
+            - If `True`:
+              The passed `g` acts as the raw input for `-exp(A_log).view(H, -1) * softplus(g + dt_bias.view(H, K))`.
               Note that as part of the input arguments,
               `A_log` (shape `[H]`) and the optional `dt_bias` (shape `[H * K]`) should be provided.
             - If `False`, `g` is expected to be the pre-computed decay value.
@@ -372,8 +372,12 @@ def chunk_kda(
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda')
         >>> g = torch.rand(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
+        >>> A_log = torch.randn(H, dtype=torch.float32, device='cuda')
+        >>> dt_bias = torch.randn(H * K, dtype=torch.float32, device='cuda')
         >>> o, ht = chunk_kda(
             q, k, v, g, beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             initial_state=h0,
@@ -385,6 +389,8 @@ def chunk_kda(
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
         >>> o, ht = chunk_kda(
             q, k, v, g, beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             initial_state=h0,

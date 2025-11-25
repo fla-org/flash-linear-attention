@@ -243,7 +243,7 @@ class KimiDeltaAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
         elif mode == "fused_recurrent":
-            g, _ = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias)
+            g = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias)
             o, recurrent_state = fused_recurrent_kda(
                 q=q,
                 k=k,
