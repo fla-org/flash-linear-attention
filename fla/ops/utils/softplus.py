@@ -4,6 +4,8 @@
 import triton
 from triton import language as tl
 
+from fla.utils import IS_NVIDIA
+
 
 def _generate_softplus(num_pack):
     template = """
@@ -57,7 +59,7 @@ NUM_REG: tl.constexpr = tl.constexpr(_NUM_REG)
 
 
 @triton.jit
-def softplus(x):
+def softplus_nv(x):
     # equivalent to:
     # return tl.where(x < 20.0, tl.math.log(1 + tl.math.exp(x)), x)
     return tl.inline_asm_elementwise(
@@ -71,9 +73,12 @@ def softplus(x):
         is_pure=True,
     )
 
+@triton.jit
+def softplus_triton(x):
+    return tl.where(x < 20.0, tl.math.log(1 + tl.math.exp(x)), x)
 
 @triton.jit
-def softplus2(x):
+def softplus2_nv(x):
     # equivalent to:
     # return tl.where(x < 15.0, tl.math.log2(1 + tl.math.exp2(x)), x)
     return tl.inline_asm_elementwise(
@@ -86,3 +91,14 @@ def softplus2(x):
         dtype=tl.float32,
         is_pure=True,
     )
+
+@triton.jit
+def softplus2_triton(x):
+    return tl.where(x < 15.0, tl.math.log2(1 + tl.math.exp2(x)), x)
+
+if IS_NVIDIA:
+    softplus = softplus_nv
+    softplus2 = softplus2_nv
+else:
+    softplus = softplus_triton
+    softplus2 = softplus2_triton
