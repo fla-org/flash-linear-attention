@@ -28,7 +28,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     g,
     beta,
     Aqk,
-    Akk,
+    Akk_diag,
     scale,
     cu_seqlens,
     B,
@@ -140,12 +140,16 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         # Akk: only accumulate if j < i_t
         b_Akk = tl.sum(b_k_self * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)  # [BH]
 
-        # Store with [B, T, H, BT] layout (no transpose needed later)
+        # Store Aqk with [B, T, H, BT] layout
         j_pos = j % BT
         offs_h = i_h_start + o_h
-        offs_out = (bos + i_t) * H * BT + offs_h * BT + j_pos
-        tl.store(Aqk + offs_out, b_Aqk.to(Aqk.dtype.element_ty), mask=m_h)
-        tl.store(Akk + offs_out, b_Akk.to(Akk.dtype.element_ty), mask=m_h)
+        offs_aqk = (bos + i_t) * H * BT + offs_h * BT + j_pos
+        tl.store(Aqk + offs_aqk, b_Aqk.to(Aqk.dtype.element_ty), mask=m_h)
+
+        # Store Akk_diag with [B, T, H, BC] layout (only diagonal blocks)
+        j_pos_diag = j - subchunk_start  # position within sub-chunk [0, BC)
+        offs_akk = (bos + i_t) * H * BC + offs_h * BC + j_pos_diag
+        tl.store(Akk_diag + offs_akk, b_Akk.to(Akk_diag.dtype.element_ty), mask=m_h)
 
 
 def chunk_kda_fwd_intra_token_parallel(
@@ -154,7 +158,7 @@ def chunk_kda_fwd_intra_token_parallel(
     gk: torch.Tensor,
     beta: torch.Tensor,
     Aqk: torch.Tensor,
-    Akk: torch.Tensor,
+    Akk_diag: torch.Tensor,
     scale: float,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
@@ -166,7 +170,7 @@ def chunk_kda_fwd_intra_token_parallel(
     Supports both fixed-length and variable-length sequences.
     Reduces wasted computation on padding.
 
-    Writes directly to Aqk and Akk tensors (in-place).
+    Writes directly to Aqk and Akk_diag tensors (in-place).
 
     Args:
         q: [B, T, H, K]
@@ -174,9 +178,10 @@ def chunk_kda_fwd_intra_token_parallel(
         gk: [B, T, H, K] cumsum of gates
         beta: [B, T, H]
         Aqk: [B, T, H, BT] output tensor to write to
-        Akk: [B, T, H, BT] output tensor to write to
+        Akk_diag: [B, T, H, BC] output tensor for diagonal blocks (fp32)
         scale: attention scale
         chunk_size: BT (default 64)
+        sub_chunk_size: BC (default 16)
         use_exp2: use exp2 vs exp
     """
     B, T, H, K = q.shape
@@ -202,7 +207,7 @@ def chunk_kda_fwd_intra_token_parallel(
         g=gk,
         beta=beta,
         Aqk=Aqk,
-        Akk=Akk,
+        Akk_diag=Akk_diag,
         scale=scale,
         cu_seqlens=cu_seqlens,
         B=B_kernel,

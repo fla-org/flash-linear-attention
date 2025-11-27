@@ -89,12 +89,10 @@ def recompute_w_u_fwd_kernel(
             tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
-
             o_k = i_k * BK + tl.arange(0, BK)
             m_k = o_k < K
             b_gn = tl.load(gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.)
-            b_kg = b_k * exp(b_gn - b_gk)
-
+            b_kg = b_k * tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], exp(b_gn[None, :] - b_gk), 0)
             p_kg = tl.make_block_ptr(kg + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
 

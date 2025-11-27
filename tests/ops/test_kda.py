@@ -260,17 +260,13 @@ def test_chunk(
     [
         pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}-tma{}".format(*test))
         for test in [
-            (4, 60, 0, [0, 15], torch.float16, True),
-            (4, 64, 0, [0, 256, 500, 1000], torch.float16, True),
+            (4, 60, 0.1, [0, 15], torch.float16, False),
+            (4, 64, 0.9, [0, 256, 500, 1000], torch.float16, False),
             (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False),
-            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True),
+            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, False),
             (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False),
         ]
     ],
-)
-@pytest.mark.skipif(
-    os.getenv("SKIP_TEST_CHUNK_VARLEN") == "1",
-    reason="Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set",
 )
 def test_chunk_varlen(
     H: int,
@@ -296,7 +292,9 @@ def test_chunk_varlen(
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
     g = F.logsigmoid(torch.randn(1, T, H, D, dtype=torch.float))
-    g = g * (torch.rand_like(g) > mask_p)
+    mask = torch.rand_like(g) > mask_p
+    g = g * mask + (~mask) * (-1000)
+
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=torch.float32)
 
@@ -305,8 +303,8 @@ def test_chunk_varlen(
     dht = torch.rand_like(h0)
 
     tri, tri_ht = chunk_kda(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=k.clone(),  # k is already normalized
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
@@ -322,8 +320,8 @@ def test_chunk_varlen(
     ref_ht = []
     for i in range(N):
         ref_i, ref_ht_i = naive_recurrent_kda(
-            q=q[:, cu_seqlens[i]: cu_seqlens[i + 1]],
-            k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            q=F.normalize(q[:, cu_seqlens[i]: cu_seqlens[i + 1]], p=2, dim=-1),
+            k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],  # k is already normalized
             v=v[:, cu_seqlens[i]: cu_seqlens[i + 1]],
             beta=beta[:, cu_seqlens[i]: cu_seqlens[i + 1]],
             g=g[:, cu_seqlens[i]: cu_seqlens[i + 1]],
