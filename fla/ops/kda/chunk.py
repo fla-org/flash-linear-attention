@@ -36,8 +36,7 @@ def chunk_kda_fwd(
         beta=beta,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        output_dtype=torch.float32,
+        chunk_indices=chunk_indices
     )
     w, u, _, kg = recompute_w_u_fwd(
         k=k,

@@ -7,8 +7,12 @@ import triton.language as tl
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
 
+if IS_TF32_SUPPORTED:
+    SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32x3')
+else:
+    SOLVE_TRIL_DOT_PRECISION = tl.constexpr('ieee')
 
 # ============================================================================
 # Fused inter + solve_tril kernel: compute off-diagonal Akk and solve in one pass
@@ -107,21 +111,21 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
         m_k = o_k < K
 
         # Load reference g values with boundary check for varlen
-        b_g0_ref = tl.load(g + (chunk_start + BC) * H * K + o_k, mask=m_k & m_sub1, other=0)
-        b_g1_ref = tl.load(g + (chunk_start + 2*BC) * H * K + o_k, mask=m_k & m_sub2, other=0)
-        b_g2_ref = tl.load(g + (chunk_start + 3*BC) * H * K + o_k, mask=m_k & m_sub3, other=0)
+        b_g0_ref = tl.load(g + (chunk_start + BC) * H * K + o_k, mask=m_k & m_sub1, other=0).to(tl.float32)
+        b_g1_ref = tl.load(g + (chunk_start + 2*BC) * H * K + o_k, mask=m_k & m_sub2, other=0).to(tl.float32)
+        b_g2_ref = tl.load(g + (chunk_start + 3*BC) * H * K + o_k, mask=m_k & m_sub3, other=0).to(tl.float32)
 
         p_k0 = tl.make_block_ptr(k, (K, T), (1, H*K), (i_k * BK, chunk_start), (BK, BC), (0, 1))
         p_g0 = tl.make_block_ptr(g, (K, T), (1, H*K), (i_k * BK, chunk_start), (BK, BC), (0, 1))
-        b_k0 = tl.load(p_k0, boundary_check=(0, 1))
-        b_g0 = tl.load(p_g0, boundary_check=(0, 1))
+        b_k0 = tl.load(p_k0, boundary_check=(0, 1)).to(tl.float32)
+        b_g0 = tl.load(p_g0, boundary_check=(0, 1)).to(tl.float32)
 
         p_q1 = tl.make_block_ptr(q, (T, K), (H*K, 1), (chunk_start + BC, i_k * BK), (BC, BK), (1, 0))
         p_k1_row = tl.make_block_ptr(k, (T, K), (H*K, 1), (chunk_start + BC, i_k * BK), (BC, BK), (1, 0))
         p_g1 = tl.make_block_ptr(g, (T, K), (H*K, 1), (chunk_start + BC, i_k * BK), (BC, BK), (1, 0))
-        b_q1 = tl.load(p_q1, boundary_check=(0, 1))
-        b_k1_row = tl.load(p_k1_row, boundary_check=(0, 1))
-        b_g1 = tl.load(p_g1, boundary_check=(0, 1))
+        b_q1 = tl.load(p_q1, boundary_check=(0, 1)).to(tl.float32)
+        b_k1_row = tl.load(p_k1_row, boundary_check=(0, 1)).to(tl.float32)
+        b_g1 = tl.load(p_g1, boundary_check=(0, 1)).to(tl.float32)
         b_q1g = b_q1 * tl.where(m_chunk1[:, None], exp(b_g1 - b_g0_ref[None, :]), 0)
         b_k1g = b_k1_row * tl.where(m_chunk1[:, None], exp(b_g1 - b_g0_ref[None, :]), 0)
         b_k0g_for_q1 = b_k0 * tl.where(m_sub1, exp(b_g0_ref[:, None] - b_g0), 0)
@@ -130,11 +134,11 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
 
         p_q2 = tl.make_block_ptr(q, (T, K), (H*K, 1), (chunk_start + 2*BC, i_k * BK), (BC, BK), (1, 0))
         p_g2 = tl.make_block_ptr(g, (T, K), (H*K, 1), (chunk_start + 2*BC, i_k * BK), (BC, BK), (1, 0))
-        b_q2 = tl.load(p_q2, boundary_check=(0, 1))
-        b_g2 = tl.load(p_g2, boundary_check=(0, 1))
+        b_q2 = tl.load(p_q2, boundary_check=(0, 1)).to(tl.float32)
+        b_g2 = tl.load(p_g2, boundary_check=(0, 1)).to(tl.float32)
         b_q2g = b_q2 * tl.where(m_chunk2[:, None], exp(b_g2 - b_g1_ref[None, :]), 0)
         p_k2_row = tl.make_block_ptr(k, (T, K), (H*K, 1), (chunk_start + 2*BC, i_k * BK), (BC, BK), (1, 0))
-        b_k2_row = tl.load(p_k2_row, boundary_check=(0, 1))
+        b_k2_row = tl.load(p_k2_row, boundary_check=(0, 1)).to(tl.float32)
         b_k2g = b_k2_row * tl.where(m_chunk2[:, None], exp(b_g2 - b_g1_ref[None, :]), 0)
         b_k0g_for_q2 = b_k0 * tl.where(m_sub2, exp(b_g1_ref[:, None] - b_g0), 0)
         b_Aqk20 += tl.dot(b_q2g, b_k0g_for_q2)
@@ -142,11 +146,11 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
 
         p_q3 = tl.make_block_ptr(q, (T, K), (H*K, 1), (chunk_start + 3*BC, i_k * BK), (BC, BK), (1, 0))
         p_g3 = tl.make_block_ptr(g, (T, K), (H*K, 1), (chunk_start + 3*BC, i_k * BK), (BC, BK), (1, 0))
-        b_q3 = tl.load(p_q3, boundary_check=(0, 1))
-        b_g3 = tl.load(p_g3, boundary_check=(0, 1))
+        b_q3 = tl.load(p_q3, boundary_check=(0, 1)).to(tl.float32)
+        b_g3 = tl.load(p_g3, boundary_check=(0, 1)).to(tl.float32)
         b_q3g = b_q3 * tl.where(m_chunk3[:, None], exp(b_g3 - b_g2_ref[None, :]), 0)
         p_k3_row = tl.make_block_ptr(k, (T, K), (H*K, 1), (chunk_start + 3*BC, i_k * BK), (BC, BK), (1, 0))
-        b_k3_row = tl.load(p_k3_row, boundary_check=(0, 1))
+        b_k3_row = tl.load(p_k3_row, boundary_check=(0, 1)).to(tl.float32)
         b_k3g = b_k3_row * tl.where(m_chunk3[:, None], exp(b_g3 - b_g2_ref[None, :]), 0)
         b_k0g_for_q3 = b_k0 * tl.where(m_sub3, exp(b_g2_ref[:, None] - b_g0), 0)
         b_Aqk30 += tl.dot(b_q3g, b_k0g_for_q3)
@@ -154,8 +158,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
 
         p_k1 = tl.make_block_ptr(k, (K, T), (1, H*K), (i_k * BK, chunk_start + BC), (BK, BC), (0, 1))
         p_gk1 = tl.make_block_ptr(g, (K, T), (1, H*K), (i_k * BK, chunk_start + BC), (BK, BC), (0, 1))
-        b_k1 = tl.load(p_k1, boundary_check=(0, 1))
-        b_gk1 = tl.load(p_gk1, boundary_check=(0, 1))
+        b_k1 = tl.load(p_k1, boundary_check=(0, 1)).to(tl.float32)
+        b_gk1 = tl.load(p_gk1, boundary_check=(0, 1)).to(tl.float32)
 
         b_k1g_for_q2 = b_k1 * tl.where(m_sub2, exp(b_g1_ref[:, None] - b_gk1), 0)
         b_Aqk21 += tl.dot(b_q2g, b_k1g_for_q2)
@@ -167,8 +171,8 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
 
         p_k2 = tl.make_block_ptr(k, (K, T), (1, H*K), (i_k * BK, chunk_start + 2*BC), (BK, BC), (0, 1))
         p_gk2 = tl.make_block_ptr(g, (K, T), (1, H*K), (i_k * BK, chunk_start + 2*BC), (BK, BC), (0, 1))
-        b_k2 = tl.load(p_k2, boundary_check=(0, 1))
-        b_gk2 = tl.load(p_gk2, boundary_check=(0, 1))
+        b_k2 = tl.load(p_k2, boundary_check=(0, 1)).to(tl.float32)
+        b_gk2 = tl.load(p_gk2, boundary_check=(0, 1)).to(tl.float32)
 
         b_k2g_for_q3 = b_k2 * tl.where(m_sub3, exp(b_g2_ref[:, None] - b_gk2), 0)
         b_Aqk32 += tl.dot(b_q3g, b_k2g_for_q3)
@@ -254,21 +258,25 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     # ===== Step 5: Compute merged inverse using off-diagonals =====
     # Off-diagonal blocks are: b_Akk10 (A_21), b_Akk20 (A_31), b_Akk21 (A_32),
     #                          b_Akk30 (A_41), b_Akk31 (A_42), b_Akk32 (A_43)
-    b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_Akk10), b_Ai_11)
-    b_Ai_32 = -tl.dot(tl.dot(b_Ai_33, b_Akk21), b_Ai_22)
-    b_Ai_43 = -tl.dot(tl.dot(b_Ai_44, b_Akk32), b_Ai_33)
+    # We used tf32x3 to maintain matrix inverse's precision whenever possible.
+    b_Ai_21 = -tl.dot(tl.dot(b_Ai_22, b_Akk10, input_precision=SOLVE_TRIL_DOT_PRECISION), b_Ai_11, input_precision=SOLVE_TRIL_DOT_PRECISION)
+    b_Ai_32 = -tl.dot(tl.dot(b_Ai_33, b_Akk21, input_precision=SOLVE_TRIL_DOT_PRECISION), b_Ai_22, input_precision=SOLVE_TRIL_DOT_PRECISION)
+    b_Ai_43 = -tl.dot(tl.dot(b_Ai_44, b_Akk32, input_precision=SOLVE_TRIL_DOT_PRECISION), b_Ai_33, input_precision=SOLVE_TRIL_DOT_PRECISION)
 
     b_Ai_31 = -tl.dot(
         b_Ai_33,
-        tl.dot(b_Akk20, b_Ai_11) + tl.dot(b_Akk21, b_Ai_21)
+        tl.dot(b_Akk20, b_Ai_11, input_precision=SOLVE_TRIL_DOT_PRECISION) + tl.dot(b_Akk21, b_Ai_21, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        input_precision=SOLVE_TRIL_DOT_PRECISION
     )
     b_Ai_42 = -tl.dot(
         b_Ai_44,
-        tl.dot(b_Akk31, b_Ai_22) + tl.dot(b_Akk32, b_Ai_32)
+        tl.dot(b_Akk31, b_Ai_22, input_precision=SOLVE_TRIL_DOT_PRECISION) + tl.dot(b_Akk32, b_Ai_32, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        input_precision=SOLVE_TRIL_DOT_PRECISION
     )
     b_Ai_41 = -tl.dot(
         b_Ai_44,
-        tl.dot(b_Akk30, b_Ai_11) + tl.dot(b_Akk31, b_Ai_21) + tl.dot(b_Akk32, b_Ai_31)
+        tl.dot(b_Akk30, b_Ai_11, input_precision=SOLVE_TRIL_DOT_PRECISION) + tl.dot(b_Akk31, b_Ai_21, input_precision=SOLVE_TRIL_DOT_PRECISION) + tl.dot(b_Akk32, b_Ai_31, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        input_precision=SOLVE_TRIL_DOT_PRECISION
     )
 
     # ===== Step 6: Store full Akk_inv to Akk [B, T, H, BT] =====
@@ -518,8 +526,6 @@ def chunk_kda_fwd_intra(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    output_dtype: torch.dtype = torch.float32,
-    use_token_parallel: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -538,10 +544,6 @@ def chunk_kda_fwd_intra(
             Default: None
         chunk_size (int):
             The chunk size. Default: 64.
-        output_dtype (torch.dtype):
-            The dtype of the output tensor. Default: `torch.float32`
-        use_token_parallel (bool):
-            Whether to use token-parallel implementation for sub_intra. Default: `True`.
 
     Returns:
         Aqk (torch.Tensor):
