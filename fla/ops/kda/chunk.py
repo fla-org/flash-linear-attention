@@ -8,7 +8,7 @@ from fla.ops.common.chunk_o import chunk_bwd_dv_local
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_inter import chunk_kda_bwd_dqkwg
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
-from fla.ops.kda.gate import kda_gate_bwd, kda_gate_fwd
+from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum, kda_gate_fwd
 from fla.ops.kda.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
@@ -209,21 +209,25 @@ class ChunkKDAFunction(torch.autograd.Function):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ):
+        chunk_size = 64
         g_org = None
         if use_gate_in_kernel:
             g_org = g
-            g = kda_gate_fwd(
+            g = kda_gate_chunk_cumsum(
                 g=g_org,
                 A_log=A_log,
                 dt_bias=dt_bias,
+                chunk_size=chunk_size,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices
             )
+        else:
+            g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
 
-        chunk_size = 64
-        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
         o, Aqk, Akk, final_state = chunk_kda_fwd(
             q=q,
             k=k,
