@@ -246,23 +246,23 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     b_Ai33 = -tl.where(m_A, b_Ai33, 0)
 
     # Forward substitution: load from Akk_diag (stride H*BC, columns 0:BC)
-    for i in range(2, BC):
-        b_a00 = -tl.load(Akk_diag + (i_t * BT + i) * H*BC + o_i)
+    for i in range(2, min(BC, T - i_tc0)):
+        b_a00 = -tl.load(Akk_diag + (i_tc0 + i) * H*BC + o_i)
         b_a00 = tl.where(o_i < i, b_a00, 0.)
         b_a00 += tl.sum(b_a00[:, None] * b_Ai00, 0)
         b_Ai00 = tl.where((o_i == i)[:, None], b_a00, b_Ai00)
-    for i in range(BC + 2, 2*BC):
-        b_a11 = -tl.load(Akk_diag + (i_t * BT + i) * H*BC + o_i)
+    for i in range(BC + 2, min(2*BC, T - i_tc0)):
+        b_a11 = -tl.load(Akk_diag + (i_tc0 + i) * H*BC + o_i)
         b_a11 = tl.where(o_i < i - BC, b_a11, 0.)
         b_a11 += tl.sum(b_a11[:, None] * b_Ai11, 0)
         b_Ai11 = tl.where((o_i == i - BC)[:, None], b_a11, b_Ai11)
-    for i in range(2*BC + 2, 3*BC):
-        b_a22 = -tl.load(Akk_diag + (i_t * BT + i) * H*BC + o_i)
+    for i in range(2*BC + 2, min(3*BC, T - i_tc0)):
+        b_a22 = -tl.load(Akk_diag + (i_tc0 + i) * H*BC + o_i)
         b_a22 = tl.where(o_i < i - 2*BC, b_a22, 0.)
         b_a22 += tl.sum(b_a22[:, None] * b_Ai22, 0)
         b_Ai22 = tl.where((o_i == i - 2*BC)[:, None], b_a22, b_Ai22)
-    for i in range(3*BC + 2, 4*BC):
-        b_a33 = -tl.load(Akk_diag + (i_t * BT + i) * H*BC + o_i)
+    for i in range(3*BC + 2, min(4*BC, T - i_tc0)):
+        b_a33 = -tl.load(Akk_diag + (i_tc0 + i) * H*BC + o_i)
         b_a33 = tl.where(o_i < i - 3*BC, b_a33, 0.)
         b_a33 += tl.sum(b_a33[:, None] * b_Ai33, 0)
         b_Ai33 = tl.where((o_i == i - 3*BC)[:, None], b_a33, b_Ai33)
