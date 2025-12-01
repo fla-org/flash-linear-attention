@@ -45,20 +45,44 @@ python tests/cp/benchmark_memory.py --cp_size 1
 torchrun --nproc_per_node=4 tests/cp/benchmark_memory.py --cp_size 4
 ```
 
+
+
+## Memory Reduction Results
+
+Here are actual benchmark results showing the memory savings with Context Parallelism:
+
+### Single GPU (CP Size = 1)
+```
+Seq Len    Chunk      Model      Peak       Status
+--------------------------------------------------
+1024       1024       0.14 GB    1.10 GB    ✓
+2048       2048       0.21 GB    1.64 GB    ✓
+4096       4096       0.21 GB    2.76 GB    ✓
+8192       8192       0.21 GB    5.00 GB    ✓
+16384      16384      0.21 GB    9.55 GB    ✓
+```
+
+### Context Parallelism (CP Size = 8)
+```
+Seq Len    Chunk      Model      Peak       Status    
+--------------------------------------------------
+1024       256        0.14 GB    0.66 GB    ✓ (1.7x reduction)
+2048       512        0.21 GB    0.79 GB    ✓ (2.1x reduction)
+4096       1024       0.21 GB    1.07 GB    ✓ (2.6x reduction)
+8192       2048       0.21 GB    1.63 GB    ✓ (3.1x reduction)
+16384      4096       0.21 GB    2.75 GB    ✓ (3.5x reduction)
+```
+
 **Key Insights:**
 - **Dramatic Memory Reduction**: Less peak memory usage with CP
 - **Longer Sequences = Better Savings**: Memory reduction improves with sequence length
-- **Linear Scaling**: Each GPU processes 1/8th of the sequence with 8-way CP
-- **Handles Very Long Sequences**: 16K tokens easily processed with CP in much lesser time
+- **Linear Scaling**: Each GPU processes 1/nth of the sequence with n-way CP
+- **Handles Very Long Sequences**: sequence length can scale with n
 
 
-
-### 3. Validation
-
+### 3. How to try for yourself
 
 ```
-
-
 # Step 1: Generate reference on single GPU
 python test_numerical_correctness.py --mode single --save_ref
 

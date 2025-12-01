@@ -4,7 +4,7 @@
 Realistic Training Script with Context Parallelism
 - Each rank loads FULL sequences from disk
 - Each rank processes its assigned CHUNK of the sequence
-- Mimics real-world distributed training
+- Mimics real-world distributed training on dummy data
 
 Usage:
     torchrun --nproc_per_node=4 train_cp_real.py --cp_size=4
