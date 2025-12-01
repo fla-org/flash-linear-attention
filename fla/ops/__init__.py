@@ -7,10 +7,10 @@ from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurren
 from .forgetting_attn import parallel_forgetting_attn
 from .gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from .generalized_delta_rule import (
-    chunk_dplr_delta_rule,
-    chunk_iplr_delta_rule,
-    fused_recurrent_dplr_delta_rule,
-    fused_recurrent_iplr_delta_rule,
+                         chunk_dplr_delta_rule,
+                         chunk_iplr_delta_rule,
+                         fused_recurrent_dplr_delta_rule,
+                         fused_recurrent_iplr_delta_rule,
 )
 from .gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
 from .gsa import chunk_gsa, fused_recurrent_gsa
@@ -26,6 +26,7 @@ from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_r
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from .simple_gla import chunk_simple_gla, fused_chunk_simple_gla, fused_recurrent_simple_gla, parallel_simple_gla
+from .stickbreaking_attn.parallel import parallel_stickbreaking_attn
 
 __all__ = [
     'chunk_abc',
@@ -51,4 +52,5 @@ __all__ = [
     'chunk_rwkv6', 'fused_recurrent_rwkv6',
     'chunk_rwkv7', 'fused_recurrent_rwkv7',
     'chunk_simple_gla', 'fused_chunk_simple_gla', 'fused_recurrent_simple_gla', 'parallel_simple_gla',
+    'parallel_stickbreaking_attn',
 ]

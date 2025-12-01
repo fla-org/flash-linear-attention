@@ -30,6 +30,7 @@ from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
+from .stickbreaking_attn import StickBreakingAttention
 
 __all__ = [
     'ABCAttention',
@@ -61,6 +62,7 @@ __all__ = [
     'RodimusAttention',
     'RWKV6Attention',
     'RWKV7Attention',
+    'StickBreakingAttention',
     'SlidingWindowSharedKeyAttention',
     'DeltaFormerAttention',
 ]
