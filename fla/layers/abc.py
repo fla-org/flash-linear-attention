@@ -124,6 +124,7 @@ class ABCAttention(nn.Module):
                     hidden_size=self.head_v_dim,
                     elementwise_affine=elementwise_affine,
                     eps=norm_eps,
+                    dtype=torch.float32,
                 )
 
         if self.use_rope:

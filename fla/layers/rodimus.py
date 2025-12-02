@@ -270,8 +270,8 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         self.o_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
 
         if qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            self.q_norm = RMSNorm(self.head_dim, dtype=torch.float32)
+            self.k_norm = RMSNorm(self.head_dim, dtype=torch.float32)
 
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 

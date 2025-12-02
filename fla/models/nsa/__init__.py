@@ -1,4 +1,3 @@
-
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
 
 from fla.models.nsa.configuration_nsa import NSAConfig
@@ -9,6 +8,4 @@ AutoModel.register(NSAConfig, NSAModel, exist_ok=True)
 AutoModelForCausalLM.register(NSAConfig, NSAForCausalLM, exist_ok=True)
 
 
-__all__ = [
-    'NSAConfig', 'NSAModel', 'NSAForCausalLM',
-]
+__all__ = ['NSAConfig', 'NSAForCausalLM', 'NSAModel']

@@ -147,6 +147,7 @@ class SimpleGatedLinearAttention(nn.Module):
                 hidden_size=self.head_v_dim,
                 elementwise_affine=elementwise_affine,
                 eps=norm_eps,
+                dtype=torch.float32
             )
             self.gate_fn = ACT2FN[gate_fn]
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)

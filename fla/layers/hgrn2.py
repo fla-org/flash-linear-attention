@@ -92,7 +92,7 @@ class HGRN2Attention(nn.Module):
                 activation=None,
             )
 
-        self.g_norm = RMSNorm(hidden_size=self.hidden_size, elementwise_affine=elementwise_affine, eps=norm_eps)
+        self.g_norm = RMSNorm(hidden_size=self.hidden_size, elementwise_affine=elementwise_affine, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.input_dim, hidden_size, bias=False)
 
     def forward(

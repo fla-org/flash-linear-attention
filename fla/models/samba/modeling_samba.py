@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import math
@@ -40,7 +39,7 @@ class SambaBlock(GradientCheckpointingLayer):
         self.config = config
         self.layer_idx = layer_idx
 
-        self.mixer_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps)
+        self.mixer_norm = RMSNorm(hidden_size=config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
         if config.attn is not None and layer_idx in config.attn['layers']:
             self.mixer = Attention(
                 hidden_size=config.hidden_size,
@@ -218,7 +217,7 @@ class SambaModel(SambaPreTrainedModel):
         self.layers = nn.ModuleList([SambaBlock(config, layer_idx=idx) for idx in range(config.num_hidden_layers)])
 
         self.gradient_checkpointing = False
-        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
         # Initialize weights and apply final processing
         self.post_init()
 

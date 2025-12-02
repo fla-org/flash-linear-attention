@@ -573,7 +573,7 @@ class BitLinear(nn.Linear):
         # Initialize the superclass nn.Linear with the given parameters
         super().__init__(in_features, out_features, bias=bias)
 
-        self.norm = RMSNorm(in_features, eps=norm_eps)
+        self.norm = RMSNorm(in_features, eps=norm_eps, dtype=torch.float32)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({super().extra_repr()}, norm_eps={self.norm.eps})"
