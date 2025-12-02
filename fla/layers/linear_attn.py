@@ -97,7 +97,7 @@ class LinearAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, self.value_dim_per_group, bias=False)
 
         if output_norm == 'rmsnorm':
-            self.norm = RMSNorm(hidden_size=self.head_v_dim, elementwise_affine=elementwise_affine, eps=norm_eps)
+            self.norm = RMSNorm(hidden_size=self.head_v_dim, elementwise_affine=elementwise_affine, eps=norm_eps, dtype=torch.float32)
         elif output_norm == 'identity':
             self.norm = nn.Identity()
         else:

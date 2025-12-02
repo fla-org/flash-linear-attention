@@ -152,7 +152,7 @@ class MambaBlock(GradientCheckpointingLayer):
         self.config = config
         self.layer_idx = layer_idx
         self.residual_in_fp32 = config.residual_in_fp32
-        self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
         self.mixer = Mamba(
             hidden_size=config.hidden_size,
             state_size=config.state_size,
@@ -309,7 +309,7 @@ class MambaModel(MambaPreTrainedModel):
         self.layers = nn.ModuleList([MambaBlock(config, layer_idx=idx) for idx in range(config.num_hidden_layers)])
 
         self.gradient_checkpointing = False
-        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
         # Initialize weights and apply final processing
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.post_init()

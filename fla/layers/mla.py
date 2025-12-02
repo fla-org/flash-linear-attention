@@ -93,7 +93,7 @@ class MultiheadLatentAttention(nn.Module):
         if q_lora_rank is not None:
             self.q_proj = nn.Sequential(
                 nn.Linear(hidden_size, q_lora_rank, bias=False),
-                RMSNorm(q_lora_rank),
+                RMSNorm(q_lora_rank, dtype=torch.float32),
                 nn.Linear(q_lora_rank, self.num_heads * self.qk_head_dim, bias=False),
             )
         else:
@@ -102,7 +102,7 @@ class MultiheadLatentAttention(nn.Module):
         self.k_rope = nn.Linear(hidden_size, self.qk_rope_head_dim, bias=False)
         self.kv_proj = nn.Sequential(
             nn.Linear(hidden_size, self.kv_lora_rank, bias=False),
-            RMSNorm(self.kv_lora_rank),
+            RMSNorm(self.kv_lora_rank, dtype=torch.float32),
             nn.Linear(self.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim), bias=False),
         )
 

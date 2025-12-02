@@ -121,7 +121,7 @@ class GatedSlotAttention(nn.Module):
                 activation='silu',
             )
 
-        self.g_norm = RMSNorm(self.hidden_size, elementwise_affine, eps=norm_eps)
+        self.g_norm = RMSNorm(self.hidden_size, elementwise_affine, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
 
     def forward(

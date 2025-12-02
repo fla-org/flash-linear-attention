@@ -88,8 +88,8 @@ class LogLinearMamba2Block(nn.Module):
             raise NotImplementedError
         self.config = config
         self.layer_idx = layer_idx
-        self.mixer_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
-        self.mlp_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.mixer_norm = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
+        self.mlp_norm = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
         self.mixer = LogLinearMamba2(
             num_heads=config.num_heads,
             head_dim=config.head_dim,
@@ -258,7 +258,7 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
         )
 
         self.gradient_checkpointing = False
-        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm_f = RMSNorm(config.hidden_size, eps=config.norm_eps, dtype=torch.float32)
         # Initialize weights and apply final processing
         self._register_load_state_dict_pre_hook(self.load_hook)
         self.post_init()

@@ -66,8 +66,8 @@ class PaTHAttention(nn.Module):
 
         # per head norm
         if use_qk_norm:
-            self.maybe_q_norm = RMSNorm(self.head_dim)
-            self.maybe_k_norm = RMSNorm(self.head_dim)
+            self.maybe_q_norm = RMSNorm(self.head_dim, dtype=torch.float32)
+            self.maybe_k_norm = RMSNorm(self.head_dim, dtype=torch.float32)
         else:
             self.maybe_q_norm = nn.Identity()
             self.maybe_k_norm = nn.Identity()

@@ -158,7 +158,7 @@ class DeltaNet(nn.Module):
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps)
         else:
-            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
+            self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
 
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
