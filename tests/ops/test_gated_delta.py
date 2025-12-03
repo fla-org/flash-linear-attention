@@ -242,7 +242,7 @@ def test_chunk(
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
 
-    ref, ref_ht = recurrent_gated_delta_rule_ref(
+    ref, ref_ht = chunk_gated_delta_rule_ref(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
