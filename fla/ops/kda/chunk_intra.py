@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
+from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
@@ -318,29 +319,27 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     # 6. store full Akk_inv to Akk
     ################################################################################
 
-    # Diagonal blocks
     p_Akk00 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc0, 0), (BC, BC), (1, 0))
-    p_Akk11 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc1, BC), (BC, BC), (1, 0))
-    p_Akk22 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc2, 2*BC), (BC, BC), (1, 0))
-    p_Akk33 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc3, 3*BC), (BC, BC), (1, 0))
-    tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk22, b_Ai22.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_Akk33, b_Ai33.to(Akk.dtype.element_ty), boundary_check=(0, 1))
-
-    # Off-diagonal blocks
     p_Akk10 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
+    p_Akk11 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc1, BC), (BC, BC), (1, 0))
     p_Akk20 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
     p_Akk21 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
+    p_Akk22 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc2, 2*BC), (BC, BC), (1, 0))
     p_Akk30 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
     p_Akk31 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
     p_Akk32 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc3, 2*BC), (BC, BC), (1, 0))
+    p_Akk33 = tl.make_block_ptr(Akk, (T, BT), (H*BT, 1), (i_tc3, 3*BC), (BC, BC), (1, 0))
+
+    tl.store(p_Akk00, b_Ai00.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk10, b_Ai10.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk11, b_Ai11.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk20, b_Ai20.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk21, b_Ai21.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk22, b_Ai22.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk30, b_Ai30.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk31, b_Ai31.to(Akk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_Akk32, b_Ai32.to(Akk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_Akk33, b_Ai33.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -559,23 +558,33 @@ def chunk_kda_bwd_kernel_intra(
 def chunk_kda_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
+    v: torch.Tensor,
     gk: torch.Tensor | None = None,
     beta: torch.Tensor | None = None,
+    Aqk: torch.Tensor | None = None,
+    Akk: torch.Tensor | None = None,
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+):
     r"""
     Args:
         q (torch.Tensor):
             The query tensor of shape `[B, T, H, K]`.
         k (torch.Tensor):
             The key tensor of shape `[B, T, H, K]`.
+        v (torch.Tensor):
+            The value tensor of shape `[B, T, H, V]`.
         gk (torch.Tensor):
             The cumulative sum of the gate tensor of shape `[B, T, H, K]` applied to the key tensor. Default: `None`.
         beta (torch.Tensor):
             The beta tensor of shape `[B, T, H]`. Default: `None`.
+        Aqk (torch.Tensor):
+            The intra Aqk tensor of shape `[B, T, H, BT]` where `BT` is the chunk size. Default: `None`.
+        Akk (torch.Tensor):
+            The intra Akk tensor of shape `[B, T, H, BT]` where `BT` is the chunk size. Default: `None`.
+            Aqk and Akk will be recomputed and returned if not provided.
         scale (Optional[float]):
             The scale factor. Default: `None`.
         cu_seqlens (torch.LongTensor):
@@ -583,12 +592,8 @@ def chunk_kda_fwd_intra(
             Default: None
         chunk_size (int):
             The chunk size. Default: 64.
-
-    Returns:
-        Aqk (torch.Tensor):
-            The intra Aqk tensor of shape `[B, T, H, BT]` where `BT` is the chunk size.
-        Akk (torch.Tensor):
-            The intra Akk tensor of shape `[B, T, H, BT]` where `BT` is the chunk size.
+        chunk_indices (torch.LongTensor):
+            The chunk indices of the input tensor. Default: None
     """
     B, T, H, K = k.shape
     assert K <= 256
@@ -599,45 +604,56 @@ def chunk_kda_fwd_intra(
 
     BC = 16
 
-    Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=k.dtype)
-    # Akk must be zero-initialized - kernel only writes lower triangular
-    Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
-    # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
-    Akk_diag = torch.empty(B, T, H, BC, device=k.device, dtype=torch.float32)
+    if Aqk is None or Akk is None:
+        Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=k.dtype)
+        # Akk must be zero-initialized - kernel only writes lower triangular
+        Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
+        # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
+        Akk_diag = torch.empty(B, T, H, BC, device=k.device, dtype=torch.float32)
 
-    # Step 1: Run token_parallel first to compute diagonal blocks into Akk_diag (fp32)
-    chunk_kda_fwd_intra_token_parallel(
-        q=q,
+        # Step 1: Run token_parallel first to compute diagonal blocks into Akk_diag (fp32)
+        chunk_kda_fwd_intra_token_parallel(
+            q=q,
+            k=k,
+            gk=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akk=Akk_diag,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=BT,
+            sub_chunk_size=BC,
+        )
+        # Step 2: Fused inter + solve_tril (works for both fixed-len and varlen)
+        grid = (NT, B * H)
+        chunk_kda_fwd_kernel_inter_solve_fused[grid](
+            q=q,
+            k=k,
+            g=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akk_diag=Akk_diag,
+            Akk=Akk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            T=T,
+            H=H,
+            K=K,
+            BT=BT,
+            BC=BC,
+        )
+
+    w, u, _, kg = recompute_w_u_fwd(
         k=k,
+        v=v,
+        beta=beta,
+        A=Akk,
         gk=gk,
-        beta=beta,
-        Aqk=Aqk,
-        Akk_diag=Akk_diag,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=BT,
-        sub_chunk_size=BC,
-    )
-    # Step 2: Fused inter + solve_tril (works for both fixed-len and varlen)
-    grid = (NT, B * H)
-    chunk_kda_fwd_kernel_inter_solve_fused[grid](
-        q=q,
-        k=k,
-        g=gk,
-        beta=beta,
-        Aqk=Aqk,
-        Akk_diag=Akk_diag,
-        Akk=Akk,
-        scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        T=T,
-        H=H,
-        K=K,
-        BT=BT,
-        BC=BC,
     )
-    return Aqk, Akk
+    return w, u, kg, Aqk, Akk
 
 
 def chunk_kda_bwd_intra(
