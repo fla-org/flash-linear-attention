@@ -27,24 +27,15 @@ def chunk_kda_fwd(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ):
-    # the intra Aqk is kept in fp32
-    # the computation has very marginal effect on the entire throughput
-    Aqk, Akk = chunk_kda_fwd_intra(
+    w, u, kg, Aqk, Akk = chunk_kda_fwd_intra(
         q=q,
         k=k,
+        v=v,
         gk=g,
         beta=beta,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices
-    )
-    w, u, _, kg = recompute_w_u_fwd(
-        k=k,
-        v=v,
-        beta=beta,
-        A=Akk,
-        gk=g,
-        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
