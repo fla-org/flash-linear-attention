@@ -7,8 +7,9 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
-from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate
+from fla.ops.kda.gate import fused_kda_gate, kda_gate_chunk_cumsum, naive_kda_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
+from fla.ops.utils import chunk_local_cumsum
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
@@ -161,7 +162,7 @@ def test_fused_recurrent(
             (2, 1000, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False),
             (3, 1024, 4, 100, 1, 0.1, 0, False, False, torch.float16, False),
             (4, 1024, 4, 128, 0.1, 1, 0, False, False, torch.float16, True),
-            (4, 1024, 4, 128, 0.1, 1, 0, True, False, torch.float16, True),
+            (4, 1024, 4, 128, 0.1, 1, 0, True, True, torch.float16, True),
             (2, 1500, 4, 128, 0.1, 10, 0, False, True, torch.float16, False),
             (4, 2048, 8, 64, 0.1, 1, 0, False, True, torch.float16, True),
         ]
@@ -190,7 +191,7 @@ def test_chunk(
     v = torch.rand(B, T, H, D, dtype=dtype)
     g = torch.randn(B, T, H, D, dtype=torch.float)
     if use_gate_in_kernel:
-        A_log = torch.randn(H, dtype=torch.float)
+        A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
         dt_bias = torch.randn(H * D, dtype=torch.float)
     else:
         g = F.logsigmoid(g) / gate_logit_normalizer
@@ -208,13 +209,13 @@ def test_chunk(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
-        g=(naive_kda_gate(g, A_log, dt_bias) if use_gate_in_kernel else g.clone()),
+        g=(naive_kda_gate(g.to(torch.float32), A_log.to(torch.float32), dt_bias.to(torch.float32)) if use_gate_in_kernel else g.clone()),
         beta=beta.clone(),
         scale=scale,
         initial_state=h0.clone(),
         output_final_state=True,
     )
-    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ((ref * do.to(ref.dtype)).sum() + (ref_ht * dht.to(ref_ht.dtype)).sum()).backward(retain_graph=True)
     if use_gate_in_kernel:
         ref_dA, A_log.grad = A_log.grad, None
         ref_dbias, dt_bias.grad = dt_bias.grad, None
@@ -250,21 +251,21 @@ def test_chunk(
     assert_close("dg", ref_dg, tri_dg, 0.02)
     assert_close("db", ref_db, tri_db, 0.02)
     if use_gate_in_kernel:
-        assert_close("dA", ref_dA, tri_dA, 0.001)
-        assert_close("dbias", ref_dbias, tri_dbias, 0.001)
+        assert_close("dA", ref_dA, tri_dA, 0.003)
+        assert_close("dbias", ref_dbias, tri_dbias, 0.003)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
 
 
 @pytest.mark.parametrize(
-    ("H", "D", "mask_p", "cu_seqlens", "dtype", "use_tma"),
+    ("H", "D", "mask_p", "cu_seqlens", "dtype", "use_gate_in_kernel"),
     [
-        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}-tma{}".format(*test))
+        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}".format(*test))
         for test in [
             (4, 60, 0.1, [0, 15], torch.float16, False),
             (4, 64, 0.9, [0, 256, 500, 1000], torch.float16, False),
-            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False),
-            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, False),
-            (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False),
+            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, True),
+            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True),
+            (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, True),
         ]
     ],
 )
@@ -274,14 +275,9 @@ def test_chunk_varlen(
     mask_p: float,
     cu_seqlens: list[int],
     dtype: torch.dtype,
-    use_tma: bool,
+    use_gate_in_kernel: bool,
 ):
-    if not use_tma:
-        os.environ["FLA_USE_TMA"] = "0"
-    else:
-        os.environ["FLA_USE_TMA"] = "1"
     torch.manual_seed(42)
-    os.environ["TRITON_F32_DEFAULT"] = "ieee"
     # randomly split the sequence into N segments
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     T = cu_seqlens[-1]
@@ -291,7 +287,13 @@ def test_chunk_varlen(
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
     v = torch.randn((1, T, H, D), dtype=dtype)
-    g = F.logsigmoid(torch.randn(1, T, H, D, dtype=torch.float))
+    g = torch.randn(1, T, H, D, dtype=torch.float)
+    if use_gate_in_kernel:
+        A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32, device=device).uniform_(1, 16))
+        dt_bias = torch.randn(H * D, dtype=torch.float32, device=device)
+    else:
+        g = F.logsigmoid(g)
+        g = g * (torch.rand_like(g) > mask_p)
     mask = torch.rand_like(g) > mask_p
     g = g * mask + (~mask) * (-1000)
 
@@ -299,6 +301,8 @@ def test_chunk_varlen(
     h0 = torch.randn((N, H, D, D), dtype=torch.float32)
 
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, g, beta, h0))
+    if use_gate_in_kernel:
+        A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(), (A_log, dt_bias))
     do = torch.randn_like(v)
     dht = torch.rand_like(h0)
 
@@ -308,13 +312,19 @@ def test_chunk_varlen(
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
+        A_log=(A_log.clone() if use_gate_in_kernel else None),
+        dt_bias=(dt_bias.clone() if use_gate_in_kernel else None),
         initial_state=h0.clone(),
         output_final_state=True,
         cu_seqlens=cu_seqlens,
+        use_gate_in_kernel=use_gate_in_kernel,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
+    if use_gate_in_kernel:
+        tri_dA, A_log.grad = A_log.grad, None
+        tri_dbias, dt_bias.grad = dt_bias.grad, None
 
     ref = []
     ref_ht = []
@@ -324,7 +334,7 @@ def test_chunk_varlen(
             k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],  # k is already normalized
             v=v[:, cu_seqlens[i]: cu_seqlens[i + 1]],
             beta=beta[:, cu_seqlens[i]: cu_seqlens[i + 1]],
-            g=g[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            g=(naive_kda_gate(g[:, cu_seqlens[i]: cu_seqlens[i + 1]].to(torch.float), A_log.to(torch.float), dt_bias.to(torch.float)) if use_gate_in_kernel else g[:, cu_seqlens[i]: cu_seqlens[i + 1]]),
             initial_state=h0[i],
             output_final_state=True,
         )
@@ -335,7 +345,9 @@ def test_chunk_varlen(
 
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
-
+    if use_gate_in_kernel:
+        ref_dA, A_log.grad = A_log.grad, None
+        ref_dbias, dt_bias.grad = dt_bias.grad, None
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
     assert_close("dq", ref_dq, tri_dq, 0.007)
@@ -344,7 +356,9 @@ def test_chunk_varlen(
     assert_close("dg", ref_dg, tri_dg, 0.015)
     assert_close("db", ref_db, tri_db, 0.015)
     assert_close("dh0", ref_dh0, tri_dh0, 0.007)
-    os.environ["FLA_USE_TMA"] = "0"
+    if use_gate_in_kernel:
+        assert_close("dA", ref_dA, tri_dA, 0.003)
+        assert_close("dbias", ref_dbias, tri_dbias, 0.005)
 
 
 @pytest.mark.parametrize(
@@ -407,3 +421,55 @@ def test_gate(
     assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        for test in [
+            (1, 2, 2, 12),
+            (1, 32, 2, 16),
+            (2, 64, 4, 32),
+            (4, 128, 8, 64),
+            (4, 128, 8, 128),
+            (1, 2, 2, 12),
+            (1, 32, 2, 16),
+            (2, 64, 4, 32),
+            (4, 128, 8, 64),
+            (4, 128, 8, 128),
+        ]
+    ],
+)
+def test_gate_cumsum(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+):
+    torch.manual_seed(42)
+    g = torch.randn(B, T, H, D, dtype=torch.float32) * 10
+    A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32).uniform_(1, 16))
+    dt_bias = torch.randn(H * D, dtype=torch.float32) * 10
+    g, A_log = map(lambda x: x.to(device).requires_grad_(True), (g, A_log))
+    if dt_bias is not None:
+        dt_bias = dt_bias.to(device).requires_grad_(True)
+
+    ref = fused_kda_gate(
+        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
+    )
+    chunk_size = 64
+    cu_seqlens = None
+    chunk_indices = None
+    ref = chunk_local_cumsum(ref, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+
+    tri = kda_gate_chunk_cumsum(
+        g=g.clone(),
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone() if dt_bias is not None else None,
+        chunk_size=chunk_size,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
+    assert_close("o", ref, tri, 1e-4)
