@@ -627,6 +627,83 @@ def test_mixed_backend(
 
 
 @pytest.mark.parametrize(
+    ('N', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    [
+        pytest.param(*test, id="N{}_T{}_D{}_W{}_activation{}_has_bias{}_has_residual{}_{}".format(*test))
+        for test in [
+            (4, 1024, 4096, 3, "swish", True, False, torch.float32),
+            (4, 1024, 4096, 4, "swish", False, False, torch.float32),
+            (4, 1024, 4096, 3, None, True, False, torch.float16),
+            (4, 1024, 4096, 4, None, False, False, torch.float16),
+        ]
+    ],
+)
+def test_fast_conv_varlen(
+    N: int,
+    T: int,
+    D: int,
+    W: int,
+    activation: str,
+    has_bias: bool,
+    has_residual: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    if causal_conv1d_fn:
+        pytest.skip("causal_conv1d is not installed for CUDA backend")
+    assert has_residual is False
+    from fla.modules.convolution import fast_causal_conv1d_fn
+    cu_seqlens = torch.cat([
+        torch.tensor([0], dtype=torch.long),
+        torch.arange(16, T)[torch.randperm(T - 16)[:N-1]],
+        torch.tensor([T], dtype=torch.long),
+    ], 0).to(device).sort()[0]
+
+    x = torch.randn(1, T, D).to(device, dtype).requires_grad_(True)
+    weight = torch.randn(D, W).to(device, dtype).requires_grad_(True)
+    bias = torch.randn(D).to(device, dtype).requires_grad_(True) if has_bias else None
+    residual = x.detach().clone().requires_grad_(True) if has_residual else None
+    dy = torch.randn(1, T, D).to(device, dtype)
+
+    ref = torch.cat([
+        rearrange(
+            causal_conv1d_ref_torch(
+                x=rearrange(x[:, bos:eos].contiguous(), "b t d -> b d t"),
+                weight=weight,
+                bias=bias,
+                activation=activation,
+            ),
+            "b t d -> b d t",
+        ) + (residual[:, bos:eos] if has_residual else torch.zeros_like(x[:, bos:eos]))
+        for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
+    ], 1)
+    ref.backward(dy)
+    ref_dx, x.grad = x.grad, None
+    ref_dw, weight.grad = weight.grad, None
+    if has_bias:
+        ref_db, bias.grad = bias.grad, None
+    if has_residual:
+        ref_dr, residual.grad = residual.grad, None
+
+    tri, _ = fast_causal_conv1d_fn(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
+    tri.backward(dy)
+    tri_dx, x.grad = x.grad, None
+    tri_dw, weight.grad = weight.grad, None
+    if has_bias:
+        tri_db, bias.grad = bias.grad, None
+    if has_residual:
+        tri_dr, residual.grad = residual.grad, None
+
+    assert_close(" y", ref, tri, 1e-3)
+    assert_close("dx", ref_dx, tri_dx, 1e-3)
+    assert_close("dw", ref_dw, tri_dw, 1e-3)
+    if has_bias:
+        assert_close("db", ref_db, tri_db, 1e-3)
+    if has_residual:
+        assert_close("dr", ref_dr, tri_dr, 1e-3)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype'),
     [
         pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_has_bias{4}_has_residual{5}_activation{6}_{7}".format(*test))

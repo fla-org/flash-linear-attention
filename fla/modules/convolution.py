@@ -20,9 +20,11 @@ STATIC_WARPS = 32 if not IS_AMD else 16
 try:
     from causal_conv1d import causal_conv1d_fn
     from causal_conv1d import causal_conv1d_update as causal_conv1d_update_cuda
+    from causal_conv1d.cpp_functions import causal_conv1d_bwd_function
 except ImportError:
     causal_conv1d_fn = None
     causal_conv1d_update_cuda = None
+    causal_conv1d_bwd_function = None
 
 
 @triton.heuristics({
@@ -688,6 +690,153 @@ class CausalConv1dFunction(torch.autograd.Function):
         return dx, dw, db, dr, dh0, None, None, None, None
 
 
+class FastCausalConv1dFn(torch.autograd.Function):
+    """
+    Mixed-mode (Mix) Causal Convolution Implementation - Combining Triton Forward and CUDA Backward Propagation
+
+    This class implements forward propagation using FLA's Triton kernel, while using the optimized
+    implementation from TriDao's causal_conv1d CUDA package for backward propagation.
+    This hybrid strategy combines the advantages of both technologies:
+
+    - Forward: Uses FLA's Triton implementation, optimized for the FLA framework
+    - Backward: Uses TriDao's causal_conv1d_bwd_function CUDA implementation for faster speed
+
+    Performance Benefits:
+    - CUDA backward implementation is typically faster than the Triton version, reducing training time
+    - Maintains the flexibility and compatibility of forward propagation
+
+    Note:
+    - Input/Output format is (batch, seqlen, dim)
+    - Backward propagation requires causal_conv1d package: pip install causal-conv1d
+    - Supports SILU/Swish activation functions
+    - Current limitations (not yet supported):
+        * output_final_state must be False
+        * initial_states must be None
+        * residual must be None
+    """
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        weight,
+        bias=None,
+        residual: torch.Tensor | None = None,
+        cu_seqlens=None,
+        initial_states=None,
+        output_final_state=False,
+        activation=None,
+        chunk_indices: torch.LongTensor | None = None,
+        seq_idx: torch.LongTensor | None = None,
+    ):
+        if activation not in [None, "silu", "swish"]:
+            raise NotImplementedError("activation must be None, silu, or swish")
+        # Note(Zhiyuan): For simple
+        assert output_final_state is False
+        assert initial_states is None
+        assert residual is None
+        if x.stride(2) != 1 and x.stride(1) != 1:
+            x = x.contiguous()
+        bias = bias.contiguous() if bias is not None else None
+        if cu_seqlens is not None and seq_idx is None:
+            seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
+        seq_idx = seq_idx.contiguous() if seq_idx is not None else None
+
+        ctx.activation = activation in ["silu", "swish"]
+        out, _ = causal_conv1d_fwd(
+            x=x,
+            weight=weight,
+            bias=bias,
+            residual=None,
+            initial_state=None,
+            output_final_state=output_final_state,
+            activation=activation,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+
+        ctx.save_for_backward(x, weight, bias, seq_idx, initial_states)
+        ctx.return_final_states = output_final_state
+        ctx.return_dinitial_states = (
+            initial_states is not None and initial_states.requires_grad
+        )
+        return out, None
+
+    @staticmethod
+    def backward(ctx, dout, *args):
+        x, weight, bias, seq_idx, initial_states = ctx.saved_tensors
+        x = rearrange(x, 'b t d -> b d t')
+        dout = rearrange(dout, 'b t d -> b d t')
+        dfinal_states = args[0] if ctx.return_final_states else None
+
+        if dout.stride(2) != 1 and dout.stride(1) != 1:
+            dout = dout.contiguous()
+        # The kernel supports passing in a pre-allocated dx (e.g., in case we want to fuse the
+        # backward of conv1d with the backward of chunk).
+        # Here we just pass in None and dx will be allocated in the C++ code.
+        dx, dweight, dbias, dinitial_states = causal_conv1d_bwd_function(
+            x,
+            weight,
+            bias,
+            dout,
+            seq_idx,
+            initial_states,
+            dfinal_states,
+            None,
+            ctx.return_dinitial_states,
+            ctx.activation,
+        )
+        dx = rearrange(dx, 'b d t -> b t d')
+        return (
+            dx,
+            dweight,
+            dbias if bias is not None else None,
+            None,
+            None,
+            dinitial_states if initial_states is not None else None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+def fast_causal_conv1d_fn(
+    x,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool | None = False,
+    activation: str | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    seq_idx: torch.LongTensor | None = None,
+):
+    """
+    x: (batch, dim, seqlen)
+    weight: (dim, width)
+    bias: (dim,)
+    seq_idx: (batch, seqlen)
+    initial_states: (batch, dim, width - 1)
+    final_states_out: (batch, dim, width - 1), to be written to
+    activation: either None or "silu" or "swish"
+
+    out: (batch, dim, seqlen)
+    """
+    return FastCausalConv1dFn.apply(
+        x,
+        weight,
+        bias,
+        residual,
+        cu_seqlens,
+        initial_state,
+        output_final_state,
+        activation,
+        chunk_indices,
+        seq_idx,
+    )
+
+
 @input_guard
 def causal_conv1d(
     x: torch.Tensor,
@@ -727,7 +876,7 @@ def causal_conv1d(
             Activations applied to output, only `swish`/`silu` or `None` (i.e., no activation) are supported.
             Default: `None`.
         backend (Optional[str]):
-            Specifies the backend to use for the convolution operation. Supported values are `'cuda'` and `'triton'`.
+            Specifies the backend to use for the convolution operation. Supported values are `'cuda'` 、 `'triton'` and `'mix'`.
             Default: `'triton'`.
         cu_seqlens (Optional[torch.Tensor]):
             Cumulative sequence lengths (optional)
@@ -752,7 +901,27 @@ def causal_conv1d(
             chunk_indices,
         )
         return y, final_state
-
+    elif backend == 'mix':
+        if causal_conv1d_bwd_function is None:
+            raise ImportError(
+                "causal_conv1d is required for backend='mix', but it is not installed. "
+                "Please install it with: pip install causal-conv1d\n"
+                "For more details, see: https://github.com/Dao-AILab/causal-conv1d"
+            )
+        seq_idx = kwargs.get('seq_idx')
+        y, final_state = FastCausalConv1dFn.apply(
+            x,
+            weight,
+            bias,
+            residual,
+            cu_seqlens,
+            initial_state,
+            output_final_state,
+            activation,
+            chunk_indices,
+            seq_idx,
+        )
+        return y, final_state
     B, _, D, W = *x.shape, weight.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     x = rearrange(x, 'b t d -> b d t')
