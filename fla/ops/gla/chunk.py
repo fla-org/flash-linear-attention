@@ -7,7 +7,7 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -292,6 +292,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'USE_EXP2': lambda args: args['use_exp2'],
 })
 @triton.autotune(
     configs=[
@@ -314,6 +315,7 @@ def chunk_gla_fwd_kernel_o(
     A,
     cu_seqlens,
     chunk_indices,
+    use_exp2,
     scale,
     T,
     H: tl.constexpr,
@@ -323,6 +325,7 @@ def chunk_gla_fwd_kernel_o(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_EXP2: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -351,7 +354,10 @@ def chunk_gla_fwd_kernel_o(
         # [BT, BK]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         # [BT, BK]
-        b_qg = (b_q * exp(b_g)).to(b_q.dtype)
+        if USE_EXP2:
+            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+        else:
+            b_qg = (b_q * exp(b_g)).to(b_q.dtype)
         # [BK, BV]
         b_h = tl.load(p_h, boundary_check=(0, 1))
         # works but dkw, owing to divine benevolence
@@ -860,6 +866,7 @@ def chunk_gla_fwd_o_gk(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
@@ -879,6 +886,7 @@ def chunk_gla_fwd_o_gk(
         A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
         scale=scale,
         T=T,
         H=H,

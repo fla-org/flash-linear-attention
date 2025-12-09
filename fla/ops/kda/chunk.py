@@ -11,6 +11,7 @@ from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_fwd
 from fla.ops.kda.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -47,6 +48,7 @@ def chunk_kda_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
 
     o = chunk_gla_fwd_o_gk(
@@ -59,6 +61,7 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     return o, Aqk, Akk, final_state
 
@@ -98,6 +101,7 @@ def chunk_kda_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -122,6 +126,7 @@ def chunk_kda_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
 
     # dq dk in fp32
@@ -214,7 +219,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             k, k_rstd = l2norm_fwd(k)
 
         chunk_size = 64
-        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+        g = chunk_local_cumsum(g, chunk_size=chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
         o, Aqk, Akk, final_state = chunk_kda_fwd(
             q=q,
             k=k,
@@ -255,7 +260,9 @@ class ChunkKDAFunction(torch.autograd.Function):
                 A_log=A_log,
                 dt_bias=dt_bias,
             )
-            g = chunk_local_cumsum(g, chunk_size=ctx.chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+            g = chunk_local_cumsum(
+                g, chunk_size=ctx.chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
+            )
         dq, dk, dv, db, dg, dh0 = chunk_kda_bwd(
             q=q,
             k=k,
