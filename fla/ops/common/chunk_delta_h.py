@@ -18,7 +18,6 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
     'SAVE_NEW_VALUE': lambda args: args['v_new'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'USE_EXP2': lambda args: args['use_exp2'],
 })
 @triton.autotune(
     configs=[
@@ -27,7 +26,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
         for num_stages in [2, 3, 4]
         for BV in [32, 64]
     ],
-    key=['H', 'K', 'V', 'BT'],
+    key=['H', 'K', 'V', 'BT', 'USE_EXP2'],
     use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
@@ -44,7 +43,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
-    use_exp2,
     T,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -231,7 +229,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     'USE_INITIAL_STATE': lambda args: args['dh0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'USE_EXP2': lambda args: args['use_exp2'],
 })
 @triton.autotune(
     configs=[
@@ -240,7 +237,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         for num_stages in ([4, 3, 2] if check_shared_mem('ampere') else [1])
         for BV in [64, 32]
     ],
-    key=['H', 'K', 'V', 'BT', 'BV', 'USE_G'],
+    key=['H', 'K', 'V', 'BT', 'BV', 'USE_G', 'USE_EXP2'],
     use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
@@ -259,7 +256,6 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     dv2,
     cu_seqlens,
     chunk_offsets,
-    use_exp2,
     scale,
     T,
     H: tl.constexpr,
@@ -513,12 +509,12 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
-        use_exp2=use_exp2,
         T=T,
         H=H,
         K=K,
         V=V,
         BT=BT,
+        USE_EXP2=use_exp2,
     )
     return h, v_new, final_state
 
@@ -570,12 +566,12 @@ def chunk_gated_delta_rule_bwd_dhu(
         dv2=dv2,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
-        use_exp2=use_exp2,
         scale=scale,
         T=T,
         H=H,
         K=K,
         V=V,
         BT=BT,
+        USE_EXP2=use_exp2,
     )
     return dh, dh0, dv2
