@@ -7,7 +7,7 @@ import triton.language as tl
 from fla.ops.kda.chunk_intra_token_parallel import chunk_kda_fwd_intra_token_parallel
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
@@ -134,10 +134,10 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             b_gt1 = tl.trans(b_g1)
 
             b_gn1 = tl.load(g + i_tc1 * H * K + o_k, mask=m_k, other=0).to(tl.float32)
-            b_gqn1 = tl.where(m_tc1[:, None], exp(b_g1 - b_gn1[None, :]), 0)
+            b_gqn1 = tl.where(m_tc1[:, None], exp2(b_g1 - b_gn1[None, :]), 0)
             b_qg1 = b_q1 * b_gqn1
             b_kg1 = b_k1 * b_gqn1
-            b_kgt = b_kt0 * exp(b_gn1[:, None] - b_gt0)
+            b_kgt = b_kt0 * exp2(b_gn1[:, None] - b_gt0)
             b_Aqk10 += tl.dot(b_qg1, b_kgt)
             b_Akk10 += tl.dot(b_kg1, b_kgt)
 
@@ -153,14 +153,14 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             b_gt2 = tl.trans(b_g2)
 
             b_gn2 = tl.load(g + i_tc2 * H * K + o_k, mask=m_k, other=0).to(tl.float32)
-            b_gqn2 = tl.where(m_tc2[:, None], exp(b_g2 - b_gn2[None, :]), 0)
+            b_gqn2 = tl.where(m_tc2[:, None], exp2(b_g2 - b_gn2[None, :]), 0)
             b_qg2 = b_q2 * b_gqn2
             b_kg2 = b_k2 * b_gqn2
-            b_kgt = b_kt0 * exp(b_gn2[:, None] - b_gt0)
+            b_kgt = b_kt0 * exp2(b_gn2[:, None] - b_gt0)
             b_Aqk20 += tl.dot(b_qg2, b_kgt)
             b_Akk20 += tl.dot(b_kg2, b_kgt)
 
-            b_kgt = b_kt1 * exp(b_gn2[:, None] - b_gt1)
+            b_kgt = b_kt1 * exp2(b_gn2[:, None] - b_gt1)
             b_Aqk21 += tl.dot(b_qg2, b_kgt)
             b_Akk21 += tl.dot(b_kg2, b_kgt)
 
@@ -173,18 +173,18 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
             b_g3 = tl.load(p_g3, boundary_check=(0, 1)).to(tl.float32)
 
             b_gn3 = tl.load(g + i_tc3 * H * K + o_k, mask=m_k, other=0).to(tl.float32)
-            b_gqn3 = tl.where(m_tc3[:, None], exp(b_g3 - b_gn3[None, :]), 0)
+            b_gqn3 = tl.where(m_tc3[:, None], exp2(b_g3 - b_gn3[None, :]), 0)
             b_qg3 = b_q3 * b_gqn3
             b_kg3 = b_k3 * b_gqn3
-            b_kgt = b_kt0 * exp(b_gn3[:, None] - b_gt0)
+            b_kgt = b_kt0 * exp2(b_gn3[:, None] - b_gt0)
             b_Aqk30 += tl.dot(b_qg3, b_kgt)
             b_Akk30 += tl.dot(b_kg3, b_kgt)
 
-            b_kgt = b_kt1 * exp(b_gn3[:, None] - b_gt1)
+            b_kgt = b_kt1 * exp2(b_gn3[:, None] - b_gt1)
             b_Aqk31 += tl.dot(b_qg3, b_kgt)
             b_Akk31 += tl.dot(b_kg3, b_kgt)
 
-            b_kgt = b_kt2 * exp(b_gn3[:, None] - b_gt2)
+            b_kgt = b_kt2 * exp2(b_gn3[:, None] - b_gt2)
             b_Aqk32 += tl.dot(b_qg3, b_kgt)
             b_Akk32 += tl.dot(b_kg3, b_kgt)
 
@@ -433,14 +433,14 @@ def chunk_kda_bwd_kernel_intra(
             # [BC, BK]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kg = b_k * exp(b_gn[None, :] - b_gk)
+            b_kg = b_k * exp2(b_gn[None, :] - b_gk)
             # [BC, BC]
             b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
             b_dAkk = tl.load(p_dAkk, boundary_check=(0, 1))
             # [BC, BK]
             b_dq2 += tl.dot(b_dAqk, b_kg)
             b_dk2 += tl.dot(b_dAkk, b_kg)
-        b_gqn = exp(b_g - b_gn[None, :])
+        b_gqn = exp2(b_g - b_gn[None, :])
         b_dq2 *= b_gqn
         b_dk2 *= b_gqn
 
@@ -465,7 +465,7 @@ def chunk_kda_bwd_kernel_intra(
         # [BC, BK]
         m_i = o_i[:, None] >= j
         # [BC, BK]
-        b_gqk = exp(b_g - b_gkj[None, :])
+        b_gqk = exp2(b_g - b_gkj[None, :])
         b_dq2 += tl.where(m_i, b_dAqk[:, None] * b_kj[None, :] * b_gqk, 0.)
         b_dk2 += tl.where(m_i, b_dAkk[:, None] * b_kj[None, :] * b_gqk, 0.)
 
@@ -511,14 +511,14 @@ def chunk_kda_bwd_kernel_intra(
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
             # [BC, BK]
-            b_gkn = exp(b_gk - b_gn[None, :])
+            b_gkn = exp2(b_gk - b_gn[None, :])
             b_qg = b_q * tl.where(m_j[:, None], b_gkn, 0)
             b_kbg = b_kb * tl.where(m_j[:, None], b_gkn, 0)
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dkt += tl.dot(b_dAqk, b_qg)
             b_dkt += tl.dot(b_dAkk, b_kbg)
-        b_dkt *= exp(b_gn[None, :] - b_g)
+        b_dkt *= exp2(b_gn[None, :] - b_g)
     o_dA = i_ti * H*BT + i_i * BC + o_i
     p_qj = q + i_ti * H*K + o_k
     p_kj = k + i_ti * H*K + o_k
@@ -535,7 +535,7 @@ def chunk_kda_bwd_kernel_intra(
         b_gkj = tl.load(p_gkj, mask=m_k, other=0).to(tl.float32)
         # [BC, BK]
         m_i = o_i[:, None] <= j
-        b_gkq = exp(b_gkj[None, :] - b_g)
+        b_gkq = exp2(b_gkj[None, :] - b_g)
         b_dkt += tl.where(m_i, b_dAqk[:, None] * b_qj[None, :] * b_gkq, 0.)
         b_dkt += tl.where(m_i, b_dAkk[:, None] * b_kbj[None, :] * b_gkq, 0.)
 

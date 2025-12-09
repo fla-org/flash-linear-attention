@@ -5,7 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
 
 
@@ -38,7 +38,6 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BH: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_tg, i_hg = tl.program_id(0), tl.program_id(1)
@@ -104,10 +103,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)
         b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
 
-        if USE_EXP2:
-            b_kgj = b_kj * exp2(b_g - b_gj)
-        else:
-            b_kgj = b_kj * exp(b_g - b_gj)
+        b_kgj = b_kj * exp2(b_g - b_gj)
 
         b_kgj = tl.where(m_k[None, :], b_kgj, 0.0)
         # [BH]
@@ -129,7 +125,6 @@ def chunk_kda_fwd_intra_token_parallel(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     sub_chunk_size: int = 16,
-    use_exp2: bool = False,
 ) -> None:
     """
     Token-parallel implementation: each token gets its own thread block.
@@ -148,7 +143,6 @@ def chunk_kda_fwd_intra_token_parallel(
         scale: attention scale
         chunk_size: BT (default 64)
         sub_chunk_size: BC (default 16)
-        use_exp2: use exp2 vs exp
     """
     B, T, H, K = q.shape
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
@@ -171,6 +165,5 @@ def chunk_kda_fwd_intra_token_parallel(
         K=K,
         BT=BT,
         BC=BC,
-        USE_EXP2=use_exp2,
     )
     return Aqk, Akk

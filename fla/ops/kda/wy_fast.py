@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 
 
@@ -80,19 +80,19 @@ def recompute_w_u_fwd_kernel(
 
         p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_kb *= exp(b_gk)
+        b_kb *= exp2(b_gk)
         if STORE_QG:
             p_q = tl.make_block_ptr(q + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             p_qg = tl.make_block_ptr(qg + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_qg = b_q * exp(b_gk)
+            b_qg = b_q * exp2(b_gk)
             tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
             o_k = i_k * BK + tl.arange(0, BK)
             m_k = o_k < K
             b_gn = tl.load(gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.)
-            b_kg = b_k * tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], exp(b_gn[None, :] - b_gk), 0)
+            b_kg = b_k * tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], exp2(b_gn[None, :] - b_gk), 0)
             p_kg = tl.make_block_ptr(kg + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
 
@@ -163,7 +163,7 @@ def prepare_wy_repr_bwd_kernel(
         b_k = tl.load(p_k, boundary_check=(0, 1))
 
         p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_gk_exp = exp(tl.load(p_gk, boundary_check=(0, 1)))
+        b_gk_exp = exp2(tl.load(p_gk, boundary_check=(0, 1)))
         b_kbg = b_k * b_b[:, None] * b_gk_exp
         b_dw = tl.load(p_dw, boundary_check=(0, 1))
 
