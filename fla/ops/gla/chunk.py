@@ -292,7 +292,6 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'USE_EXP2': lambda args: args['use_exp2'],
 })
 @triton.autotune(
     configs=[
@@ -315,7 +314,6 @@ def chunk_gla_fwd_kernel_o(
     A,
     cu_seqlens,
     chunk_indices,
-    use_exp2,
     scale,
     T,
     H: tl.constexpr,
@@ -324,8 +322,8 @@ def chunk_gla_fwd_kernel_o(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
     USE_EXP2: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -886,13 +884,13 @@ def chunk_gla_fwd_o_gk(
         A=A,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
         scale=scale,
         T=T,
         H=H,
         K=K,
         V=V,
         BT=BT,
+        USE_EXP2=use_exp2,
     )
     return o
 
