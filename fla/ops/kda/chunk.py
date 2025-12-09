@@ -219,7 +219,13 @@ class ChunkKDAFunction(torch.autograd.Function):
             k, k_rstd = l2norm_fwd(k)
 
         chunk_size = 64
-        g = chunk_local_cumsum(g, chunk_size=chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+        g = chunk_local_cumsum(
+            g=g,
+            chunk_size=chunk_size,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices
+        )
         o, Aqk, Akk, final_state = chunk_kda_fwd(
             q=q,
             k=k,
@@ -261,7 +267,11 @@ class ChunkKDAFunction(torch.autograd.Function):
                 dt_bias=dt_bias,
             )
             g = chunk_local_cumsum(
-                g, chunk_size=ctx.chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
+                g=g,
+                chunk_size=ctx.chunk_size,
+                scale=RCP_LN2,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices
             )
         dq, dk, dv, db, dg, dh0 = chunk_kda_bwd(
             q=q,
