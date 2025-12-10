@@ -11,6 +11,8 @@ from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 
+_LOG2 = 0.6931471805599453
+
 
 def naive_kda_gate(
     g: torch.Tensor,
@@ -19,9 +21,10 @@ def naive_kda_gate(
     output_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
-    Torch reference implementation for KDA gate computation.
+    Torch reference implementation for KDA gate computation with bounded output.
 
-    Computes: g = -A_log.exp().unsqueeze(-1) * softplus(g + dt_bias.view(g.shape[-2:]))
+    Computes: g = log(0.5 + 0.5 * exp(raw_gate)) = softplus(raw_gate) - log(2)
+    where raw_gate = -exp(A_log) * softplus(input)
 
     Args:
         g (torch.Tensor):
@@ -39,7 +42,8 @@ def naive_kda_gate(
     if dt_bias is not None:
         g = g + dt_bias.view(H, -1)
 
-    g = (-A_log.view(H, 1).float().exp() * F.softplus(g.float())).to(output_dtype)
+    raw_gate = -A_log.view(H, 1).float().exp() * F.softplus(g.float())
+    g = (F.softplus(raw_gate) - _LOG2).to(output_dtype)
     return g
 
 
@@ -84,7 +88,8 @@ def kda_gate_fwd_kernel(
     if HAS_BIAS:
         p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
-    b_yg = -tl.exp(b_A) * softplus(b_g)
+    b_raw = -tl.exp(b_A) * softplus(b_g)
+    b_yg = softplus(b_raw) - 0.6931471805599453 # Triton传不了_LOG2
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
 
     if HAS_BETA:
@@ -128,8 +133,8 @@ def kda_gate_bwd_kernel(
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
 
-    b_A = tl.load(A_log + i_h).to(tl.float32)
-    b_A = -tl.exp(b_A)
+    b_A_log = tl.load(A_log + i_h).to(tl.float32)
+    b_exp_A = tl.exp(b_A_log)
 
     p_g = tl.make_block_ptr(g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     p_dg = tl.make_block_ptr(dg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
@@ -143,10 +148,11 @@ def kda_gate_bwd_kernel(
         p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
 
-    # [BT, BD]
-    b_yg = b_A * softplus(b_g)
-    b_dg = b_A * (b_dyg * tl.sigmoid(b_g))
-    b_dA = tl.sum(tl.sum(b_dyg * b_yg, 1), 0)
+    b_sp = softplus(b_g)
+    b_raw = -b_exp_A * b_sp
+    b_dy_draw = tl.sigmoid(b_raw)
+    b_dg = b_dyg * b_dy_draw * (-b_exp_A) * tl.sigmoid(b_g)
+    b_dA = tl.sum(tl.sum(b_dyg * b_dy_draw * b_raw, 1), 0)
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
     tl.store(dA + i_t * H + i_h, b_dA)
 
@@ -272,9 +278,11 @@ def fused_kda_gate(
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
-    Fused KDA gate computation with autograd support.
+    Fused KDA gate computation with autograd support and bounded output.
 
-    Computes: g = -A_log.exp().unsqueeze(-1) * softplus(g + dt_bias.view(g.shape[-2:]))
+    Computes: g = log(0.5 + 0.5 * exp(raw_gate)) = softplus(raw_gate) - log(2)
+    where raw_gate = -exp(A_log) * softplus(input)
+    
 
     Args:
         g (torch.Tensor):

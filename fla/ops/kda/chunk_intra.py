@@ -419,6 +419,8 @@ def chunk_kda_bwd_kernel_intra(
     p_b = tl.make_block_ptr(beta, (T,), (H,), (i_ti,), (BC,), (0,))
     b_b = tl.load(p_b, boundary_check=(0,))
 
+    g_ref = tl.load(g + i_ti * H*K + o_k, mask=m_k, other=0).to(tl.float32)  # [BK]
+
     b_dq2 = tl.zeros([BC, BK], dtype=tl.float32)
     b_dk2 = tl.zeros([BC, BK], dtype=tl.float32)
     if i_i > 0:
@@ -445,32 +447,29 @@ def chunk_kda_bwd_kernel_intra(
         b_dk2 *= b_gqn
 
     o_i = tl.arange(0, BC)
-    m_dA = (i_ti + o_i) < T
-    o_dA = (i_ti + o_i) * H*BT + i_i * BC
-    p_kj = k + i_ti * H*K + o_k
-    p_gkj = g + i_ti * H*K + o_k
+    lower_mask = o_i[:, None] >= o_i[None, :]
+    upper_mask = o_i[:, None] <= o_i[None, :]
 
     p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_k = tl.load(p_k, boundary_check=(0, 1))
 
-    for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
-        # [BC]
-        b_dAqk = tl.load(dAqk + o_dA + j, mask=m_dA, other=0)
-        b_dAkk = tl.load(dAkk + o_dA + j, mask=m_dA, other=0)
-        # [BK]
-        b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
-        b_gkj = tl.load(p_gkj, mask=m_k, other=0).to(tl.float32)
-        # [BC, BK]
-        m_i = o_i[:, None] >= j
-        # [BC, BK]
-        b_gqk = exp2(b_g - b_gkj[None, :])
-        b_dq2 += tl.where(m_i, b_dAqk[:, None] * b_kj[None, :] * b_gqk, 0.)
-        b_dk2 += tl.where(m_i, b_dAkk[:, None] * b_kj[None, :] * b_gqk, 0.)
+    exp_row = exp2(b_g - g_ref[None, :])
+    exp_col = exp2(g_ref[None, :] - b_g)
 
-        p_kj += H*K
-        p_gkj += H*K
+    p_dAqk_tile = tl.make_block_ptr(dAqk, (T, BT), (H*BT, 1), (i_ti, i_i*BC), (BC, BC), (1, 0))
+    p_dAkk_tile = tl.make_block_ptr(dAkk, (T, BT), (H*BT, 1), (i_ti, i_i*BC), (BC, BC), (1, 0))
+    b_dAqk_tile = tl.load(p_dAqk_tile, boundary_check=(0, 1)).to(tl.float32)
+    b_dAkk_tile = tl.load(p_dAkk_tile, boundary_check=(0, 1)).to(tl.float32)
+
+    # Diagonal lower triangular
+    k_scaled = b_k * exp_col
+    dAqk_lower = tl.where(lower_mask, b_dAqk_tile, 0.)
+    dAkk_lower = tl.where(lower_mask, b_dAkk_tile, 0.)
+
+    b_dq2 += exp_row * tl.dot(dAqk_lower, k_scaled)
+    b_dk2 += exp_row * tl.dot(dAkk_lower, k_scaled)
     b_db = tl.sum(b_dk2 * b_k, 1)
     b_dk2 *= b_b[:, None]
 
@@ -519,30 +518,25 @@ def chunk_kda_bwd_kernel_intra(
             b_dkt += tl.dot(b_dAqk, b_qg)
             b_dkt += tl.dot(b_dAkk, b_kbg)
         b_dkt *= exp2(b_gn[None, :] - b_g)
-    o_dA = i_ti * H*BT + i_i * BC + o_i
-    p_qj = q + i_ti * H*K + o_k
-    p_kj = k + i_ti * H*K + o_k
-    p_gkj = g + i_ti * H*K + o_k
-    p_bj = beta + i_ti * H
 
-    for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
-        # [BC,]
-        b_dAqk = tl.load(dAqk + o_dA + j * H*BT)
-        b_dAkk = tl.load(dAkk + o_dA + j * H*BT)
-        # [BK,]
-        b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
-        b_kbj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32) * tl.load(p_bj)
-        b_gkj = tl.load(p_gkj, mask=m_k, other=0).to(tl.float32)
-        # [BC, BK]
-        m_i = o_i[:, None] <= j
-        b_gkq = exp2(b_gkj[None, :] - b_g)
-        b_dkt += tl.where(m_i, b_dAqk[:, None] * b_qj[None, :] * b_gkq, 0.)
-        b_dkt += tl.where(m_i, b_dAkk[:, None] * b_kbj[None, :] * b_gkq, 0.)
+    # Diagonal upper triangular
+    p_q_diag = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
+    p_k_diag = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
+    p_b_diag = tl.make_block_ptr(beta, (T,), (H,), (i_ti,), (BC,), (0,))
+    b_q = tl.load(p_q_diag, boundary_check=(0, 1))
+    b_k = tl.load(p_k_diag, boundary_check=(0, 1))
+    b_b = tl.load(p_b_diag, boundary_check=(0,))
 
-        p_qj += H*K
-        p_kj += H*K
-        p_gkj += H*K
-        p_bj += H
+    q_scaled = b_q * exp_row
+    kb_scaled = b_k * b_b[:, None] * exp_row
+
+    dAqk_T = tl.trans(b_dAqk_tile)
+    dAkk_T = tl.trans(b_dAkk_tile)
+    dAqk_T_upper = tl.where(upper_mask, dAqk_T, 0.)
+    dAkk_T_upper = tl.where(upper_mask, dAkk_T, 0.)
+
+    b_dkt += exp_col * tl.dot(dAqk_T_upper, q_scaled)
+    b_dkt += exp_col * tl.dot(dAkk_T_upper, kb_scaled)
     p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dk2 = tl.make_block_ptr(dk2, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dg = tl.make_block_ptr(dg, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))

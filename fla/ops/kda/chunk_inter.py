@@ -118,7 +118,7 @@ def chunk_kda_bwd_kernel_inter(
     b_dgk *= exp2(b_gn)
     b_dq *= scale
     b_dq = b_dq * exp2(b_g)
-    m_t = i_t * BT + tl.arange(0, BT) < T
+    m_t = (i_t * BT + tl.arange(0, BT)) < T
     b_dk = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
 
     p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -130,7 +130,7 @@ def chunk_kda_bwd_kernel_inter(
     b_k = tl.load(p_k, boundary_check=(0, 1))
     b_dgk += tl.sum(b_dk * b_k, axis=0)
     b_dg = b_q * b_dq - b_k * b_dk
-    b_dg = b_dg - tl.cumsum(b_dg, axis=0) + tl.sum(b_dg, axis=0)[None, :] + b_dgk[None, :]
+    b_dg = tl.cumsum(b_dg, reverse=True, axis=0) + b_dgk[None, :]
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
