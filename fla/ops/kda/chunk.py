@@ -128,7 +128,6 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
-
     # dq dk in fp32
     dAqk = chunk_gla_bwd_dA(
         v=v_new,
@@ -153,18 +152,20 @@ def chunk_kda_bwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
-    dk2, dv, db, dg2, dAkk = prepare_wy_repr_bwd(
+    dk, dv, db, dg, dAkk = prepare_wy_repr_bwd(
         k=k,
         v=v,
         beta=beta,
         gk=g,
         A=Akk,
+        dk=dk,
         dw=dw,
         du=dv,
+        dg=dg,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
-    dq, dk2, db, dg2 = chunk_kda_bwd_intra(
+    dq, dk, db, dg = chunk_kda_bwd_intra(
         q=q,
         k=k,
         g=g,
@@ -172,15 +173,13 @@ def chunk_kda_bwd(
         dAqk=dAqk,
         dAkk=dAkk,
         dq=dq,
-        dk=dk2,
+        dk=dk,
         db=db,
-        dg=dg2,
+        dg=dg,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
-    dk.add_(dk2)
-    dg.add_(dg2)
     return dq, dk, dv, db, dg, dh0
 
 

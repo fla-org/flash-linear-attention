@@ -123,9 +123,11 @@ def prepare_wy_repr_bwd_kernel(
     dw,
     du,
     dk,
+    dk2,
     dv,
     db,
     dg,
+    dg2,
     cu_seqlens,
     chunk_indices,
     T,
@@ -158,10 +160,13 @@ def prepare_wy_repr_bwd_kernel(
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dk2 = tl.make_block_ptr(dk2 + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dg = tl.make_block_ptr(dg + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dg2 = tl.make_block_ptr(dg2 + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+
         # [BT, BK]
         b_k = tl.load(p_k, boundary_check=(0, 1))
-
         p_gk = tl.make_block_ptr(gk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_gk_exp = exp2(tl.load(p_gk, boundary_check=(0, 1)))
         b_kbg = b_k * b_b[:, None] * b_gk_exp
@@ -169,13 +174,12 @@ def prepare_wy_repr_bwd_kernel(
 
         b_dA += tl.dot(b_dw, tl.trans(b_kbg).to(b_dw.dtype))
         b_dkbg = tl.dot(b_A, b_dw)
-        b_dk = b_dkbg * b_gk_exp * b_b[:, None]
+        b_dk = b_dkbg * b_gk_exp * b_b[:, None] + tl.load(p_dk, boundary_check=(0, 1))
         b_db += tl.sum(b_dkbg * b_k * b_gk_exp, 1)
-        b_dg = b_kbg * b_dkbg
+        b_dg = b_kbg * b_dkbg + tl.load(p_dg, boundary_check=(0, 1))
 
-        p_dg = tl.make_block_ptr(dg + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dk2, b_dk.to(p_dk2.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_dg2, b_dg.to(p_dg2.dtype.element_ty), boundary_check=(0, 1))
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -258,8 +262,10 @@ def prepare_wy_repr_bwd(
     beta: torch.Tensor,
     gk: torch.Tensor,
     A: torch.Tensor,
+    dk: torch.Tensor,
     dw: torch.Tensor,
     du: torch.Tensor,
+    dg: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -272,9 +278,9 @@ def prepare_wy_repr_bwd(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
-    dk = torch.empty_like(k, dtype=torch.float)
+    dk2 = torch.empty_like(dk, dtype=torch.float)
     dv = torch.empty_like(v)
-    dg = torch.empty_like(gk, dtype=torch.float)
+    dg2 = torch.empty_like(gk, dtype=torch.float)
     dA = torch.empty_like(A, dtype=torch.float)
     db = torch.empty_like(beta, dtype=torch.float)
     prepare_wy_repr_bwd_kernel[(NT, B * H)](
@@ -287,9 +293,11 @@ def prepare_wy_repr_bwd(
         dw=dw,
         du=du,
         dk=dk,
+        dk2=dk2,
         dv=dv,
         db=db,
         dg=dg,
+        dg2=dg2,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
@@ -300,4 +308,6 @@ def prepare_wy_repr_bwd(
         BK=BK,
         BV=BV,
     )
+    dk = dk2
+    dg = dg2
     return dk, dv, db, dg, dA
