@@ -467,9 +467,9 @@ def chunk_kda_bwd_kernel_intra(
         # [BC, BK]
         m_i = o_i[:, None] >= j
         # [BC, BK]
-        b_gqk = exp2(b_g - b_gkj[None, :])
-        b_dq2 += tl.where(m_i, b_dAqk[:, None] * b_kj[None, :] * b_gqk, 0.)
-        b_dk2 += tl.where(m_i, b_dAkk[:, None] * b_kj[None, :] * b_gqk, 0.)
+        b_kgj = b_kj[None, :] * exp2(b_g - b_gkj[None, :])
+        b_dq2 += tl.where(m_i, b_dAqk[:, None] * b_kgj, 0.)
+        b_dk2 += tl.where(m_i, b_dAkk[:, None] * b_kgj, 0.)
 
         p_kj += H*K
         p_gkj += H*K
@@ -513,13 +513,11 @@ def chunk_kda_bwd_kernel_intra(
             o_j = i_t * BT + i_j * BC + o_i
             m_j = o_j < T
             # [BC, BK]
-            b_gkn = exp2(b_gk - b_gn[None, :])
-            b_qg = b_q * tl.where(m_j[:, None], b_gkn, 0)
-            b_kbg = b_kb * tl.where(m_j[:, None], b_gkn, 0)
+            b_gkn = tl.where(m_j[:, None], exp2(b_gk - b_gn[None, :]), 0)
+            b_qg = b_q * b_gkn
+            b_kbg = b_kb * b_gkn
             # [BC, BK]
-            # (SY 09/17) important to not use bf16 here to have a good precision.
-            b_dkt += tl.dot(b_dAqk, b_qg)
-            b_dkt += tl.dot(b_dAkk, b_kbg)
+            b_dkt += tl.dot(b_dAqk, b_qg) + tl.dot(b_dAkk, b_kbg)
         b_dkt *= exp2(b_gn[None, :] - b_g)
     o_dA = i_ti * H*BT + i_i * BC + o_i
     p_qj = q + i_ti * H*K + o_k
@@ -538,8 +536,7 @@ def chunk_kda_bwd_kernel_intra(
         # [BC, BK]
         m_i = o_i[:, None] <= j
         b_gkq = exp2(b_gkj[None, :] - b_g)
-        b_dkt += tl.where(m_i, b_dAqk[:, None] * b_qj[None, :] * b_gkq, 0.)
-        b_dkt += tl.where(m_i, b_dAkk[:, None] * b_kbj[None, :] * b_gkq, 0.)
+        b_dkt += tl.where(m_i, (b_dAkk[:, None] * b_kbj[None, :] + b_dAqk[:, None] * b_qj[None, :]) * b_gkq, 0.)
 
         p_qj += H*K
         p_kj += H*K
