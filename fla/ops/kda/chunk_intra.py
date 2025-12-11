@@ -367,6 +367,7 @@ def chunk_kda_bwd_kernel_intra(
     dk,
     dk2,
     dg,
+    dg2,
     db,
     cu_seqlens,
     chunk_indices,
@@ -411,6 +412,7 @@ def chunk_kda_bwd_kernel_intra(
     dk += (bos * H + i_h) * K
     dk2 += (bos * H + i_h) * K
     dg += (bos * H + i_h) * K
+    dg2 += (bos * H + i_h) * K
     db += (i_k * all + bos) * H + i_h
 
     p_g = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
@@ -478,7 +480,7 @@ def chunk_kda_bwd_kernel_intra(
     p_dq2 = tl.make_block_ptr(dq2, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_db = tl.make_block_ptr(db, (T,), (H,), (i_ti,), (BC,), (0,))
 
-    b_dg = b_q * b_dq2
+    b_dg2 = b_q * b_dq2
     b_dq2 = b_dq2 + tl.load(p_dq, boundary_check=(0, 1))
     tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
@@ -546,13 +548,14 @@ def chunk_kda_bwd_kernel_intra(
     p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dk2 = tl.make_block_ptr(dk2, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dg = tl.make_block_ptr(dg, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
+    p_dg2 = tl.make_block_ptr(dg2, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
 
-    b_dg += (b_dk2 - b_dkt) * b_k
+    b_dg2 += (b_dk2 - b_dkt) * b_k + tl.load(p_dg, boundary_check=(0, 1))
     b_dk2 += tl.load(p_dk, boundary_check=(0, 1))
     b_dk2 += b_dkt
 
     tl.store(p_dk2, b_dk2.to(p_dk2.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dg2, b_dg2.to(p_dg2.dtype.element_ty), boundary_check=(0, 1))
 
 
 def chunk_kda_fwd_intra(
@@ -689,7 +692,8 @@ def chunk_kda_bwd_intra(
         dq2=dq2,
         dk=dk,
         dk2=dk2,
-        dg=dg2,
+        dg=dg,
+        dg2=dg2,
         db=db2,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
@@ -706,11 +710,11 @@ def chunk_kda_bwd_intra(
     dk = dk2
     db = db2.sum(0).add_(db)
     dg = chunk_local_cumsum(
-        dg2.add_(dg),
+        dg2,
         chunk_size=chunk_size,
         reverse=True,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
 
-    return dq, dk2, db, dg
+    return dq, dk, db, dg
