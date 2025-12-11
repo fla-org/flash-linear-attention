@@ -410,6 +410,7 @@ def causal_conv1d_fwd(
     output_final_state: bool = False,
     activation: str | None = None,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     shape = x.shape
@@ -418,8 +419,8 @@ def causal_conv1d_fwd(
     B, T, D, W = *x.shape, weight.shape[1]
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
     BW = triton.next_power_of_2(W)
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    if chunk_indices is None and (cu_seqlens is not None or cu_seqlens_cpu is not None):
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
 
@@ -464,6 +465,7 @@ def causal_conv1d_bwd(
     initial_state: torch.Tensor | None = None,
     activation: str | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ):
     shape = x.shape
@@ -473,8 +475,8 @@ def causal_conv1d_bwd(
     W = weight.shape[1] if weight is not None else None
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
     BW = triton.next_power_of_2(W)
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    if chunk_indices is None and (cu_seqlens is not None or cu_seqlens_cpu is not None):
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
 
@@ -488,6 +490,7 @@ def causal_conv1d_bwd(
             initial_state=initial_state,
             activation=None,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
             output_final_state=False,
         )
     dx = torch.empty_like(x)
@@ -652,10 +655,12 @@ class CausalConv1dFunction(torch.autograd.Function):
         output_final_state: bool | None = False,
         activation: str | None = None,
         cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ):
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
+        ctx.cu_seqlens_cpu = cu_seqlens_cpu
         ctx.chunk_indices = chunk_indices
         ctx.save_for_backward(x, weight, bias, residual, initial_state)
         y, final_state = causal_conv1d_fwd(
@@ -667,6 +672,7 @@ class CausalConv1dFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             activation=activation,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
         )
         return y, final_state
@@ -685,9 +691,10 @@ class CausalConv1dFunction(torch.autograd.Function):
             initial_state=initial_state,
             activation=ctx.activation,
             cu_seqlens=ctx.cu_seqlens,
+            cu_seqlens_cpu=ctx.cu_seqlens_cpu,
             chunk_indices=ctx.chunk_indices,
         )
-        return dx, dw, db, dr, dh0, None, None, None, None
+        return dx, dw, db, dr, dh0, None, None, None, None, None
 
 
 class FastCausalConv1dFn(torch.autograd.Function):
@@ -721,24 +728,25 @@ class FastCausalConv1dFn(torch.autograd.Function):
         weight,
         bias=None,
         residual: torch.Tensor | None = None,
-        cu_seqlens=None,
         initial_states=None,
         output_final_state=False,
         activation=None,
+        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
         seq_idx: torch.LongTensor | None = None,
     ):
         if activation not in [None, "silu", "swish"]:
             raise NotImplementedError("activation must be None, silu, or swish")
-        # Note(Zhiyuan): For simple
-        assert output_final_state is False
-        assert initial_states is None
-        assert residual is None
+        assert output_final_state is False, "output_final_state must be False for FastCausalConv1dFn"
+        assert initial_states is None, "initial_states must be None for FastCausalConv1dFn"
+        assert residual is None, "residual must be None for FastCausalConv1dFn"
         if x.stride(2) != 1 and x.stride(1) != 1:
             x = x.contiguous()
         bias = bias.contiguous() if bias is not None else None
         if cu_seqlens is not None and seq_idx is None:
-            seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
+            seq_idx = prepare_sequence_ids(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(
+                torch.int32).unsqueeze(0)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
 
         ctx.activation = activation in ["silu", "swish"]
@@ -751,6 +759,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
             output_final_state=output_final_state,
             activation=activation,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
         )
 
@@ -797,6 +806,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -809,6 +819,7 @@ def fast_causal_conv1d_fn(
     output_final_state: bool | None = False,
     activation: str | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     seq_idx: torch.LongTensor | None = None,
 ):
@@ -828,10 +839,11 @@ def fast_causal_conv1d_fn(
         weight,
         bias,
         residual,
-        cu_seqlens,
         initial_state,
         output_final_state,
         activation,
+        cu_seqlens,
+        cu_seqlens_cpu,
         chunk_indices,
         seq_idx,
     )
@@ -848,6 +860,7 @@ def causal_conv1d(
     activation: str | None = None,
     backend: str | None = 'triton',
     cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     **kwargs,
 ):
@@ -898,6 +911,7 @@ def causal_conv1d(
             output_final_state,
             activation,
             cu_seqlens,
+            cu_seqlens_cpu,
             chunk_indices,
         )
         return y, final_state
@@ -909,19 +923,19 @@ def causal_conv1d(
                 "For more details, see: https://github.com/Dao-AILab/causal-conv1d"
             )
         seq_idx = kwargs.get('seq_idx')
-        y, final_state = FastCausalConv1dFn.apply(
+        return fast_causal_conv1d_fn(
             x,
             weight,
             bias,
             residual,
-            cu_seqlens,
             initial_state,
             output_final_state,
             activation,
-            chunk_indices,
-            seq_idx,
+            cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            chunk_indices=chunk_indices,
+            seq_idx=seq_idx,
         )
-        return y, final_state
     B, _, D, W = *x.shape, weight.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     x = rearrange(x, 'b t d -> b d t')

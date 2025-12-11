@@ -649,7 +649,7 @@ def test_fast_conv_varlen(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
-    if causal_conv1d_fn:
+    if causal_conv1d_fn is None:
         pytest.skip("causal_conv1d is not installed for CUDA backend")
     assert has_residual is False
     from fla.modules.convolution import fast_causal_conv1d_fn
@@ -685,7 +685,8 @@ def test_fast_conv_varlen(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri, _ = fast_causal_conv1d_fn(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
+    tri, _ = fast_causal_conv1d_fn(x, weight, bias, residual=residual, activation=activation,
+                                   cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens.cpu())
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
