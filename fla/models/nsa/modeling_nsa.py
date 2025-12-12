@@ -43,6 +43,7 @@ class NSABlock(GradientCheckpointingLayer):
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
             num_kv_heads=config.num_kv_heads,
+            head_dim=config.head_dim,
             qkv_bias=config.qkv_bias,
             block_size=config.block_size,
             block_counts=config.block_counts,
