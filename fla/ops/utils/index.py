@@ -1,6 +1,5 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 import torch.nn.functional as F
 import triton
@@ -36,6 +35,11 @@ def prepare_position_ids_kernel(
 @tensor_cache
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return torch.diff(cu_seqlens)
+
+
+@tensor_cache
+def prepare_max_seqlen(cu_seqlens: torch.LongTensor) -> int:
+    return torch.diff(cu_seqlens).max().item()
 
 
 @tensor_cache
