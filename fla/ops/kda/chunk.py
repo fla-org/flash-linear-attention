@@ -4,9 +4,8 @@ import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
-from fla.ops.common.chunk_o import chunk_bwd_dv_local
-from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_fwd_o_gk
-from fla.ops.kda.chunk_inter import chunk_kda_bwd_dqkwg_wy_fused
+from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_dqkwg_wy_fused
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_fwd
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
@@ -103,9 +102,12 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
-    dv = chunk_bwd_dv_local(
+    # dAqk = do @ v.T
+    # dv = A @ do
+    dAqk, dv = chunk_kda_bwd_dAv(
         q=q,
         k=k,
+        v=v_new,
         do=do,
         A=Aqk,
         scale=scale,
@@ -128,17 +130,6 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
-    # dq dk in fp32
-    dAqk = chunk_gla_bwd_dA(
-        v=v_new,
-        do=do,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-    )
-    # This fuses chunk_kda_bwd_kernel_inter and prepare_wy_repr_bwd_kda_kernel into a single kernel to reduce memory bandwidth usage in the backward pass.
-    # Previously, the backward pass computed inter-chunk gradients in one kernel (writing dw, dk, dg to global memory), then immediately read them back in the WY backward kernel. The fused kernel eliminates this redundant memory traffic by keeping dw in registers and computing the WY backward contributions in the same kernel launch.
     dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_dqkwg_wy_fused(
         q=q,
         k=k,
