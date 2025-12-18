@@ -226,7 +226,7 @@ def chunk_kda_bwd_dAv(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
