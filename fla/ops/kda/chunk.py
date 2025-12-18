@@ -6,10 +6,10 @@ from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dv_local
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_fwd_o_gk
-from fla.ops.kda.chunk_inter import chunk_kda_bwd_dqkwg
+from fla.ops.kda.chunk_inter import chunk_kda_bwd_dqkwg_wy_fused
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_fwd
-from fla.ops.kda.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
+from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
@@ -137,32 +137,23 @@ def chunk_kda_bwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
-    dq, dk, dw, dg = chunk_kda_bwd_dqkwg(
+    # This fuses chunk_kda_bwd_kernel_inter and prepare_wy_repr_bwd_kda_kernel into a single kernel to reduce memory bandwidth usage in the backward pass.
+    # Previously, the backward pass computed inter-chunk gradients in one kernel (writing dw, dk, dg to global memory), then immediately read them back in the WY backward kernel. The fused kernel eliminates this redundant memory traffic by keeping dw in registers and computing the WY backward contributions in the same kernel launch.
+    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_dqkwg_wy_fused(
         q=q,
         k=k,
         v=v_new,
-        w=w,
-        g=g,
+        v_org=v,
         h=h,
-        dv=dv,
+        g=g,
+        beta=beta,
+        A=Akk,
         do=do,
         dh=dh,
+        dv=dv,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-    )
-    dk, dv, db, dg, dAkk = prepare_wy_repr_bwd(
-        k=k,
-        v=v,
-        beta=beta,
-        gk=g,
-        A=Akk,
-        dk=dk,
-        dw=dw,
-        du=dv,
-        dg=dg,
-        cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
     dq, dk, db, dg = chunk_kda_bwd_intra(
