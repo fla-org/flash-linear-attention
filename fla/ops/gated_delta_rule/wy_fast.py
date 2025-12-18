@@ -7,7 +7,30 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem, IS_NVIDIA_BLACKWELL
+
+if IS_NVIDIA_BLACKWELL:
+    """
+    Compute tl.dot with SM100 workaround.
+
+    On SM100 (Blackwell) GPUs, wraps the result in inline assembly to prevent
+    the TritonGPUHoistTMEMAlloc pass from incorrectly fusing add and dot operations.
+    See: https://github.com/fla-org/flash-linear-attention/issues/638
+    """
+    @triton.jit
+    def safe_dot(a, b):
+        return tl.inline_asm_elementwise(
+            asm="mov.f32 $0, $1;",
+            constraints="=r,r",
+            args=[tl.dot(a, b)],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+else:
+    @triton.jit
+    def safe_dot(a, b):
+        return tl.dot(a, b)
 
 
 @triton.heuristics({
@@ -198,18 +221,7 @@ def prepare_wy_repr_bwd_kernel(
         b_A += tl.dot(b_kb, tl.trans(b_k))
         b_dkb = tl.dot(b_dA, b_k)
         b_db += tl.sum(b_dkb * b_k, 1)
-        # Temporary workaround for a Triton compiler bug on B200 GPUs. (https://github.com/fla-org/flash-linear-attention/issues/638)
-        # The `TritonGPUHoistTMEMAlloc` pass incorrectly fuses the add and dot operations,
-        # leading to a dominance error. The inline assembly prevents this fusion.
-        # TODO: Remove this workaround when the compiler bug is fixed.
-        b_dk += tl.inline_asm_elementwise(
-            asm="mov.f32 $0, $1;",
-            constraints="=r,r",
-            args=[tl.dot(tl.trans(b_dA), b_kb)],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
+        b_dk += safe_dot(tl.trans(b_dA), b_kb)
         b_dk += b_dkb * b_b[:, None]
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
