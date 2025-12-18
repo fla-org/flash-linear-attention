@@ -198,6 +198,10 @@ def prepare_wy_repr_bwd_kernel(
         b_A += tl.dot(b_kb, tl.trans(b_k))
         b_dkb = tl.dot(b_dA, b_k)
         b_db += tl.sum(b_dkb * b_k, 1)
+        # Temporary workaround for a Triton compiler bug on B200 GPUs. (https://github.com/fla-org/flash-linear-attention/issues/638)
+        # The `TritonGPUHoistTMEMAlloc` pass incorrectly fuses the add and dot operations,
+        # leading to a dominance error. The inline assembly prevents this fusion.
+        # TODO: Remove this workaround when the compiler bug is fixed.
         b_dk += tl.inline_asm_elementwise(
             asm="mov.f32 $0, $1;",
             constraints="=r,r",
