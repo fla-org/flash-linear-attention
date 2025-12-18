@@ -7,7 +7,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
-from fla.utils import autotune_cache_kwargs, check_shared_mem, IS_NVIDIA_BLACKWELL
+from fla.utils import IS_NVIDIA_BLACKWELL, autotune_cache_kwargs, check_shared_mem
 
 if IS_NVIDIA_BLACKWELL:
     """
