@@ -478,6 +478,7 @@ def _register_aliases():
         'IS_NVIDIA',
         'IS_INTEL_ALCHEMIST',
         'IS_NVIDIA_HOPPER',
+        'IS_NVIDIA_BLACKWELL',
         'USE_CUDA_GRAPH',
         'IS_TF32_SUPPORTED',
         'IS_GATHER_SUPPORTED',
