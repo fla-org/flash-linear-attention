@@ -16,6 +16,9 @@ if IS_NVIDIA_BLACKWELL:
     On SM100 (Blackwell) GPUs, wraps the result in inline assembly to prevent
     the TritonGPUHoistTMEMAlloc pass from incorrectly fusing add and dot operations.
     See: https://github.com/fla-org/flash-linear-attention/issues/638
+    
+    TODO: Remove this workaround once the Triton compiler bug is fixed.
+    Track upstream issue at: https://github.com/triton-lang/triton/issues/8695
     """
     @triton.jit
     def safe_dot(a, b):
