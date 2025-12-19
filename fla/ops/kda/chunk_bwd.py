@@ -6,11 +6,11 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
-NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+NUM_WARPS = [2, 4, 8]
 
 
 @triton.heuristics({
@@ -218,6 +218,21 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
             b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
 
+            if i_k == 0:
+                p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+                p_dv2 = tl.make_block_ptr(dv2, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+
+                b_v = tl.load(p_v, boundary_check=(0, 1))
+                b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
+
+                b_dA += tl.dot(b_dv, tl.trans(b_vb))
+
+                b_dvb = tl.dot(b_A, b_dv)
+                b_dv2 = b_dvb * b_beta[:, None]
+                b_db += tl.sum(b_dvb * b_v, 1)
+
+                tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
+
         b_gk_exp = exp2(b_g)
         b_dgk *= exp2(b_gn)
         b_dq *= scale
@@ -247,22 +262,6 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
-
-    for i_v in range(tl.cdiv(V, BV)):
-        p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dv2 = tl.make_block_ptr(dv2, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
-        b_dv = tl.load(p_dv, boundary_check=(0, 1))
-
-        b_dA += tl.dot(b_dv, tl.trans(b_vb))
-
-        b_dvb = tl.dot(b_A, b_dv)
-        b_dv2 = b_dvb * b_beta[:, None]
-        b_db += tl.sum(b_dvb * b_v, 1)
-        tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA, 0)
@@ -356,7 +355,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
     dv2 = torch.empty_like(v)
     dg = torch.empty_like(g, dtype=torch.float)
     db = torch.empty_like(beta, dtype=torch.float)
-    dA = torch.empty(B, T, H, BT, dtype=torch.float, device=q.device)
+    dA = torch.empty_like(A, dtype=torch.float)
 
     grid = (NT, B * H)
     chunk_kda_bwd_kernel_wy_dqkg_fused[grid](
