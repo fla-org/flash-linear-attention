@@ -5,7 +5,7 @@ import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
-from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_dqkwg_wy_fused
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_fwd
 from fla.ops.kda.wy_fast import recompute_w_u_fwd
@@ -130,15 +130,15 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
-    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_dqkwg_wy_fused(
+    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
         q=q,
         k=k,
-        v=v_new,
-        v_org=v,
-        h=h,
+        v=v,
+        v_new=v_new,
         g=g,
         beta=beta,
         A=Akk,
+        h=h,
         do=do,
         dh=dh,
         dv=dv,

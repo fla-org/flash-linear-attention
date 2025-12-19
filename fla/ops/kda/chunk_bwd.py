@@ -106,21 +106,21 @@ def chunk_bwd_kernel_dAv(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_kda_bwd_kernel_inter_wy_fused(
+def chunk_kda_bwd_kernel_wy_dqkg_fused(
     q,
     k,
     v,
-    v_org,
+    v_new,
     g,
     beta,
     A,
     h,
     do,
     dh,
-    dv_in,
     dq,
     dk,
     dv,
+    dv2,
     dg,
     db,
     dA,
@@ -157,17 +157,17 @@ def chunk_kda_bwd_kernel_inter_wy_fused(
     q += (bos * H + i_h) * K
     k += (bos * H + i_h) * K
     v += (bos * H + i_h) * V
-    v_org += (bos * H + i_h) * V
+    v_new += (bos * H + i_h) * V
     g += (bos * H + i_h) * K
     beta += bos * H + i_h
     A += (bos * H + i_h) * BT
-    h += (i_tg * H + i_h) * K * V
+    h += (i_tg * H + i_h) * K*V
     do += (bos * H + i_h) * V
-    dh += (i_tg * H + i_h) * K * V
-    dv_in += (bos * H + i_h) * V
+    dh += (i_tg * H + i_h) * K*V
     dq += (bos * H + i_h) * K
     dk += (bos * H + i_h) * K
     dv += (bos * H + i_h) * V
+    dv2 += (bos * H + i_h) * V
     dg += (bos * H + i_h) * K
     db += bos * H + i_h
     dA += (bos * H + i_h) * BT
@@ -185,83 +185,84 @@ def chunk_kda_bwd_kernel_inter_wy_fused(
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
 
-        p_k = tl.make_block_ptr(k, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_g = tl.make_block_ptr(g, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_g = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
 
-        p_gn = g + (min(T, i_t * BT + BT) - 1) * H * K + o_k
+        p_gn = g + (min(T, i_t * BT + BT) - 1) * H*K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0)
 
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)
-        b_dk_inter = tl.zeros([BT, BK], dtype=tl.float32)
+        b_dk = tl.zeros([BT, BK], dtype=tl.float32)
         b_dw = tl.zeros([BT, BK], dtype=tl.float32)
         b_dgk = tl.zeros([BK], dtype=tl.float32)
 
         for i_v in range(tl.cdiv(V, BV)):
-            p_v = tl.make_block_ptr(v, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_do = tl.make_block_ptr(do, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_v_new = tl.make_block_ptr(v_new, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
             p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            p_dv_in = tl.make_block_ptr(dv_in, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-
-            b_v = tl.load(p_v, boundary_check=(0, 1))
+            p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+            # [BT, BV]
+            b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
             b_do = tl.load(p_do, boundary_check=(0, 1))
+            # [BV, BK]
             b_h = tl.load(p_h, boundary_check=(0, 1))
             b_dh = tl.load(p_dh, boundary_check=(0, 1))
-            b_dv_in_block = tl.load(p_dv_in, boundary_check=(0, 1))
+            # [BT, BV]
+            b_dv = tl.load(p_dv, boundary_check=(0, 1))
 
             b_dgk += tl.sum(b_h * b_dh, axis=0)
             b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-            b_dk_inter += tl.dot(b_v, b_dh.to(b_v.dtype))
-            b_dw += tl.dot(b_dv_in_block.to(b_v.dtype), b_h.to(b_v.dtype))
+            b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
+            b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
 
         b_gk_exp = exp2(b_g)
         b_dgk *= exp2(b_gn)
         b_dq *= scale
         b_dq = b_dq * b_gk_exp
-        b_dk_inter = b_dk_inter * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
+        b_dk = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
 
         b_kbg = (b_k * b_beta[:, None] * b_gk_exp).to(b_A.dtype)
-        b_dw_neg = -b_dw
 
-        b_dw_neg_cast = b_dw_neg.to(b_A.dtype)
-        b_dA += tl.dot(b_dw_neg_cast, tl.trans(b_kbg))
+        b_dw = -b_dw.to(b_A.dtype)
+        b_dA += tl.dot(b_dw, tl.trans(b_kbg))
 
-        b_dkbg = tl.dot(b_A, b_dw_neg_cast)
+        b_dkbg = tl.dot(b_A, b_dw)
         b_dk_wy = b_dkbg * b_gk_exp * b_beta[:, None]
         b_db += tl.sum(b_dkbg * b_k * b_gk_exp, 1)
         b_dg_wy = b_kbg * b_dkbg
 
-        p_q = tl.make_block_ptr(q, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_dgk += tl.sum(b_dk_inter * b_k, axis=0)
-        b_dg = b_q * b_dq - b_k * b_dk_inter + m_last[:, None] * b_dgk + b_dg_wy
+        b_dgk += tl.sum(b_dk * b_k, axis=0)
+        b_dg = b_q * b_dq - b_k * b_dk + m_last[:, None] * b_dgk + b_dg_wy
 
-        b_dk = b_dk_inter + b_dk_wy
+        b_dk = b_dk + b_dk_wy
 
-        p_dq = tl.make_block_ptr(dq, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dk = tl.make_block_ptr(dk, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_dg = tl.make_block_ptr(dg, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_dg = tl.make_block_ptr(dg, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 
     for i_v in range(tl.cdiv(V, BV)):
-        p_v_org = tl.make_block_ptr(v_org, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_du = tl.make_block_ptr(dv_in, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_dv = tl.make_block_ptr(dv, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dv2 = tl.make_block_ptr(dv2, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
 
-        b_v_org = tl.load(p_v_org, boundary_check=(0, 1))
-        b_vb = (b_v_org * b_beta[:, None]).to(b_v_org.dtype)
-        b_du = tl.load(p_du, boundary_check=(0, 1))
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_vb = (b_v * b_beta[:, None]).to(b_v.dtype)
+        b_dv = tl.load(p_dv, boundary_check=(0, 1))
 
-        b_dA += tl.dot(b_du, tl.trans(b_vb))
+        b_dA += tl.dot(b_dv, tl.trans(b_vb))
 
-        b_dvb = tl.dot(b_A, b_du)
-        b_dv_out = b_dvb * b_beta[:, None]
-        b_db += tl.sum(b_dvb * b_v_org, 1)
-        tl.store(p_dv, b_dv_out.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+        b_dvb = tl.dot(b_A, b_dv)
+        b_dv2 = b_dvb * b_beta[:, None]
+        b_db += tl.sum(b_dvb * b_v, 1)
+        tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_dA = tl.where(m_A, b_dA, 0)
@@ -326,15 +327,15 @@ def chunk_kda_bwd_dAv(
     return dA, dv
 
 
-def chunk_kda_bwd_dqkwg_wy_fused(
+def chunk_kda_bwd_wy_dqkg_fused(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    v_org: torch.Tensor,
-    h: torch.Tensor,
+    v_new: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
     A: torch.Tensor,
+    h: torch.Tensor,
     do: torch.Tensor,
     dh: torch.Tensor,
     dv: torch.Tensor,
@@ -352,29 +353,27 @@ def chunk_kda_bwd_dqkwg_wy_fused(
 
     dq = torch.empty_like(q, dtype=torch.float)
     dk = torch.empty_like(k, dtype=torch.float)
-    dv_out = torch.empty_like(v_org, dtype=torch.float)
+    dv2 = torch.empty_like(v)
     dg = torch.empty_like(g, dtype=torch.float)
-    db = torch.empty_like(beta)
+    db = torch.empty_like(beta, dtype=torch.float)
     dA = torch.empty(B, T, H, BT, dtype=torch.float, device=q.device)
 
-    def grid(meta):
-        return (NT, B * H)
-
-    chunk_kda_bwd_kernel_inter_wy_fused[grid](
+    grid = (NT, B * H)
+    chunk_kda_bwd_kernel_wy_dqkg_fused[grid](
         q=q,
         k=k,
         v=v,
-        v_org=v_org,
+        v_new=v_new,
         g=g,
         beta=beta,
         A=A,
         h=h,
         do=do,
         dh=dh,
-        dv_in=dv,
         dq=dq,
         dk=dk,
-        dv=dv_out,
+        dv=dv,
+        dv2=dv2,
         dg=dg,
         db=db,
         dA=dA,
@@ -387,4 +386,5 @@ def chunk_kda_bwd_dqkwg_wy_fused(
         V=V,
         BT=BT,
     )
-    return dq, dk, dv_out, db, dg, dA
+    dv = dv2
+    return dq, dk, dv, db, dg, dA
