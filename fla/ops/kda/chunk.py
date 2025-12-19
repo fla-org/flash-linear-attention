@@ -13,6 +13,13 @@ from fla.ops.kda.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.common.cp_chunk_delta_h import (
+    get_gdn_cp_context,
+    chunk_gated_delta_rule_fwd_h_pre_process,
+    chunk_gated_delta_rule_bwd_dhu_pre_process,
+    compress_h0,
+    expand_h0,
+)
 
 
 def chunk_kda_fwd(
@@ -39,6 +46,19 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
+
+    context = get_gdn_cp_context()
+    initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
+        k=kg, 
+        w=w, 
+        u=u, 
+        gk=g,
+        cu_seqlens=cu_seqlens,
+        initial_state=initial_state,
+        context=context,
+        use_exp2=True
+        )
+
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=kg,
         w=w,
@@ -50,6 +70,8 @@ def chunk_kda_fwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
+
+    initial_state = compress_h0(initial_state, context=context)
 
     o = chunk_gla_fwd_o_gk(
         q=q,
@@ -63,7 +85,7 @@ def chunk_kda_fwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
-    return o, Aqk, Akk, final_state
+    return o, Aqk, Akk, final_state, initial_state
 
 
 def chunk_kda_bwd(
@@ -81,6 +103,7 @@ def chunk_kda_bwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    context = None,
 ):
     w, u, qg, kg = recompute_w_u_fwd(
         q=q,
@@ -92,6 +115,8 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
+
+    initial_state = expand_h0(initial_state, context=context)
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=kg,
         w=w,
@@ -112,6 +137,21 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+    )
+
+    dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
+        q=qg,
+        k=kg,
+        w=w,
+        do=do,
+        dv=dv,
+        gk=g,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        dht=dht,
+        initial_state=initial_state,
+        use_exp2=True,
+        context=context,
     )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -225,7 +265,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices
         )
-        o, Aqk, Akk, final_state = chunk_kda_fwd(
+        o, Aqk, Akk, final_state, initial_state = chunk_kda_fwd(
             q=q,
             k=k,
             v=v,
@@ -246,6 +286,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.use_gate_in_kernel = use_gate_in_kernel
+        ctx.context = get_gdn_cp_context().copy_for_backward()
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -287,6 +328,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             chunk_size=ctx.chunk_size,
+            context=ctx.context,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
