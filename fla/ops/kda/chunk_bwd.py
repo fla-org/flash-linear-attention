@@ -245,14 +245,15 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_dA += tl.dot(b_dw, tl.trans(b_kbg))
 
         b_dkbg = tl.dot(b_A, b_dw)
-        b_dk_wy = b_dkbg * b_gk_exp * b_beta[:, None]
-        b_db += tl.sum(b_dkbg * b_k * b_gk_exp, 1)
-        b_dg_wy = b_kbg * b_dkbg
+        b_dkbgg = b_dkbg * b_gk_exp
+        b_dk_wy = b_dkbgg * b_beta[:, None]
+        b_db += tl.sum(b_dkbgg * b_k, 1)
 
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_dgk += tl.sum(b_dk * b_k, axis=0)
-        b_dg = b_q * b_dq - b_k * b_dk + m_last[:, None] * b_dgk + b_dg_wy
+        b_kdk = b_k * b_dk
+        b_dgk += tl.sum(b_kdk, axis=0)
+        b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kbg * b_dkbg
 
         b_dk = b_dk + b_dk_wy
 
