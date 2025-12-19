@@ -4,9 +4,8 @@ import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
-from fla.ops.common.chunk_o import chunk_bwd_dv_local
-from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_fwd_o_gk
-from fla.ops.kda.chunk_inter import chunk_kda_bwd_dqkwg
+from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_dqkwg
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_fwd
 from fla.ops.kda.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
@@ -103,9 +102,12 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
-    dv = chunk_bwd_dv_local(
+    # dAqk = do @ v.T
+    # dv = A @ do
+    dAqk, dv = chunk_kda_bwd_dAv(
         q=q,
         k=k,
+        v=v_new,
         do=do,
         A=Aqk,
         scale=scale,
@@ -127,15 +129,6 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         use_exp2=True,
-    )
-    # dq dk in fp32
-    dAqk = chunk_gla_bwd_dA(
-        v=v_new,
-        do=do,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
     )
     dq, dk, dw, dg = chunk_kda_bwd_dqkwg(
         q=q,
@@ -425,8 +418,10 @@ def chunk_kda(
         A_log, dt_bias = kwargs["A_log"], kwargs.get("dt_bias")
 
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
+    assert k.shape[-1] <= 256, "Currently we only support key headdim <=256 for KDA :-("
     assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
+
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkKDAFunction.apply(
