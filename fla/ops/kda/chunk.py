@@ -81,6 +81,8 @@ def chunk_kda_bwd(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ):
+    # w = Akk @ (k * beta)
+    # u = Akk @ (v * beta)
     w, u, qg, kg = recompute_w_u_fwd(
         q=q,
         k=k,

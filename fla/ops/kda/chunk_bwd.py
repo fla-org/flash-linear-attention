@@ -235,8 +235,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
         b_gk_exp = exp2(b_g)
         b_dgk *= exp2(b_gn)
-        b_dq *= scale
-        b_dq = b_dq * b_gk_exp
+        b_dq = b_dq * b_gk_exp * scale
         b_dk = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
 
         b_kbg = (b_k * b_beta[:, None] * b_gk_exp).to(b_A.dtype)
@@ -246,7 +245,6 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
         b_dkbg = tl.dot(b_A, b_dw)
         b_dkbgg = b_dkbg * b_gk_exp
-        b_dk_wy = b_dkbgg * b_beta[:, None]
         b_db += tl.sum(b_dkbgg * b_k, 1)
 
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -254,8 +252,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_kdk = b_k * b_dk
         b_dgk += tl.sum(b_kdk, axis=0)
         b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kbg * b_dkbg
-
-        b_dk = b_dk + b_dk_wy
+        b_dk = b_dk + b_dkbgg * b_beta[:, None]
 
         p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
