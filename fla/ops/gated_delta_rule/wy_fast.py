@@ -211,24 +211,28 @@ def prepare_wy_repr_bwd_kernel(
 
     if USE_G:
         b_dA *= exp(b_g[:, None] - b_g[None, :])
-    b_dA = tl.where(m_A, -b_dA, 0)
 
-    b_dA = b_dA.to(k.dtype.element_ty)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
+    b_dA = tl.where(m_A, -b_dA, 0).to(k.dtype.element_ty)
+
+    tl.debug_barrier()
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_dk = tl.load(p_dk, boundary_check=(0, 1))
-        b_kb = (b_k * b_b[:, None]).to(b_k.dtype)
-        b_A += tl.dot(b_kb, tl.trans(b_k))
+        b_kt = tl.trans(b_k)
+        b_ktb = b_kt * b_b[None, :]
+
+        b_A += tl.dot(b_k, b_kt)
         b_dkb = tl.dot(b_dA, b_k)
         b_db += tl.sum(b_dkb * b_k, 1)
-        b_dk += safe_dot(tl.trans(b_dA), b_kb)
-        b_dk += b_dkb * b_b[:, None]
+        b_dk = b_dkb * b_b[:, None] + tl.trans(tl.dot(b_ktb, b_dA))
+        b_dk += tl.load(p_dk, boundary_check=(0, 1))
+
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
 
+    b_A *= b_b[:, None]
     if USE_G:
         b_AdA = b_dA * b_A
         p_dg = tl.make_block_ptr(dg + (bos*H + i_h), (T,), (H,), (i_t * BT,), (BT,), (0,))
@@ -322,6 +326,5 @@ def prepare_wy_repr_bwd(
     return dk, dv, db, dg
 
 
-bwd_prepare_wy_repr = prepare_wy_repr_bwd
-
 fwd_recompute_w_u = recompute_w_u_fwd
+bwd_prepare_wy_repr = prepare_wy_repr_bwd
