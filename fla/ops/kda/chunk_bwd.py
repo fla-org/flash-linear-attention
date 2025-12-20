@@ -6,11 +6,11 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
-NUM_WARPS = [2, 4, 8]
+NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
 @triton.heuristics({
@@ -99,7 +99,7 @@ def chunk_bwd_kernel_dAv(
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in BK_LIST
         for BV in BV_LIST
-        for num_warps in [2, 4, 8]
+        for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
     key=['BT'],
