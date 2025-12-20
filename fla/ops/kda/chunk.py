@@ -317,7 +317,7 @@ def chunk_kda(
         g (torch.Tensor):
             (forget) gating tensor (in log space!) of shape `[B, T, H, K]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]`.
+            betas of shape `[B, T, H, K]` (per-channel beta).
         scale (Optional[float]):
             Scale factor for the KDA attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -359,7 +359,7 @@ def chunk_kda(
         >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> k = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device='cuda')
-        >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda')
+        >>> beta = torch.rand(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> g = torch.rand(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
         >>> A_log = torch.randn(H, dtype=torch.float32, device='cuda')
@@ -410,7 +410,7 @@ def chunk_kda(
 
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert k.shape[-1] <= 256, "Currently we only support key headdim <=256 for KDA :-("
-    assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."
+    assert beta.shape == q.shape, "beta must be of shape (batch size, seq len, num of head, head dim)."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
 
     if scale is None:

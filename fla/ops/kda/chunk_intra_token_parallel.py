@@ -78,7 +78,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     g += bos * H*K
     Aqk += bos * H*BT
     Akk += bos * H*BC
-    beta += bos * H
+    beta += bos * H*K
 
     BK: tl.constexpr = triton.next_power_of_2(K)
     o_h = tl.arange(0, BH)
@@ -89,23 +89,24 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     p_q = tl.make_block_ptr(q + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
     p_k = tl.make_block_ptr(k + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
     p_g = tl.make_block_ptr(g + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
-    p_beta = tl.make_block_ptr(beta + i_t * H, (H,), (1,), (i_hg * BH,), (BH,), (0,))
+    p_beta = tl.make_block_ptr(beta + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
     # [BH, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
     b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_k = b_k * tl.load(p_beta, boundary_check=(0,)).to(tl.float32)[:, None]
+    b_k = b_k * tl.load(p_beta, boundary_check=(0, 1)).to(tl.float32)
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
         p_kj = tl.make_block_ptr(k + j * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
         p_gj = tl.make_block_ptr(g + j * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+        p_bj = tl.make_block_ptr(beta + j * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
         # [BH, BK]
         b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)
         b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
+        b_bj = tl.load(p_bj, boundary_check=(0, 1)).to(tl.float32)
 
         b_kgj = tl.where(m_k[None, :], b_kj * exp2(b_g - b_gj), 0.0)
-        # [BH]
-        b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
+        b_Aqk = tl.sum(b_q * b_bj * b_kgj, axis=1) * scale
         b_Akk = tl.where(j < i_t, tl.sum(b_k * b_kgj, axis=1), 0.0)
 
         tl.store(Aqk + i_t * H*BT + (i_hg * BH + o_h) * BT + j % BT, b_Aqk.to(Aqk.dtype.element_ty), mask=m_h)
@@ -135,7 +136,7 @@ def chunk_kda_fwd_intra_token_parallel(
         q: [B, T, H, K]
         k: [B, T, H, K]
         gk: [B, T, H, K] cumsum of gates
-        beta: [B, T, H]
+        beta: [B, T, H, K] per-channel beta
         Aqk: [B, T, H, BT] output tensor to write to
         Akk: [B, T, H, BC] output tensor for diagonal blocks (fp32)
         scale: attention scale

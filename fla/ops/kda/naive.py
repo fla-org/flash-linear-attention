@@ -29,7 +29,7 @@ def naive_recurrent_kda(
     for i in range(0, T):
         q_i, k_i, v_i, g_i, b_i = q[:, i], k[:, i], v[:, i], g[:, i], beta[:, i]
         S = S * g_i[..., None].exp()
-        S = S + torch.einsum('b h k, b h v -> b h k v', b_i[..., None] * k_i, v_i - (k_i[..., None] * S).sum(-2))
+        S = S + torch.einsum('b h k, b h v -> b h k v', b_i * k_i, v_i - (k_i[..., None] * S).sum(-2))
         o[:, i] = torch.einsum('b h k, b h k v -> b h v', q_i, S)
     if not output_final_state:
         S = None
@@ -66,13 +66,12 @@ def naive_chunk_kda(
     for i in range(BT):
         k_i = k[..., i, :]
         g_i = g[..., i:i+1, :]
-        A[..., i] = torch.einsum('... c d, ... d -> ... c', k * (g - g_i).exp(), k_i)
-    A = A * beta[..., None]
+        A[..., i] = torch.einsum('... c d, ... d -> ... c', beta * k * (g - g_i).exp(), k_i)
 
     A = -A.masked_fill(mask, 0)
     for i in range(1, BT):
         A[..., i, :i] = A[..., i, :i].clone() + (A[..., i, :, None].clone() * A[..., :, :i].clone()).sum(-2)
-    A = (A + torch.eye(BT, dtype=torch.float, device=q.device)) * beta[..., None, :]
+    A = A + torch.eye(BT, dtype=torch.float, device=q.device)
 
     w = A @ (g.exp() * k)
     u = A @ v
@@ -88,13 +87,15 @@ def naive_chunk_kda(
         A = torch.zeros(B, H, BT, BT, dtype=torch.float, device=q.device)
         for j in range(BT):
             k_j = k[:, :, i, j]
+            b_j = beta[:, :, i, j]
             g_j = g[:, :, i, j:j+1, :]
-            A[..., j] = torch.einsum('... c d, ... d -> ... c', q_i * (g_i - g_j).exp(), k_j)
+            A[..., j] = torch.einsum('... c d, ... d -> ... c', q_i * (g_i - g_j).exp(), b_j * k_j)
         A = A.masked_fill(mask, 0)
         v_i = u_i - w_i @ S
         o[:, :, i] = (q_i * g_i.exp()) @ S + A @ v_i
         S = S * rearrange(g_i[:, :, -1].exp(), 'b h k -> b h k 1')
-        S += rearrange((g_i[:, :, -1:] - g_i).exp() * k_i, 'b h c k -> b h k c') @ v_i
+        b_i = beta[:, :, i]
+        S += rearrange((g_i[:, :, -1:] - g_i).exp() * b_i * k_i, 'b h c k -> b h k c') @ v_i
     if not output_final_state:
         S = None
     return rearrange(o, 'b h n c d -> b (n c) h d').to(dtype), S

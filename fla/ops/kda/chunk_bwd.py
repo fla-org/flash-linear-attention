@@ -159,7 +159,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     v += (bos * H + i_h) * V
     v_new += (bos * H + i_h) * V
     g += (bos * H + i_h) * K
-    beta += bos * H + i_h
+    beta += (bos * H + i_h) * K
     A += (bos * H + i_h) * BT
     h += (i_tg * H + i_h) * K*V
     do += (bos * H + i_h) * V
@@ -169,17 +169,13 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     dv += (bos * H + i_h) * V
     dv2 += (bos * H + i_h) * V
     dg += (bos * H + i_h) * K
-    db += bos * H + i_h
+    db += (bos * H + i_h) * K
     dA += (bos * H + i_h) * BT
-
-    p_beta = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_beta = tl.load(p_beta, boundary_check=(0,))
 
     p_A = tl.make_block_ptr(A, (BT, T), (1, H * BT), (0, i_t * BT), (BT, BT), (0, 1))
     b_A = tl.load(p_A, boundary_check=(0, 1))
 
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
-    b_db = tl.zeros([BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
@@ -187,8 +183,10 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_g = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_b = tl.make_block_ptr(beta, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
+        b_b = tl.load(p_b, boundary_check=(0, 1))
 
         p_gn = g + (min(T, i_t * BT + BT) - 1) * H*K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0)
@@ -227,50 +225,48 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
                 b_dA += tl.dot(b_dv, tl.trans(b_v))
 
-                b_dvb = tl.dot(b_A, b_dv)
-                b_dv2 = b_dvb * b_beta[:, None]
-                b_db += tl.sum(b_dvb * b_v, 1)
+                b_dv2 = tl.dot(b_A, b_dv)
 
                 tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
 
         b_gk_exp = exp2(b_g)
-        b_gb = b_gk_exp * b_beta[:, None]
         b_dgk *= exp2(b_gn)
         b_dq = b_dq * b_gk_exp * scale
-        b_dk = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
+        b_dk_kg = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
+        b_db = b_dk_kg * b_k
+        b_dk = b_dk_kg * b_b
 
         b_kg = b_k * b_gk_exp
 
         b_dw = -b_dw.to(b_A.dtype)
         b_dA += tl.dot(b_dw, tl.trans(b_kg.to(b_A.dtype)))
 
-        b_dkgb = tl.dot(b_A, b_dw)
-        b_db += tl.sum(b_dkgb * b_kg, 1)
+        b_dkg = tl.dot(b_A, b_dw)
 
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_kdk = b_k * b_dk
         b_dgk += tl.sum(b_kdk, axis=0)
-        b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kg * b_dkgb * b_beta[:, None]
-        b_dk = b_dk + b_dkgb * b_gb
+        b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kg * b_dkg
+        b_dk = b_dk + b_dkg * b_gk_exp
 
         p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dg = tl.make_block_ptr(dg, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_db = tl.make_block_ptr(db, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0, 1))
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
-    b_dA = tl.where(m_A, b_dA * b_beta[None, :], 0)
+    b_dA = tl.where(m_A, b_dA, 0)
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
     b_dA = tl.where(m_A, -b_dA, 0)
 
     p_dA = tl.make_block_ptr(dA, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    p_db = tl.make_block_ptr(db, (T,), (H,), (i_t * BT,), (BT,), (0,))
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
 
 
 def chunk_kda_bwd_dAv(

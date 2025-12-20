@@ -31,7 +31,7 @@ def fused_recurrent_kda(
         g (torch.Tensor):
             g (decays) of shape `[B, T, HV, K]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, HV]`.
+            betas of shape `[B, T, HV, K]` (per-channel beta).
         scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -64,7 +64,7 @@ def fused_recurrent_kda(
         >>> k = F.normalize(torch.randn(B, T, H, K, device='cuda'), p=2, dim=-1)
         >>> v = torch.randn(B, T, HV, V, device='cuda')
         >>> g = F.logsigmoid(torch.rand(B, T, HV, K, device='cuda'))
-        >>> beta = torch.rand(B, T, HV, device='cuda').sigmoid()
+        >>> beta = torch.rand(B, T, HV, K, device='cuda').sigmoid()
         >>> h0 = torch.randn(B, HV, K, V, device='cuda')
         >>> o, ht = fused_recurrent_kda(
             q, k, v, g, beta,

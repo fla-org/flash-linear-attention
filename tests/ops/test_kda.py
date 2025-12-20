@@ -44,7 +44,7 @@ def test_naive_chunk(
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
     g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    beta = torch.randn(B, T, H, D, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
@@ -106,7 +106,7 @@ def test_fused_recurrent(
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
     g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    beta = torch.randn(B, T, H, D, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
@@ -195,7 +195,7 @@ def test_chunk(
     else:
         g = F.logsigmoid(g) / gate_logit_normalizer
         g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    beta = torch.randn(B, T, H, D, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     if use_gate_in_kernel:
         A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
@@ -295,7 +295,7 @@ def test_chunk_varlen(
     mask = torch.rand_like(g) > mask_p
     g = g * mask + (~mask) * (-1000)
 
-    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
+    beta = torch.rand(1, T, H, D, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=torch.float32)
 
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, g, beta, h0))
