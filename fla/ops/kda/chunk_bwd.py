@@ -218,6 +218,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype))
             b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
 
+            tl.debug_barrier()
             if i_k == 0:
                 p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
                 p_dv2 = tl.make_block_ptr(dv2, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
