@@ -5,10 +5,10 @@ import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
-from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_dqkwg
+from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
 from fla.ops.kda.gate import kda_gate_bwd, kda_gate_fwd
-from fla.ops.kda.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
+from fla.ops.kda.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
@@ -81,6 +81,8 @@ def chunk_kda_bwd(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ):
+    # w = Akk @ (k * beta)
+    # u = Akk @ (v * beta)
     w, u, qg, kg = recompute_w_u_fwd(
         q=q,
         k=k,
@@ -130,32 +132,21 @@ def chunk_kda_bwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
-    dq, dk, dw, dg = chunk_kda_bwd_dqkwg(
+    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
         q=q,
         k=k,
-        v=v_new,
-        w=w,
+        v=v,
+        v_new=v_new,
         g=g,
+        beta=beta,
+        A=Akk,
         h=h,
-        dv=dv,
         do=do,
         dh=dh,
+        dv=dv,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-    )
-    dk, dv, db, dg, dAkk = prepare_wy_repr_bwd(
-        k=k,
-        v=v,
-        beta=beta,
-        gk=g,
-        A=Akk,
-        dk=dk,
-        dw=dw,
-        du=dv,
-        dg=dg,
-        cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
     dq, dk, db, dg = chunk_kda_bwd_intra(
