@@ -348,7 +348,6 @@ def chunk_gla_fwd_kernel_o(
 
         # [BT, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_q = (b_q * scale).to(b_q.dtype)
         # [BT, BK]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         # [BT, BK]
@@ -362,6 +361,7 @@ def chunk_gla_fwd_kernel_o(
         # [BT, BV]
         if i_k >= 0:
             b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+    b_o *= scale
     p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_o = tl.make_block_ptr(o + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
