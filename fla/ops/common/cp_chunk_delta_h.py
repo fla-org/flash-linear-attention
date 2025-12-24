@@ -93,6 +93,7 @@ def get_cp_cu_seqlens(cu_seqlens, world_size=None, rank=None, group=None, kernel
                pre_num_conv_tokens_list.append(0)
                is_first_rank_list.append(True)
                post_num_ranks_list.append(0)
+               pre_num_ranks_list.append(0)
     if cu_seqlens[-1] != part_len:
        cu_seqlens.append(part_len)
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=torch.cuda.current_device())
