@@ -218,7 +218,7 @@ def test_chunk(
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
     v = torch.rand(B, T, H, D, dtype=dtype)
-    beta = torch.rand(B, T, H, dtype=dtype).sigmoid()
+    beta = torch.rand(B, T, H, dtype=torch.float).sigmoid()
     g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
     g = g / gate_logit_normalizer
     g = g * (torch.rand_like(g) > mask_p)
@@ -303,7 +303,7 @@ def test_chunk_varlen(
     v = torch.randn((1, T, H, D), dtype=dtype)
     g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
     g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
+    beta = torch.rand(1, T, H, dtype=torch.float).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=dtype)
 
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
