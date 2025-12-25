@@ -1,9 +1,43 @@
+'''shell
+
+GPUS=4
+ARGS=(
+    --ops
+    # --kda
+    --backward
+    --bench
+    # --profile
+    # --profile-path /home/user/gdn
+    --seqlen 32768
+    --mean 32768
+    --std 0
+)
+torchrun --nproc_per_node $GPUS test_gdn_with_cp.py ${ARGS[@]} $@
+
+'''
 import os
 import random
 import argparse
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import sys
+sys.path.append("../../")
+
+try:
+    import fused_weight_gradient_mlp_cuda
+    apex_func = None
+    if hasattr(fused_weight_gradient_mlp_cuda, "wgrad_gemm_accum_fp32"):
+        apex_func = fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32
+    if hasattr(fused_weight_gradient_mlp_cuda, "fused_wgrad_gemm_accum_fp32"):
+        apex_func = fused_weight_gradient_mlp_cuda.fused_wgrad_gemm_accum_fp32
+    from functools import partial
+    if apex_func is None:
+        HAVE_APEX = False
+    else:
+        HAVE_APEX = True
+except:
+    HAVE_APEX = False
 
 os.environ['TRITON_PRINT_AUTOTUNING'] = '1'
 
@@ -102,7 +136,17 @@ def compare(x, y, prefix=""):
     # diff = diff / (torch.max(x.abs(), y.abs()) + 1e-6)
     # if prefix:
     #     print(prefix, end=": ")
-    print(prefix + f"max_diff: {diff.max().item()}, mean_diff: {diff.mean().item()}, absmax: {torch.maximum(x.abs().max(), y.abs().max()).item()}")
+    import torch.distributed as dist
+
+    def print_synchronized(*args, **kwargs):
+        # 确保所有进程都到达这个点
+        dist.barrier()
+        
+        for r in range(dist.get_world_size()):
+            if r == dist.get_rank():
+                print(*args, **kwargs)
+            dist.barrier()  # 每个rank打印后同步
+    print_synchronized(prefix + f"max_diff: {diff.max().item()}, mean_diff: {diff.mean().item()}, absmax: {torch.maximum(x.abs().max(), y.abs().max()).item()}")
 
 def get_ref_grad(*tensors):
     grads = []
@@ -132,6 +176,57 @@ def generate_cu_seqlens(end=8192, mean=2048, var=512):
     cu_seqlens = torch.tensor(r, device=torch.cuda.current_device(), dtype=torch.int32)
     return cu_seqlens
 
+class _LinearFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, inp, weight):
+        inp_shape = inp.shape
+        out = torch.matmul(inp.view(-1, inp_shape[-1]), weight.t())
+        ctx.save_for_backward(inp, weight)
+        return out.view(*inp_shape[:-1], -1)
+
+    @staticmethod
+    def backward(ctx, dout):
+        inp, weight = ctx.saved_tensors
+        inp_shape = inp.shape
+        inp = inp.view(-1, inp_shape[-1])
+        dout = dout.view(-1, dout.size(-1))
+        dgrad = torch.matmul(dout, weight).view(inp_shape)
+        main_grad = getattr(weight, "main_grad", None)
+        if main_grad is not None:
+            if HAVE_APEX:
+                wgrad = apex_func(inp, dout, main_grad)
+            else:
+                wgrad = torch.matmul(dout.t(), inp)
+                main_grad += wgrad
+            if hasattr(weight, 'grad_added_to_main_grad'):
+                # When overlap_grad_reduce is True, need to ensure that backward hooks
+                # are all run on the main backprop thread to prevent deadlocks. Setup
+                # dummy grad_weight tensor to prevent backward hooks from being run
+                # in a background thread.
+                wgrad = torch.empty(
+                    main_grad.shape,
+                    dtype=inp.dtype,
+                    device=torch.cuda.current_device(),
+                    requires_grad=False,
+                )
+                weight.grad_added_to_main_grad = True
+            else:
+                wgrad = None
+        else:
+            wgrad = torch.matmul(dout.t(), inp)
+        return dgrad, wgrad
+    
+def fp32_grad_linear_forward(input, self):
+    return _LinearFunction.apply(input, self.weight)
+
+def patch_fp32_grad_linear_forward(model: torch.nn.Module):
+    if HAVE_APEX:
+        for name, m in model.named_modules():
+            if isinstance(m, torch.nn.Linear):
+                # print(name)
+                m.forward = partial(fp32_grad_linear_forward, self=m)
+                m.weight.main_grad = torch.zeros_like(m.weight, dtype=torch.float32)
+    
 def profile_func(fn, path):
 
     with torch.profiler.profile(
@@ -236,6 +331,8 @@ def test_ops(args):
     ref_o = gdn_with_a2a()
     ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta = get_ref_grad(q, k, v, g, beta)
 
+    if rank == 0:
+        print(cu_seqlens)
     dist.barrier()
     compare(o, ref_o, f"rank:{rank}, out:")
     dist.barrier()
@@ -304,6 +401,14 @@ def test_layer(args):
         broadcast(p, group)
     cp_layer.load_state_dict(layer.state_dict())
 
+    patch_fp32_grad_linear_forward(layer)
+    patch_fp32_grad_linear_forward(cp_layer)
+    layer.dt_bias.to(torch.float)
+    layer.A_log.to(torch.float)
+    cp_layer.dt_bias.to(torch.float)
+    cp_layer.A_log.to(torch.float)
+
+
     backward = args.backward
     def gdn_no_cp():
         set_gdn_cp_context()
@@ -330,6 +435,8 @@ def test_layer(args):
     o = gdn_with_custom_cp()
     dx = x.grad
 
+    if rank == 0:
+        print(cu_seqlens)
     dist.barrier()
     compare(o, ref_o, f"rank:{rank}, out:")
     if backward:
@@ -337,8 +444,12 @@ def test_layer(args):
         dist.barrier()
         for (name1, p1), (name2, p2) in zip(layer.named_parameters(), cp_layer.named_parameters()):
             assert name1 == name2
-            grad1 = p1.grad.float()
-            grad2 = p2.grad.float()
+            if HAVE_APEX and hasattr(p1, "main_grad"):
+                grad1 = p1.main_grad
+                grad2 = p2.main_grad
+            else:
+                grad1 = p1.grad.float()
+                grad2 = p2.grad.float()
             torch.distributed.all_reduce(grad2, group=group)
             compare(grad1, grad2, f"rank:{rank}, {name1} grad:")
             dist.barrier()
@@ -364,6 +475,9 @@ def main():
     dist.init_process_group()
     world_size = dist.get_world_size()
     rank = dist.get_rank()
+    torch.manual_seed(rank + 42)
+    torch.cuda.manual_seed(rank + 42)
+    random.seed(42)
     torch.cuda.set_device(rank)
     group = dist.new_group(list(range(world_size)))
     args = get_args()
