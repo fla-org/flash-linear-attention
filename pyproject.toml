@@ -33,10 +33,6 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
 [build-system]
 requires = ["setuptools>=45", "wheel"]
 
-[tool.ruff.lint.isort]
-known-first-party = ["fla"]
-force-sort-within-sections = false
-
 [tool.pytest.ini_options]
 log_cli = true
 log_cli_level = "INFO"
@@ -50,6 +46,7 @@ line-length = 127
 
 [tool.ruff.format]
 docstring-code-format = true
+indent-style = "space"
 
 [tool.ruff.lint]
 select = [
@@ -87,10 +84,14 @@ ignore = [
 ]
 extend-select = ["RUF022"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["fla"]
+force-sort-within-sections = false
+
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "fla/utils.py" = ["TCH004"]
 "evals/harness.py" = ["I", "TCH"]
 "tests/*/*.py" = ["UP030"]
 "scripts/*.py" = ["C414"]
-"egacy/training/flame/*.py" = ["C408"]
+"legacy/training/flame/*.py" = ["C408"]

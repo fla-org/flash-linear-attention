@@ -134,6 +134,7 @@ def chunk_gsa_fwd_k_kernel_intra(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    o_i = tl.arange(0, BC)
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
 
@@ -161,7 +162,6 @@ def chunk_gsa_fwd_k_kernel_intra(
     b_g = tl.load(p_g, boundary_check=(0, 1))
     b_o *= exp(b_g - b_gn[None, :])
 
-    o_i = tl.arange(0, BC)
     o_A = (bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * HQ*BT + i_hq * BT + i_i * BC
     m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
@@ -247,13 +247,13 @@ def chunk_gsa_bwd_k_kernel_dA(
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * exp(b_g - b_gn[None, :]) * scale).to(b_do.dtype)
+        b_do = (b_do * exp(b_g - b_gn[None, :])).to(b_do.dtype)
         # [BV, BC]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
         b_vg = (b_v * exp(b_gn[:, None] - b_gv)).to(b_v.dtype)
         # [BC, BC]
-        b_dA = tl.dot(b_do, b_vg)
+        b_dA = tl.dot(b_do, b_vg) * scale
     elif i_i == i_j:
         p_g = tl.make_block_ptr(g + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
         p_do = tl.make_block_ptr(do + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_i*BC, i_v*BV), (BC, BV), (1, 0))
@@ -381,7 +381,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         b_h = tl.load(p_h, boundary_check=(0, 1))
         # [BT, BV]
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * exp(b_g) * scale).to(b_do.dtype)
+        b_do = (b_do * exp(b_g)).to(b_do.dtype)
         # [BK, BV]
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
         # [BV]
@@ -389,7 +389,7 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
 
         b_dh = b_dh.to(b_k.dtype)
         # [BT, BK]
-        b_dq += tl.dot(b_do, b_h.to(b_k.dtype))
+        b_dq += tl.dot(b_do, b_h.to(b_k.dtype)) * scale
         b_dk += tl.dot((b_v * b_gv).to(b_v.dtype), tl.trans(b_dh))
         # [BT, BV]
         b_dv = tl.dot(b_k, b_dh) * b_gv
@@ -452,6 +452,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    o_i = tl.arange(0, BC)
     o_v = i_v * BV + tl.arange(0, BV)
     m_v = o_v < V
 
@@ -469,20 +470,19 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         p_g = tl.make_block_ptr(g + (bos*H+i_h) * V, (T, V), (H*V, 1), (i_t * BT + i_j * BC, i_v * BV), (BC, BV), (1, 0))
         p_A = tl.make_block_ptr(A + (bos*HQ+i_hq) * BT, (BT, T), (1, HQ*BT), (i_i*BC, i_t*BT + i_j*BC), (BC, BC), (0, 1))
         p_do = tl.make_block_ptr(do + (bos*HQ+i_hq) * V, (T, V), (HQ*V, 1), (i_t*BT + i_j*BC, i_v*BV), (BC, BV), (1, 0))
+
+        m_j = (i_t * BT + i_j * BC + o_i) < T
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1)) * exp(b_g - b_gn[None, :])
+        b_do = tl.load(p_do, boundary_check=(0, 1)) * tl.where(m_j[:, None], exp(b_g - b_gn[None, :]), 0)
         # [BC, BC]
         b_A = tl.load(p_A, boundary_check=(0, 1))
         # [BC, BV]
         b_dv += tl.dot(b_A, b_do.to(b_A.dtype))
     b_dv *= exp(b_gn[None, :] - b_gv)
 
-    o_i = tl.arange(0, BC)
-    o_c = i_i * BC + tl.arange(0, BC)
-
     p_g = g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v
-    p_A = A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + o_c
+    p_A = A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + i_i * BC + o_i
     p_do = do + (bos + i_t*BT + i_i*BC) * HQ*V + i_hq * V + o_v
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         # [BC,]
