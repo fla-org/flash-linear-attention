@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
-from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -15,24 +14,24 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.kda import KimiDeltaAttention
 from fla.models.kda.configuration_kda import KDAConfig
-from fla.models.utils import Cache
+from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as KDAMLP
 from fla.modules.l2warp import l2_warp
-
-try:
-    from torch.distributed.tensor import DTensor
-except (ImportError, AttributeError):
-    DTensor = None
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
 
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ImportError:
+    from fla.models.modeling_layers import GradientCheckpointingLayer
+
 logger = logging.get_logger(__name__)
 
 
-class KDABlock(nn.Module):
+class KDABlock(GradientCheckpointingLayer):
     def __init__(self, config: KDAConfig, layer_idx: int):
         super().__init__()
 
@@ -40,14 +39,14 @@ class KDABlock(nn.Module):
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        if config.attn is not None and layer_idx in config.attn['layers']:
+        if config.attn is not None and layer_idx in config.attn["layers"]:
             self.attn = Attention(
                 hidden_size=config.hidden_size,
-                num_heads=config.attn['num_heads'],
-                num_kv_heads=config.attn['num_kv_heads'],
-                qkv_bias=config.attn['qkv_bias'],
-                window_size=config.attn['window_size'],
-                rope_theta=config.attn['rope_theta'],
+                num_heads=config.attn["num_heads"],
+                num_kv_heads=config.attn["num_kv_heads"],
+                qkv_bias=config.attn["qkv_bias"],
+                window_size=config.attn["window_size"],
+                rope_theta=config.attn["rope_theta"],
                 max_position_embeddings=config.max_position_embeddings,
                 layer_idx=layer_idx,
             )
@@ -108,11 +107,10 @@ class KDABlock(nn.Module):
 
 
 class KDAPreTrainedModel(PreTrainedModel):
-
     config_class = KDAConfig
-    base_model_prefix = 'model'
+    base_model_prefix = "model"
     supports_gradient_checkpointing = True
-    _no_split_modules = ['KDABlock']
+    _no_split_modules = ["KDABlock"]
     _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
@@ -124,7 +122,7 @@ class KDAPreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: str | None = None,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, KimiDeltaAttention) and next(module.parameters()).device.type != 'meta':
+        if isinstance(module, KimiDeltaAttention) and next(module.parameters()).device.type != "meta":
             with torch.no_grad():
                 module.A_log.copy_(nn.init.uniform_(module.A_log, a=1, b=16).log())
                 dt = torch.exp(
@@ -137,11 +135,11 @@ class KDAPreTrainedModel(PreTrainedModel):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None and not getattr(module.bias, '_is_hf_initialized', False):
+            if module.bias is not None and not getattr(module.bias, "_is_hf_initialized", False):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-        elif hasattr(module, 'reset_parameters'):
+        elif hasattr(module, "reset_parameters"):
             module.reset_parameters()
 
         if prenorm_residual_strategy is not None:
@@ -152,27 +150,26 @@ class KDAPreTrainedModel(PreTrainedModel):
             #
             # Reference (Megatron-LM): https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/model/gpt_model.py
             p = None
-            if hasattr(module, 'o_proj'):
+            if hasattr(module, "o_proj"):
                 p = module.o_proj.weight
-            elif hasattr(module, 'down_proj'):
+            elif hasattr(module, "down_proj"):
                 p = module.down_proj.weight
             if p is not None:
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                 # We need to reinit p since this code could be called multiple times
                 # Having just p *= scale would repeatedly scale it down
-                if prenorm_residual_strategy == 'rescale':
+                if prenorm_residual_strategy == "rescale":
                     nn.init.kaiming_uniform_(p, a=math.sqrt(5))
                     with torch.no_grad():
                         p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
-                elif prenorm_residual_strategy == 'zero':
+                elif prenorm_residual_strategy == "zero":
                     nn.init.zeros_(p)
                 else:
                     raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
 class KDAModel(KDAPreTrainedModel):
-
     def __init__(self, config: KDAConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
@@ -205,7 +202,7 @@ class KDAModel(KDAPreTrainedModel):
         **kwargs: Unpack[dict],
     ) -> tuple | BaseModelOutputWithPast:
         if output_attentions:
-            warnings.warn("`KDAModel` does not `output_attentions` now, setting it to `False`.", stacklevel=2)
+            warnings.warn("`KDAModel` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -225,35 +222,20 @@ class KDAModel(KDAPreTrainedModel):
         if use_cache and not isinstance(past_key_values, Cache):
             past_key_values = Cache.from_legacy_cache(past_key_values)
 
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
-            use_cache = False
-
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            if self.gradient_checkpointing and self.training:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
-                    layer.__call__,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    use_cache,
-                    output_attentions,
-                    **kwargs,
-                )
-            else:
-                hidden_states, attentions, past_key_values = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    **kwargs,
-                )
+            hidden_states, attentions, past_key_values = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
 
             if output_attentions:
                 all_attns += (attentions,)
@@ -274,8 +256,7 @@ class KDAModel(KDAPreTrainedModel):
         )
 
 
-class KDAForCausalLM(KDAPreTrainedModel, GenerationMixin):
-
+class KDAForCausalLM(KDAPreTrainedModel, FLAGenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
@@ -310,14 +291,14 @@ class KDAForCausalLM(KDAPreTrainedModel, GenerationMixin):
         try:
             return super().generate(*args, **kwargs)
         except AttributeError as exception:
-            if 'past_key_values' in str(exception):
+            if "past_key_values" in str(exception):
                 raise AttributeError(
                     f"You tried to call `generate` with a decoding strategy that manipulates `past_key_values`, "
                     f"which is not supported for {self.__class__.__name__}. "
                     f"Try another generation strategy instead. "
                     f"For the available generation strategies, check this doc: "
                     f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies",
-                ) from exception
+                )
             else:
                 raise exception
 
@@ -337,9 +318,7 @@ class KDAForCausalLM(KDAPreTrainedModel, GenerationMixin):
         **kwargs: Unpack[dict],
     ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.model(
@@ -361,7 +340,7 @@ class KDAForCausalLM(KDAPreTrainedModel, GenerationMixin):
         if not fuse_linear_and_cross_entropy or labels is None:
             logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if labels is not None:
-            if getattr(self, 'criterion', None) is None:
+            if getattr(self, "criterion", None) is None:
                 if fuse_linear_and_cross_entropy:
                     criterion = FusedLinearCrossEntropyLoss(use_l2warp=self.config.use_l2warp)
                 elif self.config.fuse_cross_entropy:
