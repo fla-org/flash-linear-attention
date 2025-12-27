@@ -824,7 +824,7 @@ def fast_causal_conv1d_fn(
     seq_idx: torch.LongTensor | None = None,
 ):
     """
-    x: (batch, dim, seqlen)
+    x: (batch, seqlen, dim)
     weight: (dim, width)
     bias: (dim,)
     seq_idx: (batch, seqlen)
@@ -832,7 +832,7 @@ def fast_causal_conv1d_fn(
     final_states_out: (batch, dim, width - 1), to be written to
     activation: either None or "silu" or "swish"
 
-    out: (batch, dim, seqlen)
+    out: (batch, seqlen, dim)
     """
     return FastCausalConv1dFn.apply(
         x,
