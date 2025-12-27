@@ -194,7 +194,8 @@ if __name__ == "__main__":
     all_args_string = " ".join(sys.argv[1:])
     changed_files = all_args_string.split()
 
-    BLACKLIST = ['fla/utils.py', 'utils/convert_from_llama.py', 'utils/convert_from_rwkv6.py', 'utils/convert_from_rwkv7.py']
+    BLACKLIST = ['fla/utils.py', 'utils/convert_from_llama.py', 'utils/convert_from_rwkv6.py',
+                 'utils/convert_from_rwkv7.py', 'tests/modules/conftest.py', 'tests/ops/conftest.py']
     changed_files = [file for file in changed_files if not any(file.endswith(b) for b in BLACKLIST)]
 
     changed_files = [file for file in changed_files if file.endswith('.py')]
