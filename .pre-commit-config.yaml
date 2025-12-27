@@ -12,7 +12,7 @@ repos:
   - id: check-merge-conflict
   - id: detect-private-key
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.14.0
+  rev: v0.14.10
   hooks:
   - id: ruff
     args: [--fix, --exit-non-zero-on-fix]
@@ -21,4 +21,4 @@ repos:
   rev: v2.3.2
   hooks:
   - id: autopep8
-    args: [--max-line-length=127]
+    args: [--in-place]
