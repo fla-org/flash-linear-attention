@@ -801,7 +801,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
             dbias if bias is not None else None,
             None,
             None,
-            dinitial_states if initial_states is not None else None,
+            None,
             None,
             None,
             None,
