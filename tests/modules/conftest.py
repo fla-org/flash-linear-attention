@@ -88,14 +88,11 @@ def _guarded_empty(*args, stride=None, **kwargs):
 
     shape = _resolve_shape(args)
     dtype = kwargs.get('dtype', torch.get_default_dtype())
-    device = kwargs.get('device', 'cpu')
 
-    if not dtype.is_floating_point:
+    if not (dtype.is_floating_point or dtype.is_complex):
         return _ORIGINAL_EMPTY(*args, **kwargs)
 
-    numel = 1
-    for s in shape:
-        numel *= s
+    numel = math.prod(shape)
     padding_elements = _calc_aligned_padding(dtype)
 
     total_len = padding_elements + numel + padding_elements
@@ -104,11 +101,7 @@ def _guarded_empty(*args, stride=None, **kwargs):
         del kwargs_raw['size']
 
     raw_tensor = _ORIGINAL_EMPTY(total_len, **kwargs_raw)
-
-    if raw_tensor.is_floating_point():
-        raw_tensor.fill_(CANARY_VALUE)
-    elif raw_tensor.is_complex():
-        raw_tensor.fill_(complex(float('nan'), float('nan')))
+    raw_tensor.fill_(CANARY_VALUE)
 
     if stride is None:
         stride = torch._prims_common.make_contiguous_strides_for(shape)
@@ -120,11 +113,13 @@ def _guarded_empty(*args, stride=None, **kwargs):
 
     if user_tensor.is_floating_point():
         user_tensor.fill_(float('nan'))
+    elif user_tensor.is_complex():
+        user_tensor.fill_(complex(float('nan'), float('nan')))
 
     if req_grad:
         user_tensor.requires_grad_(True)
 
-    if str(device).startswith('cuda') or (hasattr(device, 'type') and device.type == 'cuda'):
+    if user_tensor.is_cuda:
         _MEMORY_GUARD.register(raw_tensor, padding_elements, padding_elements + numel, shape, dtype)
 
     return user_tensor
