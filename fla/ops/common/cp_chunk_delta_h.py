@@ -87,11 +87,10 @@ def get_cp_cu_seqlens(cu_seqlens, world_size=None, rank=None, group=None, kernel
                 is_first_rank_list.append(rank == first_rank) # backward
                 post_num_ranks_list.append(last_rank - rank) # backward
             else:
-               is_last_rank_list.append(True)
-               pre_num_ranks_list.append(0)
-               is_first_rank_list.append(True)
-               post_num_ranks_list.append(0)
-               
+                is_last_rank_list.append(True)
+                pre_num_ranks_list.append(0)
+                is_first_rank_list.append(True)
+                post_num_ranks_list.append(0)
     if cu_seqlens[-1] != part_len:
        cu_seqlens.append(part_len)
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=torch.cuda.current_device())

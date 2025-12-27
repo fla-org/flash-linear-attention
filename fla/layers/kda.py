@@ -340,7 +340,7 @@ class KimiDeltaAttentionWithCP(KimiDeltaAttention):
 
         cu_seqlens = kwargs.get('cu_seqlens', None)
         if cu_seqlens is None:
-            cu_seqlens = torch.tensor([0, seqlen], dtype=torch.int32, device=hidden_states.device)
+            cu_seqlens = torch.tensor([0, seqlen * torch.distributed.get_world_size(self.group)], dtype=torch.int32, device=hidden_states.device)
 
         set_gdn_cp_context(cu_seqlens, self.group, kernel_size=self.conv_size if self.use_short_conv else None)
         context = get_gdn_cp_context()
