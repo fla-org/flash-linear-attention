@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
+FLA_DISABLE_TENSOR_CACHE = os.getenv('FLA_DISABLE_TENSOR_CACHE', '0') == '1'
 
 
 SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
@@ -104,6 +105,7 @@ def tensor_cache(
     This decorator will store the output of the decorated function for the most recent set of input tensors.
     If the function is called again with the same input tensors, it will return the cached result.
 
+    If FLA_DISABLE_TENSOR_CACHE environment variable is set to '1', caching is disabled.
 
     Args:
         fn (Callable[..., torch.Tensor]):
@@ -120,6 +122,10 @@ def tensor_cache(
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         nonlocal last_args, last_kwargs, last_result
+
+        # Skip cache if FLA_DISABLE_TENSOR_CACHE is set
+        if FLA_DISABLE_TENSOR_CACHE:
+            return fn(*args, **kwargs)
 
         if last_args is not None and last_kwargs is not None:
             if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
