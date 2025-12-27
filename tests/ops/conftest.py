@@ -73,6 +73,17 @@ def _calc_aligned_padding(dtype):
     return pad_elements
 
 
+def _calc_contiguous_strides(shape):
+    """Calculate strides for a contiguous tensor."""
+    # For shape (a, b, c), strides are (b*c, c, 1)
+    strides = []
+    stride = 1
+    for s in reversed(shape):
+        strides.append(stride)
+        stride *= s
+    return tuple(reversed(strides))
+
+
 def _resolve_shape(args):
     if len(args) == 1 and isinstance(args[0], (tuple, list, torch.Size)):
         return tuple(args[0])
@@ -104,7 +115,7 @@ def _guarded_empty(*args, stride=None, **kwargs):
     raw_tensor.fill_(CANARY_VALUE)
 
     if stride is None:
-        stride = torch._prims_common.make_contiguous_strides_for(shape)
+        stride = _calc_contiguous_strides(shape)
     user_tensor = raw_tensor.as_strided(
         size=shape,
         stride=stride,
