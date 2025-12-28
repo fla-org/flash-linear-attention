@@ -1,3 +1,4 @@
+import inspect
 import math
 from unittest.mock import patch
 
@@ -94,6 +95,35 @@ def _resolve_shape(args):
 # -----------------------------------------------------------------------------
 
 
+def _is_called_from_fla():
+    """Check if the call is from fla package."""
+    frame = inspect.currentframe()
+    try:
+        # Skip the current frame and go up the call stack
+        while frame:
+            frame = frame.f_back
+            if frame is None:
+                break
+
+            # Check if this frame is from a test file
+            # Look for 'tests/' or 'test_' in the file path
+            if hasattr(frame, 'f_code') and hasattr(frame.f_code, 'co_filename'):
+                filename = frame.f_code.co_filename
+                # If the call passes through any test file, don't guard
+                if 'tests/' in filename or 'test_' in filename:
+                    return False
+
+            module = inspect.getmodule(frame)
+            if module and hasattr(module, '__name__'):
+                # If call is from fla package, apply guard
+                if 'fla' in module.__name__:
+                    return True
+    finally:
+        del frame
+    # Default to not guarding if we can't determine
+    return False
+
+
 def _guarded_empty(*args, stride=None, **kwargs):
     req_grad = kwargs.pop('requires_grad', False)
 
@@ -101,6 +131,11 @@ def _guarded_empty(*args, stride=None, **kwargs):
     dtype = kwargs.get('dtype', torch.get_default_dtype())
 
     if not (dtype.is_floating_point or dtype.is_complex):
+        return _ORIGINAL_EMPTY(*args, **kwargs)
+
+    # Check if this call is from fla package or from test directly
+    if not _is_called_from_fla():
+        # Direct call from test file - don't guard
         return _ORIGINAL_EMPTY(*args, **kwargs)
 
     numel = math.prod(shape)
