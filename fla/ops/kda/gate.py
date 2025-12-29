@@ -265,9 +265,9 @@ def kda_gate_bwd(
         lower_bound=lower_bound,
     )
 
-    dg = dg.view_as(g)
-    dA = dA.sum(0).view_as(A_log)
-    dbias = dg.view(-1, H * K).sum(0) if dt_bias is not None else None
+    dg = dg.view_as(g).type_as(g)
+    dA = dA.sum(0).view_as(A_log).type_as(A_log)
+    dbias = dg.view(-1, H * K).sum(0).to(dt_bias) if dt_bias is not None else None
 
     return dg, dA, dbias
 
@@ -307,11 +307,10 @@ class KDAGateFunction(torch.autograd.Function):
             dyg=dyg,
             lower_bound=ctx.lower_bound
         )
-        if dt_bias is not None:
-            dbias = dbias.to(dt_bias)
-        return dg.type_as(g), dA.type_as(A_log), dbias, None, None
+        return dg, dA, dbias, None, None
 
 
+@torch.compiler.disable
 def fused_kda_gate(
     g: torch.Tensor,
     A_log: torch.Tensor,
