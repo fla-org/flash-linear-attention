@@ -282,7 +282,6 @@ class ChunkKDAFunction(torch.autograd.Function):
                 A_log=A_log,
                 dt_bias=dt_bias,
                 dyg=dg,
-                dyb=db,
             )
             dA = dA.to(A_log)
             if dt_bias is not None:
