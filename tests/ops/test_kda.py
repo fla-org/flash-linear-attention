@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
-from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate
+from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
@@ -348,20 +348,20 @@ def test_chunk_varlen(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "HAS_BIAS"),
+    ("B", "T", "H", "D", "HAS_BIAS", "LOWER_BOUND"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-lowerbound{}".format(*test))
         for test in [
-            (1, 2, 2, 12, False),
-            (1, 32, 2, 16, False),
-            (2, 64, 4, 32, False),
-            (4, 128, 8, 64, False),
-            (4, 128, 8, 128, False),
-            (1, 2, 2, 12, True),
-            (1, 32, 2, 16, True),
-            (2, 64, 4, 32, True),
-            (4, 128, 8, 64, True),
-            (4, 128, 8, 128, True),
+            (1, 2, 2, 12, False, -5.0),
+            (1, 32, 2, 16, False, -5.0),
+            (2, 64, 4, 32, False, -5.0),
+            (4, 128, 8, 64, False, -5.0),
+            (4, 128, 8, 128, False, None),
+            (1, 2, 2, 12, True, None),
+            (1, 32, 2, 16, True, None),
+            (2, 64, 4, 32, True, None),
+            (4, 128, 8, 64, True, None),
+            (4, 128, 8, 128, True, None),
         ]
     ],
 )
@@ -371,6 +371,7 @@ def test_gate(
     H: int,
     D: int,
     HAS_BIAS: bool,
+    LOWER_BOUND: float | None,
 ):
     torch.manual_seed(42)
     g = torch.randn(B, T, H, D, dtype=torch.float32) * 10
@@ -381,11 +382,17 @@ def test_gate(
         dt_bias = dt_bias.to(device).requires_grad_(True)
     do = torch.randn_like(g).view(B, T, H, D)
 
-    ref = naive_kda_gate(
-        g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
-    )
+    if LOWER_BOUND is not None:
+        ref = naive_kda_lowerbound_gate(
+            g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None, LOWER_BOUND
+        )
+    else:
+        ref = naive_kda_gate(
+            g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
+        )
     tri = fused_kda_gate(
         g.clone(), A_log.clone(), dt_bias.clone() if dt_bias is not None else None,
+        lower_bound=LOWER_BOUND
     )
     (ref * do).sum().backward(retain_graph=True)
 
