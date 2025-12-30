@@ -335,9 +335,6 @@ class ChunkKDAFunction(torch.autograd.Function):
                 dyg=dg,
                 lower_bound=ctx.lower_bound
             )
-            dA = dA.to(A_log)
-            if dt_bias is not None:
-                dbias = dbias.to(dt_bias)
         else:
             dg = chunk_local_cumsum(
                 dg,
