@@ -1,5 +1,4 @@
 
-import os
 
 import torch
 import triton
@@ -38,21 +37,11 @@ def benchmark(T, provider):
     dtype = torch.bfloat16
     B, H, D = 1, 16, 128
 
-    # Set TMA environment variable based on provider
-    original_tma_env = os.environ.get('FLA_USE_TMA', '0')
-
-    if provider.endswith('_no_tma'):
-        os.environ['FLA_USE_TMA'] = '0'
-        provider_base = provider.replace('_no_tma', '')
-    else:
-        os.environ['FLA_USE_TMA'] = '1'
-        provider_base = provider
-
     quantiles = [0.5, 0.2, 0.8]
     results = 0, 0, 0
 
     do = torch.randn(B, T, H, D, dtype=dtype, device=device)
-    if provider_base == 'gdn':
+    if provider == 'gdn':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         v = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -69,7 +58,7 @@ def benchmark(T, provider):
             )[0].backward(do),
             quantiles=quantiles,
         )
-    elif provider_base == 'attn':
+    elif provider == 'attn':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         v = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -81,7 +70,7 @@ def benchmark(T, provider):
             ).backward(do),
             quantiles=quantiles,
         )
-    elif provider_base == 'comba':
+    elif provider == 'comba':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         p = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -100,7 +89,7 @@ def benchmark(T, provider):
             )[0].backward(do),
             quantiles=quantiles,
         )
-    elif provider_base == 'kda':
+    elif provider == 'kda':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         v = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -114,10 +103,11 @@ def benchmark(T, provider):
                 g=g,
                 beta=beta,
                 use_qk_l2norm_in_kernel=True,
+                safe_gate=True,  # Plese Carefully read doc strings
             )[0].backward(do),
             quantiles=quantiles,
         )
-    elif provider_base == 'dplr':
+    elif provider == 'dplr':
         q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
         a = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
@@ -137,8 +127,6 @@ def benchmark(T, provider):
             quantiles=quantiles,
         )
 
-    # Restore original TMA environment variable
-    os.environ['FLA_USE_TMA'] = original_tma_env
     return results
 
 
