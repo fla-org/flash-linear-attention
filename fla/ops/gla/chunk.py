@@ -349,7 +349,7 @@ def chunk_gla_fwd_kernel_o(
         # [BT, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         # [BT, BK]
-        b_g = tl.load(p_g, boundary_check=(0, 1))
+        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
         # [BT, BK]
         if USE_EXP2:
             b_qg = (b_q * exp2(b_g)).to(b_q.dtype)

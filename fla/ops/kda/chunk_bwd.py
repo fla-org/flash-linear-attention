@@ -188,10 +188,10 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_g = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_g = tl.load(p_g, boundary_check=(0, 1))
+        b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
 
         p_gn = g + (min(T, i_t * BT + BT) - 1) * H*K + o_k
-        b_gn = tl.load(p_gn, mask=m_k, other=0)
+        b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
 
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)
         b_dk = tl.zeros([BT, BK], dtype=tl.float32)
