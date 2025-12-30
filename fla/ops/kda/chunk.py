@@ -217,7 +217,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         if use_gate_in_kernel:
             g_org = g
             if safe_gate:
-                assert lower_bound is not None, "lower_bound must be set when use sage_gate"
+                assert lower_bound is not None, "lower_bound must be set when use safe_gate"
             g = kda_gate_chunk_cumsum(
                 g=g_org,
                 A_log=A_log,
