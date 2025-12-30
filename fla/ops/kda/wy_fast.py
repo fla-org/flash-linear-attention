@@ -19,13 +19,13 @@ from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
         triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
-        for DOT_PRECISION in (["tf32x3", "ieee"] if IS_TF32_SUPPORTED else ["ieee"])
+        for DOT_PRECISION in (["tf32", "tf32x3", "ieee"] if IS_TF32_SUPPORTED else ["ieee"])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def recompute_w_u_fwd_kernel(
+def recompute_w_u_fwd_kda_kernel(
     q,
     k,
     qg,
@@ -113,7 +113,7 @@ def recompute_w_u_fwd_kernel(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def prepare_wy_repr_bwd_kernel(
+def prepare_wy_repr_bwd_kda_kernel(
     k,
     v,
     beta,
@@ -218,7 +218,7 @@ def recompute_w_u_fwd(
     gk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
     BK = 64
@@ -232,7 +232,7 @@ def recompute_w_u_fwd(
     u = torch.empty_like(v)
     qg = torch.empty_like(q) if q is not None else None
     kg = torch.empty_like(k) if gk is not None else None
-    recompute_w_u_fwd_kernel[(NT, B*H)](
+    recompute_w_u_fwd_kda_kernel[(NT, B*H)](
         q=q,
         k=k,
         qg=qg,
@@ -283,7 +283,7 @@ def prepare_wy_repr_bwd(
     dg2 = torch.empty_like(gk, dtype=torch.float)
     dA = torch.empty_like(A, dtype=torch.float)
     db = torch.empty_like(beta, dtype=torch.float)
-    prepare_wy_repr_bwd_kernel[(NT, B * H)](
+    prepare_wy_repr_bwd_kda_kernel[(NT, B * H)](
         k=k,
         v=v,
         beta=beta,
