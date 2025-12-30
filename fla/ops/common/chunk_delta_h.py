@@ -144,7 +144,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         last_idx = min((i_t + 1) * BT, T) - 1
         if USE_G:
             m_t = (i_t * BT + tl.arange(0, BT)) < T
-            b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
+            b_g_last = tl.load(g + bos * H + last_idx * H + i_h).to(tl.float32)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
             if USE_EXP2:
@@ -333,7 +333,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
 
         last_idx = min((i_t + 1) * BT, T) - 1
         if USE_G:
-            bg_last = tl.load(g + (bos + last_idx) * H + i_h)
+            bg_last = tl.load(g + (bos + last_idx) * H + i_h).to(tl.float32)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
             if USE_EXP2:
