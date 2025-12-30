@@ -101,27 +101,6 @@ def load_cached_config(kernel_name: str) -> dict[str, Any] | None:
         return None
 
 
-def find_best_config_by_kernel_name(kernel_name: str) -> dict[str, Any] | None:
-    """
-    Find best config for a kernel by kernel name only (deprecated).
-
-    This function is kept for backward compatibility. Use load_cached_config() instead.
-
-    Args:
-        kernel_name: Name of the kernel
-
-    Returns:
-        Best config dictionary or None if not found
-    """
-    warnings.warn(
-        "find_best_config_by_kernel_name() is deprecated. "
-        "Use load_cached_config() instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    return load_cached_config(kernel_name)
-
-
 class CachedAutotuner(Autotuner):
     """
     A modified autotuner that loads best config from FLA's config directory.
