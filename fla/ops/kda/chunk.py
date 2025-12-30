@@ -480,6 +480,11 @@ def chunk_kda(
     if use_gate_in_kernel:
         assert "A_log" in kwargs, "A_log must be provided when use_gate_in_kernel=True."
         A_log, dt_bias = kwargs["A_log"], kwargs.get("dt_bias")
+        if safe_gate:
+            if lower_bound is None:
+                raise ValueError("`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`.")
+            if not (-5 <= lower_bound < 0):
+                raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
 
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert k.shape[-1] <= 256, "Currently we only support key headdim <=256 for KDA :-("
