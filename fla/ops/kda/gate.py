@@ -372,7 +372,6 @@ def kda_gate_chunk_cumsum_vector_kernel(
     HAS_BIAS: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    HEAD_FIRST: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -384,12 +383,8 @@ def kda_gate_chunk_cumsum_vector_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    if HEAD_FIRST:
-        p_s = tl.make_block_ptr(s + (bos * H + i_h*T)*S, (T, S), (S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-        p_o = tl.make_block_ptr(o + (bos * H + i_h*T)*S, (T, S), (S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-    else:
-        p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-        p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
+    p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
+    p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
     # [BT, BS]
     b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
 
@@ -425,7 +420,6 @@ def kda_gate_chunk_cumsum(
     scale: float = None,
     dt_bias: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
-    head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
     chunk_indices: torch.LongTensor | None = None,
     lower_bound: float | None = None,
@@ -434,11 +428,7 @@ def kda_gate_chunk_cumsum(
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
     assert len(g.shape) == 4
-
-    if head_first:
-        B, H, T, S = g.shape
-    else:
-        B, T, H, S = g.shape
+    B, T, H, S = g.shape
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -461,7 +451,6 @@ def kda_gate_chunk_cumsum(
         H=H,
         S=S,
         BT=BT,
-        HEAD_FIRST=head_first,
         REVERSE=False,
     )
     return g
