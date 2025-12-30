@@ -1,5 +1,5 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-# This file is modified and supported by the Moonshot Team
+# This file is modified and supported by the Moonshot AI Team
 
 import torch
 import torch.nn.functional as F
