@@ -12,6 +12,7 @@ from einops import rearrange
 
 from fla.ops.utils import prepare_chunk_indices, prepare_sequence_ids
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
+from fla.ops.common.cp_chunk_delta_h import get_gdn_cp_context, pre_process_for_conv1d, post_process_for_conv1d
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 STATIC_WARPS = 32 if not IS_AMD else 16
@@ -1146,8 +1147,8 @@ class ShortConvolution(nn.Conv1d):
                 stacklevel=2,
             )
             self.backend = 'triton'
-
-        return causal_conv1d(
+        x, cu_seqlens = pre_process_for_conv1d(x, cu_seqlens)
+        y, cache = causal_conv1d(
             x=x,
             weight=rearrange(self.weight, "d 1 w -> d w"),
             bias=self.bias,
@@ -1160,6 +1161,8 @@ class ShortConvolution(nn.Conv1d):
             chunk_indices=chunk_indices,
             **kwargs,
         )
+        y = post_process_for_conv1d(y, T)
+        return y, cache
 
     def step(
         self,

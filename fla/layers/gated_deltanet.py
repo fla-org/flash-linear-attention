@@ -14,6 +14,7 @@ from torch.nn import functional as F
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from fla.ops.common.cp_chunk_delta_h import set_gdn_cp_context, get_gdn_cp_context
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -316,3 +317,86 @@ class GatedDeltaNet(nn.Module):
             o = pad_input(o.squeeze(0), indices, batch_size, q_len)
 
         return o, None, past_key_values
+
+
+class GatedDeltaNetWithCP(GatedDeltaNet):
+    def __init__(
+        self,
+        hidden_size: int = 2048,
+        expand_v: float = 2,
+        head_dim: int = 256,
+        num_heads: int = 6,
+        num_v_heads: int = None,
+        mode: str = 'chunk',
+        use_gate: bool = True,
+        use_short_conv: bool = True,
+        allow_neg_eigval: bool = False,
+        conv_size: int = 4,
+        conv_bias: bool = False,
+        layer_idx: int = None,
+        norm_eps: float = 1e-5,
+        group: torch.distributed.ProcessGroup | None = None,
+        **kwargs,
+    ) -> GatedDeltaNetWithCP:
+        super().__init__(
+            hidden_size=hidden_size,
+            expand_v=expand_v,
+            head_dim=head_dim,
+            num_heads=num_heads,
+            num_v_heads=num_v_heads,
+            mode=mode,
+            use_gate=use_gate,
+            use_short_conv=use_short_conv,
+            allow_neg_eigval=allow_neg_eigval,
+            conv_size=conv_size,
+            conv_bias=conv_bias,
+            layer_idx=layer_idx,
+            norm_eps=norm_eps,
+            **kwargs
+        )
+        assert self.mode == "chunk"
+        if torch.distributed.get_world_size(group) == 1:
+            group = None
+        self.group = group
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+        if self.group is None:
+            return super().forward(
+                hidden_states,
+                attention_mask,
+                past_key_values,
+                use_cache,
+                output_attentions,
+                **kwargs,
+            )
+
+        bs, seqlen, _ = hidden_states.shape
+        assert bs == 1, "use cp only support batch_size == 1"
+
+        cu_seqlens = kwargs.get('cu_seqlens', None)
+        if cu_seqlens is None:
+            cu_seqlens = torch.tensor([0, seqlen * torch.distributed.get_world_size(self.group)], dtype=torch.int32, device=hidden_states.device)
+
+        set_gdn_cp_context(cu_seqlens, self.group, kernel_size=self.conv_size if self.use_short_conv else None)
+        context = get_gdn_cp_context()
+
+        kwargs['cu_seqlens'] = context.cu_seqlens
+        out = super().forward(
+                        hidden_states,
+                        attention_mask,
+                        past_key_values,
+                        use_cache,
+                        output_attentions,
+                        **kwargs,
+                    )
+        kwargs['cu_seqlens'] = cu_seqlens
+
+        return out
