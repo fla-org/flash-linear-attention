@@ -291,3 +291,46 @@ fwd_prepare_wy_repr = prepare_wy_repr_fwd
 bwd_prepare_wy_repr = prepare_wy_repr_bwd
 
 fwd_recompute_w_u = recompute_w_u_fwd
+
+
+def fwd_prepare_T(
+    k: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+) -> torch.Tensor:
+    """
+    Prepare the transformation matrix T (A) for delta rule computation.
+
+    This function computes the matrix A = (I - tril(beta * K * K^T))^{-1}
+    which is used in the parallel delta rule algorithm.
+
+    Args:
+        k: Key tensor of shape [B, H, T, K] (head-first format)
+        beta: Beta weights of shape [B, H, T] (head-first format)
+        chunk_size: Size of chunks for processing
+        cu_seqlens: Optional cumulative sequence lengths for variable-length sequences
+
+    Returns:
+        A: Transformation matrix of shape [B, H, T, chunk_size]
+    """
+    # Convert from head-first [B, H, T, K] to seq-first [B, T, H, K]
+    k_seq_first = k.transpose(1, 2).contiguous()
+    beta_seq_first = beta.transpose(1, 2).contiguous()
+
+    A = chunk_scaled_dot_kkt_fwd(
+        k=k_seq_first,
+        beta=beta_seq_first,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        output_dtype=torch.float32,
+    )
+    A = solve_tril(
+        A=A,
+        cu_seqlens=cu_seqlens,
+        output_dtype=k.dtype
+    )
+
+    # Convert back from [B, T, H, chunk_size] to [B, H, T, chunk_size]
+    A = A.transpose(1, 2).contiguous()
+    return A
