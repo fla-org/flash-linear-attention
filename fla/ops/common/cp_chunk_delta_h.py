@@ -767,7 +767,8 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
 def compress_h0(h0: torch.Tensor, context: Context=_GDN_CP_CONTEXT):
     if context.group is None or h0 is None or len(context.cu_seqlens) == 2:
         return h0
-    return h0[:1]
+    # Here must use clone op or the full tensor will be saved for backward
+    return h0[:1].clone()
 
 def expand_h0(h0: torch.Tensor, context: Context=_GDN_CP_CONTEXT):
     if context.group is None or h0 is None or len(context.cu_seqlens) == 2:
