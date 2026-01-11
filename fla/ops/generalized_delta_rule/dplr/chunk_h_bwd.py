@@ -116,6 +116,7 @@ def chunk_dplr_bwd_dhu(
     dv: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *qg.shape, do.shape[-1]
     BT = chunk_size
@@ -132,7 +133,8 @@ def chunk_dplr_bwd_dhu(
         BV = 16
         BC = 16
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
