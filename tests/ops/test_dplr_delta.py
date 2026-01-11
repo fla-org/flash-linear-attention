@@ -293,6 +293,7 @@ def test_chunk(
     gk = F.logsigmoid(gk)
     gk = gk / gate_logit_normalizer
     gk = gk * (torch.rand_like(gk) > mask_p)
+    gk = gk.clamp(-5, 0)
 
     h0 = torch.randn(B, H, D, D, dtype=torch.float)
     q, k, v, a, b, gk, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, a, b, gk, h0))

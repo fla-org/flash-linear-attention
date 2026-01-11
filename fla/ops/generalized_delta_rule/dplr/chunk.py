@@ -27,7 +27,8 @@ def chunk_dplr_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
+    chunk_size: int = 32,
+    safe_gate: bool = False,
 ):
     gi, ge = chunk_rwkv6_fwd_cumsum(gk, chunk_size, cu_seqlens=cu_seqlens)
 
@@ -41,6 +42,7 @@ def chunk_dplr_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        safe_gate=safe_gate,
     )
     del ge
 
@@ -101,8 +103,9 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
+        safe_gate: bool = False,
     ):
-        chunk_size = 16
+        chunk_size = 16 if not safe_gate else 32
         o, final_state = chunk_dplr_fwd(
             q=q,
             k=k,
@@ -115,11 +118,13 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            safe_gate=safe_gate,
         )
         ctx.save_for_backward(q, k, v, a, b, gk, initial_state)
         ctx.cu_seqlens = cu_seqlens
         ctx.scale = scale
         ctx.chunk_size = chunk_size
+        ctx.safe_gate = safe_gate
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -256,9 +261,10 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
             chunk_size=chunk_size,
             scale=scale,
             cu_seqlens=cu_seqlens,
+            safe_gate=ctx.safe_gate,
         )
 
-        return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None
+        return dq.to(q), dk.to(k), dv.to(v), da.to(a), db.to(b), dgk.to(gk), None, dh0, None, None, None
 
 
 @torch.compiler.disable
@@ -274,6 +280,7 @@ def chunk_dplr_delta_rule(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     head_first: bool = False,
+    safe_gate: bool = False,
 ):
     r"""
     Args:
@@ -353,5 +360,6 @@ def chunk_dplr_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
+        safe_gate,
     )
     return o, final_state
