@@ -250,8 +250,8 @@ class RWKV7Attention(nn.Module):
             recurrent_state = last_state['recurrent_state']
 
         delta, conv_state = token_shift(
-                hidden_states, cu_seqlens, output_cache=True, cache=conv_cache,
-            )
+            hidden_states, cu_seqlens, output_cache=True, cache=conv_cache,
+        )
         xr, xw, xk, xv, xa, xg = fused_addcmul_rwkv7(hidden_states, delta, self.x_r, self.x_w,
                                                      self.x_k, self.x_v, self.x_a, self.x_g)
 
@@ -312,6 +312,8 @@ class RWKV7Attention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                safe_gate=True,
+                chunk_size=64,
             )
         else:
             o, recurrent_state = fused_mul_recurrent_rwkv7(

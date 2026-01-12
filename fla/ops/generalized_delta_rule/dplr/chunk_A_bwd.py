@@ -221,6 +221,173 @@ def chunk_dplr_bwd_kernel_intra(
 })
 @triton.autotune(
     configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [4, 8]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['BK', 'BT'],
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def chunk_dplr_bwd_kernel_intra_tensorcore(
+    q,
+    k,
+    a,
+    b,
+    gi,
+    ge,
+    dAqk,
+    dAqb,
+    dAak,
+    dAab,
+    dq,
+    dk,
+    da,
+    db,
+    dqg,
+    dkg,
+    dag,
+    dbg,
+    dgk,
+    dgk_offset,
+    cu_seqlens,
+    chunk_indices,
+    scale: tl.constexpr,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    BT: tl.constexpr,
+    BC: tl.constexpr,
+    BK: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    GATHER_SUPPORTED: tl.constexpr,
+):
+    i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_b, i_h = i_bh // H, i_bh % H
+
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T_len = eos - bos
+    else:
+        bos, eos = (i_b * T).to(tl.int32), (i_b * T + T).to(tl.int32)
+        T_len = T
+
+    if i_t * BT >= T_len:
+        return
+
+    offset_base_k = (bos * H + i_h) * K
+    offset_base_attn = (bos * H + i_h) * BT
+
+    valid_len = min(T_len - i_t * BT, BT)
+    mid_idx = valid_len // 2
+    m_k = tl.arange(0, BK) + i_k * BK < K
+    p_offset = gi + offset_base_k + (i_t * BT + mid_idx) * K + tl.arange(0, BK) + i_k * BK
+    b_offset = tl.load(p_offset, mask=m_k, other=0.0).to(tl.float32)
+
+    # Q, K, A, B, Gates: [BT, BK]
+    p_q = tl.make_block_ptr(q + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_k = tl.make_block_ptr(k + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_a = tl.make_block_ptr(a + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_b = tl.make_block_ptr(b + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_gi = tl.make_block_ptr(gi + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_ge = tl.make_block_ptr(ge + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_k = tl.load(p_k, boundary_check=(0, 1))
+    b_a = tl.load(p_a, boundary_check=(0, 1))
+    b_b = tl.load(p_b, boundary_check=(0, 1))
+    b_gi_val = tl.load(p_gi, boundary_check=(0, 1)).to(tl.float32)
+    b_ge_val = tl.load(p_ge, boundary_check=(0, 1)).to(tl.float32)
+
+    b_gi_shifted = b_gi_val - b_offset[None, :]
+    b_ge_shifted = b_ge_val - b_offset[None, :]
+    exp_gi_shifted = tl.exp(b_gi_shifted)
+    inv_exp_gi_shifted = tl.exp(-b_gi_shifted)
+    exp_ge_shifted = tl.exp(b_ge_shifted)
+
+    q_ops = (b_q * exp_gi_shifted).to(tl.float32)
+    k_ops = (b_k * inv_exp_gi_shifted).to(tl.float32)
+    b_ops = (b_b * inv_exp_gi_shifted).to(tl.float32)
+    a_ops = (b_a * exp_ge_shifted).to(tl.float32)
+
+    p_dAqk = tl.make_block_ptr(dAqk + offset_base_attn, (T_len, BT), (H*BT, 1), (i_t*BT, 0), (BT, BT), (1, 0))
+    p_dAqb = tl.make_block_ptr(dAqb + offset_base_attn, (T_len, BT), (H*BT, 1), (i_t*BT, 0), (BT, BT), (1, 0))
+    p_dAak = tl.make_block_ptr(dAak + offset_base_attn, (T_len, BT), (H*BT, 1), (i_t*BT, 0), (BT, BT), (1, 0))
+    p_dAab = tl.make_block_ptr(dAab + offset_base_attn, (T_len, BT), (H*BT, 1), (i_t*BT, 0), (BT, BT), (1, 0))
+
+    b_dAqk = tl.load(p_dAqk, boundary_check=(0, 1))
+    b_dAqb = tl.load(p_dAqb, boundary_check=(0, 1))
+    b_dAak = tl.load(p_dAak, boundary_check=(0, 1))
+    b_dAab = tl.load(p_dAab, boundary_check=(0, 1))
+
+    offs_n = tl.arange(0, BT)
+    offs_m = tl.arange(0, BT)
+    mask_inclusive = offs_m[:, None] >= offs_n[None, :]
+    mask_strict = offs_m[:, None] > offs_n[None, :]
+
+    b_dAqk = tl.where(mask_inclusive, b_dAqk, 0.0).to(tl.float32)
+    b_dAqb = tl.where(mask_inclusive, b_dAqb, 0.0).to(tl.float32)
+    b_dAak = tl.where(mask_strict, b_dAak, 0.0).to(tl.float32)
+    b_dAab = tl.where(mask_strict, b_dAab, 0.0).to(tl.float32)
+
+    # Intra-chunk gradients calculation
+    b_dq_intra = tl.dot(b_dAqk, k_ops) + tl.dot(b_dAqb, b_ops)
+    b_da_intra = tl.dot(b_dAak, k_ops) + tl.dot(b_dAab, b_ops)
+
+    b_dAqk_T = tl.trans(b_dAqk)
+    b_dAqb_T = tl.trans(b_dAqb)
+    b_dAak_T = tl.trans(b_dAak)
+    b_dAab_T = tl.trans(b_dAab)
+
+    b_dk_intra = tl.dot(b_dAqk_T, q_ops) + tl.dot(b_dAak_T, a_ops)
+    b_db_intra = tl.dot(b_dAqb_T, q_ops) + tl.dot(b_dAab_T, a_ops)
+
+    # Inter-chunk gradients loading
+    p_dqg = tl.make_block_ptr(dqg + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_dkg = tl.make_block_ptr(dkg + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_dag = tl.make_block_ptr(dag + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_dbg = tl.make_block_ptr(dbg + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+
+    b_dqg = tl.load(p_dqg, boundary_check=(0, 1))
+    b_dag = tl.load(p_dag, boundary_check=(0, 1))
+    b_dkg = tl.load(p_dkg, boundary_check=(0, 1))
+    b_dbg = tl.load(p_dbg, boundary_check=(0, 1))
+
+    last_idx = min((i_t+1) * BT, T_len) - 1
+    p_g_last = gi + offset_base_k + last_idx * H * K + tl.arange(0, BK) + i_k * BK
+    b_g_last = tl.load(p_g_last, mask=m_k, other=0.0)
+
+    b_dq = b_dq_intra * exp_gi_shifted + b_dqg * tl.exp(b_gi_val) * scale
+    b_da = b_da_intra * exp_ge_shifted + b_dag * tl.exp(b_ge_val)
+    term_inter_stabilized = tl.exp(b_g_last[None, :] - b_gi_val)
+    b_dk = b_dk_intra * inv_exp_gi_shifted + b_dkg * term_inter_stabilized
+    b_db = b_db_intra * inv_exp_gi_shifted + b_dbg * term_inter_stabilized
+
+    b_dgk = (b_dq * b_q + b_da * b_a - b_dk * b_k - b_db * b_b)
+    b_dgk_offset = b_da * b_a
+
+    p_dq = tl.make_block_ptr(dq + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_dk = tl.make_block_ptr(dk + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_da = tl.make_block_ptr(da + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_db = tl.make_block_ptr(db + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_dgk = tl.make_block_ptr(dgk + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+    p_dgk_offset = tl.make_block_ptr(dgk_offset + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))
+
+    tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_da, b_da.to(p_da.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dgk, b_dgk.to(p_dgk.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dgk_offset, b_dgk_offset.to(p_dgk_offset.dtype.element_ty), boundary_check=(0, 1))
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.autotune(
+    configs=[
         triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3, 4]
@@ -298,12 +465,15 @@ def chunk_dplr_bwd_dqk_intra(
     scale: float = 1.0,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    safe_gate: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K = q.shape
     BT = chunk_size
     BK = min(64, triton.next_power_of_2(K)) if check_shared_mem() else min(32, triton.next_power_of_2(K))
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NK = triton.cdiv(K, BK)
 
@@ -315,7 +485,11 @@ def chunk_dplr_bwd_dqk_intra(
     dgk_offset = torch.empty_like(gi, dtype=torch.float)
 
     grid = (NK, NT, B * H)
-    chunk_dplr_bwd_kernel_intra[grid](
+    if safe_gate:
+        chunk_dplr_bwd_kernel_intra_func = chunk_dplr_bwd_kernel_intra_tensorcore
+    else:
+        chunk_dplr_bwd_kernel_intra_func = chunk_dplr_bwd_kernel_intra
+    chunk_dplr_bwd_kernel_intra_func[grid](
         q=q,
         k=k,
         a=a,

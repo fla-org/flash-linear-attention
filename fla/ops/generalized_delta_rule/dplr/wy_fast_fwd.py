@@ -249,11 +249,13 @@ def prepare_wy_repr_fwd(
     A_ab: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, _ = ag.shape
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
     fwd_fn = prepare_wy_repr_fwd_kernel_chunk64 if BT == 64 else prepare_wy_repr_fwd_kernel_chunk32
