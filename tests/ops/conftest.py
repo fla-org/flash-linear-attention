@@ -5,6 +5,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from fla.utils import device_torch_lib
+
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
@@ -201,5 +203,6 @@ def poison_torch_memory():
             patch('torch.empty_like', side_effect=_guarded_empty_like), \
             patch('torch.Tensor.new_empty', new=_guarded_new_empty):
         yield
-        torch.cuda.synchronize()
+        if hasattr(device_torch_lib, 'synchronize'):
+            device_torch_lib.synchronize()
         _MEMORY_GUARD.verify_and_clear()
