@@ -15,10 +15,13 @@ def chunk_rwkv7(
     a: torch.Tensor,
     b: torch.Tensor,
     scale: float = 1.0,
-    initial_state: torch.Tensor = None,
-    output_final_state: bool = True,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     head_first: bool = False,
+    safe_gate: bool = False,
+    chunk_size: int | None = None,
 ):
     """
     Args:
@@ -45,6 +48,15 @@ def chunk_rwkv7(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        cu_seqlens_cpu (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+        safe_gate (bool):
+            Whether the kernel can assume the input gate values `g` are in a safe range.
+            When `True`, the kernel can use M=16 TensorCore acceleration.
+            The safe range is approximately [-5, 0). Default: `False`.
+        chunk_size (Optional[int]):
+            Chunk size for the chunked computation. Default: `None`, which means 16.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `False`.
             This argument has been deprecated.
@@ -72,5 +84,8 @@ def chunk_rwkv7(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        safe_gate=safe_gate,
+        chunk_size=chunk_size,
         head_first=head_first,
     )

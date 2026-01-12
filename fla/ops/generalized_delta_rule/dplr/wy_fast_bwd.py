@@ -122,12 +122,14 @@ def chunk_dplr_bwd_wy(
     dv0: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
     chunk_size: int,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A_ab_inv, A_ak, v, ag, dw, du = map(lambda x: x.contiguous(), [A_ab_inv, A_ak, v, ag, dw, du])
     B, T, H, K, V = *dw.shape, du.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(max(triton.next_power_of_2(K), 16), 64)
     BV = min(max(triton.next_power_of_2(V), 16), 64) if check_shared_mem() else min(max(triton.next_power_of_2(V), 16), 32)
