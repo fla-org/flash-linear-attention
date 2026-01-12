@@ -14,7 +14,7 @@ from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
 from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import prepare_wy_repr_fwd
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import TRITON_ABOVE_3_4_0, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 def chunk_dplr_fwd(
@@ -116,7 +116,19 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         # Due to gate numerical stability consideration, we only support chunk_size=16 when safe_gate=True
         # And in practice, chunk_size=16 is sufficient for no safe gate situations.
         # It's different from the other chunk implementations.
-        chunk_size = 16 if chunk_size is None else chunk_size
+        if chunk_size is None:
+            chunk_size = 16
+        elif TRITON_ABOVE_3_4_0:
+            chunk_size = chunk_size
+        else:
+            # Avoid Triton Compiler error
+            warnings.warn(
+                "Set chunk_size to 16, to avoid triton compiler erorr. "
+                f"original chunk_size {chunk_size}",
+                category=RuntimeWarning,
+                stacklevel=2,
+            )
+            chunk_size = 16
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
         o, final_state = chunk_dplr_fwd(
