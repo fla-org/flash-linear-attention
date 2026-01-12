@@ -447,3 +447,77 @@ def test_gate(
     assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_chunk_return_intermediate_states(dtype):
+    """Test that return_intermediate_states=True works in inference mode and returns h with correct shape."""
+    torch.manual_seed(42)
+    B, T, H, D = 2, 1024, 4, 128
+    chunk_size = 64
+
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, H, dtype=dtype, device=device)
+
+    with torch.inference_mode():
+        # Test equal-length sequences
+        o, final_state, h = chunk_kda(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=None,
+            output_final_state=True,
+            return_intermediate_states=True,
+            disable_recompute=False  # Should not cause issues in inference mode
+        )
+
+        # Verify shapes
+        assert o.shape == (B, T, H, D), f"Output shape mismatch: {o.shape}"
+        assert final_state.shape == (B, H, D, D), f"Final state shape mismatch: {final_state.shape}"
+
+        # Calculate expected NT (number of chunks)
+        expected_nt = (T + chunk_size - 1) // chunk_size
+        assert h.shape == (B, expected_nt, H, D, D), f"h shape mismatch: {h.shape}, expected: {(B, expected_nt, H, D, D)}"
+        assert h.dtype == dtype, f"h dtype should be bfloat16, got: {h.dtype}"
+
+        # Test variable-length sequences with proper flattened inputs
+        total_tokens = 1024
+        N = 2  # Number of sequences
+        # Create cu_seqlens for varlen: [0, len1, len1+len2, ..., total_tokens]
+        # Simple case: two sequences of equal length
+        seq_len = total_tokens // N
+        cu_seqlens = torch.tensor([0, seq_len, total_tokens], dtype=torch.long, device=device)
+
+        # Generate new tensors for varlen test (flattened batch size = 1)
+        q_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
+        k_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
+        v_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
+        g_varlen = torch.randn(1, total_tokens, H, D, dtype=dtype, device=device)
+        beta_varlen = torch.rand(1, total_tokens, H, dtype=dtype, device=device)
+
+        o_varlen, final_state_varlen, h_varlen = chunk_kda(
+            q=q_varlen,
+            k=k_varlen,
+            v=v_varlen,
+            g=g_varlen,
+            beta=beta_varlen,
+            initial_state=None,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            return_intermediate_states=True,
+            disable_recompute=False
+        )
+
+        # Verify varlen shapes - B should be 1 (flattened), sequence length is total_tokens
+        assert o_varlen.shape == (1, total_tokens, H, D), f"Varlen output shape mismatch: {o_varlen.shape}"
+        assert final_state_varlen.shape == (N, H, D, D), f"Varlen final state shape mismatch: {final_state_varlen.shape}"
+
+        # NT for varlen is total number of chunks across all sequences
+        assert h_varlen.shape[0] == 1, f"Varlen h batch dim should be 1, got: {h_varlen.shape[0]}"
+        assert h_varlen.shape[2:] == (H, D, D), f"Varlen h dims mismatch: {h_varlen.shape[2:]}"
+        assert h_varlen.dtype == dtype, f"Varlen h dtype should be {dtype}, got: {h_varlen.dtype}"

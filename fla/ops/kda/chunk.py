@@ -29,7 +29,8 @@ def chunk_kda_fwd(
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     safe_gate: bool = False,
-    disable_recompute: bool = False
+    disable_recompute: bool = False,
+    return_intermediate_states: bool = False,
 ):
     # qg = None if disable_recompute is False
     w, u, qg, kg, Aqk, Akk = chunk_kda_fwd_intra(
@@ -71,7 +72,10 @@ def chunk_kda_fwd(
     )
     if not disable_recompute:
         # Delete to save memory
-        w, u, qg, kg, v_new, h = None, None, None, None, None, None
+        w, u, qg, kg, v_new = None, None, None, None, None
+        if not return_intermediate_states:
+            # Only delete h if not requested for inference
+            h = None
 
     return o, Aqk, Akk, final_state, w, u, qg, kg, v_new, h
 
@@ -208,7 +212,8 @@ class ChunkKDAFunction(torch.autograd.Function):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
         lower_bound: float | None = None,
-        disable_recompute: bool = False
+        disable_recompute: bool = False,
+        return_intermediate_states: bool = False,
     ):
         chunk_size = 64
         g_org = None
@@ -253,8 +258,13 @@ class ChunkKDAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             safe_gate=safe_gate,
-            disable_recompute=disable_recompute
+            disable_recompute=disable_recompute,
+            return_intermediate_states=return_intermediate_states,
         )
+        if return_intermediate_states:
+            assert torch.is_inference_mode_enabled(), "return_intermediate_states is only allowed in inference mode"
+            assert disable_recompute is False, "return_intermediate_states must be used with disable_recompute=False"
+            return o.to(q.dtype), final_state, h
 
         if disable_recompute is False and use_gate_in_kernel:
             g = None  # type: ignore
@@ -344,7 +354,7 @@ class ChunkKDAFunction(torch.autograd.Function):
                 chunk_indices=chunk_indices,
             )
         return (dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None)
 
 
 @torch.compiler.disable
@@ -364,6 +374,7 @@ def chunk_kda(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     disable_recompute: bool = False,
+    return_intermediate_states: bool = False,
     **kwargs,
 ):
     r"""
@@ -415,12 +426,26 @@ def chunk_kda(
             Whether to disable gradient recomputation in the kernel. When `True`, the kernel
             will save all intermediate activations for backward pass, which is beneficial
             for training small models at the cost of increased memory usage. Default: `False`.
+        return_intermediate_states (bool):
+            If True, returns intermediate state `h` for inference scenarios (e.g., vLLM).
+            Must be used within `torch.inference_mode()` and will return a 3-tuple instead of 2-tuple.
+            This is not intended for training as it bypasses autograd. Default: `False`.
 
     Returns:
-        o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]`.
-        final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+        - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
+            o (torch.Tensor):
+                Outputs of shape `[B, T, H, V]`.
+            final_state (torch.Tensor):
+                Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+        - Inference mode (return_intermediate_states=True): A tuple (o, final_state, h)
+            o (torch.Tensor):
+                Outputs of shape `[B, T, H, V]`.
+            final_state (torch.Tensor):
+                Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            h (torch.Tensor):
+                Intermediate states of shape `[B, NT, H, K, V]` and dtype `bfloat16` for caching or further processing.
+                - For equal-length sequences: `NT = #chunks_per_sequence` (typically `ceil(T / chunk_size)`)
+                - For variable-length sequences (cu_seqlens): B is always 1 (flattened), NT is the total number of chunks across all sequences, determined by `prepare_chunk_indices(cu_seqlens, chunk_size)`
 
     Examples::
         >>> import torch
@@ -492,7 +517,7 @@ def chunk_kda(
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, final_state = ChunkKDAFunction.apply(
+    return ChunkKDAFunction.apply(
         q,
         k,
         v,
@@ -509,6 +534,6 @@ def chunk_kda(
         cu_seqlens_cpu,
         safe_gate,
         lower_bound,
-        disable_recompute
+        disable_recompute,
+        return_intermediate_states,
     )
-    return o, final_state
