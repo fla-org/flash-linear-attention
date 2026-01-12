@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
+from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
@@ -133,6 +134,140 @@ def test_fused_recurrent(
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize(
+    ("B", "H", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-H{}-D{}-scale{}-norm{}-qk_l2{}-gate{}-safe_gate{}-dtype{}".format(*test),
+        )
+        for test in [
+            (16, 16, 128, 0.1, 1.0, True, False, False, torch.bfloat16),
+            (32, 8, 64, 1.0, 1.0, False, False, False, torch.float16),
+            (7, 32, 128, 0.5, 0.5, True, False, False, torch.bfloat16),  # Odd batch size
+            (16, 16, 128, 0.1, 1.0, True, True, False, torch.bfloat16),
+            (32, 8, 64, 1.0, 1.0, False, True, False, torch.float16),
+            (7, 32, 128, 0.5, 0.5, True, True, True, torch.bfloat16),  # Odd batch size
+        ]
+    ],
+)
+def test_fused_recurrent_vllm_decode(
+    B: int,
+    H: int,
+    D: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    use_qk_l2norm_in_kernel: bool,
+    use_gate_in_kernel: bool,
+    safe_gate: bool,
+    dtype: torch.dtype,
+):
+    """Test vLLM-style decoding with continuous batching and paged state storage."""
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+
+    # Setup cache pool and inputs
+    max_cache_slots = B * 3
+    state_pool = torch.randn(max_cache_slots, H, D, D, dtype=torch.float32, device=device)
+    state_indices = torch.randperm(max_cache_slots, device=device)[:B].int()
+
+    # Fill unaccessed slots with a huge value to detect out-of-bound access
+    HUGE_VALUE = 1e30
+    mask = torch.ones(max_cache_slots, dtype=torch.bool, device=device)
+    mask[state_indices.long()] = False
+    state_pool[mask] = HUGE_VALUE
+
+    T = 1
+    total_tokens = B * T
+
+    q = torch.rand(1, total_tokens, H, D, dtype=dtype, device=device)
+    k = torch.rand(1, total_tokens, H, D, dtype=dtype, device=device)
+    v = torch.rand(1, total_tokens, H, D, dtype=dtype, device=device)
+    g = torch.randn(1, total_tokens, H, D, dtype=torch.float if not use_gate_in_kernel else dtype, device=device)
+
+    if use_gate_in_kernel:
+        A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32, device=device).uniform_(1, 16)).squeeze()
+        dt_bias = torch.randn(H * D, dtype=torch.float32, device=device)
+        lower_bound = -5.0 if safe_gate else None
+        naive_kda_gate_fn = naive_kda_lowerbound_gate if safe_gate else naive_kda_gate
+    else:
+        g = F.logsigmoid(g) / gate_logit_normalizer
+        A_log = None
+        dt_bias = None
+        lower_bound = None
+        naive_kda_gate_fn = None
+
+    beta = torch.randn(1, total_tokens, H, dtype=dtype, device=device).sigmoid()
+
+    cu_seqlens = torch.arange(0, total_tokens + 1, step=T, device=device, dtype=torch.int32)
+    ref_state_pool = state_pool.clone()
+    tri_state_pool = state_pool.clone()
+
+    # Reference implementation (loop over batch)
+    ref_outputs = []
+    for i in range(B):
+        start, end = i, i + 1
+        slot_idx = state_indices[i].item()
+
+        q_i = q[:, start:end].clone()
+        k_i = k[:, start:end].clone()
+        v_i = v[:, start:end].clone()
+        g_i = g[:, start:end].clone()
+        beta_i = beta[:, start:end].clone()
+
+        h_init = ref_state_pool[slot_idx].clone().unsqueeze(0)
+        ref_o_i, ref_ht_i = naive_recurrent_kda(
+            q=F.normalize(q_i, p=2, dim=-1),
+            k=F.normalize(k_i, p=2, dim=-1),
+            v=v_i,
+            g=(naive_kda_gate_fn(g_i, A_log, dt_bias) if use_gate_in_kernel else g_i),
+            beta=beta_i,
+            scale=scale,
+            initial_state=h_init,
+            output_final_state=True
+        )
+        ref_outputs.append(ref_o_i)
+        ref_state_pool[slot_idx] = ref_ht_i.squeeze(0)
+
+    ref_out = torch.cat(ref_outputs, dim=1)
+
+    # Triton kernel
+    q_in = q.clone()
+    k_in = k.clone()
+    if not use_qk_l2norm_in_kernel:
+        q_in = F.normalize(q_in, p=2, dim=-1)
+        k_in = F.normalize(k_in, p=2, dim=-1)
+
+    tri_out, _ = fused_recurrent_kda_fwd(
+        q=q_in,
+        k=k_in,
+        v=v,
+        g=g,
+        beta=beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        initial_state=tri_state_pool,
+        scale=scale,
+        output_final_state=False,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=None,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_exp2=False,
+        lower_bound=lower_bound
+    )
+
+    # Verify results
+    assert_close("o", ref_out, tri_out, 0.005)
+    assert_close("ht", ref_state_pool[state_indices.long()], tri_state_pool[state_indices.long()], 0.005)
+
+    mask = torch.ones(max_cache_slots, dtype=torch.bool, device=device)
+    mask[state_indices.long()] = False
+    assert_close("Untouched ht", ref_state_pool[mask], tri_state_pool[mask], 0.0)
 
 
 @pytest.mark.parametrize(
