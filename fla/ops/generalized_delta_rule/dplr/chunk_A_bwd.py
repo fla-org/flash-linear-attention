@@ -327,22 +327,24 @@ def chunk_dplr_bwd_kernel_intra_tensorcore(
     mask_inclusive = offs_m[:, None] >= offs_n[None, :]
     mask_strict = offs_m[:, None] > offs_n[None, :]
 
-    b_dAqk = tl.where(mask_inclusive, b_dAqk, 0.0).to(tl.float32)
-    b_dAqb = tl.where(mask_inclusive, b_dAqb, 0.0).to(tl.float32)
+    b_dAqk = tl.where(mask_inclusive, b_dAqk, 0.0).to(b_dAqk.dtype)
+    b_dAqb = tl.where(mask_inclusive, b_dAqb, 0.0).to(b_dAqb.dtype)
     b_dAak = tl.where(mask_strict, b_dAak, 0.0).to(tl.float32)
     b_dAab = tl.where(mask_strict, b_dAab, 0.0).to(tl.float32)
 
     # Intra-chunk gradients calculation
-    b_dq_intra = tl.dot(b_dAqk, k_ops) + tl.dot(b_dAqb, b_ops)
+    k_ops_h = k_ops.to(b_dAqk.dtype)
+    b_ops_h = b_ops.to(b_dAqb.dtype)
+    b_dq_intra = tl.dot(b_dAqk, k_ops_h) + tl.dot(b_dAqb, b_ops_h)
     b_da_intra = tl.dot(b_dAak, k_ops) + tl.dot(b_dAab, b_ops)
 
     b_dAqk_T = tl.trans(b_dAqk)
     b_dAqb_T = tl.trans(b_dAqb)
     b_dAak_T = tl.trans(b_dAak)
     b_dAab_T = tl.trans(b_dAab)
-
-    b_dk_intra = tl.dot(b_dAqk_T, q_ops) + tl.dot(b_dAak_T, a_ops)
-    b_db_intra = tl.dot(b_dAqb_T, q_ops) + tl.dot(b_dAab_T, a_ops)
+    q_ops_h = q_ops.to(b_dAqk.dtype)
+    b_dk_intra = tl.dot(b_dAqk_T, q_ops_h) + tl.dot(b_dAak_T, a_ops)
+    b_db_intra = tl.dot(b_dAqb_T, q_ops_h) + tl.dot(b_dAab_T, a_ops)
 
     # Inter-chunk gradients loading
     p_dqg = tl.make_block_ptr(dqg + offset_base_k, (T_len, K), (H*K, 1), (i_t*BT, i_k*BK), (BT, BK), (1, 0))

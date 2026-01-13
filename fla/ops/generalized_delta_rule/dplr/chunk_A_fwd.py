@@ -271,8 +271,9 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     b_ops_t = tl.trans(b_ops)
 
     # Compute intra-chunk attention using TensorCores
-    b_A_qk = tl.dot(q_ops, k_ops_t)
-    b_A_qb = tl.dot(q_ops, b_ops_t)
+    q_ops_h = q_ops.to(b_q.dtype)
+    b_A_qk = tl.dot(q_ops_h, k_ops_t.to(b_q.dtype))
+    b_A_qb = tl.dot(q_ops_h, b_ops_t.to(b_q.dtype))
     b_A_ak = tl.dot(a_ops, k_ops_t)
     b_A_ab = tl.dot(a_ops, b_ops_t)
 
