@@ -966,7 +966,7 @@ def test_conv_non_contiguous_qkv(
 
     tri_k_out, _ = causal_conv1d(k, weight, bias, activation=activation)
 
-    assert_close("non-contiguous k", ref_k_out, tri_k_out, 1e-3)
+    assert_close("o", ref_k_out, tri_k_out, 1e-3)
 
     # Test backward
     dy = torch.randn_like(tri_k_out)
@@ -982,10 +982,10 @@ def test_conv_non_contiguous_qkv(
     ref_k_out_detached.backward(dy)
 
     # Check gradients
-    assert_close("grad k", ref_k_detached.grad, k_detached.grad, 1e-3)
-    assert_close("grad weight", weight.grad, weight.grad, 1e-3)
+    assert_close("dx", ref_k_detached.grad, k_detached.grad, 1e-3)
+    assert_close("dw", weight.grad, weight.grad, 1e-3)
     if has_bias:
-        assert_close("grad bias", bias.grad, bias.grad, 1e-3)
+        assert_close("dbias", bias.grad, bias.grad, 1e-3)
 
     # Test with residual (residual is contiguous)
     residual = k.detach().clone().requires_grad_(True)
@@ -997,14 +997,14 @@ def test_conv_non_contiguous_qkv(
     k_res = k.detach().requires_grad_(True)
     tri_k_out_res, _ = causal_conv1d(k_res, weight, bias, residual=residual, activation=activation)
 
-    assert_close("k", ref_k_out_res, tri_k_out_res, 1e-3)
+    assert_close("o", ref_k_out_res, tri_k_out_res, 1e-3)
 
     # Backward with residual
     dy = torch.randn_like(tri_k_out_res)
     ref_k_out_res.backward(dy)
     tri_k_out_res.backward(dy)
 
-    assert_close("dk_res", ref_k_res.grad, k_res.grad, 1e-3)
+    assert_close("dx", ref_k_res.grad, k_res.grad, 1e-3)
     assert_close("dr", ref_residual.grad, residual.grad, 1e-3)
 
     initial_state = torch.randn(B, D, W).to(device, dtype)
@@ -1022,15 +1022,15 @@ def test_conv_non_contiguous_qkv(
         output_final_state=True, activation=activation
     )
 
-    assert_close("k with state", ref_k_out_state, tri_k_out_state, 1e-3)
-    assert_close("final state", ref_final_state, tri_final_state, 1e-3)
+    assert_close("o", ref_k_out_state, tri_k_out_state, 1e-3)
+    assert_close("h", ref_final_state, tri_final_state, 1e-3)
 
     # Backward with state
     dy = torch.randn_like(tri_k_out_state)
     ref_k_out_state.backward(dy)
     tri_k_out_state.backward(dy)
 
-    assert_close("grad k with state", ref_k_state.grad, k_state.grad, 1e-3)
+    assert_close("dh", ref_k_state.grad, k_state.grad, 1e-3)
 
 
 @pytest.mark.parametrize(
@@ -1086,7 +1086,7 @@ def test_conv_varlen_non_contiguous_qkv(
 
     tri_k_out, _ = causal_conv1d(k, weight, bias, activation=activation, cu_seqlens=cu_seqlens)
 
-    assert_close("varlen non-contiguous k", ref_k_out, tri_k_out, 1e-3)
+    assert_close("dx", ref_k_out, tri_k_out, 1e-3)
 
     # Test backward
     dy = torch.randn_like(tri_k_out)
@@ -1126,10 +1126,10 @@ def test_conv_varlen_non_contiguous_qkv(
     ref_k_out_detached2.backward(dy.clone())
 
     # Check gradients
-    assert_close("varlen grad k", ref_k_detached.grad, k_detached.grad, 1e-3)
-    assert_close("varlen grad weight", ref_grad_weight, weight.grad, 1e-3)
+    assert_close("dx", ref_k_detached.grad, k_detached.grad, 1e-3)
+    assert_close("dw", ref_grad_weight, weight.grad, 1e-3)
     if has_bias:
-        assert_close("varlen grad bias", ref_grad_bias, bias.grad, 1e-3)
+        assert_close("dbias", ref_grad_bias, bias.grad, 1e-3)
 
     # Test with residual (residual is contiguous)
     residual = k.detach().clone().requires_grad_(True)
@@ -1142,15 +1142,15 @@ def test_conv_varlen_non_contiguous_qkv(
     k_res = k.detach().requires_grad_(True)
     tri_k_out_res, _ = causal_conv1d(k_res, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
 
-    assert_close("varlen k", ref_k_out_res, tri_k_out_res, 1e-3)
+    assert_close("o", ref_k_out_res, tri_k_out_res, 1e-3)
 
     # Backward with residual
     dy = torch.randn_like(tri_k_out_res)
     ref_k_out_res.backward(dy)
     tri_k_out_res.backward(dy)
 
-    assert_close("varlen dk_res", ref_k_res.grad, k_res.grad, 1e-3)
-    assert_close("varlen dr", ref_residual.grad, residual.grad, 1e-3)
+    assert_close("dx", ref_k_res.grad, k_res.grad, 1e-3)
+    assert_close("dr", ref_residual.grad, residual.grad, 1e-3)
     initial_state = torch.randn(N, D, W).to(device, dtype)
 
     # Forward with state
@@ -1166,12 +1166,12 @@ def test_conv_varlen_non_contiguous_qkv(
         output_final_state=True, activation=activation, cu_seqlens=cu_seqlens
     )
 
-    assert_close("varlen k with state", ref_k_out_state, tri_k_out_state, 1e-3)
-    assert_close("varlen final state", ref_final_state, tri_final_state, 1e-3)
+    assert_close("o", ref_k_out_state, tri_k_out_state, 1e-3)
+    assert_close("dh", ref_final_state, tri_final_state, 1e-3)
 
     # Backward with state
     dy = torch.randn_like(tri_k_out_state)
     ref_k_out_state.backward(dy)
     tri_k_out_state.backward(dy)
 
-    assert_close("varlen grad k with state", ref_k_state.grad, k_state.grad, 1e-3)
+    assert_close("dx", ref_k_state.grad, k_state.grad, 1e-3)
