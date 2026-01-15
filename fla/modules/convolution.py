@@ -877,8 +877,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
         assert output_final_state is False, "output_final_state must be False for FastCausalConv1dFn"
         assert initial_states is None, "initial_states must be None for FastCausalConv1dFn"
         assert residual is None, "residual must be None for FastCausalConv1dFn"
-        if x.stride(2) != 1 and x.stride(1) != 1:
-            x = x.contiguous()
+
         bias = bias.contiguous() if bias is not None else None
         if cu_seqlens is not None and seq_idx is None:
             seq_idx = prepare_sequence_ids(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(
@@ -907,9 +906,12 @@ class FastCausalConv1dFn(torch.autograd.Function):
         return out, None
 
     @staticmethod
+    @input_guard
     def backward(ctx, dout, *args):
         x, weight, bias, seq_idx, initial_states = ctx.saved_tensors
+        dx = torch.empty_like(x, memory_format=torch.contiguous_format)
         x = rearrange(x, 'b t d -> b d t')
+        dx = rearrange(dx, 'b t d -> b d t')
         dout = rearrange(dout, 'b t d -> b d t')
         dfinal_states = args[0] if ctx.return_final_states else None
 
@@ -926,7 +928,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
             seq_idx,
             initial_states,
             dfinal_states,
-            None,
+            dx,
             ctx.return_dinitial_states,
             ctx.activation,
         )
@@ -1072,11 +1074,15 @@ def causal_conv1d(
             chunk_indices=chunk_indices,
             seq_idx=seq_idx,
         )
-    B, _, D, W = *x.shape, weight.shape[-1]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    if x.stride(-1) != 1:
-        x = x.contiguous()
-    x = rearrange(x, 'b t d -> b d t')
+    W = weight.shape[-1]
+    if initial_state is not None:
+        # Case: Has initial_state -> Must be Channel-Last (physically B, T, D)
+        if x.stride(-1) != 1:
+            x = x.contiguous()
+        x = rearrange(x, 'b t d -> b d t')
+    else:
+        # Case: No initial_state -> Prefer Contiguous (physically B, D, T)
+        x = rearrange(x, 'b t d -> b d t').contiguous()
 
     # check if cu_seqlens and cache are both provided
     # Sequence index for each token. Used for varlen.
@@ -1103,20 +1109,24 @@ def causal_conv1d(
             .transpose(1, 2)               # [N, D, W-1] and stride(1)==1
         )
 
-    result = causal_conv1d_fn(
+    y = causal_conv1d_fn(
         x=x,
         weight=weight,
         bias=bias,
         activation=activation,
         seq_idx=seq_idx,
         initial_states=initial_state,
-        return_final_states=output_final_state,
+        return_final_states=False,
     )
-    y, final_state = result if output_final_state else (result, None)
+
     y = rearrange(y, 'b d t -> b t d')
     if output_final_state:
-        cache = x.new_zeros(N, D, W)
-        cache[:, :, -W+1:].copy_(final_state[:, :, -W+1:])
+        final_state = causal_conv1d_update_states(
+            x=x,
+            state_len=W,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+        )
     if residual is not None:
         y.add_(residual)
 
@@ -1273,10 +1283,9 @@ class ShortConvolution(nn.Conv1d):
         # cuda backend do not support:
         # 1. both `cu_seqlens` and `cache` being provided
         # 2. both `cu_seqlens` and `output_final_state` being provided
-        if self.backend == 'cuda' and (
-            (cu_seqlens is not None and cache is not None) or
-            (cu_seqlens is not None and output_final_state)
-        ):
+        # and other small issues
+        # to simplify the implementation, we just switch to triton backend
+        if self.backend == 'cuda' and cache is not None:
             warnings.warn(
                 "The CUDA backend does not support both `cu_seqlens` and `cache` being provided, "
                 "or both `cu_seqlens` and `output_final_state` being provided. "
