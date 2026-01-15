@@ -55,6 +55,9 @@ def causal_conv1d_fwd_kernel(
     chunk_indices,
     B,
     T,
+    stride_x_n,
+    stride_x_t,
+    stride_x_d,
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -74,9 +77,11 @@ def causal_conv1d_fwd_kernel(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
+        p_x = x + bos * stride_x_t
     else:
         i_n = i_b
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        p_x = x + i_b * stride_x_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = tl.arange(0, BW) + W - BW
@@ -90,7 +95,7 @@ def causal_conv1d_fwd_kernel(
     b_y = tl.zeros((BT, BD), dtype=tl.float32)
     if not USE_INITIAL_STATE:
         for i_w in tl.static_range(-W + 1, 1):
-            p_yi = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            p_yi = tl.make_block_ptr(p_x, (T, D), (stride_x_t, stride_x_d), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
             b_yi = tl.load(p_yi, boundary_check=(0, 1)).to(tl.float32)
             if HAS_WEIGHT:
@@ -99,7 +104,7 @@ def causal_conv1d_fwd_kernel(
     elif i_t * BT >= W:
         # to make Triton compiler happy, we need to copy codes
         for i_w in tl.static_range(-W + 1, 1):
-            p_yi = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
+            p_yi = tl.make_block_ptr(p_x, (T, D), (stride_x_t, stride_x_d), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]
             b_yi = tl.load(p_yi, boundary_check=(0, 1)).to(tl.float32)
             if HAS_WEIGHT:
@@ -112,7 +117,11 @@ def causal_conv1d_fwd_kernel(
             m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d
             m_c = ((o_x + W >= 0) & (o_x < 0))[:, None] & m_d
 
-            b_yi = tl.load(x + bos * D + o_x[:, None] * D + o_d, mask=m_x, other=0).to(tl.float32)
+            b_yi = tl.load(
+                p_x + o_x[:, None] * stride_x_t + o_d * stride_x_d,
+                mask=m_x,
+                other=0
+            ).to(tl.float32)
 
             b_yi += tl.load(initial_state + i_n * D*W + o_d * W + (o_x + W)[:, None], mask=m_c, other=0).to(tl.float32)
 
@@ -167,6 +176,12 @@ def causal_conv1d_bwd_kernel(
     chunk_indices,
     B,
     T,
+    stride_x_n,   # x batch stride
+    stride_x_t,   # x time stride
+    stride_x_d,   # x dim stride
+    stride_dx_n,  # dx batch stride
+    stride_dx_t,  # dx time stride
+    stride_dx_d,  # dx dim stride
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -186,10 +201,12 @@ def causal_conv1d_bwd_kernel(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
+        p_x = x + bos * stride_x_t
     else:
         i_tg = i_b * tl.num_programs(1) + i_t
         i_n = i_b
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        p_x = x + i_b * stride_x_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = tl.arange(0, BW) + W - BW
@@ -197,7 +214,7 @@ def causal_conv1d_bwd_kernel(
     m_w = o_w >= 0
 
     if HAS_WEIGHT:
-        p_x = tl.make_block_ptr(x + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        p_x = tl.make_block_ptr(p_x, (T, D), (stride_x_t, stride_x_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
         b_x = tl.load(p_x, boundary_check=(0, 1))
         # [BD, BW]
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
@@ -329,7 +346,12 @@ def causal_conv1d_bwd_kernel(
             b_dht = tl.load(dht + dht_off, mask=mask[:, None] & m_d[None, :], other=0.).to(tl.float32)
             b_dx += b_dht
 
-    p_dx = tl.make_block_ptr(dx + bos * D, (T, D), (D, 1), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+    if IS_VARLEN:
+        p_dx = dx + bos * stride_dx_t
+    else:
+        p_dx = dx + i_b * stride_dx_n
+
+    p_dx = tl.make_block_ptr(p_dx, (T, D), (stride_dx_t, stride_dx_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
     tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
@@ -347,6 +369,10 @@ def causal_conv1d_update_kernel(
     y,
     weight,
     bias,
+    stride_x_n,  # batch stride
+    stride_x_d,  # dim stride
+    stride_y_n,  # batch stride
+    stride_y_d,  # dim stride
     D: tl.constexpr,
     W: tl.constexpr,
     BD: tl.constexpr,
@@ -360,28 +386,37 @@ def causal_conv1d_update_kernel(
     i_d, i_n = tl.program_id(0), tl.program_id(1)
 
     o_d = i_d * BD + tl.arange(0, BD)
-    o_w = tl.arange(0, BW) + W - BW
+    o_w = tl.arange(0, BW)
     m_d = o_d < D
-    m_w = o_w >= 0
-    m_c = o_w < W - 1
+    m_w = o_w < W
 
     # [BD]
-    b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=0).to(tl.float32)
+    b_x = tl.load(x + i_n * stride_x_n + o_d * stride_x_d, mask=m_d, other=0).to(tl.float32)
+
+    b_cache = tl.zeros((BD, BW), dtype=tl.float32)
 
     if USE_INITIAL_STATE:
-        # shift the cache by 1 with the last one being discarded
-        p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW + 1), (BD, BW), (1, 0))
-        # [BD, BW]
-        b_cache = tl.load(p_cache, boundary_check=(0, 1)).to(tl.float32)
-        b_cache = tl.where(m_c[None, :], b_cache, b_x[:, None])
-    else:
-        b_cache = tl.zeros((BD, BW), dtype=tl.float32)
+        # 2. Shift Cache (Read [1:])
+        p_cache_read = tl.make_block_ptr(
+            cache + i_n * D*W,
+            shape=(D, W),
+            strides=(W, 1),
+            offsets=(i_d * BD, 1),
+            block_shape=(BD, BW),
+            order=(1, 0)
+        )
+        b_cache = tl.load(p_cache_read, boundary_check=(0, 1)).to(tl.float32)
+
+        # 3. Fill x to the last position
+        m_update = o_w == (W - 1)
+        b_cache = tl.where(m_update[None, :], b_x[:, None], b_cache)
 
     if HAS_WEIGHT:
         b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0)
         b_y = tl.sum(b_cache * b_w, 1)
     else:
         b_y = tl.sum(b_cache, 1)
+
     if HAS_BIAS:
         b_y += tl.load(bias + o_d, mask=m_d)
 
@@ -391,16 +426,23 @@ def causal_conv1d_update_kernel(
     if HAS_RESIDUAL:
         b_y += tl.load(residual + i_n * D + o_d, mask=m_d, other=0)
 
-    tl.store(y + i_n * D + o_d, tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_d)
+    tl.store(y + i_n * stride_y_n + o_d * stride_y_d, tl.cast(b_y,
+             dtype=y.dtype.element_ty, fp_downcast_rounding='rtne'), mask=m_d)
 
     if USE_INITIAL_STATE:
-        b_cache = tl.cast(b_cache, dtype=cache.dtype.element_ty, fp_downcast_rounding='rtne')
-        # update the cache in-place
-        p_cache = tl.make_block_ptr(cache + i_n * D*W, (D, W), (W, 1), (i_d * BD, W - BW), (BD, BW), (1, 0))
-        tl.store(p_cache, b_cache, boundary_check=(0, 1))
+        p_cache_write = tl.make_block_ptr(
+            cache + i_n * D*W,
+            shape=(D, W),
+            strides=(W, 1),
+            offsets=(i_d * BD, 0),
+            block_shape=(BD, BW),
+            order=(1, 0)
+        )
+        tl.store(p_cache_write, tl.cast(b_cache, dtype=cache.dtype.element_ty,
+                 fp_downcast_rounding='rtne'), boundary_check=(0, 1))
 
 
-@input_guard
+@input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -416,7 +458,10 @@ def causal_conv1d_fwd(
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
-    B, T, D, W = *x.shape, weight.shape[1]
+    B, T, D = x.shape[0], x.shape[1], weight.shape[0]
+    W = weight.shape[1]
+    stride_x_n, stride_x_t, stride_x_d = x.stride()
+
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
     BW = triton.next_power_of_2(W)
     if chunk_indices is None and (cu_seqlens is not None or cu_seqlens_cpu is not None):
@@ -424,7 +469,8 @@ def causal_conv1d_fwd(
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
 
-    y = torch.empty_like(x)
+    y = torch.empty_like(x, memory_format=torch.contiguous_format)
+
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_fwd_kernel[grid](
         x=x,
@@ -442,6 +488,9 @@ def causal_conv1d_fwd(
         BT=BT,
         BW=BW,
         NB=NB,
+        stride_x_n=stride_x_n,
+        stride_x_t=stride_x_t,
+        stride_x_d=stride_x_d,
         ACTIVATION=activation,
     )
     final_state = None
@@ -473,6 +522,9 @@ def causal_conv1d_bwd(
         x = rearrange(x, 'b t ... -> b t (...)')
     B, T, D = x.shape
     W = weight.shape[1] if weight is not None else None
+
+    stride_x_n, stride_x_t, stride_x_d = x.stride()
+
     BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
     BW = triton.next_power_of_2(W)
     if chunk_indices is None and (cu_seqlens is not None or cu_seqlens_cpu is not None):
@@ -499,6 +551,8 @@ def causal_conv1d_bwd(
     dr = dy if residual is not None else None
     dh0 = initial_state.new_zeros(min(NT, triton.cdiv(W, BT)), *initial_state.shape) if initial_state is not None else None
 
+    stride_dx_n, stride_dx_t, stride_dx_d = dx.stride()
+
     def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
         x=x,
@@ -520,6 +574,12 @@ def causal_conv1d_bwd(
         BT=BT,
         BW=BW,
         NB=NB,
+        stride_x_n=stride_x_n,
+        stride_x_t=stride_x_t,
+        stride_x_d=stride_x_d,
+        stride_dx_n=stride_dx_n,
+        stride_dx_t=stride_dx_t,
+        stride_dx_d=stride_dx_d,
         ACTIVATION=activation,
     )
     if weight is not None:
@@ -545,50 +605,91 @@ def causal_conv1d_states_fwd_kernel(
     T,
     D,
     W,
+    stride_x_n,
+    stride_x_t,
+    stride_x_d,
     BD: tl.constexpr,
     BW: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_d, i_n = tl.program_id(0), tl.program_id(1)
-    if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-    else:
-        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
 
-    o_t = eos - BW + tl.arange(0, BW)
+    # o_d Shape: [BD]
     o_d = i_d * BD + tl.arange(0, BD)
-    o_w = W - BW + tl.arange(0, BW)
-    m_t = (o_t >= tl.maximum(bos, eos - W))
     m_d = o_d < D
-    m_w = (o_w >= 0) & (o_w < W)
 
-    b_x = tl.load(x + o_t * D + o_d[:, None], mask=(m_t & m_d[:, None]), other=0)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        seq_len = eos - bos
+        p_x = x + bos * stride_x_t
+    else:
+        seq_len = T
+        p_x = x + i_n * stride_x_n
+
+    p_x = tl.make_block_ptr(p_x, (seq_len, D), (stride_x_t, stride_x_d), (seq_len - BW, i_d * BD), (BW, BD), (1, 0))
+
+    # b_x Shape: [BW, BD]
+    b_x = tl.load(p_x, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+
     if USE_INITIAL_STATE:
-        if T < BW:
-            o_c = W - (BW - T) + tl.arange(0, BW)
+        if seq_len < BW:
+            o_c = W - (BW - seq_len) + tl.arange(0, BW)
             m_c = (o_c >= 0) & (o_c < W)
-            b_cache = tl.load(initial_state + i_n * D*W + o_d[:, None] * W + o_c, mask=m_d[:, None] & m_c, other=0)
+
+            p_init = initial_state + i_n * D*W + o_d[None, :] * W + o_c[:, None]
+            mask_init = m_d[None, :] & m_c[:, None]
+
+            b_cache = tl.load(p_init, mask=mask_init, other=0)
             b_x += b_cache
 
-    tl.store(final_state + i_n * D*W + o_d[:, None] * W + o_w, b_x, mask=m_d[:, None] & m_w)
+    # final_state: [N, D, W] (Channel Major inside sample)
+    # o_w Shape: [BW]
+    o_w = W - BW + tl.arange(0, BW)
+
+    # o_d[:, None] -> [BD, 1]
+    # o_w[None, :] -> [1, BW]
+    # p_final Shape -> [BD, BW]
+    p_final = final_state + i_n * D*W + o_d[:, None] * W + o_w[None, :]
+
+    # m_final Shape -> [BD, BW]
+    m_final = m_d[:, None] & (o_w[None, :] >= 0)
+
+    tl.store(p_final, tl.trans(b_x).to(final_state.dtype.element_ty), mask=m_final)
 
 
-@input_guard
+@input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update_states(
     x: torch.Tensor,
     state_len: int,
     initial_state: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    B, T, D, W = *x.shape, state_len
-    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    if cu_seqlens is not None:
+        N = len(cu_seqlens) - 1
+        if x.dim() == 2:
+            stride_x_n = 0
+            stride_x_t, stride_x_d = x.stride()
+            T = x.shape[0]
+        else:
+            stride_x_n = x.stride(0)
+            stride_x_t, stride_x_d = x.stride(1), x.stride(2)
+            T = x.shape[1]
+        D = x.shape[-1]
+    else:
+        B, T, D = x.shape
+        N = B
+        stride_x_n, stride_x_t, stride_x_d = x.stride()
 
+    W = state_len
     final_state = torch.empty(N, D, W, dtype=x.dtype, device=x.device)
+
     BD = min(triton.next_power_of_2(D), 256)
     BW = triton.next_power_of_2(W)
+
     grid = (triton.cdiv(D, BD), N)
+
     causal_conv1d_states_fwd_kernel[grid](
         x=x,
         initial_state=initial_state,
@@ -597,13 +698,16 @@ def causal_conv1d_update_states(
         T=T,
         D=D,
         W=W,
+        stride_x_n=stride_x_n,
+        stride_x_t=stride_x_t,
+        stride_x_d=stride_x_d,
         BW=BW,
         BD=BD,
     )
     return final_state
 
 
-@input_guard
+@input_guard(no_guard_contiguous=["x"])
 def causal_conv1d_update(
     x: torch.Tensor,
     cache: torch.Tensor,
@@ -615,15 +719,42 @@ def causal_conv1d_update(
     shape = x.shape
     if weight is not None and x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
-    *_, D = x.shape
+
+    D = x.shape[-1]
     N = x.numel() // D
     W = weight.shape[1] if weight is not None else None
     BD = 8
     BW = triton.next_power_of_2(W)
 
-    y = torch.empty_like(x)
-    # NOTE: autotuning is disabled as cache is updated in-place
+    if x.dim() == 2:
+        # Case: (N, D)
+        stride_x_n = x.stride(0)
+        stride_x_d = x.stride(1)
+    elif x.dim() == 3 and x.shape[0] == 1:
+        # Case: (1, N, D) -> Time=1, Batch=N, Dim=D
+        # Batch 在 dim 1
+        stride_x_n = x.stride(1)
+        stride_x_d = x.stride(2)
+    elif x.dim() == 3:
+        # Case: (N, 1, D) -> Batch=N, Time=1, Dim=D
+        # Batch 在 dim 0
+        stride_x_n = x.stride(0)
+        stride_x_d = x.stride(2)
+    else:
+        # Fallback / Error case
+        raise ValueError(f"Unsupported input shape: {x.shape}")
+
+    y = torch.empty_like(x, memory_format=torch.contiguous_format)
+
+    if y.dim() == 2:
+        stride_y_n, stride_y_d = y.stride(0), y.stride(1)
+    elif y.dim() == 3 and y.shape[0] == 1:
+        stride_y_n, stride_y_d = y.stride(1), y.stride(2)
+    elif y.dim() == 3:
+        stride_y_n, stride_y_d = y.stride(0), y.stride(2)
+
     def grid(meta): return (triton.cdiv(D, meta['BD']), N)
+
     causal_conv1d_update_kernel[grid](
         x=x,
         cache=cache,
@@ -631,6 +762,10 @@ def causal_conv1d_update(
         y=y,
         weight=weight,
         bias=bias,
+        stride_x_n=stride_x_n,
+        stride_x_d=stride_x_d,
+        stride_y_n=stride_y_n,
+        stride_y_d=stride_y_d,
         D=D,
         W=W,
         BD=BD,
@@ -644,7 +779,7 @@ def causal_conv1d_update(
 class CausalConv1dFunction(torch.autograd.Function):
 
     @staticmethod
-    @input_guard
+    @input_guard(no_guard_contiguous=["x"])
     def forward(
         ctx,
         x: torch.Tensor,
@@ -678,7 +813,7 @@ class CausalConv1dFunction(torch.autograd.Function):
         return y, final_state
 
     @staticmethod
-    @input_guard
+    @input_guard(no_guard_contiguous=["dy"])
     def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None):
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
@@ -722,6 +857,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
         * residual must be None
     """
     @staticmethod
+    @input_guard(no_guard_contiguous=["x"])
     def forward(
         ctx,
         x,
@@ -741,8 +877,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
         assert output_final_state is False, "output_final_state must be False for FastCausalConv1dFn"
         assert initial_states is None, "initial_states must be None for FastCausalConv1dFn"
         assert residual is None, "residual must be None for FastCausalConv1dFn"
-        if x.stride(2) != 1 and x.stride(1) != 1:
-            x = x.contiguous()
+
         bias = bias.contiguous() if bias is not None else None
         if cu_seqlens is not None and seq_idx is None:
             seq_idx = prepare_sequence_ids(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(
@@ -771,9 +906,12 @@ class FastCausalConv1dFn(torch.autograd.Function):
         return out, None
 
     @staticmethod
+    @input_guard
     def backward(ctx, dout, *args):
         x, weight, bias, seq_idx, initial_states = ctx.saved_tensors
+        dx = torch.empty_like(x, memory_format=torch.contiguous_format)
         x = rearrange(x, 'b t d -> b d t')
+        dx = rearrange(dx, 'b t d -> b d t')
         dout = rearrange(dout, 'b t d -> b d t')
         dfinal_states = args[0] if ctx.return_final_states else None
 
@@ -790,7 +928,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
             seq_idx,
             initial_states,
             dfinal_states,
-            None,
+            dx,
             ctx.return_dinitial_states,
             ctx.activation,
         )
@@ -811,7 +949,7 @@ class FastCausalConv1dFn(torch.autograd.Function):
 
 
 def fast_causal_conv1d_fn(
-    x,
+    x: torch.Tensor,
     weight: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
@@ -849,7 +987,7 @@ def fast_causal_conv1d_fn(
     )
 
 
-@input_guard
+@input_guard(no_guard_contiguous=["x"])
 def causal_conv1d(
     x: torch.Tensor,
     weight: torch.Tensor | None = None,
@@ -936,9 +1074,15 @@ def causal_conv1d(
             chunk_indices=chunk_indices,
             seq_idx=seq_idx,
         )
-    B, _, D, W = *x.shape, weight.shape[-1]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    x = rearrange(x, 'b t d -> b d t')
+    W = weight.shape[-1]
+    if initial_state is not None:
+        # Case: Has initial_state -> Must be Channel-Last (physically B, T, D)
+        if x.stride(-1) != 1:
+            x = x.contiguous()
+        x = rearrange(x, 'b t d -> b d t')
+    else:
+        # Case: No initial_state -> Prefer Contiguous (physically B, D, T)
+        x = rearrange(x, 'b t d -> b d t').contiguous()
 
     # check if cu_seqlens and cache are both provided
     # Sequence index for each token. Used for varlen.
@@ -965,20 +1109,24 @@ def causal_conv1d(
             .transpose(1, 2)               # [N, D, W-1] and stride(1)==1
         )
 
-    result = causal_conv1d_fn(
+    y = causal_conv1d_fn(
         x=x,
         weight=weight,
         bias=bias,
         activation=activation,
         seq_idx=seq_idx,
         initial_states=initial_state,
-        return_final_states=output_final_state,
+        return_final_states=False,
     )
-    y, final_state = result if output_final_state else (result, None)
+
     y = rearrange(y, 'b d t -> b t d')
     if output_final_state:
-        cache = x.new_zeros(N, D, W)
-        cache[:, :, -W+1:].copy_(final_state[:, :, -W+1:])
+        final_state = causal_conv1d_update_states(
+            x=x,
+            state_len=W,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+        )
     if residual is not None:
         y.add_(residual)
 
@@ -1135,10 +1283,9 @@ class ShortConvolution(nn.Conv1d):
         # cuda backend do not support:
         # 1. both `cu_seqlens` and `cache` being provided
         # 2. both `cu_seqlens` and `output_final_state` being provided
-        if self.backend == 'cuda' and (
-            (cu_seqlens is not None and cache is not None) or
-            (cu_seqlens is not None and output_final_state)
-        ):
+        # and other small issues
+        # to simplify the implementation, we just switch to triton backend
+        if self.backend == 'cuda' and cache is not None:
             warnings.warn(
                 "The CUDA backend does not support both `cu_seqlens` and `cache` being provided, "
                 "or both `cu_seqlens` and `output_final_state` being provided. "
