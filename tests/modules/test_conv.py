@@ -1091,21 +1091,45 @@ def test_conv_varlen_non_contiguous_qkv(
     # Test backward
     dy = torch.randn_like(tri_k_out)
 
+    # Clear gradients
+    weight.grad = None
+    if has_bias:
+        bias.grad = None
+
     # Detach and create new leaf nodes for gradient comparison
     k_detached = k.detach().requires_grad_(True)
     ref_k_detached = k.detach().contiguous().requires_grad_(True)
 
+    # Forward for gradient comparison
     tri_k_out_detached, _ = causal_conv1d(k_detached, weight, bias, activation=activation, cu_seqlens=cu_seqlens)
     ref_k_out_detached, _ = causal_conv1d(ref_k_detached, weight, bias, activation=activation, cu_seqlens=cu_seqlens)
 
-    tri_k_out_detached.backward(dy)
-    ref_k_out_detached.backward(dy)
+    # Backward to compute gradients
+    tri_k_out_detached.backward(dy.clone())
+    ref_k_out_detached.backward(dy.clone())
+
+    # Capture reference gradients
+    ref_grad_weight = weight.grad.clone()
+    if has_bias:
+        ref_grad_bias = bias.grad.clone()
+
+    # Clear gradients again for second run
+    weight.grad = None
+    if has_bias:
+        bias.grad = None
+
+    # Second forward/backward for actual test
+    tri_k_out_detached2, _ = causal_conv1d(k_detached, weight, bias, activation=activation, cu_seqlens=cu_seqlens)
+    ref_k_out_detached2, _ = causal_conv1d(ref_k_detached, weight, bias, activation=activation, cu_seqlens=cu_seqlens)
+
+    tri_k_out_detached2.backward(dy.clone())
+    ref_k_out_detached2.backward(dy.clone())
 
     # Check gradients
     assert_close("varlen grad k", ref_k_detached.grad, k_detached.grad, 1e-3)
-    assert_close("varlen grad weight", weight.grad, weight.grad, 1e-3)
+    assert_close("varlen grad weight", ref_grad_weight, weight.grad, 1e-3)
     if has_bias:
-        assert_close("varlen grad bias", bias.grad, bias.grad, 1e-3)
+        assert_close("varlen grad bias", ref_grad_bias, bias.grad, 1e-3)
 
     # Test with residual (residual is contiguous)
     residual = k.detach().clone().requires_grad_(True)
