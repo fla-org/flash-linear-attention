@@ -5,6 +5,14 @@ import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.common.cp.cp_chunk_delta_h import (
+    FLACPContext,
+    chunk_gated_delta_rule_bwd_dhu_pre_process,
+    chunk_gated_delta_rule_fwd_h_pre_process,
+    compress_h0,
+    expand_h0,
+    get_gdn_cp_context,
+)
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
@@ -14,13 +22,6 @@ from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
-from fla.ops.common.cp_chunk_delta_h import (
-    get_gdn_cp_context,
-    chunk_gated_delta_rule_fwd_h_pre_process,
-    chunk_gated_delta_rule_bwd_dhu_pre_process,
-    compress_h0,
-    expand_h0,
-)
 
 
 def chunk_kda_fwd(
@@ -56,9 +57,9 @@ def chunk_kda_fwd(
 
     context = get_gdn_cp_context()
     initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
-        k=kg, 
-        w=w, 
-        u=u, 
+        k=kg,
+        w=w,
+        u=u,
         gk=g,
         cu_seqlens=cu_seqlens,
         initial_state=initial_state,
@@ -119,7 +120,7 @@ def chunk_kda_bwd(
     chunk_size: int = 64,
     safe_gate: bool = False,
     disable_recompute: bool = False,
-    context = None,
+    context=None,
     **kwargs,
 ):
     if not disable_recompute:
@@ -416,6 +417,7 @@ def chunk_kda(
     lower_bound: float | None = None,
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
+    cp_context: FLACPContext = None,
     **kwargs,
 ):
     r"""

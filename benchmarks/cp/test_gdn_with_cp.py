@@ -16,20 +16,21 @@ ARGS=(
 torchrun --nproc_per_node $GPUS test_gdn_with_cp.py ${ARGS[@]} $@
 
 '''
-from fla.ops.kda import chunk_kda, fused_recurrent_kda
-from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.modules.convolution import causal_conv1d
-from fla.models.utils import Cache
-from einops import rearrange, repeat
-from functools import partial
 import argparse
 import os
 import random
 import sys
+from functools import partial
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from einops import rearrange, repeat
+
+from fla.models.utils import Cache
+from fla.modules.convolution import causal_conv1d
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from fla.ops.kda import chunk_kda, fused_recurrent_kda
 
 sys.path.append("../../")
 
@@ -666,7 +667,7 @@ def profile_func(fn, path):
 
 
 def test_ops(args):
-    from fla.ops.common.cp_chunk_delta_h import get_gdn_cp_context, set_gdn_cp_context
+    from fla.ops.common.cp.cp_chunk_delta_h import get_gdn_cp_context, set_gdn_cp_context
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
     from fla.ops.kda import chunk_kda
 
@@ -789,7 +790,7 @@ def test_ops(args):
 def test_layer(args):
     from fla.layers.gated_deltanet import GatedDeltaNet, GatedDeltaNetWithCP
     from fla.layers.kda import KimiDeltaAttention, KimiDeltaAttentionWithCP
-    from fla.ops.common.cp_chunk_delta_h import set_gdn_cp_context
+    from fla.ops.common.cp.cp_chunk_delta_h import set_gdn_cp_context
 
     device = torch.cuda.current_device()
     group = args.group

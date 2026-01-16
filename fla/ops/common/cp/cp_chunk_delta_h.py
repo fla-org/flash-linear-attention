@@ -1,16 +1,19 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang, Duyue MA
+from dataclasses import dataclass
+from functools import lru_cache
+
 import torch
+import torch.distributed as dist
 import triton
 import triton.language as tl
-import torch.distributed as dist
 
-from functools import lru_cache
-from dataclasses import dataclass
 from fla.ops.utils.op import exp, exp2
 from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
 
+
 @dataclass
-class Context:
+class FLACPContext:
+    """FLA FLACPContext Parallel FLACPContext - Operator-level context management"""
     group: dist.ProcessGroup = None
     cu_seqlens: torch.Tensor = None
     is_last_rank: bool = None
@@ -23,35 +26,46 @@ class Context:
 
     def copy_for_backward(self):
         "IF PP_SIZE > 1, need to copy context for backward"
-        return Context(
+        return FLACPContext(
             group=self.group,
-            cu_seqlens=self.cu_seqlens,
+            cu_seqlens=self.cu_seqlens.clone() if self.cu_seqlens is not None else None,
             is_last_rank=self.is_last_rank,
             pre_num_ranks=self.pre_num_ranks,
             is_first_rank=self.is_first_rank,
             post_num_ranks=self.post_num_ranks,
             kernel_size=self.kernel_size,
             pre_num_conv_tokens=self.pre_num_conv_tokens,
-            cu_seqlens_conv1d=self.cu_seqlens_conv1d,
+            cu_seqlens_conv1d=self.cu_seqlens_conv1d.clone() if self.cu_seqlens_conv1d is not None else None,
         )
 
-_GDN_CP_CONTEXT = Context()
+
+_GDN_CP_CONTEXT = FLACPContext()
+
 
 def set_gdn_cp_context(cu_seqlens=None, group=None, kernel_size=None):
     if group is None:
-        context = Context()
+        context = FLACPContext()
     else:
         assert cu_seqlens is not None
         context = get_cp_cu_seqlens(cu_seqlens, group=group, kernel_size=kernel_size)
     global _GDN_CP_CONTEXT
     _GDN_CP_CONTEXT = context
 
-def get_gdn_cp_context():
+
+def get_gdn_cp_context() -> FLACPContext:
     global _GDN_CP_CONTEXT
     return _GDN_CP_CONTEXT
 
+
 @lru_cache(maxsize=5)
-def get_cp_cu_seqlens(cu_seqlens, world_size=None, rank=None, group=None, kernel_size=None):
+def get_cp_cu_seqlens(
+    cu_seqlens: torch.LongTensor,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    world_size: int | None = None,
+    rank: int | None = None,
+    group: dist.ProcessGroup | None = None,
+    kernel_size: int | None = None
+):
     if world_size is None:
         assert group is not None
         world_size = dist.get_world_size(group=group)
@@ -62,6 +76,7 @@ def get_cp_cu_seqlens(cu_seqlens, world_size=None, rank=None, group=None, kernel
     start = part_len * rank
     end = start + part_len
     # 该rank是否包含该sample
+
     def contain(left, right):
         return (min(right, end) - max(left, start)) > 0
     cu_seqlens = []
@@ -82,17 +97,17 @@ def get_cp_cu_seqlens(cu_seqlens, world_size=None, rank=None, group=None, kernel
             if left < start or right > end:
                 first_rank = left // part_len
                 last_rank = (right - 1) // part_len
-                is_last_rank_list.append(rank == last_rank) # forward
-                pre_num_ranks_list.append(rank - first_rank) # forward
-                is_first_rank_list.append(rank == first_rank) # backward
-                post_num_ranks_list.append(last_rank - rank) # backward
+                is_last_rank_list.append(rank == last_rank)  # forward
+                pre_num_ranks_list.append(rank - first_rank)  # forward
+                is_first_rank_list.append(rank == first_rank)  # backward
+                post_num_ranks_list.append(last_rank - rank)  # backward
             else:
                 is_last_rank_list.append(True)
                 pre_num_ranks_list.append(0)
                 is_first_rank_list.append(True)
                 post_num_ranks_list.append(0)
     if cu_seqlens[-1] != part_len:
-       cu_seqlens.append(part_len)
+        cu_seqlens.append(part_len)
     cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=torch.cuda.current_device())
     # 取最后一个，如果是False，那么该rank需要计算state传给下一个
     is_last_rank = is_last_rank_list[-1]
@@ -113,7 +128,8 @@ def get_cp_cu_seqlens(cu_seqlens, world_size=None, rank=None, group=None, kernel
             cu_seqlens_conv1d = cu_seqlens
     else:
         cu_seqlens_conv1d = None
-    return Context(group, cu_seqlens, is_last_rank, pre_num_ranks, is_first_rank, post_num_ranks, kernel_size, pre_num_conv_tokens, cu_seqlens_conv1d)
+    return FLACPContext(group, cu_seqlens, is_last_rank, pre_num_ranks, is_first_rank, post_num_ranks, kernel_size, pre_num_conv_tokens, cu_seqlens_conv1d)
+
 
 def all_gather(inp, out=None, group=None, async_op=False):
     world_size = dist.get_world_size(group=group)
@@ -121,6 +137,7 @@ def all_gather(inp, out=None, group=None, async_op=False):
         out = torch.empty(world_size, *inp.shape, device=inp.device, dtype=inp.dtype)
     handle = dist.all_gather_into_tensor(out, inp, group=group, async_op=async_op)
     return out, handle
+
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
@@ -282,6 +299,7 @@ def pre_process_fwd_kernel_stage1(
         p_h4 = tl.make_block_ptr(hm, (K, V), (K+V, 1), (192, i_v * BV), (64, BV), (1, 0))
         tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
 
+
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_GK': lambda args: args['gk'] is not None,
@@ -422,6 +440,7 @@ def merge_fwd_bwd_kernel(
         b_h = tl.dot(b_ag_m, b_h.to(b_ag_m.dtype)) + b_ag_h
     p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
     tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
@@ -598,7 +617,9 @@ def pre_process_bwd_kernel_stage1(
         p_dh4 = tl.make_block_ptr(dhm, (K, V), (V + K, 1), (192, i_v * BV), (64, BV), (1, 0))
         tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), boundary_check=(0, 1))
 
+
 DTYPE = torch.float32
+
 
 def chunk_gated_delta_rule_fwd_h_pre_process(
     k: torch.Tensor,
@@ -610,7 +631,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     cu_seqlens: torch.LongTensor | None = None,
     use_exp2: bool = False,
     initial_state: torch.Tensor | None = None,
-    context: Context = _GDN_CP_CONTEXT,
+    context: FLACPContext = FLACPContext(),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if context.group is None:
         return initial_state
@@ -679,6 +700,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         )
     return initial_state
 
+
 def chunk_gated_delta_rule_bwd_dhu_pre_process(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -692,7 +714,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     use_exp2: bool = False,
     dht: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
-    context: Context = _GDN_CP_CONTEXT,
+    context: FLACPContext = _GDN_CP_CONTEXT,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if context.group is None:
         return dht, initial_state
@@ -764,70 +786,18 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         )
     return dht, None
 
-def compress_h0(h0: torch.Tensor, context: Context=_GDN_CP_CONTEXT):
+
+def compress_h0(h0: torch.Tensor, context: FLACPContext = _GDN_CP_CONTEXT):
     if context.group is None or h0 is None or len(context.cu_seqlens) == 2:
         return h0
     # Here must use clone op or the full tensor will be saved for backward
     return h0[:1].clone()
 
-def expand_h0(h0: torch.Tensor, context: Context=_GDN_CP_CONTEXT):
+
+def expand_h0(h0: torch.Tensor, context: FLACPContext = FLACPContext()):
     if context.group is None or h0 is None or len(context.cu_seqlens) == 2:
         return h0
     B = len(context.cu_seqlens) - 1
     expand_h0 = h0.new_zeros(B, *h0.shape[1:])
     expand_h0[:1] = h0
     return expand_h0
-
-
-class AGForConv1D(torch.autograd.Function):
-    "Faster than p2p"
-    @staticmethod
-    def forward(ctx, tensor, group):
-        ctx.group = group
-        rank = dist.get_rank(group)
-        world_size = dist.get_world_size(group)
-        ag_tensor, _ = all_gather(tensor, group=group, async_op=False)
-        out = ag_tensor[(rank-1) % world_size]
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        group = ctx.group
-        rank = dist.get_rank(group)
-        world_size = dist.get_world_size(group)
-        ag_tensor, _ = all_gather(grad_output, group=group, async_op=False)
-        grad = ag_tensor[(rank+1) % world_size]
-        return grad, None
-
-
-def pre_process_for_conv1d(x, cu_seqlens=None):
-    # return x, cu_seqlens
-    context = get_gdn_cp_context()
-    if context.group is None:
-        return x, cu_seqlens
-    kernel_size = context.kernel_size
-    dim = x.dim()
-    if dim == 3:
-        x = x.squeeze(0)
-    num_tail_tokens = kernel_size - 1
-    tails = x[-num_tail_tokens:]
-    heads = AGForConv1D.apply(tails, context.group)
-    pre_num_conv_tokens = context.pre_num_conv_tokens
-    num_cat = min(kernel_size - 1, pre_num_conv_tokens)
-    num_drop = kernel_size - 1 - num_cat
-    x = torch.cat([heads[num_drop:], x], 0)
-    if dim == 3:
-        x = x.unsqueeze(0)
-    return x, context.cu_seqlens_conv1d
-
-def post_process_for_conv1d(x, seqlen):
-    context = get_gdn_cp_context()
-    if context.group is None:
-        return x
-    dim = x.dim()
-    if dim == 3:
-        x = x.squeeze(0)
-    x = x[-seqlen:]
-    if dim == 3:
-       x = x.unsqueeze(0)
-    return x

@@ -16,23 +16,23 @@ ARGS=(
 torchrun --nproc_per_node $GPUS test_gdn_with_cp.py ${ARGS[@]} $@
 
 '''
-import os
-import random
-import argparse
-import torch
-import torch.distributed as dist
-import torch.nn.functional as F
-import sys
-sys.path.append("../../")
-
-from typing import Optional, Tuple
-from fla.modules.convolution import causal_conv1d
-from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
-from fla.ops.kda.gate import fused_kda_gate
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from fla.modules.convolution import causal_conv1d
 from fla.models.utils import Cache
 from einops import rearrange, repeat
 from functools import partial
+import argparse
+import os
+import random
+import sys
+
+import torch
+import torch.distributed as dist
+import torch.nn.functional as F
+
+sys.path.append("../../")
+
 
 try:
     import fused_weight_gradient_mlp_cuda
@@ -58,6 +58,7 @@ H = 64
 K = 128
 V = 128
 
+
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ops", action="store_true")
@@ -72,7 +73,9 @@ def get_args():
     parser.add_argument("--use-cp2hp", action="store_true")
     return parser.parse_args()
 
-# torchrun --nproc-per-node=4 test_cp.py 
+# torchrun --nproc-per-node=4 test_cp.py
+
+
 def a2a(x, stage=1, group=None, async_op=False):
     assert stage in [1, 2]
     x = x.contiguous()
@@ -91,6 +94,7 @@ def a2a(x, stage=1, group=None, async_op=False):
         out = out.transpose(0, 1).contiguous().flatten(1, 2)
     return out, handle
 
+
 class _All2All(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, stages, group, async_op):
@@ -105,6 +109,7 @@ class _All2All(torch.autograd.Function):
         dx, handle = a2a(do, stage=ctx.bwd_stage, group=ctx.group)
         return dx, None, None, None
 
+
 def qkvo_all2ll(x, is_qkv=True, group=None, async_op=False):
     if is_qkv:
         stages = [1, 2]
@@ -112,6 +117,7 @@ def qkvo_all2ll(x, is_qkv=True, group=None, async_op=False):
         stages = [2, 1]
     out, handle = _All2All.apply(x, stages, group, async_op)
     return out, handle
+
 
 def bench(fn, step=20, warm_up=10, grad_to_none=None):
     # triton.testing.do_bench have bug if there are some comms in kernels
@@ -130,6 +136,7 @@ def bench(fn, step=20, warm_up=10, grad_to_none=None):
     t1 = start_event.elapsed_time(end_event)
     return t1 / step
 
+
 def print_rank0(*args, **kwargs):
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
@@ -139,11 +146,12 @@ def print_rank0(*args, **kwargs):
     else:
         print(*args, **kwargs)
 
+
 def compare(x, y, prefix=""):
     if x is None or y is None:
         return
-    if any([x.dtype == torch.float32, y.dtype==torch.float32]):
-        x,y = x.float(), y.float()
+    if any([x.dtype == torch.float32, y.dtype == torch.float32]):
+        x, y = x.float(), y.float()
     diff = (x-y).abs()
     # diff = diff / (torch.max(x.abs(), y.abs()) + 1e-6)
     # if prefix:
@@ -153,12 +161,14 @@ def compare(x, y, prefix=""):
     def print_synchronized(*args, **kwargs):
         # 确保所有进程都到达这个点
         dist.barrier()
-        
+
         for r in range(dist.get_world_size()):
             if r == dist.get_rank():
                 print(*args, **kwargs)
             dist.barrier()  # 每个rank打印后同步
-    print_synchronized(prefix + f"max_diff: {diff.max().item()}, mean_diff: {diff.mean().item()}, absmax: {torch.maximum(x.abs().max(), y.abs().max()).item()}")
+    print_synchronized(
+        prefix + f"max_diff: {diff.max().item()}, mean_diff: {diff.mean().item()}, absmax: {torch.maximum(x.abs().max(), y.abs().max()).item()}")
+
 
 def get_ref_grad(*tensors):
     grads = []
@@ -169,14 +179,17 @@ def get_ref_grad(*tensors):
         grads = grads[0]
     return grads
 
+
 def broadcast(x, group=None):
     dist.broadcast(x, src=0, group=group)
+
 
 def all_gather(x, group=None) -> torch.Tensor:
     world_size = dist.get_world_size(group=group)
     y = torch.empty(world_size * x.size(0), *x.shape[1:], device=x.device, dtype=x.dtype)
     dist.all_gather_into_tensor(y, x, group=group)
     return y
+
 
 def generate_cu_seqlens(end=8192, mean=2048, var=512):
     random.seed(42)
@@ -187,6 +200,7 @@ def generate_cu_seqlens(end=8192, mean=2048, var=512):
     r[-1] = end
     cu_seqlens = torch.tensor(r, device=torch.cuda.current_device(), dtype=torch.int32)
     return cu_seqlens
+
 
 class _LinearFunction(torch.autograd.Function):
     @staticmethod
@@ -233,10 +247,12 @@ class _LinearFunction(torch.autograd.Function):
         else:
             dbias = None
         return dgrad, wgrad, dbias
-    
+
+
 def fp32_grad_linear_forward(input, self):
     out = _LinearFunction.apply(input, self.weight, self.bias)
     return out
+
 
 def patch_fp32_grad_linear_forward(model: torch.nn.Module):
     if HAVE_APEX:
@@ -246,18 +262,19 @@ def patch_fp32_grad_linear_forward(model: torch.nn.Module):
                 m.forward = partial(fp32_grad_linear_forward, self=m)
                 m.weight.main_grad = torch.zeros_like(m.weight, dtype=torch.float32)
 
+
 def short_conv_forward(
     x: torch.Tensor,
-    residual: Optional[torch.Tensor] = None,
-    mask: Optional[torch.Tensor] = None,
-    cache: Optional[torch.Tensor] = None,
+    residual: torch.Tensor | None = None,
+    mask: torch.Tensor | None = None,
+    cache: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     cp_size=None,
     cp_rank=None,
     self=None,
     **kwargs,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
         x (`torch.Tensor`):
@@ -321,23 +338,25 @@ def short_conv_forward(
         **kwargs
     )
 
+
 def maybe_wait(handle):
     if handle is None:
         return
     handle.wait()
 
+
 def gdn_forward(
     hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    past_key_values: Optional[Cache] = None,
-    use_cache: Optional[bool] = False,
-    output_attentions: Optional[bool] = False,
+    attention_mask: torch.Tensor | None = None,
+    past_key_values: Cache | None = None,
+    use_cache: bool | None = False,
+    output_attentions: bool | None = False,
     cp_group=None,
     cp_size=None,
     cp_rank=None,
     self=None,
     **kwargs
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
     if attention_mask is not None:
         assert len(attention_mask.shape) == 2, (
             "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -355,10 +374,10 @@ def gdn_forward(
     if past_key_values is not None and len(past_key_values) > self.layer_idx:
         last_state = past_key_values[self.layer_idx]
 
-    cu_seqlens = kwargs.get('cu_seqlens', None)
+    cu_seqlens = kwargs.get('cu_seqlens')
     # assert cu_seqlens is not None
-    
-    async_op=False
+
+    async_op = False
     q = self.q_proj(hidden_states)
     k = self.k_proj(hidden_states)
     v = self.v_proj(hidden_states)
@@ -373,7 +392,8 @@ def gdn_forward(
     a, handle_a = qkvo_all2ll(a.view(-1, self.num_v_heads, 1), is_qkv=True, group=cp_group, async_op=async_op)
     b, handle_b = qkvo_all2ll(b.view(-1, self.num_v_heads, 1), is_qkv=True, group=cp_group, async_op=async_op)
     if self.use_gate:
-        gate, handle_gate = qkvo_all2ll(gate.view(-1, self.num_v_heads, self.head_v_dim), is_qkv=True, group=cp_group, async_op=async_op)
+        gate, handle_gate = qkvo_all2ll(gate.view(-1, self.num_v_heads, self.head_v_dim),
+                                        is_qkv=True, group=cp_group, async_op=async_op)
     q, k, v, a, b = [t.flatten(-2, -1).unsqueeze(0) for t in [q, k, v, a, b]]
 
     if self.use_short_conv:
@@ -477,7 +497,6 @@ def gdn_forward(
     return o, None, past_key_values
 
 
-
 def kda_forward(
     hidden_states: torch.Tensor,
     attention_mask: torch.Tensor | None = None,
@@ -509,7 +528,7 @@ def kda_forward(
 
     cu_seqlens = kwargs.get('cu_seqlens')
 
-    async_op=False
+    async_op = False
     q = self.q_proj(hidden_states)
     k = self.k_proj(hidden_states)
     v = self.v_proj(hidden_states)
@@ -521,7 +540,8 @@ def kda_forward(
     v, handle_v = qkvo_all2ll(v.view(-1, self.num_v_heads, self.head_v_dim), is_qkv=True, group=cp_group, async_op=async_op)
     g, handle_g = qkvo_all2ll(g.view(-1, self.num_heads, self.head_k_dim), is_qkv=True, group=cp_group, async_op=async_op)
     b, handle_b = qkvo_all2ll(b.view(-1, self.num_heads, 1), is_qkv=True, group=cp_group, async_op=async_op)
-    gate, handle_gate = qkvo_all2ll(gate.view(-1, self.num_v_heads, self.head_v_dim), is_qkv=True, group=cp_group, async_op=async_op)
+    gate, handle_gate = qkvo_all2ll(gate.view(-1, self.num_v_heads, self.head_v_dim),
+                                    is_qkv=True, group=cp_group, async_op=async_op)
     q, k, v, g, b, gate = [t.flatten(-2, -1).unsqueeze(0) for t in [q, k, v, g, b, gate]]
 
     if self.use_short_conv:
@@ -620,7 +640,8 @@ def kda_forward(
     o = self.o_proj(o)
 
     return o, None, past_key_values
-    
+
+
 def profile_func(fn, path):
 
     with torch.profiler.profile(
@@ -643,10 +664,11 @@ def profile_func(fn, path):
             prof.step()  # 通知profiler一个步骤完成
     return prof
 
+
 def test_ops(args):
-    from fla.ops.kda import chunk_kda
+    from fla.ops.common.cp.cp_chunk_delta_h import get_gdn_cp_context, set_gdn_cp_context
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-    from fla.ops.common.cp_chunk_delta_h import set_gdn_cp_context, get_gdn_cp_context
+    from fla.ops.kda import chunk_kda
 
     device = torch.cuda.current_device()
     group = args.group
@@ -679,8 +701,8 @@ def test_ops(args):
     def gdn_no_cp():
         set_gdn_cp_context()
         total_out, total_ht = op(
-        total_q, total_k, total_v, total_g, total_beta,
-        cu_seqlens=cu_seqlens
+            total_q, total_k, total_v, total_g, total_beta,
+            cu_seqlens=cu_seqlens
         )
         dist.barrier()
         if backward:
@@ -691,8 +713,8 @@ def test_ops(args):
     def gdn_with_custom_cp():
         set_gdn_cp_context(cu_seqlens, group)
         o, ht = op(
-        q, k, v, g, beta,
-        cu_seqlens=get_gdn_cp_context().cu_seqlens
+            q, k, v, g, beta,
+            cu_seqlens=get_gdn_cp_context().cu_seqlens
         )
         dist.barrier()
         if backward:
@@ -709,8 +731,8 @@ def test_ops(args):
             g2 = qkvo_all2ll(g.squeeze(0), is_qkv=True, group=group)[0].unsqueeze(0)
         beta2 = qkvo_all2ll(beta.squeeze(0).unsqueeze(-1), is_qkv=True, group=group)[0].unsqueeze(0).squeeze(-1)
         o, ht = op(
-        q2, k2, v2, g2, beta2,
-        cu_seqlens=cu_seqlens
+            q2, k2, v2, g2, beta2,
+            cu_seqlens=cu_seqlens
         )
         o = qkvo_all2ll(o.squeeze(0), is_qkv=False, group=group)[0].unsqueeze(0)
         dist.barrier()
@@ -763,10 +785,11 @@ def test_ops(args):
             dist.barrier()
         profile_func(fn, args.profile_path)
 
+
 def test_layer(args):
-    from fla.layers.kda import KimiDeltaAttention, KimiDeltaAttentionWithCP
     from fla.layers.gated_deltanet import GatedDeltaNet, GatedDeltaNetWithCP
-    from fla.ops.common.cp_chunk_delta_h import set_gdn_cp_context, get_gdn_cp_context
+    from fla.layers.kda import KimiDeltaAttention, KimiDeltaAttentionWithCP
+    from fla.ops.common.cp.cp_chunk_delta_h import set_gdn_cp_context
 
     device = torch.cuda.current_device()
     group = args.group
@@ -785,12 +808,14 @@ def test_layer(args):
     total_do = all_gather(do.squeeze(0), group=group).unsqueeze(0)
     if not args.kda:
         layer = GatedDeltaNet(hidden_size, expand_v=1, head_dim=head_dim, num_heads=n_head, use_short_conv=use_conv)
-        cp_layer = GatedDeltaNetWithCP(hidden_size, expand_v=1, head_dim=head_dim, num_heads=n_head, use_short_conv=use_conv, group=group)
+        cp_layer = GatedDeltaNetWithCP(hidden_size, expand_v=1, head_dim=head_dim,
+                                       num_heads=n_head, use_short_conv=use_conv, group=group)
         if args.use_cp2hp:
             cp_layer.forward = partial(gdn_forward, self=cp_layer, cp_size=world_size, cp_rank=rank, cp_group=group)
     else:
         layer = KimiDeltaAttention(hidden_size, expand_v=1, head_dim=head_dim, num_heads=n_head, use_short_conv=use_conv)
-        cp_layer = KimiDeltaAttentionWithCP(hidden_size, expand_v=1, head_dim=head_dim, num_heads=n_head, use_short_conv=use_conv, group=group)
+        cp_layer = KimiDeltaAttentionWithCP(hidden_size, expand_v=1, head_dim=head_dim,
+                                            num_heads=n_head, use_short_conv=use_conv, group=group)
         if args.use_cp2hp:
             cp_layer.forward = partial(kda_forward, self=cp_layer, cp_size=world_size, cp_rank=rank, cp_group=group)
     if args.use_cp2hp and use_conv:
@@ -811,8 +836,8 @@ def test_layer(args):
     cp_layer.dt_bias.to(torch.float)
     cp_layer.A_log.to(torch.float)
 
-
     backward = args.backward
+
     def gdn_no_cp():
         set_gdn_cp_context()
         total_o = layer(total_x, cu_seqlens=cu_seqlens)[0]
@@ -874,6 +899,7 @@ def test_layer(args):
             dist.barrier()
         profile_func(fn, args.profile_path)
 
+
 def main():
     dist.init_process_group()
     world_size = dist.get_world_size()
@@ -890,9 +916,9 @@ def main():
     else:
         test_layer(args)
 
+
 if __name__ == '__main__':
     main()
 '''
 torchrun --nproc-per-node=4 test_gdn_with_cp.py
 '''
-

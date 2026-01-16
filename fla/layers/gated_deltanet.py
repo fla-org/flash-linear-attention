@@ -13,8 +13,8 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.ops.common.cp.cp_chunk_delta_h import get_gdn_cp_context, set_gdn_cp_context
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.ops.common.cp_chunk_delta_h import set_gdn_cp_context, get_gdn_cp_context
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -381,22 +381,23 @@ class GatedDeltaNetWithCP(GatedDeltaNet):
         bs, seqlen, _ = hidden_states.shape
         assert bs == 1, "use cp only support batch_size == 1"
 
-        cu_seqlens = kwargs.get('cu_seqlens', None)
+        cu_seqlens = kwargs.get('cu_seqlens')
         if cu_seqlens is None:
-            cu_seqlens = torch.tensor([0, seqlen * torch.distributed.get_world_size(self.group)], dtype=torch.int32, device=hidden_states.device)
+            cu_seqlens = torch.tensor([0, seqlen * torch.distributed.get_world_size(self.group)],
+                                      dtype=torch.int32, device=hidden_states.device)
 
         set_gdn_cp_context(cu_seqlens, self.group, kernel_size=self.conv_size if self.use_short_conv else None)
         context = get_gdn_cp_context()
 
         kwargs['cu_seqlens'] = context.cu_seqlens
         out = super().forward(
-                        hidden_states,
-                        attention_mask,
-                        past_key_values,
-                        use_cache,
-                        output_attentions,
-                        **kwargs,
-                    )
+            hidden_states,
+            attention_mask,
+            past_key_values,
+            use_cache,
+            output_attentions,
+            **kwargs,
+        )
         kwargs['cu_seqlens'] = cu_seqlens
 
         return out
