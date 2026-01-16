@@ -5,8 +5,8 @@ import torch
 import torch.distributed as dist
 
 from fla.modules.convolution import causal_conv1d
-from fla.ops.common.cp.conv_utils import causal_conv1d_cp
-from fla.ops.common.cp.cp_chunk_delta_h import get_gdn_cp_context, set_gdn_cp_context
+from fla.cp.conv import causal_conv1d_cp
+from fla.ops.cp import get_gdn_cp_context, set_gdn_cp_context
 from fla.utils import device
 
 

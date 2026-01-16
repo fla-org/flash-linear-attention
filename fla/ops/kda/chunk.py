@@ -5,13 +5,12 @@ import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
-from fla.ops.common.cp.cp_chunk_delta_h import (
-    FLACPContext,
+from fla.ops.cp import FLACPContext, get_gdn_cp_context
+from fla.ops.cp.chunk_delta_h import (
     chunk_gated_delta_rule_bwd_dhu_pre_process,
     chunk_gated_delta_rule_fwd_h_pre_process,
     compress_h0,
     expand_h0,
-    get_gdn_cp_context,
 )
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused

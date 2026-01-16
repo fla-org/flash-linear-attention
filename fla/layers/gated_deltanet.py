@@ -13,7 +13,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.ops.common.cp.cp_chunk_delta_h import get_gdn_cp_context, set_gdn_cp_context
+from fla.ops.cp import get_gdn_cp_context, set_gdn_cp_context
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
 if TYPE_CHECKING:

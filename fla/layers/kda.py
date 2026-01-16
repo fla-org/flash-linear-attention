@@ -12,7 +12,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, ShortConvolution
-from fla.ops.common.cp.cp_chunk_delta_h import get_gdn_cp_context, set_gdn_cp_context
+from fla.ops.cp import get_gdn_cp_context, set_gdn_cp_context
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.gate import fused_kda_gate
 

@@ -1,5 +1,3 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang, Duyue MA
-from dataclasses import dataclass
 from functools import lru_cache
 
 import torch
@@ -7,54 +5,9 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 
+from fla.ops.cp.context import FLACPContext, get_cp_context
 from fla.ops.utils.op import exp, exp2
 from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
-
-
-@dataclass
-class FLACPContext:
-    """FLA FLACPContext Parallel FLACPContext - Operator-level context management"""
-    group: dist.ProcessGroup = None
-    cu_seqlens: torch.Tensor = None
-    is_last_rank: bool = None
-    pre_num_ranks: int = None
-    is_first_rank: bool = None
-    post_num_ranks: int = None
-    kernel_size: int = None
-    pre_num_conv_tokens: int = None
-    cu_seqlens_conv1d: torch.Tensor = None
-
-    def copy_for_backward(self):
-        "IF PP_SIZE > 1, need to copy context for backward"
-        return FLACPContext(
-            group=self.group,
-            cu_seqlens=self.cu_seqlens.clone() if self.cu_seqlens is not None else None,
-            is_last_rank=self.is_last_rank,
-            pre_num_ranks=self.pre_num_ranks,
-            is_first_rank=self.is_first_rank,
-            post_num_ranks=self.post_num_ranks,
-            kernel_size=self.kernel_size,
-            pre_num_conv_tokens=self.pre_num_conv_tokens,
-            cu_seqlens_conv1d=self.cu_seqlens_conv1d.clone() if self.cu_seqlens_conv1d is not None else None,
-        )
-
-
-_GDN_CP_CONTEXT = FLACPContext()
-
-
-def set_gdn_cp_context(cu_seqlens=None, group=None, kernel_size=None):
-    if group is None:
-        context = FLACPContext()
-    else:
-        assert cu_seqlens is not None
-        context = get_cp_cu_seqlens(cu_seqlens, group=group, kernel_size=kernel_size)
-    global _GDN_CP_CONTEXT
-    _GDN_CP_CONTEXT = context
-
-
-def get_gdn_cp_context() -> FLACPContext:
-    global _GDN_CP_CONTEXT
-    return _GDN_CP_CONTEXT
 
 
 @lru_cache(maxsize=5)
@@ -714,8 +667,10 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     use_exp2: bool = False,
     dht: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
-    context: FLACPContext = _GDN_CP_CONTEXT,
+    context: FLACPContext | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if context is None:
+        context = get_cp_context()
     if context.group is None:
         return dht, initial_state
     assert dht is None, "When enable CP, the provided dht must be None."
@@ -787,7 +742,9 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     return dht, None
 
 
-def compress_h0(h0: torch.Tensor, context: FLACPContext = _GDN_CP_CONTEXT):
+def compress_h0(h0: torch.Tensor, context: FLACPContext | None = None):
+    if context is None:
+        context = get_cp_context()
     if context.group is None or h0 is None or len(context.cu_seqlens) == 2:
         return h0
     # Here must use clone op or the full tensor will be saved for backward

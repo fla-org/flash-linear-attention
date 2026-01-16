@@ -8,12 +8,12 @@ from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from fla.ops.common.cp.cp_chunk_delta_h import (
+from fla.ops.cp import get_gdn_cp_context
+from fla.ops.cp.chunk_delta_h import (
     chunk_gated_delta_rule_bwd_dhu_pre_process,
     chunk_gated_delta_rule_fwd_h_pre_process,
     compress_h0,
     expand_h0,
-    get_gdn_cp_context,
 )
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
