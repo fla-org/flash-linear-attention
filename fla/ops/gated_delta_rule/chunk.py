@@ -8,7 +8,7 @@ from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from fla.ops.cp import get_gdn_cp_context
+from fla.ops.cp import get_cp_context
 from fla.ops.cp.chunk_delta_h import (
     chunk_gated_delta_rule_bwd_dhu_pre_process,
     chunk_gated_delta_rule_fwd_h_pre_process,
@@ -54,7 +54,7 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
     )
 
-    context = get_gdn_cp_context()
+    context = get_cp_context()
     initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
         k=k,
         w=w,
@@ -224,7 +224,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        ctx.context = get_gdn_cp_context().copy_for_backward()
+        ctx.context = get_cp_context().copy_for_backward()
         return o.to(q.dtype), final_state
 
     @staticmethod

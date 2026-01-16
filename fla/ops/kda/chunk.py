@@ -5,7 +5,7 @@ import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
-from fla.ops.cp import FLACPContext, get_gdn_cp_context
+from fla.ops.cp import FLACPContext, get_cp_context
 from fla.ops.cp.chunk_delta_h import (
     chunk_gated_delta_rule_bwd_dhu_pre_process,
     chunk_gated_delta_rule_fwd_h_pre_process,
@@ -54,7 +54,7 @@ def chunk_kda_fwd(
         disable_recompute=disable_recompute
     )
 
-    context = get_gdn_cp_context()
+    context = get_cp_context()
     initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
         k=kg,
         w=w,
@@ -319,7 +319,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.use_gate_in_kernel = use_gate_in_kernel
         ctx.disable_recompute = disable_recompute
-        ctx.context = get_gdn_cp_context().copy_for_backward()
+        ctx.context = get_cp_context().copy_for_backward()
         return o.to(q.dtype), final_state
 
     @staticmethod

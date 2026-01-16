@@ -16,20 +16,21 @@ ARGS=(
 torchrun --nproc_per_node $GPUS test_gdn_with_cp.py ${ARGS[@]} $@
 
 '''
-from fla.ops.kda import chunk_kda, fused_recurrent_kda
-from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.modules.convolution import causal_conv1d
-from fla.models.utils import Cache
-from einops import rearrange, repeat
-from functools import partial
 import argparse
 import os
 import random
 import sys
+from functools import partial
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from einops import rearrange, repeat
+
+from fla.models.utils import Cache
+from fla.modules.convolution import causal_conv1d
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from fla.ops.kda import chunk_kda, fused_recurrent_kda
 
 sys.path.append("../../")
 
@@ -79,7 +80,6 @@ def get_args():
 def a2a(x, stage=1, group=None, async_op=False):
     assert stage in [1, 2]
     x = x.contiguous()
-    rank = dist.get_rank(group)
     world_size = dist.get_world_size(group)
     t, h, d = x.shape
     if stage == 1:
@@ -666,7 +666,7 @@ def profile_func(fn, path):
 
 
 def test_ops(args):
-    from fla.ops.cp import get_gdn_cp_context, set_gdn_cp_context
+    from fla.ops.cp import get_cp_context, set_cp_context
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
     from fla.ops.kda import chunk_kda
 
@@ -699,7 +699,7 @@ def test_ops(args):
     op = chunk_gated_delta_rule if not args.kda else chunk_kda
 
     def gdn_no_cp():
-        set_gdn_cp_context()
+        set_cp_context()
         total_out, total_ht = op(
             total_q, total_k, total_v, total_g, total_beta,
             cu_seqlens=cu_seqlens
@@ -711,10 +711,10 @@ def test_ops(args):
         return total_out.chunk(world_size, 1)[rank]
 
     def gdn_with_custom_cp():
-        set_gdn_cp_context(cu_seqlens, group)
+        set_cp_context(cu_seqlens, group)
         o, ht = op(
             q, k, v, g, beta,
-            cu_seqlens=get_gdn_cp_context().cu_seqlens
+            cu_seqlens=get_cp_context().cu_seqlens
         )
         dist.barrier()
         if backward:
@@ -723,7 +723,7 @@ def test_ops(args):
         return o
 
     def gdn_with_a2a():
-        set_gdn_cp_context()
+        set_cp_context()
         q2, k2, v2 = [qkvo_all2ll(t.squeeze(0), is_qkv=True, group=group)[0].unsqueeze(0) for t in [q, k, v]]
         if not args.kda:
             g2 = qkvo_all2ll(g.squeeze(0).unsqueeze(-1), is_qkv=True, group=group)[0].unsqueeze(0).squeeze(-1)
@@ -789,7 +789,7 @@ def test_ops(args):
 def test_layer(args):
     from fla.layers.gated_deltanet import GatedDeltaNet, GatedDeltaNetWithCP
     from fla.layers.kda import KimiDeltaAttention, KimiDeltaAttentionWithCP
-    from fla.ops.cp import set_gdn_cp_context
+    from fla.ops.cp import set_cp_context
 
     device = torch.cuda.current_device()
     group = args.group
@@ -839,7 +839,7 @@ def test_layer(args):
     backward = args.backward
 
     def gdn_no_cp():
-        set_gdn_cp_context()
+        set_cp_context()
         total_o = layer(total_x, cu_seqlens=cu_seqlens)[0]
         dist.barrier()
         if backward:

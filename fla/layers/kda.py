@@ -12,7 +12,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, ShortConvolution
-from fla.ops.cp import get_gdn_cp_context, set_gdn_cp_context
+from fla.ops.cp import get_cp_context, set_cp_context
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.gate import fused_kda_gate
 
@@ -343,8 +343,8 @@ class KimiDeltaAttentionWithCP(KimiDeltaAttention):
             cu_seqlens = torch.tensor([0, seqlen * torch.distributed.get_world_size(self.group)],
                                       dtype=torch.int32, device=hidden_states.device)
 
-        set_gdn_cp_context(cu_seqlens, self.group, kernel_size=self.conv_size if self.use_short_conv else None)
-        context = get_gdn_cp_context()
+        set_cp_context(cu_seqlens, self.group, kernel_size=self.conv_size if self.use_short_conv else None)
+        context = get_cp_context()
 
         kwargs['cu_seqlens'] = context.cu_seqlens
         out = super().forward(

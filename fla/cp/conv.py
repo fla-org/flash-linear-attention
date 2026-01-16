@@ -1,9 +1,9 @@
 import torch
 import torch.distributed as dist
 
-from fla.ops.cp import get_gdn_cp_context
-from fla.ops.cp.comm import conv_cp_send_recv_fwd, conv_cp_send_recv_bwd
-from fla.modules.convolution import causal_conv1d_fwd, causal_conv1d_bwd
+from fla.modules.convolution import causal_conv1d_bwd, causal_conv1d_fwd
+from fla.ops.cp import get_cp_context
+from fla.ops.cp.comm import conv_cp_send_recv_bwd, conv_cp_send_recv_fwd
 
 
 class CausalConv1dFunctionCP(torch.autograd.Function):
@@ -30,7 +30,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         cu_seqlens_cpu: torch.Tensor | None,
         chunk_indices: torch.Tensor | None,
     ):
-        context = get_gdn_cp_context()
+        context = get_cp_context()
         group = context.group
 
         # Get kernel_size
@@ -46,7 +46,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             assert x.dim() == 3 and x.shape[0] == 1, f"CP requires [1, T, D], got {x.shape}"
 
             x_2d = x.squeeze(0)  # [T, D]
-            tails = x_2d[-(W-1):].contiguous()  # [W-1, D]
+            tails = x_2d[-(W-1):]  # [W-1, D]
             heads = conv_cp_send_recv_fwd(tails, group)  # [W-1, D]
 
             # Construct initial_state: [N, D, W]

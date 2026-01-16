@@ -11,9 +11,7 @@ from .comm import (
 from .context import (
     FLACPContext,
     get_cp_context,
-    get_gdn_cp_context,
     set_cp_context,
-    set_gdn_cp_context,
 )
 
 __all__ = [
@@ -21,8 +19,8 @@ __all__ = [
     "FLACPContext",
     "get_cp_context",
     "set_cp_context",
-    "get_gdn_cp_context",
-    "set_gdn_cp_context",
+    "get_cp_context",
+    "set_cp_context",
     # Communication
     "all_gather_into_tensor",
     "all_reduce_sum",

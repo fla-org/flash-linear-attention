@@ -64,8 +64,3 @@ def set_cp_context(cu_seqlens=None, group=None, kernel_size=None):
 def get_cp_context() -> FLACPContext:
     """Get the global CP context."""
     return _CP_CONTEXT
-
-
-# Aliases for backward compatibility
-set_gdn_cp_context = set_cp_context
-get_gdn_cp_context = get_cp_context

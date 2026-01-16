@@ -4,9 +4,9 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from fla.modules.convolution import causal_conv1d
 from fla.cp.conv import causal_conv1d_cp
-from fla.ops.cp import get_gdn_cp_context, set_gdn_cp_context
+from fla.modules.convolution import causal_conv1d
+from fla.ops.cp import get_cp_context, set_cp_context
 from fla.utils import device
 
 
@@ -96,8 +96,8 @@ def run_cp_test(dtype=torch.float32):
 
     # A. 激活 CP Context (group=None 表示使用默认的 world group)
     # 注意：set_gdn_cp_context 中 group=None 会返回空 context，需要传入实际的 group
-    set_gdn_cp_context(cu_seqlens_global, group=dist.group.WORLD, kernel_size=W)
-    context = get_gdn_cp_context()
+    set_cp_context(cu_seqlens_global, group=dist.group.WORLD, kernel_size=W)
+    context = get_cp_context()
 
     # B. 数据切分 (Slice Input)
     chunk_size = T // world_size
