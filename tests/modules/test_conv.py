@@ -961,13 +961,14 @@ def test_conv_cache_backward_no_final_state(
     cache = torch.randn(B, D, W - 1, device=device, dtype=dtype, requires_grad=True)
 
     def ref_func(x, weight, bias, residual, cache):
-        # Reference uses output_final_state=False
+        # Use output_final_state=True for ref so we get a tuple, then ignore final_state
+        # This ensures we test the same forward computation
         out, _ = causal_conv1d_ref_torch(
             x.transpose(1, 2),
             weight,
             bias,
             initial_state=cache,
-            output_final_state=False,
+            output_final_state=True,  # Use True to get tuple return
             activation=activation,
         )
         out = out.transpose(1, 2)
@@ -979,37 +980,41 @@ def test_conv_cache_backward_no_final_state(
         zero_padding = torch.zeros(B, D, 1, device=device, dtype=dtype)
         triton_cache = torch.cat([zero_padding, cache], dim=-1).contiguous()
         # Key: output_final_state=False to test the "if not USE_FINAL_STATE" branch
+        # causal_conv1d always returns tuple (y, final_state)
         tri, _ = causal_conv1d(
             x,
             weight=weight,
             bias=bias,
             residual=residual,
             initial_state=triton_cache,
-            output_final_state=False,
+            output_final_state=False,  # This is what we're testing!
             activation=activation,
         )
         return tri
 
     d_tri = torch.randn_like(x)
 
-    def get_grads(func, *inputs):
-        out = func(*inputs)
+    def get_grads(func, inputs_dict):
+        out = func(**inputs_dict)
         loss = (out * d_tri).sum()
+        # Filter out None values for autograd
+        tensors_to_grad = {k: v for k, v in inputs_dict.items() if v is not None}
         grads = torch.autograd.grad(
             loss,
-            inputs,
+            list(tensors_to_grad.values()),
             retain_graph=True,
             create_graph=False,
         )
-        return grads
+        return dict(zip(tensors_to_grad.keys(), grads))
 
-    inputs = (x, weight, bias, residual, cache)
-    grads_ref = get_grads(ref_func, *inputs)
-    grads_tri = get_grads(triton_func, *inputs)
+    inputs_dict = {"x": x, "weight": weight, "bias": bias, "residual": residual, "cache": cache}
+    grads_ref = get_grads(lambda **kw: ref_func(kw["x"], kw["weight"], kw["bias"], kw["residual"], kw["cache"]), inputs_dict)
+    grads_tri = get_grads(lambda **kw: triton_func(kw["x"], kw["weight"],
+                          kw["bias"], kw["residual"], kw["cache"]), inputs_dict)
 
-    names = ["x", "weight", "bias", "residual", "cache"]
-    for name, g_ref, g_tri in zip(names, grads_ref, grads_tri, strict=False):
-        assert_close(name, g_ref, g_tri, ratio=1e-3)
+    for name in ["x", "weight", "bias", "residual", "cache"]:
+        if name in grads_ref:
+            assert_close(name, grads_ref[name], grads_tri[name], ratio=1e-3)
 
 
 @pytest.mark.parametrize(

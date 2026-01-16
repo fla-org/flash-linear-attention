@@ -1,5 +1,7 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import os
+
 import pytest
 import torch
 from transformers.configuration_utils import PretrainedConfig
@@ -79,6 +81,7 @@ def run_test_generation(
     A foundational test for K/V cache-based generation.
     """
     torch.manual_seed(42)
+    os.environ['FLA_CONV_BACKEND'] = 'triton'
     if config_class.__name__ in GENERATION_UNSUPPORTED:
         pytest.skip(f"Generation test not supported for {config_class.__name__}.")
     if config_class.__name__ in NOT_READY_FOR_TESTING:
