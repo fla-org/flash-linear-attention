@@ -223,7 +223,7 @@ def causal_conv1d_bwd_kernel(
     if HAS_BIAS:
         b_db = tl.zeros((BD,), dtype=tl.float32)
 
-    if not USE_FINAL_STATE:
+    if not USE_FINAL_STATE and not USE_INITIAL_STATE:
         for i_w in tl.static_range(0, W):
             p_dy = tl.make_block_ptr(dy + bos * D, (T, D), (D, 1), (i_t * BT + i_w, i_d * BD), (BT, BD), (1, 0))
             # [BT, BD]

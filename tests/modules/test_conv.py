@@ -922,6 +922,102 @@ def test_conv_cache_backward(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_has_bias{4}_has_residual{5}_activation{6}_{7}".format(*test))
+        for test in [
+            # Test USE_INITIAL_STATE=True, USE_FINAL_STATE=False case
+            # This specifically tests the "if not USE_FINAL_STATE" branch with initial_state
+            (2, 64, 100, 3, True, False, "swish", torch.float32),
+            (2, 128, 128, 4, True, False, "swish", torch.float32),
+            (3, 128, 128, 4, False, False, "swish", torch.float32),
+            (2, 64, 256, 4, True, True, "swish", torch.float32),
+            (2, 128, 512, 4, True, False, None, torch.float32),
+            (2, 64, 128, 3, True, False, "swish", torch.float16),
+        ]
+    ],
+)
+def test_conv_cache_backward_no_final_state(
+    B: int,
+    T: int,
+    D: int,
+    W: int,
+    has_bias: bool,
+    has_residual: bool,
+    activation: str,
+    dtype: torch.dtype,
+):
+    """Test backward with initial_state but WITHOUT output_final_state.
+
+    This tests the 'if not USE_FINAL_STATE' branch in causal_conv1d_bwd_kernel,
+    which previously was missing dh0 calculation and dw contribution from initial_state.
+    """
+    torch.manual_seed(42)
+
+    x = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
+    weight = torch.randn(D, W, device=device, dtype=dtype, requires_grad=True)
+    bias = torch.randn(D, device=device, dtype=dtype, requires_grad=True) if has_bias else None
+    residual = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True) if has_residual else None
+    cache = torch.randn(B, D, W - 1, device=device, dtype=dtype, requires_grad=True)
+
+    def ref_func(x, weight, bias, residual, cache):
+        # Use output_final_state=True for ref so we get a tuple, then ignore final_state
+        # This ensures we test the same forward computation
+        out, _ = causal_conv1d_ref_torch(
+            x.transpose(1, 2),
+            weight,
+            bias,
+            initial_state=cache,
+            output_final_state=True,  # Use True to get tuple return
+            activation=activation,
+        )
+        out = out.transpose(1, 2)
+        if residual is not None:
+            out += residual
+        return out
+
+    def triton_func(x, weight, bias, residual, cache):
+        zero_padding = torch.zeros(B, D, 1, device=device, dtype=dtype)
+        triton_cache = torch.cat([zero_padding, cache], dim=-1).contiguous()
+        # Key: output_final_state=False to test the "if not USE_FINAL_STATE" branch
+        # causal_conv1d always returns tuple (y, final_state)
+        tri, _ = causal_conv1d(
+            x,
+            weight=weight,
+            bias=bias,
+            residual=residual,
+            initial_state=triton_cache,
+            output_final_state=False,  # This is what we're testing!
+            activation=activation,
+        )
+        return tri
+
+    d_tri = torch.randn_like(x)
+
+    def get_grads(func, inputs_dict):
+        out = func(**inputs_dict)
+        loss = (out * d_tri).sum()
+        # Filter out None values for autograd
+        tensors_to_grad = {k: v for k, v in inputs_dict.items() if v is not None}
+        grads = torch.autograd.grad(
+            loss,
+            list(tensors_to_grad.values()),
+            retain_graph=True,
+            create_graph=False,
+        )
+        return dict(zip(tensors_to_grad.keys(), grads))
+
+    inputs_dict = {"x": x, "weight": weight, "bias": bias, "residual": residual, "cache": cache}
+    grads_ref = get_grads(lambda **kw: ref_func(kw["x"], kw["weight"], kw["bias"], kw["residual"], kw["cache"]), inputs_dict)
+    grads_tri = get_grads(lambda **kw: triton_func(kw["x"], kw["weight"],
+                          kw["bias"], kw["residual"], kw["cache"]), inputs_dict)
+
+    for name in ["x", "weight", "bias", "residual", "cache"]:
+        if name in grads_ref:
+            assert_close(name, grads_ref[name], grads_tri[name], ratio=1e-3)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'dtype'),
     [
         pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_{6}".format(*test))
