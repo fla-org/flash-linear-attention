@@ -921,6 +921,81 @@ def test_conv_cache_backward(
         assert_close(name, g_ref, g_tri, ratio=1e-3)
 
 
+def test_conv_varlen_initial_state_backward_random():
+    torch.manual_seed(1234)
+    B = 1
+    T = 256
+    D = 128
+    W = 4
+    activation = "swish"
+
+    # Random but deterministic split into two sequences
+    l1 = int(torch.randint(low=W, high=T - W, size=(1,)).item())
+    cu_seqlens = torch.tensor([0, l1, T], device=device, dtype=torch.int32)
+
+    x = torch.randn(B, T, D, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(D, W, device=device, dtype=torch.float32, requires_grad=True)
+    bias = torch.randn(D, device=device, dtype=torch.float32, requires_grad=True)
+
+    # initial_state uses padded layout [N, D, W] with column 0 as padding
+    initial_state = torch.zeros(2, D, W, device=device, dtype=torch.float32, requires_grad=True)
+    with torch.no_grad():
+        initial_state[:, :, 1:].copy_(torch.randn(2, D, W - 1, device=device, dtype=torch.float32))
+
+    dy = torch.randn_like(x)
+
+    def ref_varlen(x, weight, bias, initial_state, cu_seqlens):
+        outs = []
+        caches = []
+        num_seqs = cu_seqlens.numel() - 1
+        for i in range(num_seqs):
+            s = int(cu_seqlens[i].item())
+            e = int(cu_seqlens[i + 1].item())
+            x_seq = x[:, s:e, :]
+            cache = initial_state[i:i+1, :, 1:].contiguous()
+            out_seq, cache_out = causal_conv1d_ref_torch(
+                x_seq.transpose(1, 2),
+                weight,
+                bias,
+                initial_state=cache,
+                output_final_state=True,
+                activation=activation,
+            )
+            outs.append(out_seq.transpose(1, 2))
+            caches.append(cache_out)
+        return torch.cat(outs, dim=1), torch.cat(caches, dim=0)
+
+    y_ref, _ = ref_varlen(x, weight, bias, initial_state, cu_seqlens)
+    loss_ref = (y_ref * dy).sum()
+    grads_ref = torch.autograd.grad(
+        loss_ref,
+        (x, weight, bias, initial_state),
+        retain_graph=False,
+        create_graph=False,
+    )
+
+    y_tri, _ = causal_conv1d(
+        x=x,
+        weight=weight,
+        bias=bias,
+        activation=activation,
+        cu_seqlens=cu_seqlens,
+        initial_state=initial_state,
+    )
+    loss_tri = (y_tri * dy).sum()
+    grads_tri = torch.autograd.grad(
+        loss_tri,
+        (x, weight, bias, initial_state),
+        retain_graph=False,
+        create_graph=False,
+    )
+
+    assert_close("dx", grads_ref[0], grads_tri[0], ratio=1e-3)
+    assert_close("dw", grads_ref[1], grads_tri[1], ratio=1e-3)
+    assert_close("db", grads_ref[2], grads_tri[2], ratio=1e-3)
+    assert_close("d_init", grads_ref[3], grads_tri[3], ratio=1e-3)
+
+
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'W', 'has_bias', 'has_residual', 'activation', 'dtype'),
     [
@@ -1103,18 +1178,20 @@ def test_conv_non_contiguous_qkv(
     assert_close("dx", ref_k_res.grad, k_res.grad, 1e-3)
     assert_close("dr", ref_residual.grad, residual.grad, 1e-3)
 
-    initial_state = torch.randn(B, D, W).to(device, dtype)
+    # Test with initial_state (including dh0 gradient)
+    ref_initial_state = torch.randn(B, D, W).to(device, dtype).requires_grad_(True)
+    tri_initial_state = ref_initial_state.detach().clone().requires_grad_(True)
 
     # Forward with state
     ref_k_state = k.detach().contiguous().requires_grad_(True)
     ref_k_out_state, ref_final_state = causal_conv1d(
-        ref_k_state, weight, bias, initial_state=initial_state,
+        ref_k_state, weight, bias, initial_state=ref_initial_state,
         output_final_state=True, activation=activation
     )
 
     k_state = k.detach().requires_grad_(True)
     tri_k_out_state, tri_final_state = causal_conv1d(
-        k_state, weight, bias, initial_state=initial_state,
+        k_state, weight, bias, initial_state=tri_initial_state,
         output_final_state=True, activation=activation
     )
 
@@ -1126,7 +1203,8 @@ def test_conv_non_contiguous_qkv(
     ref_k_out_state.backward(dy)
     tri_k_out_state.backward(dy)
 
-    assert_close("dh", ref_k_state.grad, k_state.grad, 1e-3)
+    assert_close("dx", ref_k_state.grad, k_state.grad, 1e-3)
+    assert_close("dh0", ref_initial_state.grad, tri_initial_state.grad, 1e-3)
 
 
 @pytest.mark.parametrize(
@@ -1247,18 +1325,21 @@ def test_conv_varlen_non_contiguous_qkv(
 
     assert_close("dx", ref_k_res.grad, k_res.grad, 1e-3)
     assert_close("dr", ref_residual.grad, residual.grad, 1e-3)
-    initial_state = torch.randn(N, D, W).to(device, dtype)
+
+    # Test with initial_state (including dh0 gradient)
+    ref_initial_state = torch.randn(N, D, W).to(device, dtype).requires_grad_(True)
+    tri_initial_state = ref_initial_state.detach().clone().requires_grad_(True)
 
     # Forward with state
     ref_k_state = k.detach().contiguous().requires_grad_(True)
     ref_k_out_state, ref_final_state = causal_conv1d(
-        ref_k_state, weight, bias, initial_state=initial_state,
+        ref_k_state, weight, bias, initial_state=ref_initial_state,
         output_final_state=True, activation=activation, cu_seqlens=cu_seqlens
     )
 
     k_state = k.detach().requires_grad_(True)
     tri_k_out_state, tri_final_state = causal_conv1d(
-        k_state, weight, bias, initial_state=initial_state,
+        k_state, weight, bias, initial_state=tri_initial_state,
         output_final_state=True, activation=activation, cu_seqlens=cu_seqlens
     )
 
@@ -1271,3 +1352,4 @@ def test_conv_varlen_non_contiguous_qkv(
     tri_k_out_state.backward(dy)
 
     assert_close("dx", ref_k_state.grad, k_state.grad, 1e-3)
+    assert_close("dh0", ref_initial_state.grad, tri_initial_state.grad, 1e-3)
