@@ -130,7 +130,7 @@ def _guarded_empty(*args, stride=None, **kwargs):
     req_grad = kwargs.pop('requires_grad', False)
 
     shape = _resolve_shape(args)
-    dtype = kwargs.get('dtype', torch.get_default_dtype())
+    dtype = kwargs.get('dtype') or torch.get_default_dtype()
 
     if not (dtype.is_floating_point or dtype.is_complex):
         return _ORIGINAL_EMPTY(*args, **kwargs)
@@ -174,33 +174,33 @@ def _guarded_empty(*args, stride=None, **kwargs):
 
 
 def _guarded_empty_like(input, **kwargs):
-    if 'dtype' not in kwargs:
+    if kwargs.get('dtype') is None:
         kwargs['dtype'] = input.dtype
-    if 'layout' not in kwargs:
+    if kwargs.get('layout') is None:
         kwargs['layout'] = input.layout
-    if 'device' not in kwargs:
+    if kwargs.get('device') is None:
         kwargs['device'] = input.device
-    if 'requires_grad' not in kwargs:
+    if kwargs.get('requires_grad') is None:
         kwargs['requires_grad'] = input.requires_grad
     return _guarded_empty(input.shape, stride=input.stride(), **kwargs)
 
 
 def _guarded_new_empty(self, *args, **kwargs):
-    if 'dtype' not in kwargs:
+    if kwargs.get('dtype') is None:
         kwargs['dtype'] = self.dtype
-    if 'device' not in kwargs:
+    if kwargs.get('device') is None:
         kwargs['device'] = self.device
-    if 'layout' not in kwargs:
+    if kwargs.get('layout') is None:
         kwargs['layout'] = self.layout
-    if 'requires_grad' not in kwargs:
+    if kwargs.get('requires_grad') is None:
         kwargs['requires_grad'] = self.requires_grad
     return _guarded_empty(*args, **kwargs)
 
 
 @pytest.fixture(scope="function", autouse=True)
 def poison_torch_memory():
-    with patch('torch.empty', side_effect=_guarded_empty), \
-            patch('torch.empty_like', side_effect=_guarded_empty_like), \
+    with patch('torch.empty', new=_guarded_empty), \
+            patch('torch.empty_like', new=_guarded_empty_like), \
             patch('torch.Tensor.new_empty', new=_guarded_new_empty):
         yield
         if hasattr(device_torch_lib, 'synchronize'):
