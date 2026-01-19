@@ -5,6 +5,13 @@ import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.cp import FLACPContext
+from fla.ops.cp.chunk_delta_h import (
+    chunk_gated_delta_rule_bwd_dhu_pre_process,
+    chunk_gated_delta_rule_fwd_h_pre_process,
+    compress_h0,
+    expand_h0,
+)
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd_dAv, chunk_kda_bwd_wy_dqkg_fused
 from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra, chunk_kda_fwd_intra
@@ -31,6 +38,7 @@ def chunk_kda_fwd(
     safe_gate: bool = False,
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
+    cp_context: FLACPContext | None = None,
 ):
     # qg = None if disable_recompute is False
     w, u, qg, kg, Aqk, Akk = chunk_kda_fwd_intra(
@@ -46,6 +54,19 @@ def chunk_kda_fwd(
         safe_gate=safe_gate,
         disable_recompute=disable_recompute
     )
+
+    if cp_context is not None:
+        initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
+            k=kg,
+            w=w,
+            u=u,
+            gk=g,
+            cu_seqlens=cu_seqlens,
+            initial_state=initial_state,
+            context=cp_context,
+            use_exp2=True,
+        )
+
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=kg,
         w=w,
@@ -57,6 +78,9 @@ def chunk_kda_fwd(
         chunk_indices=chunk_indices,
         use_exp2=True,
     )
+
+    if cp_context is not None:
+        initial_state = compress_h0(initial_state, context=cp_context)
 
     o = chunk_gla_fwd_o_gk(
         q=q,
@@ -77,7 +101,7 @@ def chunk_kda_fwd(
             # Only delete h if not requested for inference
             h = None
 
-    return o, Aqk, Akk, final_state, w, u, qg, kg, v_new, h
+    return o, Aqk, Akk, final_state, w, u, qg, kg, v_new, h, initial_state
 
 
 def chunk_kda_bwd(
@@ -97,6 +121,7 @@ def chunk_kda_bwd(
     chunk_size: int = 64,
     safe_gate: bool = False,
     disable_recompute: bool = False,
+    cp_context: FLACPContext | None = None,
     **kwargs,
 ):
     if not disable_recompute:
@@ -112,6 +137,8 @@ def chunk_kda_bwd(
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
+        if cp_context is not None:
+            initial_state = expand_h0(initial_state, context=cp_context)
         h, v_new, _ = chunk_gated_delta_rule_fwd_h(
             k=kg,
             w=w,
@@ -138,6 +165,22 @@ def chunk_kda_bwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
     )
+
+    if cp_context is not None:
+        dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
+            q=qg,
+            k=kg,
+            w=w,
+            do=do,
+            dv=dv,
+            gk=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            dht=dht,
+            initial_state=initial_state,
+            use_exp2=True,
+            context=cp_context,
+        )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=qg,
@@ -214,6 +257,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         lower_bound: float | None = None,
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
+        cp_context: FLACPContext | None = None,
     ):
         chunk_size = 64
         g_org = None
@@ -246,7 +290,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
 
-        (o, Aqk, Akk, final_state, w, u, qg, kg, v_new, h) = chunk_kda_fwd(
+        (o, Aqk, Akk, final_state, w, u, qg, kg, v_new, h, initial_state) = chunk_kda_fwd(
             q=q,
             k=k,
             v=v,
@@ -260,6 +304,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             safe_gate=safe_gate,
             disable_recompute=disable_recompute,
             return_intermediate_states=return_intermediate_states,
+            cp_context=cp_context,
         )
         if return_intermediate_states:
             assert torch.is_inference_mode_enabled(), "return_intermediate_states is only allowed in inference mode"
@@ -280,6 +325,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.use_gate_in_kernel = use_gate_in_kernel
         ctx.disable_recompute = disable_recompute
+        ctx.cp_context = cp_context
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -323,7 +369,8 @@ class ChunkKDAFunction(torch.autograd.Function):
             chunk_size=ctx.chunk_size,
             safe_gate=ctx.safe_gate,
             disable_recompute=ctx.disable_recompute,
-            w=w, u=u, qg=qg, kg=kg, v_new=v_new, h=h
+            w=w, u=u, qg=qg, kg=kg, v_new=v_new, h=h,
+            cp_context=ctx.cp_context,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -354,7 +401,7 @@ class ChunkKDAFunction(torch.autograd.Function):
                 chunk_indices=chunk_indices,
             )
         return (dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None)
 
 
 @torch.compiler.disable
@@ -375,6 +422,7 @@ def chunk_kda(
     lower_bound: float | None = None,
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
+    cp_context: FLACPContext = None,
     **kwargs,
 ):
     r"""
@@ -515,6 +563,10 @@ def chunk_kda(
     assert k.shape[-1] <= 256, "Currently we only support key headdim <=256 for KDA :-("
     assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
+    if cp_context is not None:
+        assert initial_state is None, "Initial state is not supported for CP"
+        assert output_final_state is False, "Output final state is not supported for CP"
+        assert cu_seqlens is not None, "cu_seqlens is required for CP"
     if scale is None:
         scale = k.shape[-1] ** -0.5
     return ChunkKDAFunction.apply(
@@ -536,4 +588,5 @@ def chunk_kda(
         lower_bound,
         disable_recompute,
         return_intermediate_states,
+        cp_context,
     )
