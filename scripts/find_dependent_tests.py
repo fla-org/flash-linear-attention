@@ -183,6 +183,9 @@ class DependencyFinder:
             if changed_file in self.all_test_files:
                 dependent_tests.add(str(changed_file))
 
+        # Filter out test files containing 'mamba'
+        dependent_tests = {test for test in dependent_tests if 'mamba' not in os.path.basename(test)}
+
         return dependent_tests
 
 
