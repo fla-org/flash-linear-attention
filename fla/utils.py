@@ -543,7 +543,13 @@ def _register_aliases():
         if hasattr(current_module, key):
             setattr(current_module, key.lower(), getattr(current_module, key))
 
-
+@functools.cache
+def get_multiprocessor_count(tensor_idx: int = 0) -> int:
+    if triton.runtime.driver.active.get_current_target().backend == 'npu':
+        return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['num_vectorcore']
+    else:
+        return 1
+    
 _register_aliases()
 
 del _register_aliases
