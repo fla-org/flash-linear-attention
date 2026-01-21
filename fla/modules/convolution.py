@@ -1145,14 +1145,11 @@ def causal_conv1d(
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
         assert output_final_state is False, "Output final state is not supported for CP"
-        assert cu_seqlens is not None, "cu_seqlens is required for CP"
         output = causal_conv1d_cp(
             x=x,
             weight=weight,
             bias=bias,
             activation=activation,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
             cp_context=cp_context,
         )
@@ -1736,13 +1733,13 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
         activation: str | None,
-        cu_seqlens: torch.Tensor | None,
-        cu_seqlens_cpu: torch.Tensor | None,
         chunk_indices: torch.Tensor | None,
         cp_context: FLACPContext | None,
     ):
         if cp_context is None:
             raise ValueError("cp_context must be provided for CausalConv1dFunctionCP")
+        cu_seqlens = cp_context.cu_seqlens
+        cu_seqlens_cpu = cp_context.cu_seqlens_cpu
         group = cp_context.group
 
         # Get kernel_size
@@ -1811,7 +1808,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             is_first_rank=ctx.is_first_rank,
         )
 
-        return dx, dw, db, None, None, None, None, None
+        return dx, dw, db, None, None, None
 
 
 def causal_conv1d_cp(
@@ -1819,8 +1816,6 @@ def causal_conv1d_cp(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
     activation: str | None = None,
-    cu_seqlens: torch.Tensor | None = None,
-    cu_seqlens_cpu: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     cp_context: FLACPContext | None = None,
 ):
@@ -1836,12 +1831,15 @@ def causal_conv1d_cp(
         weight: Weight tensor of shape [D, W]
         bias: Bias tensor of shape [D] or None
         activation: Activation function name or None
-        cu_seqlens: Cumulative sequence lengths
-        cu_seqlens_cpu: Cumulative sequence lengths on CPU
         chunk_indices: Chunk indices for variable-length sequences
         cp_context: CP context (required for CP mode)
     """
+    if cp_context is None:
+        raise ValueError("cp_context must be provided for causal_conv1d_cp")
+
+    assert cp_context.conv1d_kernel_size is not None, "conv1d_kernel_size must be provided for causal_conv1d_cp"
+    assert cp_context.cu_seqlens is not None, "cu_seqlens must be provided for causal_conv1d_cp"
     return CausalConv1dFunctionCP.apply(
         x, weight, bias, activation,
-        cu_seqlens, cu_seqlens_cpu, chunk_indices, cp_context
+        chunk_indices, cp_context
     )

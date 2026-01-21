@@ -181,7 +181,6 @@ def run_cp_gdn_test_worker(
             v=v_local,
             g=g_local,
             beta=beta_local,
-            cu_seqlens=context.cu_seqlens,
             cp_context=context,
         )
 
@@ -498,7 +497,6 @@ if __name__ == "__main__":
                         v=v_local,
                         g=g_local,
                         beta=beta_local,
-                        cu_seqlens=context.cu_seqlens,
                         cp_context=context,
                     )
                     o_local.backward(do_local)

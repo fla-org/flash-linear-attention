@@ -150,7 +150,7 @@ def run_cp_conv_test_worker(
         # Step 3: Context Parallel Run
         dist.barrier()
 
-        context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD, kernel_size=W)
+        context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD, conv1d_kernel_size=W)
 
         chunk_size = T // world_size
         start_idx = rank * chunk_size
@@ -173,7 +173,6 @@ def run_cp_conv_test_worker(
             weight=weight_local,
             bias=bias_local,
             activation=activation,
-            cu_seqlens=context.cu_seqlens,
             cp_context=context,
         )
 
@@ -443,7 +442,7 @@ if __name__ == "__main__":
                         ref_dw, ref_db = weight_ref.grad.detach(), bias_ref.grad.detach()
 
                     dist.barrier()
-                    context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD, kernel_size=W)
+                    context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD, conv1d_kernel_size=W)
 
                     chunk_size = T // world_size
                     start_idx, end_idx = rank * chunk_size, (rank + 1) * chunk_size
@@ -453,7 +452,7 @@ if __name__ == "__main__":
                     bias_local = bias.clone().detach().requires_grad_(True)
 
                     y_local, _ = causal_conv1d(x=x_local, weight=weight_local, bias=bias_local,
-                                               activation='swish', cu_seqlens=context.cu_seqlens, cp_context=context)
+                                               activation='swish', cp_context=context)
                     y_local.backward(dy_local)
 
                     y_gathered = [torch.zeros_like(y_local) for _ in range(world_size)]
