@@ -55,6 +55,22 @@ class ShortConvolution(nn.Conv1d):
         dtype: torch.dtype | None = None,
         **kwargs,
     ):
+        """
+        Initialize a ShortConvolution layer configured as a causal, depthwise 1D convolution.
+        
+        Parameters:
+            hidden_size (int): Number of input/output channels (depthwise groups).
+            kernel_size (int): Convolution kernel width (causal padding = kernel_size - 1).
+            bias (bool): If True, include a learnable bias. Default: False.
+            activation (str | None): Optional activation to apply; allowed values are 'silu' or 'swish'. Pass None to disable activation. Default: 'silu'.
+            backend (str | None): Preferred backend implementation, either 'triton' or 'cuda'. This value can be overridden by the environment variable FLA_CONV_BACKEND. Default: 'triton'.
+            device (torch.device | None): Device for parameters and buffers.
+            dtype (torch.dtype | None): Dtype for parameters and buffers.
+            **kwargs: Additional keyword arguments. The legacy 'use_fast_conv1d' flag is accepted for backward compatibility but ignored (a deprecation warning is emitted).
+        
+        Notes:
+            - If 'cuda' is selected but the CUDA implementation is unavailable, the backend is automatically switched to 'triton' with a warning.
+        """
         super().__init__(
             in_channels=hidden_size,
             out_channels=hidden_size,
@@ -92,6 +108,14 @@ class ShortConvolution(nn.Conv1d):
                 self.backend = 'triton'
 
     def extra_repr(self):
+        """
+        Produce a concise string describing the layer's configuration.
+        
+        The representation includes in_channels, out_channels, kernel_size, stride, and appends non-default convolution attributes (padding, dilation, output_padding, groups, bias presence, padding_mode, activation) followed by the backend.
+        
+        Returns:
+            A formatted string describing the convolution layer and its non-default settings.
+        """
         s = ('{in_channels}, {out_channels}, kernel_size={kernel_size}'
              ', stride={stride}')
         if self.padding != (0,) * len(self.padding):
@@ -123,26 +147,22 @@ class ShortConvolution(nn.Conv1d):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Args:
-            x (`torch.Tensor`):
-                Tensor of shape `[B, T, D]`. `B` must be 1 if `cu_seqlens` is provided.
-            residual (`Optional[torch.Tensor]`):
-                Residual tensor of shape `[B, T, D]`. Default: `None`.
-            mask (`Optional[torch.Tensor]`):
-                Attention mask dealing with padded positions.
-            cache (`Optional[torch.Tensor]`):
-                Previous cache tensor of shape `[N, D, W]`, where `W` is the kernel size.
-                If provided, the cache is updated **inplace**.
-            output_final_state (Optional[bool]):
-                Whether to output the final state of shape `[N, D, W]`. Default: `False`.
-            cu_seqlens (Optional[torch.LongTensor]):
-                Cumulative sequence lengths for each batch. Used for varlen. Default: `None`.
-                Shape: [B+1]
-            chunk_indices (Optional[torch.LongTensor]):
-                Chunk indices for variable-length sequences. Default: `None`.
-
+        Apply the causal depthwise 1D convolution to the input sequence, with optional residual addition, masking, variable-length batching, and incremental cache updates for decoding.
+        
+        Parameters:
+            x (torch.Tensor): Input tensor of shape [B, T, D].
+            residual (torch.Tensor | None): Optional residual to add of shape [B, T, D].
+            mask (torch.Tensor | None): Optional attention mask for padding; must not be provided together with `cu_seqlens`.
+            cache (torch.Tensor | None): Optional previous convolution state of shape [N, D, W]; if provided it may be updated in place.
+            output_final_state (bool): If True, return the final state of shape [N, D, W]. Default: False.
+            cu_seqlens (torch.LongTensor | None): Optional cumulative sequence lengths for variable-length batching (shape [B+1]); when provided B must be 1 for the non-varlen decoding path.
+            chunk_indices (torch.LongTensor | None): Optional chunk indices for variable-length processing.
+            **kwargs: Passed through to the underlying causal convolution implementation.
+        
         Returns:
-            Tensor of shape `[B, T, D]`.
+            tuple:
+                y (torch.Tensor): Output tensor of shape [B, T, D].
+                cache (torch.Tensor | None): Updated cache/state of shape [N, D, W] when applicable; otherwise the backend's returned state or None.
         """
         # Import here to avoid circular dependency
         from fla.modules.conv.causal_conv1d import causal_conv1d
@@ -201,6 +221,19 @@ class ShortConvolution(nn.Conv1d):
         output_final_state: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
     ):
+        """
+        Compute a single decoding step of the causal depthwise convolution and update the convolutional state.
+        
+        Parameters:
+            x (torch.Tensor): Input frames with shape [B, T, D], where B is batch, T is time (often 1 in decoding), and D is hidden_size.
+            residual (torch.Tensor | None): Optional residual to add to the output; same shape as `x` if provided.
+            cache (torch.Tensor | None): Convolution state with shape [N, D, W], where W is kernel_size and N is number of sequences (defaults to B when `cu_seqlens` is None). The cache is updated in-place in the fast path.
+            output_final_state (bool): If True and `cache` is None, allocate and return a zero-initialized cache for the final state.
+            cu_seqlens (torch.LongTensor | None): Cumulative sequence lengths for variable-length (packed) inputs; when provided N is len(cu_seqlens) - 1.
+        
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: A pair (y, cache) where `y` has the same shape as `x` and contains the convolved (and optionally residual-added) output, and `cache` is the updated convolution state.
+        """
         from fla.modules.conv.triton.ops import causal_conv1d_update
 
         B, _, D, W = *x.shape, self.kernel_size[0]
@@ -238,4 +271,10 @@ class ShortConvolution(nn.Conv1d):
 
     @property
     def state_size(self) -> int:
+        """
+        Return the length of the internal convolutional state buffer.
+        
+        Returns:
+            state_size (int): Number of elements in the per-channel convolution state (hidden_size * kernel_size).
+        """
         return self.hidden_size * self.kernel_size

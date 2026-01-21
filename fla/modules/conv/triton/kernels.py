@@ -53,6 +53,36 @@ def causal_conv1d_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
+    """
+    Compute a block-wise forward pass of a 1D causal convolution into the output tensor `y`.
+    
+    This Triton kernel reads a block of input sequence frames (with optional variable-length handling and an initial state),
+    applies a causal convolution over a window of width `W` with optional `weight` and `bias`, applies an optional
+    activation ("swish"/"silu"), adds an optional `residual`, and writes the resulting block into `y`.
+    
+    Parameters:
+        x: Input tensor buffer (flattened pointer used by Triton) containing sequence data.
+        y: Output tensor buffer where computed blocks are stored.
+        weight: Optional convolution weight buffer with layout [D, W] accessed when HAS_WEIGHT is true.
+        bias: Optional bias buffer of length D accessed when HAS_BIAS is true.
+        residual: Optional residual tensor buffer added to the result when HAS_RESIDUAL is true.
+        cu_seqlens: Cumulative sequence lengths used when IS_VARLEN is true to locate per-sequence ranges.
+        initial_state: Optional initial-state buffer of shape (N, D * W) used for pre-history when USE_INITIAL_STATE is true.
+        chunk_indices: Index buffer used to map program grid indices to sequence indices when IS_VARLEN is true.
+        B: Number of batches (or batch-related extent) in the launch grid.
+        T: Sequence length (per-chunk length when varlen handling is disabled).
+        stride_x_n, stride_x_t, stride_x_d: Strides for indexing `x` along batch/sequence/channel dimensions.
+        D (tl.constexpr): Channel dimension size.
+        W (tl.constexpr): Convolution window width.
+        BT, BW, BD, NB (tl.constexpr): Block-size and launch-tuning constants used to partition time and channel dimensions.
+        ACTIVATION (tl.constexpr): Activation identifier; supports 'swish'/'silu' to apply x * sigmoid(x).
+        HAS_WEIGHT, HAS_BIAS, HAS_RESIDUAL, USE_INITIAL_STATE, IS_VARLEN (tl.constexpr): Compile-time flags that enable corresponding features and code paths.
+    
+    Notes:
+        - The kernel writes directly into `y` and does not return a value.
+        - Behavior differs for variable-length sequences (IS_VARLEN) vs fixed-length, and for positions early in the sequence
+          where initial-state values may be read when USE_INITIAL_STATE is true.
+    """
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if IS_VARLEN:
@@ -176,6 +206,41 @@ def causal_conv1d_bwd_kernel(
     USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
+    """
+    Compute gradients for a 1D causal convolution and store them into dx, dw, db, and optionally dht.
+    
+    This Triton kernel computes the gradient of the causal_conv1d forward pass with respect to the input (dx), weight (dw), bias (db), and — when enabled — the final/initial state gradient buffer (dht). It supports variable-length batches, optional weight/bias, optional initial/final state handling, and activation-aware gradient modulation for swish/silu.
+    
+    Parameters:
+        x: Input tensor pointer for forward-pass values.
+        y: Output tensor pointer from the forward pass.
+        weight: Pointer to convolution weights (may be None if HAS_WEIGHT is false).
+        initial_state: Pointer to initial-state cache used when USE_INITIAL_STATE is true.
+        dht: Pointer to final-state gradient buffer (used when USE_FINAL_STATE is true).
+        dy: Pointer to gradients of the output y.
+        dx: Pointer where computed input gradients will be written.
+        dw: Pointer where computed weight gradients will be accumulated (when HAS_WEIGHT is true).
+        db: Pointer where computed bias gradients will be accumulated (when HAS_BIAS is true).
+        cu_seqlens: Cumulative sequence lengths (used when IS_VARLEN is true) to derive per-sample sequence boundaries.
+        chunk_indices: Index pairs mapping program grid indices to (sample, time-offset) for varlen execution.
+        B: Number of batches (program-grid related).
+        T: Time dimension length (per-chunk or full sequence length depending on IS_VARLEN).
+        stride_x_n, stride_x_t, stride_x_d: x tensor strides for batch, time, and channel dimensions.
+        stride_dx_n, stride_dx_t, stride_dx_d: dx tensor strides for batch, time, and channel dimensions.
+        D (constexpr): Channel dimension size.
+        W (constexpr): Convolution kernel width (receptive field).
+        BT, BW, BD, NB (constexpr): Block configuration constants used by the kernel grid.
+        ACTIVATION (constexpr): Activation mode; supports 'swish'/'silu' to apply activation-aware gradient correction.
+        HAS_WEIGHT (constexpr): If true, weight gradients (dw) are computed/updated.
+        HAS_BIAS (constexpr): If true, bias gradients (db) are computed/updated.
+        USE_INITIAL_STATE (constexpr): If true, gradients include contributions from the provided initial_state cache.
+        USE_FINAL_STATE (constexpr): If true, the kernel reads dht contributions into dx for tail timesteps.
+        IS_VARLEN (constexpr): If true, per-sample variable-length sequences are used and cu_seqlens/chunk_indices are consulted.
+    
+    Notes:
+        - The kernel writes results directly into the provided dx, dw, db, and reads/writes dht as controlled by the flags.
+        - Behavior differs across branches to support varlen/fixed-length inputs and initial/final state options; activation correction is applied only when ACTIVATION is 'swish' or 'silu'.
+    """
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     if IS_VARLEN:
         i_tg = i_t
@@ -337,6 +402,31 @@ def causal_conv1d_update_kernel(
     HAS_BIAS: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
 ):
+    """
+    Compute an update step for a 1D causal convolution: produce output y for a single (channel block, batch)
+    tile and optionally read/write the per-batch input cache.
+    
+    Given input slice x and a sliding cache of the previous W frames, this kernel:
+    - loads a BD-sized channel block from x for batch index i_n;
+    - optionally shifts and updates the per-batch cache (when USE_INITIAL_STATE) by inserting the current x at the last cache column;
+    - computes the convolution output over the W window using optional per-channel `weight` and optional `bias`;
+    - applies the `swish`/`silu` activation if requested;
+    - adds an optional `residual` contribution;
+    - writes the computed output into y and, when USE_INITIAL_STATE is true, writes back the updated cache.
+    
+    Parameters with non-obvious meanings:
+    - stride_x_n, stride_x_d: strides to index x by batch and channel respectively.
+    - stride_y_n, stride_y_d: strides to index y by batch and channel respectively.
+    - D, W, BD, BW: compile-time block dimensions: total channels (D), kernel window (W),
+      channel block size (BD), and window block size (BW).
+    - ACTIVATION: compile-time string; supports 'swish' / 'silu' to enable activation.
+    - USE_INITIAL_STATE: compile-time flag to enable reading/updating `cache`.
+    - HAS_WEIGHT, HAS_BIAS, HAS_RESIDUAL: compile-time flags to enable use of `weight`, `bias`, and `residual`.
+    
+    Behavioral notes:
+    - All out-of-bounds channel or window lanes are masked.
+    - Writes to `cache` are performed with boundary checks to preserve valid entries.
+    """
     i_d, i_n = tl.program_id(0), tl.program_id(1)
 
     o_d = i_d * BD + tl.arange(0, BD)
@@ -417,10 +507,28 @@ def compute_dh0_kernel(
     IS_VARLEN: tl.constexpr,
 ):
     """
-    Compute dh0 (gradient w.r.t. initial_state) in a separate kernel.
-    This avoids Triton compiler bugs on some architectures (e.g., GB200).
-
-    Grid: (cdiv(D, BD), N)
+    Compute the gradient with respect to the initial state (dh0) for each batch and channel block across the convolution window.
+    
+    This kernel accumulates contributions for dh0[:, :, i_w] for i_w in [1, W) by summing dy over time steps t in [0, min(i_w, seq_len) - 1], multiplying by the corresponding weight column for offset (i_w - 1 - t), and applying an activation-aware correction when enabled. For variable-length inputs (IS_VARLEN), sequence boundaries are read from cu_seqlens; otherwise the full length T is used. Results are written in-place into dh0.
+    
+    Parameters:
+        dy: Pointer to output gradients over time (dy). For non-varlen: layout [B, T, D]; for varlen: flattened [1, total_T, D] and offset by cu_seqlens.
+        y: Pointer to forward outputs used when USE_ACTIVATION is true to compute activation correction (same layout/offset semantics as dy).
+        weight: Pointer to convolution weights of shape [D, W] (stored column-major per channel block in this kernel).
+        dh0: Pointer to output buffer where computed initial-state gradients are stored; layout expected [N, D, W] (this kernel writes dh0[i_n, :, i_w]).
+        cu_seqlens: Pointer to cumulative sequence lengths used when IS_VARLEN is true; used to compute bos/eos offsets per sequence.
+        stride_dy_n: Stride (in elements) to advance dy between batches (used for non-varlen layout).
+        stride_dy_t: Stride (in elements) to advance dy between time steps.
+        T: Full sequence length (used when IS_VARLEN is false).
+        D: Channel dimension size (constexpr).
+        W: Convolution window size (constexpr).
+        BD: Channel block size processed by the kernel (constexpr).
+        USE_ACTIVATION: Constexpr flag; when true applies activation-aware gradient modulation using y.
+        IS_VARLEN: Constexpr flag; when true uses cu_seqlens to determine per-sequence start/end and offsets.
+    
+    Note:
+        - The kernel iterates i_w from 1 to W-1; dh0 for i_w == 0 is not produced here.
+        - This function writes dh0 in-place and does not return a value.
     """
     i_d, i_n = tl.program_id(0), tl.program_id(1)
 
@@ -494,6 +602,31 @@ def causal_conv1d_states_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
+    """
+    Compute and store the final per-sample channel-major state window for a causal 1D convolution.
+    
+    This Triton kernel reads a BWxBD tile of the input sequence for a specific channel block and sample, optionally adds a corresponding initial state slice when USE_INITIAL_STATE is true and the sequence is shorter than BW, and writes the transposed tile into final_state as channel-major windows of length W. Supports variable-length sequences when IS_VARLEN is set by using cu_seqlens to derive per-sample start/end offsets.
+    
+    Parameters:
+        x: Pointer or tensor base for input sequence frames laid out with time and channel strides given by stride_x_t and stride_x_d.
+        initial_state: Base pointer for initial states stored per-sample as contiguous windows of length W (used only when USE_INITIAL_STATE is true).
+        final_state: Destination buffer to store final state windows with layout [N, D, W] (channel-major within each sample).
+        cu_seqlens: Per-sample start indices (length N+1) used when IS_VARLEN is true; ignored for fixed-length sequences.
+        T: Maximum sequence length (used when IS_VARLEN is false).
+        D: Total number of channels.
+        W: Window length for the causal convolution (final_state width).
+        stride_x_n: Stride (in elements) to advance x between samples (used when IS_VARLEN is false).
+        stride_x_t: Stride (in elements) to advance x between time steps.
+        stride_x_d: Stride (in elements) to advance x between channels within a time step.
+        BD: Block depth (channels per block) as a compile-time constant.
+        BW: Block width (time positions per block) as a compile-time constant.
+        USE_INITIAL_STATE: Compile-time flag that enables adding initial_state for short sequences.
+        IS_VARLEN: Compile-time flag that enables variable-length sequence handling via cu_seqlens.
+    
+    Notes:
+        - final_state is written in channel-major order per sample: final_state[n, d, :] holds the last W positions for channel d of sample n.
+        - For sequences shorter than BW when USE_INITIAL_STATE is true, the kernel fetches and adds the appropriate tail of initial_state before storing final_state.
+    """
     i_d, i_n = tl.program_id(0), tl.program_id(1)
 
     # o_d Shape: [BD]
@@ -547,6 +680,21 @@ def causal_conv1d_update_states(
     initial_state: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """
+    Compute the final per-sequence cache (state) of length `state_len` for a causal 1D convolution.
+    
+    Parameters:
+        x (torch.Tensor): Input activations. Expected shapes:
+            - (B, T, D) for batched fixed-length sequences,
+            - (T, D) or (T, D) with implicit batch when `cu_seqlens` is provided,
+            or (N variable-length packed) when using `cu_seqlens`. The last dimension is features D.
+        state_len (int): Number of past time steps to include in the state (W).
+        initial_state (torch.Tensor | None): Optional initial state tensor of shape (N, D, W) to be prepended to each sequence before extracting the final state.
+        cu_seqlens (torch.Tensor | None): Optional 1D cumulative sequence lengths of length N+1 for variable-length packed inputs; if provided the function treats `x` as packed along time and derives per-sequence boundaries from `cu_seqlens`.
+    
+    Returns:
+        torch.Tensor: `final_state` tensor of shape (N, D, W) containing, for each sequence, the last `state_len` frames (features ordered along D) from the sequence after applying the optional `initial_state`. The returned tensor has the same dtype and device as `x`.
+    """
     if cu_seqlens is not None:
         N = len(cu_seqlens) - 1
         if x.dim() == 2:
@@ -597,6 +745,27 @@ def causal_conv1d_update(
     bias: torch.Tensor | None = None,
     activation: str | None = None,
 ) -> torch.Tensor:
+    """
+    Compute one update step of a stateful 1D causal convolution over a single time step and return the output and updated cache.
+    
+    Parameters:
+        x (torch.Tensor): Input for the current step. Supported shapes:
+            - (N, D)
+            - (1, N, D)  (time=1, batch=N, dim=D)
+            - (N, 1, D)  (batch=N, time=1, dim=D)
+            If `weight` is provided and the trailing dimension does not match `weight.shape[0]`,
+            `x` will be reshaped to combine trailing dimensions into a feature dimension.
+        cache (torch.Tensor): Rolling cache storing past input frames required by the causal window.
+        residual (torch.Tensor | None): Optional residual tensor added to the convolution output (must be broadcastable to x).
+        weight (torch.Tensor | None): Optional convolution weight of shape (D, W) where W is the causal window width.
+        bias (torch.Tensor | None): Optional bias added per output channel (shape compatible with D).
+        activation (str | None): Optional activation identifier applied after convolution (e.g., "silu" / "swish"); None means no activation.
+    
+    Returns:
+        tuple:
+            y (torch.Tensor): Output tensor with the same shape as the (possibly original) input `x`.
+            cache (torch.Tensor): The (potentially updated) cache tensor after consuming the current input step.
+    """
     shape = x.shape
     if weight is not None and x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -634,7 +803,16 @@ def causal_conv1d_update(
     elif y.dim() == 3:
         stride_y_n, stride_y_d = y.stride(0), y.stride(2)
 
-    def grid(meta): return (triton.cdiv(D, meta['BD']), N)
+    def grid(meta): """
+Compute the Triton kernel launch grid for the given metadata.
+
+Parameters:
+    meta (dict): Kernel metadata containing 'BD' (block depth).
+
+Returns:
+    tuple: (number of D-blocks, N) where number of D-blocks is ceil(D / meta['BD']) and N is the batch/sequence dimension.
+"""
+return (triton.cdiv(D, meta['BD']), N)
 
     causal_conv1d_update_kernel[grid](
         x=x,

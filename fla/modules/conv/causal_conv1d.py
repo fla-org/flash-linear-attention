@@ -37,40 +37,32 @@ def causal_conv1d(
     **kwargs,
 ):
     """
-    A causal 1D convolution implementation that powers Mamba/Mamba2 and DeltaNet architectures.
-
-    When a residual connection is provided, this implements the Canon operation
-    described in the paper at https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5240330.
-
-    Args:
-        x (torch.Tensor):
-            Input tensor of shape [B, T, D].
-        weight (Optional[torch.Tensor]):
-            Weight tensor of shape [D, W]. Default: `None`.
-        bias (Optional[torch.Tensor]):
-            Bias tensor of shape [D]. Default: `None`.
-        residual (Optional[torch.Tensor]):
-            Residual tensor of shape [B, T, D]. Default: `None`.
-        initial_state (Optional[torch.Tensor]):
-            Initial state tensor of shape [N, D, W],
-            where `N` is the number of sequences in the batch and `W` is the kernel size.
-            If provided, the initial state is used to initialize the cache. Default: `None`.
-        output_final_state (Optional[bool]):
-            Whether to output the final state of shape [N, D, W]. Default: `False`.
-        activation (Optional[str]):
-            Activations applied to output, only `swish`/`silu` or `None` (i.e., no activation) are supported.
-            Default: `None`.
-        backend (Optional[str]):
-            Specifies the backend to use for the convolution operation. Supported values are `'cuda'` 、 `'triton'` and `'mix'`.
-            Default: `'triton'`.
-        cu_seqlens (Optional[torch.Tensor]):
-            Cumulative sequence lengths (optional)
-        chunk_indices (Optional[torch.LongTensor]):
-            Chunk indices for variable-length sequences (optional)
-
+    Compute a causal 1D convolution over batched sequences using one of several backends.
+    
+    Supports an optional residual (implements the Canon operation), an initial state / cache for streaming,
+    optional emission of the final convolution state, and an optional activation (`'swish'`/`'silu'`).
+    Selects among CP, Triton, mixed (requires external causal-conv1d), or CUDA backends via `cp_context`/`backend`.
+    
+    Parameters:
+        x (torch.Tensor): Input tensor of shape [B, T, D].
+        weight (torch.Tensor | None): Convolution kernel of shape [D, W] or `None` for identity-like behavior.
+        bias (torch.Tensor | None): Per-channel bias of shape [D] or `None`.
+        residual (torch.Tensor | None): Optional residual to add to the output, shape [B, T, D].
+        initial_state (torch.Tensor | None): Optional cache tensor of shape [N, D, W] used to initialize streaming state.
+        output_final_state (bool | None): If true, return the final state corresponding to the processed input.
+        activation (str | None): Activation name to apply to outputs; supported: `'swish'`/`'silu'` or `None`.
+        backend (str | None): Backend selector: `'triton'`, `'mix'`, or `'cuda'`. Default: `'triton'`.
+        cu_seqlens (torch.Tensor | None): Optional cumulative sequence lengths for variable-length batches.
+        cu_seqlens_cpu (torch.LongTensor | None): CPU copy of `cu_seqlens` when needed by some backends.
+        chunk_indices (torch.LongTensor | None): Optional chunk indices for variable-length processing.
+        cp_context (FLACPContext | None): When provided, run the CP (causal-parallel) implementation; in this mode
+            `initial_state` must be `None`, `output_final_state` must be `False`, and `cu_seqlens` is required.
+        **kwargs: Backwards-compatible extras (e.g., `seq_idx` for some backends).
+    
     Returns:
-        Tuple of (output, final_state).
-        If `output_final_state` is `False`, the final state is `None`.
+        Tuple[torch.Tensor, Optional[torch.Tensor]]: (output, final_state_or_cache)
+        - output: Tensor of shape [B, T, D] containing the convolution result.
+        - final_state_or_cache: Final state tensor (shape matching input cache) when requested or applicable; otherwise `None`.
     """
     # Import here to avoid circular dependencies
     from fla.modules.conv.cp import causal_conv1d_cp

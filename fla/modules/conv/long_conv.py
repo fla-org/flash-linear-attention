@@ -7,6 +7,19 @@ from einops import rearrange
 
 
 def fft_conv(u, k, dropout_mask, gelu=True, k_rev=None):
+    """
+    Apply a convolution in the frequency domain between input `u` and time-domain kernel `k`, add the input as a residual connection, then optionally apply GELU activation and scale by a dropout mask.
+    
+    Parameters:
+        u (torch.Tensor): Input tensor whose last dimension is the sequence length.
+        k (torch.Tensor): Time-domain convolution kernel compatible with `u`'s channel layout.
+        dropout_mask (torch.Tensor or None): Optional mask with shape broadcastable to `[batch, H, 1]`; when provided the output is multiplied by this mask and cast back to `u`'s dtype.
+        gelu (bool): If True, apply GELU to the residual-added result before dropout masking.
+        k_rev (torch.Tensor or None): Optional second kernel whose frequency-domain conjugate is added to `k`'s frequency response (used to include a reversed or symmetric component).
+    
+    Returns:
+        torch.Tensor: The convolved tensor with the same shape as `u`, cast to `u`'s dtype.
+    """
     seqlen = u.shape[-1]
     fft_size = 2 * seqlen
     k_f = torch.fft.rfft(k, n=fft_size) / fft_size
@@ -49,10 +62,13 @@ class LongConvolution(nn.Module):
         **kwargs,
     ):
         """
-        Initializes the LongConvolution module.
-        Args:
-            hidden_size (int): The number of expected features in the input and output.
-            max_len (int): The maximum sequence length.
+        Create a LongConvolution module and initialize its learnable convolution filter.
+        
+        Initializes a trainable parameter `filter` of shape (hidden_size, max_len) with a standard normal distribution and stores `hidden_size`.
+        
+        Parameters:
+            hidden_size (int): Number of input/output feature channels; determines first dimension of `filter`.
+            max_len (int): Maximum convolution length; determines second dimension of `filter`.
         """
         super().__init__()
         self.hidden_size = hidden_size
@@ -60,11 +76,13 @@ class LongConvolution(nn.Module):
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         """
-        Applies the LongConvolution operation on the input tensor.
-        Args:
-            x: [batch_size, seq_len, hidden_size] tensor
+        Apply the module's learned FFT-based long convolution to an input sequence and return the convolved output.
+        
+        Parameters:
+            x (torch.Tensor): Input tensor of shape [batch_size, seq_len, hidden_size].
+        
         Returns:
-            y: [batch_size, seq_len, hidden_size] tensor
+            torch.Tensor: Output tensor of shape [batch_size, seq_len, hidden_size] with the same dtype as `x`.
         """
         x = x.transpose(1, 2)
         y = fft_conv(x, self.filter, dropout_mask=None, gelu=False)
@@ -74,7 +92,17 @@ class LongConvolution(nn.Module):
 
 class PositionalEmbedding(nn.Module):
     def __init__(self, emb_dim: int, seq_len: int, **kwargs):
-        """Complex exponential positional embeddings for implicit long convolution filters."""
+        """
+        Create fixed complex-exponential positional embeddings used to parameterize implicit convolution filters.
+        
+        Parameters:
+            emb_dim (int): Embedding dimension. The first channel is a normalized time embedding; the remaining channels are paired real/imag components of complex exponentials (so emb_dim should typically be 1 + 2 * bands).
+            seq_len (int): Maximum sequence length; embeddings are created for positions [0, seq_len-1].
+        
+        Notes:
+            - Produces self.z with shape (1, seq_len, emb_dim), stored as a non-trainable parameter.
+            - The first channel is t normalized to [0, 1]. Remaining channels are real and imaginary parts of exp(-i * f * w) for a set of frequencies f.
+        """
         super().__init__()
 
         self.seq_len = seq_len
@@ -93,6 +121,15 @@ class PositionalEmbedding(nn.Module):
         self.z = nn.Parameter(z, requires_grad=False)
 
     def forward(self, L):
+        """
+        Return the first L positional embeddings.
+        
+        Parameters:
+            L (int): Number of positions to return.
+        
+        Returns:
+            torch.Tensor: Complex-valued positional embeddings for positions [0, L), shape (embedding_dim, L).
+        """
         return self.z[:, :L]
 
 
@@ -126,9 +163,22 @@ class ImplicitLongConvolution(nn.Module):
         **kwargs,
     ):
         """
-        Long convolution with implicit filter parameterized by an MLP.
-
-
+        Construct an implicit long-range convolution module whose filter is produced by an MLP conditioned on positional embeddings.
+        
+        Parameters:
+        	hidden_size (int): Number of input/output channels (the MLP output dimension).
+        	max_len (int): Maximum sequence length supported by the internal positional embeddings.
+        	d_emb (int, optional): Dimensionality of positional embeddings; must be odd and >= 3 (default: 3).
+        	d_hidden (int, optional): Hidden dimension of the MLP (default: 16).
+        	**kwargs: Ignored; present for API compatibility.
+        
+        Details:
+        	Creates a PositionalEmbedding of dimension `d_emb` for sequences up to `max_len` and a two-layer MLP
+        	that maps per-position embeddings of size `d_emb` to a filter of size `hidden_size`. The MLP architecture is
+        	Linear(d_emb -> d_hidden) -> ReLU -> Linear(d_hidden -> hidden_size).
+        
+        Raises:
+        	AssertionError: If `d_emb` is not odd or is less than 3.
         """
         super().__init__()
         self.hidden_size = hidden_size
@@ -147,15 +197,26 @@ class ImplicitLongConvolution(nn.Module):
         )
 
     def filter(self, seq_len: int, *args, **kwargs):
+        """
+        Generate a convolution kernel for a given sequence length by applying the positional embeddings to the module MLP.
+        
+        Parameters:
+            seq_len (int): Desired sequence length for the generated kernel.
+        
+        Returns:
+            torch.Tensor: Kernel tensor with shape (1, hidden_size, seq_len), where the middle dimension indexes output channels/features and the last dimension indexes time positions.
+        """
         return self.mlp(self.pos_emb(seq_len)).transpose(1, 2)
 
     def forward(self, x: torch.Tensor, *args, **kwargs):
         """
-        Args:
-            x: [batch_size, seq_len, hidden_size] tensor
-
+        Apply the module's implicit long-range convolution filter to the input via FFT.
+        
+        Parameters:
+            x (torch.Tensor): Input tensor of shape [batch_size, seq_len, hidden_size].
+        
         Returns:
-            y: [batch_size, seq_len, hidden_size] tensor
+            torch.Tensor: Output tensor of shape [batch_size, seq_len, hidden_size] with the same dtype as the input.
         """
         x = x.transpose(1, 2)
         k = self.filter(x.shape[-1])

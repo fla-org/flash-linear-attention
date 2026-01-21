@@ -1,4 +1,3 @@
-
 import torch
 import triton
 from einops import rearrange
@@ -29,6 +28,24 @@ def causal_conv1d_fwd(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
+    """
+    Compute the forward pass of a Triton-accelerated causal 1D convolution with optional bias, residual connection, initial state, and activation.
+    
+    Parameters:
+        x (torch.Tensor): Input tensor with shape (..., T, D) or broadcastable variants; last dimension must match weight.shape[0] after optional rearrange.
+        weight (torch.Tensor): Convolution weights with shape (D, W).
+        bias (torch.Tensor): Bias tensor broadcastable to output channels.
+        residual (torch.Tensor): Residual tensor added to the convolution output.
+        initial_state (torch.Tensor | None): Optional initial state tensor of shape (N, D, W) used for sequence continuation.
+        output_final_state (bool): If True, compute and return the final state for each sequence.
+        activation (str | None): Optional activation name to apply elementwise (e.g., 'swish', 'silu'); passed to the kernel.
+        cu_seqlens (torch.LongTensor | None): Optional cumulative sequence lengths for packed variable-length sequences; length should be N+1.
+        cu_seqlens_cpu (torch.LongTensor | None): CPU-side cu_seqlens used to prepare chunk indices if provided.
+        chunk_indices (torch.LongTensor | None): Optional precomputed chunk indices used to tile long sequences; if None and cu_seqlens is provided, indices are derived internally.
+    
+    Returns:
+        (torch.Tensor, torch.Tensor | None): A tuple where the first element is the convolution output reshaped to the original input shape, and the second element is the final state tensor of shape (N, D, W) if `output_final_state` is True, otherwise `None`.
+    """
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -45,7 +62,16 @@ def causal_conv1d_fwd(
 
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
 
-    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
+    def grid(meta): """
+Compute the Triton kernel grid dimensions for the current convolution launch.
+
+Parameters:
+    meta (dict): Kernel meta parameters; must contain 'BD' (block size along the D dimension).
+
+Returns:
+    tuple: (num_blockD, NT, B) where `num_blockD` is ceil(D / meta['BD']), `NT` is the number of time chunks, and `B` is the batch size.
+"""
+return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_fwd_kernel[grid](
         x=x,
         y=y,
@@ -87,8 +113,20 @@ def compute_dh0_triton(
     cu_seqlens: torch.Tensor | None,
 ) -> torch.Tensor:
     """
-    Compute dh0 (gradient w.r.t. initial_state) using a separate Triton kernel.
-    This is a workaround for Triton compiler bugs on some architectures (e.g., GB200).
+    Compute the gradient with respect to the initial state (dh0) by invoking a Triton kernel.
+    
+    This routine produces a tensor of the same shape as `initial_state` containing dL/d(h0). `y` must be provided when `activation` is 'swish' or 'silu' because the kernel requires the post-activation values for those activations. The implementation uses a Triton kernel and serves as a workaround for compiler issues on some architectures.
+    
+    Parameters:
+        dy (torch.Tensor): Gradient of the output with shape (B, T, D).
+        y (torch.Tensor | None): Optional forward-output (post-activation) with shape compatible with `dy`; required for 'swish'/'silu', otherwise may be None.
+        weight (torch.Tensor): Convolution weight with shape (D, W).
+        initial_state (torch.Tensor): Initial state with shape (N, D, W); determines the shape of the returned gradient.
+        activation (str | None): Activation name; affects whether `y` is required.
+        cu_seqlens (torch.Tensor | None): Optional cumulative sequence lengths for packed/batched sequences.
+    
+    Returns:
+        torch.Tensor: `dh0`, the gradient w.r.t. `initial_state`, with the same shape and dtype as `initial_state`.
     """
     D, W = weight.shape
     N = initial_state.shape[0]
@@ -135,6 +173,30 @@ def causal_conv1d_bwd(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ):
+    """
+    Compute gradients for a causal 1D convolution with optional parameter, residual, and initial-state gradients.
+    
+    Parameters:
+        x (torch.Tensor): Input tensor of shape (B, T, D) or broadcastable equivalent used in the forward pass.
+        dy (torch.Tensor): Gradient of the loss w.r.t. the forward output y (same layout as y).
+        dht (torch.Tensor): Gradient w.r.t. any provided final hidden/state passed back into backward (can be None).
+        weight (torch.Tensor | None): Convolution weight tensor of shape (D_in, W); when provided, per-weight gradients are computed.
+        bias (torch.Tensor | None): Bias tensor for the convolution; when provided, per-bias gradients are computed.
+        residual (torch.Tensor | None): Residual input from the forward pass; when provided, its gradient is returned (as dr).
+        initial_state (torch.Tensor | None): Initial hidden/state tensor used in the forward pass; when provided, gradient w.r.t. this state (dh0) is computed.
+        activation (str | None): Activation name used in the forward pass; when provided, internal forward activations may be recomputed to support gradient calculation.
+        cu_seqlens (torch.Tensor | None): Optional cumulative sequence lengths for packed variable-length sequences; used to compute chunking and per-sequence gradients.
+        cu_seqlens_cpu (torch.LongTensor | None): CPU copy of cu_seqlens to assist chunk index preparation when needed.
+        chunk_indices (torch.LongTensor | None): Precomputed chunk indices for time-chunking; if not provided and cu_seqlens is present, indices will be prepared internally.
+    
+    Returns:
+        tuple: A 5-tuple containing:
+            - dx (torch.Tensor): Gradient w.r.t. the input x, shaped like the original x.
+            - dw (torch.Tensor | None): Gradient w.r.t. weight (same dtype and shape as weight) or None if weight was not provided.
+            - db (torch.Tensor | None): Gradient w.r.t. bias (same dtype and shape as bias) or None if bias was not provided.
+            - dr (torch.Tensor | None): Gradient w.r.t. the residual (same shape as residual) or None if residual was not provided.
+            - dh0 (torch.Tensor | None): Gradient w.r.t. the initial_state or None if initial_state was not provided.
+    """
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -170,7 +232,16 @@ def causal_conv1d_bwd(
 
     stride_dx_n, stride_dx_t, stride_dx_d = dx.stride()
 
-    def grid(meta): return (triton.cdiv(D, meta['BD']), NT, B)
+    def grid(meta): """
+Compute the Triton kernel grid dimensions for the current convolution launch.
+
+Parameters:
+    meta (dict): Kernel meta parameters; must contain 'BD' (block size along the D dimension).
+
+Returns:
+    tuple: (num_blockD, NT, B) where `num_blockD` is ceil(D / meta['BD']), `NT` is the number of time chunks, and `B` is the batch size.
+"""
+return (triton.cdiv(D, meta['BD']), NT, B)
     causal_conv1d_bwd_kernel[grid](
         x=x,
         y=y,
@@ -225,6 +296,18 @@ def causal_conv1d_update_states(
     initial_state: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """
+    Compute the final convolutional state for each sequence in `x` after a causal 1D convolution.
+    
+    Parameters:
+        x (torch.Tensor): Input activations. Accepts either a batched tensor of shape (B, T, D) or a packed representation when `cu_seqlens` is provided — either (T, D) or (N_packed, T, D). D is the feature dimension and T is the time length.
+        state_len (int): Length W of the per-feature state to produce for each sequence.
+        initial_state (torch.Tensor | None): Optional initial state of shape (N, D, W) to seed state updates. If None, the kernels will assume an implicit zero initial state.
+        cu_seqlens (torch.Tensor | None): Optional 1D cumulative sequence lengths tensor; when provided, N is inferred as len(cu_seqlens) - 1 and `x` is interpreted as packed per-sequence data.
+    
+    Returns:
+        final_state (torch.Tensor): Tensor of shape (N, D, W) containing the final state for each sequence, with the same dtype and device as `x`.
+    """
     if cu_seqlens is not None:
         N = len(cu_seqlens) - 1
         if x.dim() == 2:
@@ -275,6 +358,20 @@ def causal_conv1d_update(
     bias: torch.Tensor | None = None,
     activation: str | None = None,
 ) -> torch.Tensor:
+    """
+    Apply a single-step causal convolution update to `x` using the provided `cache` and optional weight, bias, residual, and activation.
+    
+    Parameters:
+        x (torch.Tensor): Input tensor. Supported shapes: (N, D), (1, N, D) interpreted as (Time=1, Batch=N, Dim=D), or (N, 1, D) interpreted as (Batch=N, Time=1, Dim=D).
+        cache (torch.Tensor): Residual/cache tensor used by the kernel and returned alongside the output.
+        residual (torch.Tensor | None): Optional residual to add to the convolution output.
+        weight (torch.Tensor | None): Optional convolution weight with shape (D, W). If provided and `x`'s last dimension does not match `weight.shape[0]`, `x` will be reshaped to align.
+        bias (torch.Tensor | None): Optional bias added to the convolution output.
+        activation (str | None): Optional activation name passed through to the kernel (e.g., "swish", "silu"); if None no activation is applied.
+    
+    Returns:
+        tuple: (y, cache) where `y` is the updated output tensor reshaped to match the original `x` shape, and `cache` is the (possibly unchanged) cache tensor provided as input.
+    """
     shape = x.shape
     if weight is not None and x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -312,7 +409,16 @@ def causal_conv1d_update(
     elif y.dim() == 3:
         stride_y_n, stride_y_d = y.stride(0), y.stride(2)
 
-    def grid(meta): return (triton.cdiv(D, meta['BD']), N)
+    def grid(meta): """
+Constructs a Triton kernel grid tuple using the block size provided in `meta`.
+
+Parameters:
+    meta (dict): Must contain key `'BD'` (block size along the D dimension) used to compute the first grid dimension.
+
+Returns:
+    tuple: `(grid_x, grid_y)` where `grid_x = ceil(D / meta['BD'])` and `grid_y = N`.
+"""
+return (triton.cdiv(D, meta['BD']), N)
 
     causal_conv1d_update_kernel[grid](
         x=x,
@@ -352,6 +458,26 @@ class CausalConv1dFunction(torch.autograd.Function):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ):
+        """
+        Perform the forward pass of the Triton-accelerated causal 1D convolution and save tensors required for the backward pass.
+        
+        Parameters:
+            ctx: Autograd context used to save tensors and configuration for backward.
+            x (torch.Tensor): Input tensor with time and feature dimensions (shape varies by layout).
+            weight (torch.Tensor | None): Convolution weight; if None, convolution is skipped and input is forwarded.
+            bias (torch.Tensor | None): Optional bias added to the convolution output.
+            residual (torch.Tensor | None): Optional residual to add to the convolution output.
+            initial_state (torch.Tensor | None): Optional initial state for the causal convolution (shape (N, D, W)).
+            output_final_state (bool | None): If True, compute and return the final state after the forward pass.
+            activation (str | None): Optional activation name applied after convolution (e.g., "swish", "silu"); pass None for no activation.
+            cu_seqlens (torch.Tensor | None): Optional packed sequence lengths for variable-length (packed) inputs.
+            cu_seqlens_cpu (torch.LongTensor | None): CPU copy of cu_seqlens when provided.
+            chunk_indices (torch.LongTensor | None): Optional precomputed chunk indices for packed inputs to control kernel tiling.
+        
+        Returns:
+            y (torch.Tensor): Convolution output tensor, shaped to match the input layout.
+            final_state (torch.Tensor | None): Final state tensor when `output_final_state` is True (shape (N, D, W)), otherwise `None`.
+        """
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
@@ -374,6 +500,22 @@ class CausalConv1dFunction(torch.autograd.Function):
     @staticmethod
     @input_guard(no_guard_contiguous=["dy"])
     def backward(ctx, dy: torch.Tensor, dht: torch.Tensor | None = None):
+        """
+        Compute and return gradients for tensors saved in the forward pass using the causal_conv1d backward routine.
+        
+        Parameters:
+            dy (torch.Tensor): Gradient of the loss with respect to the output produced in forward.
+            dht (torch.Tensor | None): Optional gradient with respect to the final state returned by forward.
+        
+        Returns:
+            tuple: A tuple of gradients corresponding to the forward arguments:
+                - dx (torch.Tensor): Gradient with respect to the input `x`.
+                - dw (torch.Tensor | None): Gradient with respect to `weight`, or `None` if `weight` was not provided.
+                - db (torch.Tensor | None): Gradient with respect to `bias`, or `None` if `bias` was not provided.
+                - dr (torch.Tensor | None): Gradient with respect to `residual`, or `None` if `residual` was not provided.
+                - dh0 (torch.Tensor | None): Gradient with respect to `initial_state`, or `None` if `initial_state` was not provided.
+                - Followed by `None` placeholders for gradients corresponding to non-tensor or unused forward arguments.
+        """
         x, weight, bias, residual, initial_state = ctx.saved_tensors
         dx, dw, db, dr, dh0 = causal_conv1d_bwd(
             x=x,
