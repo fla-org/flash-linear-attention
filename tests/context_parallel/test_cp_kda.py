@@ -183,7 +183,6 @@ def run_cp_kda_test_worker(
             v=v_local,
             g=g_local,
             beta=beta_local,
-            cu_seqlens=context.cu_seqlens,
             cp_context=context,
             disable_recompute=disable_recompute,
         )
@@ -524,7 +523,6 @@ if __name__ == "__main__":
                         v=v_local,
                         g=g_local,
                         beta=beta_local,
-                        cu_seqlens=context.cu_seqlens,
                         cp_context=context,
                     )
                     o_local.backward(do_local)

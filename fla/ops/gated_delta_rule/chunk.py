@@ -347,6 +347,12 @@ def chunk_gated_delta_rule(
             "Please use head_first=False for now instead.",
         )
 
+    if cp_context is not None:
+        assert initial_state is None, "Initial state is not supported for CP"
+        assert output_final_state is False, "Output final state is not supported for CP"
+        assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
+        cu_seqlens = cp_context.cu_seqlens
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -358,10 +364,6 @@ def chunk_gated_delta_rule(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
-    if cp_context is not None:
-        assert initial_state is None, "Initial state is not supported for CP"
-        assert output_final_state is False, "Output final state is not supported for CP"
-        assert cu_seqlens is not None, "cu_seqlens is required for CP"
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkGatedDeltaRuleFunction.apply(

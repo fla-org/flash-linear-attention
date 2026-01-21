@@ -547,6 +547,15 @@ def chunk_kda(
         )
     """
 
+    if cp_context is not None:
+        assert initial_state is None, "Initial state is not supported for CP"
+        assert output_final_state is False, "Output final state is not supported for CP"
+        assert cp_context.cu_seqlens is not None, "cu_seqlens is required for CP"
+        # Override cu_seqlens and cu_seqlens_cpu with the ones from the context
+        cu_seqlens = cp_context.cu_seqlens
+        if cp_context.cu_seqlens_cpu is not None:
+            cu_seqlens_cpu = cp_context.cu_seqlens_cpu
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -575,10 +584,7 @@ def chunk_kda(
     assert k.shape[-1] <= 256, "Currently we only support key headdim <=256 for KDA :-("
     assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
-    if cp_context is not None:
-        assert initial_state is None, "Initial state is not supported for CP"
-        assert output_final_state is False, "Output final state is not supported for CP"
-        assert cu_seqlens is not None, "cu_seqlens is required for CP"
+
     if scale is None:
         scale = k.shape[-1] ** -0.5
     return ChunkKDAFunction.apply(
