@@ -188,6 +188,7 @@ def causal_conv1d_cuda(
     output_final_state: bool | None = False,
     activation: str | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     **kwargs,
 ):
     assert causal_conv1d_fn_cuda is not None, "causal_conv1d_fn_cuda is not available"
@@ -199,7 +200,7 @@ def causal_conv1d_cuda(
         x = x.contiguous()
     x_conv1d = rearrange(x, 'b t d -> b d t')
     if cu_seqlens is not None and seq_idx is None:
-        seq_idx = prepare_sequence_ids(cu_seqlens).to(torch.int32).unsqueeze(0)
+        seq_idx = prepare_sequence_ids(cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu).to(torch.int32).unsqueeze(0)
 
     y = causal_conv1d_fn_cuda(
         x=x_conv1d,

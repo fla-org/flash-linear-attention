@@ -117,6 +117,7 @@ def causal_conv1d(
             output_final_state,
             activation,
             cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
             **kwargs,
         )
     else:
