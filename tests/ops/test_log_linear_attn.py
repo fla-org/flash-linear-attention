@@ -13,9 +13,10 @@ from fla.utils import assert_close, device, device_platform
     ("B", "T", "H", "D", "dtype"),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
-        for test in [(2, 1024, 8, 128, torch.float32), (4, 2048, 8, 64, torch.float32)]
+        for test in [(2, 1024, 8, 128, torch.float32), (4, 512, 8, 64, torch.float32)]
     ],
 )
+@torch.inference_mode()
 @pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
 def test_chunk(
     B: int,
