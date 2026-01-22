@@ -131,7 +131,7 @@ class HGRNAttention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            i = i.mul_(attention_mask[:, -i.shape[-2]:, None])
+            i = i.mul(attention_mask[:, -i.shape[-2]:, None])
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
