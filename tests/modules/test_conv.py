@@ -96,18 +96,22 @@ def causal_conv1d_update_ref_torch(x, conv_state, weight, bias=None, activation=
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    ('B', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
     [
-        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test))
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test))
         for test in [
-            (2, 64, 128, 3, "swish", True, True, torch.float32),
-            (2, 128, 128, 4, "swish", False, True, torch.float32),
-            (2, 64, 128, 3, "swish", True, False, torch.float32),
-            (2, 128, 128, 4, "swish", False, False, torch.float32),
-            (2, 500, 1024, 3, None, True, True, torch.float32),
-            (2, 1024, 1024, 4, None, False, True, torch.float32),
-            (2, 64, 128, 3, None, True, False, torch.float16),
-            (2, 128, 128, 4, None, False, False, torch.float16),
+            (2, 64, 128, 3, "swish", True, True, torch.float32, 'triton'),
+            (2, 128, 128, 4, "swish", False, True, torch.float32, 'triton'),
+            (2, 64, 128, 3, "swish", True, False, torch.float32, 'triton'),
+            (2, 128, 128, 4, "swish", False, False, torch.float32, 'triton'),
+            (2, 500, 1024, 3, None, True, True, torch.float32, 'cuda'),
+            (2, 1024, 1024, 4, None, False, True, torch.float32, 'triton'),
+            (2, 64, 128, 3, None, True, False, torch.float16, 'triton'),
+            (2, 128, 128, 4, None, False, False, torch.float16, 'triton'),
+            (2, 64, 128, 3, "swish", True, True, torch.float32, 'cuda'),
+            (2, 128, 128, 4, "swish", False, True, torch.float32, 'cuda'),
+            (2, 64, 128, 3, "swish", True, False, torch.float32, 'cuda'),
+            (2, 128, 128, 4, "swish", False, False, torch.float32, 'cuda'),
         ]
     ],
 )
@@ -120,7 +124,10 @@ def test_conv(
     has_bias: bool,
     has_residual: bool,
     dtype: torch.dtype,
+    backend: str,
 ):
+    if causal_conv1d_fn is None and backend == 'cuda':
+        pytest.skip("causal_conv1d is not installed for CUDA backend")
     torch.manual_seed(42)
 
     x = torch.randn(B, T, D).to(device, dtype).requires_grad_(True)
@@ -146,7 +153,7 @@ def test_conv(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation)
+    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation, backend=backend)
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None
@@ -165,14 +172,18 @@ def test_conv(
 
 
 @pytest.mark.parametrize(
-    ('N', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype'),
+    ('N', 'T', 'D', 'W', 'activation', 'has_bias', 'has_residual', 'dtype', 'backend'),
     [
-        pytest.param(*test, id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}".format(*test))
+        pytest.param(*test, id="N{0}_T{1}_D{2}_W{3}_activation{4}_has_bias{5}_has_residual{6}_{7}_{8}".format(*test))
         for test in [
-            (4, 500, 128, 3, "swish", True, True, torch.float32),
-            (4, 1024, 200, 4, "swish", False, True, torch.float32),
-            (4, 500, 128, 3, None, True, False, torch.float16),
-            (4, 1024, 1024, 4, None, False, False, torch.float16),
+            (4, 500, 128, 3, "swish", True, True, torch.float32, 'triton'),
+            (4, 1024, 200, 4, "swish", False, True, torch.float32, 'triton'),
+            (4, 500, 128, 3, None, True, False, torch.float16, 'triton'),
+            (4, 1024, 1024, 4, None, False, False, torch.float16, 'triton'),
+            (4, 500, 128, 3, "swish", True, True, torch.float32, 'cuda'),
+            (4, 1024, 200, 4, "swish", False, True, torch.float32, 'cuda'),
+            (4, 500, 128, 3, None, True, False, torch.float16, 'cuda'),
+            (4, 1024, 1024, 4, None, False, False, torch.float16, 'cuda'),
         ]
     ],
 )
@@ -185,7 +196,10 @@ def test_conv_varlen(
     has_bias: bool,
     has_residual: bool,
     dtype: torch.dtype,
+    backend: str,
 ):
+    if causal_conv1d_fn is None and backend == 'cuda':
+        pytest.skip("causal_conv1d is not installed for CUDA backend")
     torch.manual_seed(42)
     cu_seqlens = torch.cat([
         torch.tensor([0], dtype=torch.long),
@@ -219,7 +233,7 @@ def test_conv_varlen(
     if has_residual:
         ref_dr, residual.grad = residual.grad, None
 
-    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens)
+    tri, _ = causal_conv1d(x, weight, bias, residual=residual, activation=activation, cu_seqlens=cu_seqlens, backend=backend)
     tri.backward(dy)
     tri_dx, x.grad = x.grad, None
     tri_dw, weight.grad = weight.grad, None

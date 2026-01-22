@@ -4,6 +4,13 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import is_fake
+
+try:
+    from torch.compiler import is_compiling
+except ImportError:
+    def is_compiling():
+        return False
 
 from fla.utils import device_torch_lib
 
@@ -33,6 +40,8 @@ class MemoryGuard:
         errors = []
         for alloc in self.allocations:
             raw = alloc["raw"]
+            if is_fake(raw):
+                continue
             start = alloc["start"]
             end = alloc["end"]
 
@@ -58,6 +67,8 @@ _MEMORY_GUARD = MemoryGuard()
 # -----------------------------------------------------------------------------
 
 _ORIGINAL_EMPTY = torch.empty
+_ORIGINAL_EMPTY_LIKE = torch.empty_like
+_ORIGINAL_NEW_EMPTY = torch.Tensor.new_empty
 
 
 def _get_element_size(dtype):
@@ -107,11 +118,13 @@ def _is_called_from_fla():
             if frame is None:
                 break
 
-            # Check if this frame is from a test file
-            # Look for 'tests/' or 'test_' in the file path
             if hasattr(frame, 'f_code') and hasattr(frame.f_code, 'co_filename'):
                 filename = frame.f_code.co_filename
-                # If the call passes through any test file, don't guard
+                # Skip conftest.py frames (where the guarded functions are defined)
+                if 'conftest.py' in filename:
+                    continue
+                # Check if this frame is from a test file
+                # Look for 'tests/' or 'test_' in the file path
                 if 'tests/' in filename or 'test_' in filename:
                     return False
 
@@ -167,13 +180,20 @@ def _guarded_empty(*args, stride=None, **kwargs):
     if req_grad:
         user_tensor.requires_grad_(True)
 
-    if user_tensor.is_cuda:
+    if user_tensor.is_cuda and not is_fake(user_tensor):
         _MEMORY_GUARD.register(raw_tensor, padding_elements, padding_elements + numel, shape, dtype)
 
     return user_tensor
 
 
 def _guarded_empty_like(input, **kwargs):
+    if is_compiling() or not _is_called_from_fla():
+        return _ORIGINAL_EMPTY_LIKE(input, **kwargs)
+
+    # Skip guard for non-contiguous tensors to avoid as_strided view issues
+    if not input.is_contiguous():
+        return _ORIGINAL_EMPTY_LIKE(input, **kwargs)
+
     if kwargs.get('dtype') is None:
         kwargs['dtype'] = input.dtype
     if kwargs.get('layout') is None:
@@ -182,10 +202,21 @@ def _guarded_empty_like(input, **kwargs):
         kwargs['device'] = input.device
     if kwargs.get('requires_grad') is None:
         kwargs['requires_grad'] = input.requires_grad
-    return _guarded_empty(input.shape, stride=input.stride(), **kwargs)
+
+    if kwargs.get('layout') != torch.strided:
+        return _ORIGINAL_EMPTY_LIKE(input, **kwargs)
+
+    return _guarded_empty(input.shape, **kwargs)
 
 
 def _guarded_new_empty(self, *args, **kwargs):
+    if is_compiling() or not _is_called_from_fla():
+        return _ORIGINAL_NEW_EMPTY(self, *args, **kwargs)
+
+    # Skip guard for non-contiguous tensors to avoid potential issues
+    if not self.is_contiguous():
+        return _ORIGINAL_NEW_EMPTY(self, *args, **kwargs)
+
     if kwargs.get('dtype') is None:
         kwargs['dtype'] = self.dtype
     if kwargs.get('device') is None:
