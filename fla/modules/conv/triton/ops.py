@@ -4,7 +4,7 @@ import triton
 from einops import rearrange
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard
+from fla.utils import input_guard
 
 from .kernels import (
     STATIC_WARPS,
@@ -28,6 +28,7 @@ def causal_conv1d_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    BT: int = 64,
 ) -> torch.Tensor:
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -36,9 +37,8 @@ def causal_conv1d_fwd(
     W = weight.shape[1]
     stride_x_n, stride_x_t, stride_x_d = x.stride()
 
-    BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
     BW = triton.next_power_of_2(W)
-    if chunk_indices is None and (cu_seqlens is not None or cu_seqlens_cpu is not None):
+    if cu_seqlens is not None and chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
@@ -134,6 +134,7 @@ def causal_conv1d_bwd(
     cu_seqlens: torch.Tensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    BT: int = 64,
 ):
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
@@ -143,9 +144,8 @@ def causal_conv1d_bwd(
 
     stride_x_n, stride_x_t, stride_x_d = x.stride()
 
-    BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
     BW = triton.next_power_of_2(W)
-    if chunk_indices is None and (cu_seqlens is not None or cu_seqlens_cpu is not None):
+    if cu_seqlens is not None and chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     NB = triton.cdiv(B*T, 1024)
@@ -162,6 +162,7 @@ def causal_conv1d_bwd(
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             output_final_state=False,
+            chunk_indices=chunk_indices,
         )
     dx = torch.empty_like(x)
     dw = weight.new_empty(B*NT, *weight.shape, dtype=torch.float) if weight is not None else None
@@ -351,7 +352,11 @@ class CausalConv1dFunction(torch.autograd.Function):
         cu_seqlens: torch.Tensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
+        chunk_size: int = 64,
     ):
+        BT = chunk_size
+        if cu_seqlens is not None and chunk_indices is None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
         ctx.activation = activation
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
@@ -368,6 +373,7 @@ class CausalConv1dFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
+            BT=BT,
         )
         return y, final_state
 
@@ -388,4 +394,4 @@ class CausalConv1dFunction(torch.autograd.Function):
             cu_seqlens_cpu=ctx.cu_seqlens_cpu,
             chunk_indices=ctx.chunk_indices,
         )
-        return dx, dw, db, dr, dh0, None, None, None, None, None
+        return dx, dw, db, dr, dh0, None, None, None, None, None, None
