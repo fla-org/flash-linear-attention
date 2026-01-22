@@ -229,8 +229,8 @@ def causal_conv1d_cp(
     assert cp_context.conv1d_kernel_size is not None, "conv1d_kernel_size must be provided for causal_conv1d_cp"
     assert cp_context.cu_seqlens is not None, "cu_seqlens must be provided for causal_conv1d_cp"
     assert backend in ['triton'], "backend must be 'triton'"
+    chunk_size = chunk_size or 64
     if chunk_indices is None:
-        chunk_size = chunk_size or 64
         chunk_indices = prepare_chunk_indices(cp_context.cu_seqlens, chunk_size, cu_seqlens_cpu=cp_context.cu_seqlens_cpu)
 
     return CausalConv1dFunctionCP.apply(
