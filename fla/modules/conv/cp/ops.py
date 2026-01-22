@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 
 from fla.ops.cp import FLACPContext, conv_cp_send_recv_bwd, conv_cp_send_recv_fwd
+from fla.ops.utils import prepare_chunk_indices
 
 
 class CausalConv1dFunctionCP(torch.autograd.Function):
@@ -108,6 +109,8 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         activation: str | None,
         chunk_indices: torch.Tensor | None,
         cp_context: FLACPContext | None,
+        chunk_size: int | None,
+        backend: str = 'triton',
     ):
         # Import here to avoid circular dependency
         from fla.modules.conv.triton.ops import causal_conv1d_fwd
@@ -134,6 +137,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         ctx.cu_seqlens = cu_seqlens
         ctx.cu_seqlens_cpu = cu_seqlens_cpu
         ctx.chunk_indices = chunk_indices
+        ctx.chunk_size = chunk_size
         ctx.group = group
         ctx.W = W
         ctx.is_first_rank = cp_context.is_first_rank
@@ -150,6 +154,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
+            BT=chunk_size,
         )
 
         return y
@@ -176,6 +181,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             cu_seqlens=ctx.cu_seqlens,
             cu_seqlens_cpu=ctx.cu_seqlens_cpu,
             chunk_indices=ctx.chunk_indices,
+            BT=ctx.chunk_size,
         )
 
         # Correct dx gradients for CP
@@ -187,7 +193,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             is_first_rank=ctx.is_first_rank,
         )
 
-        return dx, dw, db, None, None, None
+        return dx, dw, db, None, None, None, None, None
 
 
 def causal_conv1d_cp(
@@ -197,6 +203,8 @@ def causal_conv1d_cp(
     activation: str | None = None,
     chunk_indices: torch.Tensor | None = None,
     cp_context: FLACPContext | None = None,
+    chunk_size: int | None = None,
+    backend: str = 'triton',
 ):
     """
     Context Parallel version of causal_conv1d.
@@ -220,8 +228,12 @@ def causal_conv1d_cp(
 
     assert cp_context.conv1d_kernel_size is not None, "conv1d_kernel_size must be provided for causal_conv1d_cp"
     assert cp_context.cu_seqlens is not None, "cu_seqlens must be provided for causal_conv1d_cp"
+    assert backend in ['triton'], "backend must be 'triton'"
+    chunk_size = chunk_size or 64
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cp_context.cu_seqlens, chunk_size, cu_seqlens_cpu=cp_context.cu_seqlens_cpu)
 
     return CausalConv1dFunctionCP.apply(
         x, weight, bias, activation,
-        chunk_indices, cp_context
+        chunk_indices, cp_context, chunk_size, backend
     )
