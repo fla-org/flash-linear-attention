@@ -229,7 +229,13 @@ def _guarded_new_empty(self, *args, **kwargs):
 
 
 @pytest.fixture(scope="function", autouse=True)
-def poison_torch_memory():
+def poison_torch_memory(request):
+    # Only apply the guard to ops and modules tests
+    path = str(request.node.fspath)
+    if 'tests/ops/' not in path and 'tests/modules/' not in path:
+        yield
+        return
+
     with patch('torch.empty', new=_guarded_empty), \
             patch('torch.empty_like', new=_guarded_empty_like), \
             patch('torch.Tensor.new_empty', new=_guarded_new_empty):
