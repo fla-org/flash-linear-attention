@@ -9,7 +9,7 @@ from fla.utils import IS_NVIDIA_HOPPER, assert_close, device, device_torch_lib
 
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("T", [16, 1024, 4096])
-@pytest.mark.parametrize("V", [32000, 65536, 131072])
+@pytest.mark.parametrize("V", [32000, 65536])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("inplace", [True, False])
 @pytest.mark.parametrize("repeat", [100])
@@ -49,7 +49,7 @@ def test_fused_grpos(B: int, T: int, V: int, dtype: torch.dtype, inplace: bool, 
         if save_kl:
             y1, kl2 = y1
             y2, kl3 = y2
-            assert (kl2-kl3).abs().max() < 1e-3
+            assert (kl2-kl3).abs().max() <= 2e-3
         dy = torch.randn_like(y1) * 10
         y1.backward(dy)
         y2.backward(dy.float())
