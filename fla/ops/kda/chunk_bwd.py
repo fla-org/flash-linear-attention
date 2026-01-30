@@ -140,15 +140,15 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_tg = i_t
+        i_tg = i_t.to(tl.int64)
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos, eos = i_b * T, i_b * T + T
+        i_tg = (i_b * NT + i_t).to(tl.int64)
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
@@ -190,7 +190,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
 
-        p_gn = g + (min(T, i_t * BT + BT) - 1) * H*K + o_k
+        p_gn = g + (min(T, i_t * BT + BT) - 1).to(tl.int64) * H*K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
 
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)

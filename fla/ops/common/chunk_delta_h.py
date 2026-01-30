@@ -107,16 +107,17 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
     # main recurrence
     for i_t in range(NT):
-        p_h1 = tl.make_block_ptr(h + i_t * H*K*V, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
+        i_t_int64 = i_t.to(tl.int64)
+        p_h1 = tl.make_block_ptr(h + i_t_int64 * H*K*V, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
         if K > 64:
-            p_h2 = tl.make_block_ptr(h + i_t * H*K*V, (K, V), (V, 1), (64, i_v * BV), (64, BV), (1, 0))
+            p_h2 = tl.make_block_ptr(h + i_t_int64 * H*K*V, (K, V), (V, 1), (64, i_v * BV), (64, BV), (1, 0))
             tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), boundary_check=(0, 1))
         if K > 128:
-            p_h3 = tl.make_block_ptr(h + i_t * H*K*V, (K, V), (V, 1), (128, i_v * BV), (64, BV), (1, 0))
+            p_h3 = tl.make_block_ptr(h + i_t_int64 * H*K*V, (K, V), (V, 1), (128, i_v * BV), (64, BV), (1, 0))
             tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), boundary_check=(0, 1))
         if K > 192:
-            p_h4 = tl.make_block_ptr(h + i_t * H*K*V, (K, V), (V, 1), (192, i_v * BV), (64, BV), (1, 0))
+            p_h4 = tl.make_block_ptr(h + i_t_int64 * H*K*V, (K, V), (V, 1), (192, i_v * BV), (64, BV), (1, 0))
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
 
         p_w = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_t * BT, 0), (BT, 64), (1, 0))
@@ -144,8 +145,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         last_idx = min((i_t + 1) * BT, T) - 1
         if USE_G:
             m_t = (i_t * BT + tl.arange(0, BT)) < T
-            b_g_last = tl.load(g + bos * H + last_idx * H + i_h).to(tl.float32)
-            p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+            b_g_last = tl.load(g + (bos * H + last_idx * H + i_h).to(tl.int64)).to(tl.float32)
+            p_g = tl.make_block_ptr(g + (bos * H + i_h).to(tl.int64), (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
             if USE_EXP2:
                 b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
@@ -189,6 +190,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     b_h4 *= exp2(b_gk_last4)[:, None]
                 else:
                     b_h4 *= exp(b_gk_last4)[:, None]
+
         b_v = b_v.to(k.dtype.element_ty)
 
         p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT), (64, BT), (0, 1))
@@ -319,16 +321,17 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dh4 += tl.load(p_dht4, boundary_check=(0, 1))
 
     for i_t in range(NT - 1, -1, -1):
-        p_dh1 = tl.make_block_ptr(dh + i_t*H*K*V, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
+        i_t_int64 = i_t.to(tl.int64)
+        p_dh1 = tl.make_block_ptr(dh + i_t_int64*H*K*V, (K, V), (V, 1), (0, i_v * BV), (64, BV), (1, 0))
         tl.store(p_dh1, b_dh1.to(p_dh1.dtype.element_ty), boundary_check=(0, 1))
         if K > 64:
-            p_dh2 = tl.make_block_ptr(dh + i_t*H*K*V, (K, V), (V, 1), (64, i_v * BV), (64, BV), (1, 0))
+            p_dh2 = tl.make_block_ptr(dh + i_t_int64*H*K*V, (K, V), (V, 1), (64, i_v * BV), (64, BV), (1, 0))
             tl.store(p_dh2, b_dh2.to(p_dh2.dtype.element_ty), boundary_check=(0, 1))
         if K > 128:
-            p_dh3 = tl.make_block_ptr(dh + i_t*H*K*V, (K, V), (V, 1), (128, i_v * BV), (64, BV), (1, 0))
+            p_dh3 = tl.make_block_ptr(dh + i_t_int64*H*K*V, (K, V), (V, 1), (128, i_v * BV), (64, BV), (1, 0))
             tl.store(p_dh3, b_dh3.to(p_dh3.dtype.element_ty), boundary_check=(0, 1))
         if K > 192:
-            p_dh4 = tl.make_block_ptr(dh + i_t*H*K*V, (K, V), (V, 1), (192, i_v * BV), (64, BV), (1, 0))
+            p_dh4 = tl.make_block_ptr(dh + i_t_int64*H*K*V, (K, V), (V, 1), (192, i_v * BV), (64, BV), (1, 0))
             tl.store(p_dh4, b_dh4.to(p_dh4.dtype.element_ty), boundary_check=(0, 1))
 
         last_idx = min((i_t + 1) * BT, T) - 1
