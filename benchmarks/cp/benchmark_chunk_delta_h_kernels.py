@@ -201,7 +201,7 @@ def benchmark_all_kernels(B, T, H, K, V):
     print("[2b/6] Benchmarking pre_process_fwd_kernel_merged (FWD)...")
 
     BLOCK_SIZE = 32 if K <= 64 else 64
-    grid_merged = (triton.cdiv(V + K, BLOCK_SIZE), H)
+    grid_merged = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), H)
 
     def kernel_fwd_merged():
         pre_process_fwd_kernel_merged[grid_merged](

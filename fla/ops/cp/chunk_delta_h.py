@@ -1047,7 +1047,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     initial_state = k.new_zeros(N, H, K, V, dtype=DTYPE)
     if not context.is_last_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
-        grid = (triton.cdiv(V + K, BLOCK_SIZE), H)
+        grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), H)
         pre_process_fwd_kernel_merged[grid](
             k=k,
             v=u,
@@ -1116,7 +1116,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     dht = q.new_zeros(N, H, K, V, dtype=DTYPE)
     if not context.is_first_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
-        grid = (triton.cdiv(V + K, BLOCK_SIZE), H)
+        grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), H)
         pre_process_bwd_kernel_merged[grid](
             q=q,
             k=k,
