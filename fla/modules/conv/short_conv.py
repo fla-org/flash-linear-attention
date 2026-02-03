@@ -19,7 +19,7 @@ except ImportError:
 class ShortConvolution(nn.Conv1d):
     """Short convolution layer for efficient causal convolution operations.
 
-    This class implements a depthwise separable 1D convolution with causal padding,
+    This class implements a depthwise 1D convolution with causal padding,
     designed for efficient sequence processing. It supports multiple backends (Triton/CUDA)
     and optional activation functions.
 
