@@ -200,7 +200,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
         if isinstance(module, Mamba2):
 
             # --- A_log ---
-            A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
+            A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(0, 16)
             with torch.no_grad():
                 if not isinstance(module.A_log, DTensor):
                     module.A_log.copy_(torch.log(A))
