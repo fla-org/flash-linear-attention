@@ -173,7 +173,11 @@ class Mamba2(nn.Module):
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
         # hard coded for now
         dt_init_floor = 1e-4
-        dt = torch.exp(torch.rand(self.num_heads) * (math.log(self.time_step_max) - math.log(self.time_step_min)) + math.log(self.time_step_min))
+        dt = torch.exp(
+            torch.rand(self.num_heads) * (
+                math.log(self.time_step_max) - math.log(self.time_step_min)
+            ) + math.log(self.time_step_min)
+        )
         dt = torch.clamp(dt, min=dt_init_floor)
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
