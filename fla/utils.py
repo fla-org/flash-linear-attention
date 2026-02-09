@@ -91,6 +91,8 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
     error_rate = get_err_ratio(ref, tri)
     if abs_atol <= err_atol:
         return
+    assert not torch.isnan(ref).any(), f"{prefix}: NaN detected in ref"
+    assert not torch.isnan(tri).any(), f"{prefix}: NaN detected in tri"
     if warning or (FLA_CI_ENV and (error_rate < 0.01 or abs_atol <= 0.3)):
         if error_rate > ratio:
             warnings.warn(msg)
