@@ -56,6 +56,7 @@ class BackendRegistry:
 
     _registries: ClassVar[dict[str, BackendRegistry]] = {}
     _initialized: ClassVar[set[str]] = set()
+    _init_lock: ClassVar[threading.Lock] = threading.Lock()
 
     def __init__(self, operation_name: str):
         self.operation_name = operation_name
@@ -82,7 +83,7 @@ class BackendRegistry:
         if operation in cls._initialized:
             return
 
-        with threading.Lock():
+        with cls._init_lock:
             if operation in cls._initialized:
                 return
 
