@@ -505,7 +505,7 @@ def pre_process_fwd_kernel_merged(
             # Compute m update: m = (diag - k^T @ w) @ m
             b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
             b_m_i = b_diag - b_kw
-            b_m = tl.dot(b_m_i.to(b_w.dtype), b_m.to(b_w.dtype))
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
 
         # Store m result
         p_m = tl.make_block_ptr(hm + V, (K, K), (K + V, 1), (0, i_k_col * BLOCK_SIZE), (BK1, BLOCK_SIZE), (1, 0))
@@ -551,7 +551,8 @@ def merge_fwd_bwd_kernel(
         b_ag_h = tl.load(p_ag_h, boundary_check=(0, 1))
         p_ag_m = tl.make_block_ptr(ag_hm + cur_rank * stride + V, (K, K), (K + V, 1), (0, 0), (BK, BK), (1, 0))
         b_ag_m = tl.load(p_ag_m, boundary_check=(0, 1))
-        b_h = tl.dot(b_ag_m, b_h.to(b_ag_m.dtype)) + b_ag_h
+        # h = M @ h + h_ext
+        b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
     p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
     tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
 
@@ -1005,14 +1006,12 @@ def pre_process_bwd_kernel_merged(
             # Note: FORWARD=False uses tl.trans(b_w) @ b_k instead of tl.trans(b_k) @ b_w
             b_kw = tl.dot(tl.trans(b_w), b_k.to(b_w.dtype))
             b_m_i = b_diag - b_kw
-            b_m = tl.dot(b_m_i.to(b_w.dtype), b_m.to(b_w.dtype))
+            # Keep m chain in fp32 to avoid precision loss from repeated bf16 casting
+            b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
 
         # Store dm result
         p_m = tl.make_block_ptr(dhm + V, (K, K), (V + K, 1), (0, i_k_col * BLOCK_SIZE), (BK1, BLOCK_SIZE), (1, 0))
         tl.store(p_m, b_m.to(p_m.dtype.element_ty), boundary_check=(0, 1))
-
-
-DTYPE = torch.float32
 
 
 def chunk_gated_delta_rule_fwd_h_pre_process(
@@ -1043,8 +1042,8 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
         N = len(cu_seqlens) - 1
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    hm = k.new_zeros(H, K, (V + K), dtype=DTYPE)
-    initial_state = k.new_zeros(N, H, K, V, dtype=DTYPE)
+    hm = k.new_zeros(H, K, (V + K), dtype=torch.float32)
+    initial_state = k.new_zeros(N, H, K, V, dtype=torch.float32)
     if not context.is_last_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), H)
@@ -1112,8 +1111,9 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     else:
         N = len(cu_seqlens) - 1
 
-    dhm = q.new_zeros(H, K, V + K, dtype=DTYPE)
-    dht = q.new_zeros(N, H, K, V, dtype=DTYPE)
+    dhm = q.new_zeros(H, K, V + K, dtype=torch.float32)
+    dht = q.new_zeros(N, H, K, V, dtype=torch.float32)
+
     if not context.is_first_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), H)
@@ -1137,7 +1137,9 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             USE_EXP2=use_exp2,
             BLOCK_SIZE=BLOCK_SIZE,
         )
+
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
+
     if not context.is_last_rank:
         def grid(meta): return (triton.cdiv(V, meta['BV']), H)
         merge_fwd_bwd_kernel[grid](
@@ -1151,6 +1153,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             BK=BK,
             FORWARD=False
         )
+
     # initial_state is None in the CP mode
     # We only need to compute dht of current rank and pass it to the backward kernel
     return dht, None

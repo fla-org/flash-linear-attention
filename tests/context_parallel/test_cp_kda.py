@@ -1,6 +1,80 @@
 """
 Test for Context Parallel (CP) KDA (Kimi Delta Attention)
 
+Implementation Hierarchy and Relationships:
+==========================================
+
+1. naive_recurrent_kda (fla/ops/kda/naive.py):
+   - The mathematical gold standard - sequential token-by-token computation
+   - Input g is per-token log-space decay (NOT cumulative)
+   - Each g_t is used independently as: S_t = S_{t-1} * exp(g_t)
+   - Recurrence:
+       S_t = S_{t-1} * exp(g_t) + beta_t * k_t (x) (v_t - S_{t-1} @ k_t)
+       o_t = q_t^T @ S_t
+     where (x) denotes outer product, S is [K, V] state matrix
+   - No internal gate computation or L2 normalization
+   - Used as the reference baseline for correctness verification
+
+2. naive_chunk_kda (fla/ops/kda/naive.py):
+   - Chunk-parallel version mathematically equivalent to naive_recurrent_kda
+   - Input g is also per-token (same as naive_recurrent_kda)
+   - Performs cumsum on g internally: g = g.cumsum(-2) at line 60
+   - Still a PyTorch implementation, but exploits chunk-level parallelism
+   - The chunk algorithm uses the "w-y representation" for efficient computation
+
+3. chunk_kda (fla/ops/kda/chunk.py ChunkKDAFunction):
+   - Production Triton kernel implementation with optimizations:
+     a) Fused L2 normalization (when use_qk_l2norm_in_kernel=True)
+     b) Fused gate computation (when use_gate_in_kernel=True)
+     c) Variable-length sequence support (cu_seqlens)
+   - Gate processing flow when use_gate_in_kernel=True:
+     - Raw g -> kda_gate_chunk_cumsum() -> applies gate formula + cumsum + scale(RCP_LN2)
+     - For safe_gate=True: gate_t = lower_bound * sigmoid(exp(A_log) * (g_t + dt_bias))
+     - For safe_gate=False: gate_t = -exp(A_log) * softplus(g_t + dt_bias)
+     - kda_gate_chunk_cumsum outputs CUMSUM'd + SCALED values (gate + cumsum in one fused op)
+   - L2 normalization is applied AFTER gate computation
+
+4. Context Parallel (CP) chunk_kda:
+   - Extension of chunk_kda for multi-GPU distributed training
+   - Sequence is partitioned across ranks, with state communication between ranks
+   - Uses build_cp_context() to manage cross-rank dependencies
+   - Forward: Non-first ranks receive initial_state from previous rank
+   - Backward: Gradient dht flows back across rank boundaries
+
+Gate Functions (fla/ops/kda/gate.py):
+=====================================
+
+- naive_kda_gate / naive_kda_lowerbound_gate:
+  Pure PyTorch reference. Output is per-token gate values (NOT cumsum'd).
+  Used in this test's reference path to compute g for naive_recurrent_kda.
+
+- kda_gate_chunk_cumsum (Triton kernel):
+  Fused gate + chunk-local cumsum + optional scale. Output IS cumsum'd.
+  Used internally by chunk_kda when use_gate_in_kernel=True.
+
+Test Architecture Notes:
+========================
+This test uses naive_recurrent_kda as the reference baseline because:
+- It represents the exact mathematical definition without chunking approximations
+- It expects per-token g (non-cumsum'd) and pre-normalized q/k
+
+When use_gate_in_kernel=True, the reference path must manually:
+1. Apply L2 normalization to q/k before passing to naive_recurrent_kda
+2. Apply the gate formula (naive_kda_lowerbound_gate or naive_kda_gate)
+3. The output g from these naive gate functions is per-token (non-cumsum'd),
+   which is exactly what naive_recurrent_kda expects
+
+When use_gate_in_kernel=False:
+- For chunk_kda: input g must be pre-processed (gate applied + cumsum'd)
+- For naive_recurrent_kda reference: g should be gate-applied but NOT cumsum'd
+
+Variable-Length Sequence Handling:
+==================================
+- All sequences are flattened to batch size 1 with cu_seqlens markers
+- Each sequence is processed independently with h0=0 (no cross-sequence state)
+- The reference computation loops over sequences and concatenates results
+- CP path uses the same cu_seqlens for correct chunk boundary handling
+
 Context Parallel Principle for KDA:
 ===================================
 
@@ -30,6 +104,7 @@ Test Scenarios:
 4. CP4 with single long sequence
 """
 
+import logging
 import os
 
 import pytest
@@ -40,10 +115,19 @@ import torch.nn.functional as F
 
 from fla.ops.cp import build_cp_context
 from fla.ops.kda import chunk_kda
+from fla.ops.kda.gate import naive_kda_lowerbound_gate
+from fla.ops.kda.naive import naive_recurrent_kda
+from fla.utils import assert_close
+
+# Configure logging to see assert_close messages
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
 def init_distributed(rank, world_size):
     """Initialize distributed environment for a single process."""
+    # Configure logging in worker process
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '29501'  # Different port from conv test
     os.environ['RANK'] = str(rank)
@@ -60,13 +144,6 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
-def assert_close(name, ref, tri, atol=1e-3, rtol=1e-3):
-    """Helper function for assertion with detailed diff output."""
-    diff = (ref - tri).abs().max().item()
-    print(f"  Checking {name:<10} | Max Diff: {diff:.6f}")
-    assert diff < atol, f"{name} mismatch. Max diff: {diff}"
-
-
 def run_cp_kda_test_worker(
     rank: int,
     world_size: int,
@@ -77,6 +154,9 @@ def run_cp_kda_test_worker(
     lengths: list[int],
     dtype,
     disable_recompute: bool = False,
+    use_gate_in_kernel: bool = False,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
 ):
     """
     Worker function for CP KDA test.
@@ -93,19 +173,37 @@ def run_cp_kda_test_worker(
             print(f"\n{'='*60}")
             print(f"Test: {test_name}")
             print(f"Config: T={T}, H={H}, D={D}, world_size={world_size}, disable_recompute={disable_recompute}")
+            print(f"use_gate_in_kernel={use_gate_in_kernel}, safe_gate={safe_gate}, lower_bound={lower_bound}")
             print(f"Sequence lengths: {lengths}")
             print(f"{'='*60}")
 
-        # Step 1: Prepare Global Data
-        torch.manual_seed(42)
+        # Step 1: Prepare Global Data (all generated on rank 0, broadcast to other ranks)
         B = 1
+        q_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
+        k_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
+        v_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
+        g_global = torch.empty(B, T, H, D, device=device, dtype=dtype if use_gate_in_kernel else torch.float)
+        beta_global = torch.empty(B, T, H, device=device, dtype=dtype)
+        do_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
+        A_log_global = None
+        dt_bias_global = None
 
-        # Generate inputs
-        q_global = torch.randn(B, T, H, D, device=device, dtype=dtype)
-        k_global = torch.randn(B, T, H, D, device=device, dtype=dtype)
-        v_global = torch.randn(B, T, H, D, device=device, dtype=dtype)
-        g_global = F.logsigmoid(torch.randn(B, T, H, D, device=device, dtype=torch.float))
-        beta_global = torch.randn(B, T, H, device=device, dtype=dtype).sigmoid()
+        if rank == 0:
+            torch.manual_seed(42)
+            # Generate inputs
+            # Asymmetric initialization for q and k to test L2 norm
+            # q: small positive values around 1.0
+            # k: large negative values around -50.0
+            q_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) + 1.0)
+            k_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * 10.0 - 50.0)
+            v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
+            if use_gate_in_kernel:
+                g_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
+            else:
+                g_global.copy_(F.logsigmoid(torch.randn(B, T, H, D, device=device, dtype=torch.float)))
+                g_global.clamp_(min=-5.0)
+            beta_global.copy_(torch.randn(B, T, H, device=device, dtype=dtype).sigmoid())
+            do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
 
         # Broadcast to ensure all ranks have same data
         dist.broadcast(q_global, src=0)
@@ -113,45 +211,146 @@ def run_cp_kda_test_worker(
         dist.broadcast(v_global, src=0)
         dist.broadcast(g_global, src=0)
         dist.broadcast(beta_global, src=0)
+        dist.broadcast(do_global, src=0)
+
+        # Prepare and broadcast A_log and dt_bias for gate computation
+        # Always generate these for reference, even when use_gate_in_kernel=False
+        import triton
+        num_even_heads = triton.next_power_of_2(H)
+        projection_size = H * D
+
+        # All ranks create tensors with same shape first
+        A_log_global = torch.empty(num_even_heads, dtype=torch.float32, device=device)
+        dt_bias_global = torch.empty(projection_size, dtype=torch.float32, device=device)
+
+        # Rank 0 fills in the actual data
+        if rank == 0:
+            import math
+            if safe_gate and lower_bound is not None:
+                A_log_global.copy_(torch.log(torch.ones(num_even_heads, dtype=torch.float32, device=device)))
+            else:
+                A_log_global.copy_(torch.log(torch.empty(num_even_heads, dtype=torch.float32, device=device).uniform_(1, 16)))
+            # dt initialization from real training
+            dt = torch.exp(torch.rand(projection_size, device=device) *
+                           (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
+            dt_bias_global.copy_(dt + torch.log(-torch.expm1(-dt)))
+
+        # Broadcast from rank 0 to all ranks
+        dist.broadcast(A_log_global, src=0)
+        dist.broadcast(dt_bias_global, src=0)
 
         # Prepare cu_seqlens
         cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
         cu_seqlens_global = torch.tensor(cu_seqlens_list, device=device, dtype=torch.long)
 
-        # Prepare gradients
-        do_global = torch.randn(B, T, H, D, device=device, dtype=dtype)
-        dist.broadcast(do_global, src=0)
-
-        # Step 2: Reference Run (single GPU, varlen)
+        # Step 2: Reference Run using naive_recurrent_kda (ground truth)
+        # Each sequence is computed independently with h0=0 for simplicity
         ref_out = None
         ref_dq, ref_dk, ref_dv, ref_dg, ref_db = None, None, None, None, None
 
         if rank == 0:
-            q_ref = q_global.clone().detach().requires_grad_(True)
-            k_ref = k_global.clone().detach().requires_grad_(True)
-            v_ref = v_global.clone().detach().requires_grad_(True)
-            g_ref = g_global.clone().detach().requires_grad_(True)
-            beta_ref = beta_global.clone().detach().requires_grad_(True)
+            N = len(lengths)
+            ref_outputs = []
 
-            # Use chunk_kda with varlen (no CP)
-            o_ref, _ = chunk_kda(
-                q=F.normalize(q_ref, p=2, dim=-1),
-                k=F.normalize(k_ref, p=2, dim=-1),
-                v=v_ref,
-                g=g_ref,
-                beta=beta_ref,
-                cu_seqlens=cu_seqlens_global,
-                disable_recompute=disable_recompute,
-            )
+            for i in range(N):
+                seq_start = cu_seqlens_list[i]
+                seq_end = cu_seqlens_list[i + 1]
 
-            o_ref.backward(do_global)
+                # Extract sequence data and create leaf tensors
+                q_seq = q_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
+                k_seq = k_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
+                v_seq = v_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
+                g_seq = g_global[:, seq_start:seq_end].clone().detach()
+                beta_seq = beta_global[:, seq_start:seq_end].clone().detach().requires_grad_(True)
+                do_seq = do_global[:, seq_start:seq_end].clone()
 
-            ref_out = o_ref.detach()
-            ref_dq = q_ref.grad.detach()
-            ref_dk = k_ref.grad.detach()
-            ref_dv = v_ref.grad.detach()
-            ref_dg = g_ref.grad.detach()
-            ref_db = beta_ref.grad.detach()
+                # Apply L2 normalization to q (naive implementation expects normalized q)
+                q_seq_norm = F.normalize(q_seq, p=2, dim=-1)
+                k_seq_norm = F.normalize(k_seq, p=2, dim=-1)
+
+                # Compute gate using naive implementation
+                # When use_gate_in_kernel=True, reference should compute g_raw's grad
+                # When use_gate_in_kernel=False, reference should compute g_processed's grad
+                if use_gate_in_kernel:
+                    # For kernel mode: compare g_raw gradients
+                    g_seq_input = g_seq.requires_grad_(True)
+                    if safe_gate and lower_bound is not None:
+                        g_processed = naive_kda_lowerbound_gate(
+                            g_seq_input.to(torch.float),
+                            A_log_global[:H].contiguous(),
+                            dt_bias_global,
+                            lower_bound=lower_bound
+                        )
+                    else:
+                        from fla.ops.kda.gate import naive_kda_gate
+                        g_processed = naive_kda_gate(
+                            g_seq_input.to(torch.float),
+                            A_log_global[:H].contiguous(),
+                            dt_bias_global
+                        )
+                    g_for_grad = g_seq_input
+                else:
+                    # For non-kernel mode: compare g_processed gradients
+                    g_seq_input = g_seq  # No grad needed for raw input
+                    if safe_gate and lower_bound is not None:
+                        g_processed = naive_kda_lowerbound_gate(
+                            g_seq_input.to(torch.float),
+                            A_log_global[:H].contiguous(),
+                            dt_bias_global,
+                            lower_bound=lower_bound
+                        ).requires_grad_(True)
+                    else:
+                        from fla.ops.kda.gate import naive_kda_gate
+                        g_processed = naive_kda_gate(
+                            g_seq_input.to(torch.float),
+                            A_log_global[:H].contiguous(),
+                            dt_bias_global
+                        ).requires_grad_(True)
+                    g_for_grad = g_processed
+
+                # Run naive forward with h0=0 (independent sequences)
+                o_seq, _ = naive_recurrent_kda(
+                    q=q_seq_norm,
+                    k=k_seq_norm,
+                    v=v_seq,
+                    g=g_processed,
+                    beta=beta_seq,
+                    initial_state=None,
+                    output_final_state=False,
+                )
+
+                ref_outputs.append({
+                    'o': o_seq,
+                    'q': q_seq,
+                    'k': k_seq,
+                    'v': v_seq,
+                    'g': g_for_grad,
+                    'beta': beta_seq,
+                    'do': do_seq,
+                })
+
+            # Backward pass for each sequence
+            all_dq = []
+            all_dk = []
+            all_dv = []
+            all_dg = []
+            all_db = []
+
+            for item in ref_outputs:
+                (item['o'] * item['do']).sum().backward()
+                all_dq.append(item['q'].grad.detach())
+                all_dk.append(item['k'].grad.detach())
+                all_dv.append(item['v'].grad.detach())
+                all_dg.append(item['g'].grad.detach())
+                all_db.append(item['beta'].grad.detach())
+
+            # Concatenate outputs and gradients
+            ref_out = torch.cat([item['o'].detach() for item in ref_outputs], dim=1)
+            ref_dq = torch.cat(all_dq, dim=1)
+            ref_dk = torch.cat(all_dk, dim=1)
+            ref_dv = torch.cat(all_dv, dim=1)
+            ref_dg = torch.cat(all_dg, dim=1)
+            ref_db = torch.cat(all_db, dim=1)
 
         # Step 3: Context Parallel Run
         dist.barrier()
@@ -178,13 +377,19 @@ def run_cp_kda_test_worker(
 
         # CP Forward
         o_local, _ = chunk_kda(
-            q=F.normalize(q_local, p=2, dim=-1),
-            k=F.normalize(k_local, p=2, dim=-1),
+            q=q_local,
+            k=k_local,
             v=v_local,
             g=g_local,
             beta=beta_local,
             cp_context=context,
             disable_recompute=disable_recompute,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=use_gate_in_kernel,
+            safe_gate=safe_gate,
+            lower_bound=lower_bound,
+            A_log=A_log_global[:H].contiguous() if use_gate_in_kernel else None,
+            dt_bias=dt_bias_global if use_gate_in_kernel else None,
         )
 
         # CP Backward
@@ -217,14 +422,20 @@ def run_cp_kda_test_worker(
 
         test_passed = True
         if rank == 0:
-            print(f"\n[{test_name}] Verification Results:")
+            print(f"\n[{test_name}] Verifying results...")
+
+            tensors_to_verify = [
+                ("Output", ref_out, o_cp_global),
+                ("dq", ref_dq, dq_cp_global),
+                ("dk", ref_dk, dk_cp_global),
+                ("dv", ref_dv, dv_cp_global),
+                ("dg", ref_dg, dg_cp_global),
+                ("db", ref_db, db_cp_global),
+            ]
+
             try:
-                assert_close("Output", ref_out, o_cp_global, atol=5e-3)
-                assert_close("dq", ref_dq, dq_cp_global, atol=8e-3)
-                assert_close("dk", ref_dk, dk_cp_global, atol=8e-3)
-                assert_close("dv", ref_dv, dv_cp_global, atol=8e-3)
-                assert_close("dg", ref_dg, dg_cp_global, atol=2e-2)
-                assert_close("db", ref_db, db_cp_global, atol=2e-2)
+                for name, ref, cp in tensors_to_verify:
+                    assert_close(name, ref, cp, ratio=5e-2, warning=False)
                 print(f"✅ [{test_name}] Test Passed!\n")
             except AssertionError as e:
                 print(f"❌ [{test_name}] Test Failed: {e}\n")
@@ -248,8 +459,11 @@ def run_cp_test_with_spawn(
     H: int,
     D: int,
     lengths: list[int],
-    dtype=torch.float16,
+    dtype=torch.bfloat16,
     disable_recompute: bool = False,
+    use_gate_in_kernel: bool = False,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -257,7 +471,7 @@ def run_cp_test_with_spawn(
     """
     mp.start_processes(
         run_cp_kda_test_worker,
-        args=(world_size, test_name, T, H, D, lengths, dtype, disable_recompute),
+        args=(world_size, test_name, T, H, D, lengths, dtype, disable_recompute, use_gate_in_kernel, safe_gate, lower_bound),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -266,143 +480,115 @@ def run_cp_test_with_spawn(
 
 # ============================================================
 # Test Scenario Definitions
+# All tests use: use_gate_in_kernel=True, safe_gate=True, lower_bound=-5.0
 # ============================================================
 
-def test_cp2_sequence_cut():
-    """
-    Test Case 1: CP2 with sequences cut in the middle.
+GATE_KWARGS = dict(use_gate_in_kernel=True, safe_gate=True, lower_bound=-5.0)
 
-    Scenario:
-    - world_size=2, T=1024, chunk_size=512
-    - lengths=[300, 400, 324] -> sequences span across rank boundary
-    - Rank 0: tokens [0, 512) contains seq0 (300) + part of seq1 (212)
-    - Rank 1: tokens [512, 1024) contains rest of seq1 (188) + seq2 (324)
-    """
+
+def test_cp2_sequence_cut():
+    """CP2: sequences cut across rank boundary."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
 
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_SequenceCut",
-        T=1024,
-        H=4,
-        D=64,
-        lengths=[300, 400, 324],
-        dtype=torch.float16,
+        T=10240, H=4, D=128,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
+        **GATE_KWARGS,
     )
 
 
 def test_cp2_boundary_aligned():
-    """
-    Test Case 2: CP2 with sequence boundaries aligned with rank boundaries.
-
-    Scenario:
-    - world_size=2, T=1024, chunk_size=512
-    - lengths=[512, 512] -> sequence boundary exactly at rank boundary
-    - Rank 0: tokens [0, 512) contains exactly seq0
-    - Rank 1: tokens [512, 1024) contains exactly seq1
-    """
+    """CP2: sequence boundaries aligned with rank boundaries."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
 
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_BoundaryAligned",
-        T=1024,
-        H=4,
-        D=128,
-        lengths=[512, 512],
-        dtype=torch.float16,
+        T=10240, H=4, D=128,
+        lengths=[5120, 5120],
+        dtype=torch.bfloat16,
+        **GATE_KWARGS,
     )
 
 
 def test_cp4_complex():
-    """
-    Test Case 3: CP4 with complex sequence distribution.
-
-    Scenario:
-    - world_size=4, T=1024, chunk_size=256
-    - lengths=[700, 324] -> first sequence spans 3 ranks
-    """
+    """CP4: complex sequence distribution, first sequence spans 3 ranks."""
     if torch.cuda.device_count() < 4:
         pytest.skip("At least 4 GPUs required")
 
     run_cp_test_with_spawn(
         world_size=4,
         test_name="CP4_Complex",
-        T=1024,
-        H=4,
-        D=128,
-        lengths=[700, 324],
-        dtype=torch.float16,
+        T=10240, H=4, D=128,
+        lengths=[7000, 3240],
+        dtype=torch.bfloat16,
+        **GATE_KWARGS,
     )
 
 
 def test_cp4_single_sequence():
-    """
-    Test Case 4: CP4 with a single long sequence spanning all ranks.
-
-    Scenario:
-    - world_size=4, T=1024, chunk_size=256
-    - lengths=[1024] -> single sequence spans all 4 ranks
-    """
+    """CP4: single long sequence spanning all ranks."""
     if torch.cuda.device_count() < 4:
         pytest.skip("At least 4 GPUs required")
 
     run_cp_test_with_spawn(
         world_size=4,
         test_name="CP4_SingleSequence",
-        T=1024,
-        H=4,
-        D=64,
-        lengths=[1024],
-        dtype=torch.float16,
+        T=10240, H=4, D=128,
+        lengths=[10240],
+        dtype=torch.bfloat16,
+        **GATE_KWARGS,
+    )
+
+
+def test_cp8_single_sequence():
+    """CP8: single long sequence spanning all ranks."""
+    if torch.cuda.device_count() < 8:
+        pytest.skip("At least 8 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=8,
+        test_name="CP8_SingleSequence",
+        T=65536, H=4, D=128,
+        lengths=[65536],
+        dtype=torch.bfloat16,
+        **GATE_KWARGS,
     )
 
 
 def test_cp2_many_short_sequences():
-    """
-    Test Case 5: CP2 with many short sequences.
-
-    Scenario:
-    - world_size=2, T=1024, chunk_size=512
-    - lengths=[100, 150, 200, 250, 124, 100, 100] -> many short sequences
-    """
+    """CP2: many short sequences."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
 
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_ManyShortSequences",
-        T=1024,
-        H=4,
-        D=64,
-        lengths=[100, 150, 200, 250, 124, 100, 100],
-        dtype=torch.float16,
+        T=10240, H=4, D=128,
+        lengths=[1000, 1500, 2000, 2500, 1240, 1000, 1000],
+        dtype=torch.bfloat16,
+        **GATE_KWARGS,
     )
 
 
 def test_cp2_disable_recompute():
-    """
-    Test Case 6: CP2 with disable_recompute=True.
-
-    Scenario:
-    - world_size=2, T=1024, chunk_size=512
-    - lengths=[300, 400, 324] -> sequences span across rank boundary
-    - disable_recompute=True
-    """
+    """CP2: disable_recompute=True."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
 
     run_cp_test_with_spawn(
         world_size=2,
         test_name="CP2_DisableRecompute",
-        T=1024,
-        H=4,
-        D=64,
-        lengths=[300, 400, 324],
-        dtype=torch.float16,
+        T=10240, H=4, D=128,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
         disable_recompute=True,
+        **GATE_KWARGS,
     )
 
 
@@ -419,161 +605,3 @@ def setup_distributed_torchrun():
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     return True
-
-
-if __name__ == "__main__":
-    # Check if running with torchrun
-    if 'RANK' in os.environ:
-        # Running with torchrun
-        if setup_distributed_torchrun():
-            from fla.utils import device as fla_device
-
-            world_size = dist.get_world_size()
-            rank = dist.get_rank()
-
-            try:
-                if rank == 0:
-                    print("=" * 60)
-                    print("Running CP KDA Tests (torchrun mode)")
-                    print("=" * 60)
-
-                # Define test configs based on world_size
-                if world_size == 2:
-                    test_configs = [
-                        ("CP2_SequenceCut", 1024, 4, 64, [300, 400, 324]),
-                        ("CP2_BoundaryAligned", 1024, 4, 64, [512, 512]),
-                        ("CP2_ManyShortSequences", 1024, 4, 64, [100, 150, 200, 250, 124, 100, 100]),
-                    ]
-                elif world_size == 4:
-                    test_configs = [
-                        ("CP4_Complex", 1024, 4, 64, [700, 324]),
-                        ("CP4_SingleSequence", 1024, 4, 64, [1024]),
-                    ]
-                else:
-                    test_configs = [
-                        (f"CP{world_size}_SingleSequence", 1024, 4, 64, [1024]),
-                    ]
-
-                for test_name, T, H, D, lengths in test_configs:
-                    torch.manual_seed(42)
-                    B = 1
-
-                    # Generate global data
-                    q_global = torch.randn(B, T, H, D, device=fla_device, dtype=torch.float16)
-                    k_global = torch.randn(B, T, H, D, device=fla_device, dtype=torch.float16)
-                    v_global = torch.randn(B, T, H, D, device=fla_device, dtype=torch.float16)
-                    g_global = F.logsigmoid(torch.randn(B, T, H, D, device=fla_device, dtype=torch.float))
-                    beta_global = torch.randn(B, T, H, device=fla_device, dtype=torch.float16).sigmoid()
-                    do_global = torch.randn(B, T, H, D, device=fla_device, dtype=torch.float16)
-
-                    # Broadcast
-                    dist.broadcast(q_global, src=0)
-                    dist.broadcast(k_global, src=0)
-                    dist.broadcast(v_global, src=0)
-                    dist.broadcast(g_global, src=0)
-                    dist.broadcast(beta_global, src=0)
-                    dist.broadcast(do_global, src=0)
-
-                    cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
-                    cu_seqlens_global = torch.tensor(cu_seqlens_list, device=fla_device, dtype=torch.long)
-
-                    # Reference
-                    ref_out, ref_dq, ref_dk, ref_dv, ref_dg, ref_db = None, None, None, None, None, None
-                    if rank == 0:
-                        q_ref = q_global.clone().detach().requires_grad_(True)
-                        k_ref = k_global.clone().detach().requires_grad_(True)
-                        v_ref = v_global.clone().detach().requires_grad_(True)
-                        g_ref = g_global.clone().detach().requires_grad_(True)
-                        beta_ref = beta_global.clone().detach().requires_grad_(True)
-
-                        o_ref, _ = chunk_kda(
-                            q=F.normalize(q_ref, p=2, dim=-1),
-                            k=F.normalize(k_ref, p=2, dim=-1),
-                            v=v_ref,
-                            g=g_ref,
-                            beta=beta_ref,
-                            cu_seqlens=cu_seqlens_global,
-                        )
-                        o_ref.backward(do_global)
-                        ref_out = o_ref.detach()
-                        ref_dq = q_ref.grad.detach()
-                        ref_dk = k_ref.grad.detach()
-                        ref_dv = v_ref.grad.detach()
-                        ref_dg = g_ref.grad.detach()
-                        ref_db = beta_ref.grad.detach()
-
-                    dist.barrier()
-
-                    # CP run
-                    context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD)
-
-                    chunk_size = T // world_size
-                    start_idx, end_idx = rank * chunk_size, (rank + 1) * chunk_size
-
-                    q_local = q_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-                    k_local = k_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-                    v_local = v_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-                    g_local = g_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-                    beta_local = beta_global[:, start_idx:end_idx].clone().detach().requires_grad_(True)
-                    do_local = do_global[:, start_idx:end_idx, :].clone()
-
-                    o_local, _ = chunk_kda(
-                        q=F.normalize(q_local, p=2, dim=-1),
-                        k=F.normalize(k_local, p=2, dim=-1),
-                        v=v_local,
-                        g=g_local,
-                        beta=beta_local,
-                        cp_context=context,
-                    )
-                    o_local.backward(do_local)
-
-                    # Gather output and gradients
-                    o_gathered = [torch.zeros_like(o_local) for _ in range(world_size)]
-                    dist.all_gather(o_gathered, o_local)
-                    o_cp_global = torch.cat(o_gathered, dim=1)
-
-                    dq_gathered = [torch.zeros_like(q_local.grad) for _ in range(world_size)]
-                    dist.all_gather(dq_gathered, q_local.grad)
-                    dq_cp_global = torch.cat(dq_gathered, dim=1)
-
-                    dk_gathered = [torch.zeros_like(k_local.grad) for _ in range(world_size)]
-                    dist.all_gather(dk_gathered, k_local.grad)
-                    dk_cp_global = torch.cat(dk_gathered, dim=1)
-
-                    dv_gathered = [torch.zeros_like(v_local.grad) for _ in range(world_size)]
-                    dist.all_gather(dv_gathered, v_local.grad)
-                    dv_cp_global = torch.cat(dv_gathered, dim=1)
-
-                    dg_gathered = [torch.zeros_like(g_local.grad) for _ in range(world_size)]
-                    dist.all_gather(dg_gathered, g_local.grad)
-                    dg_cp_global = torch.cat(dg_gathered, dim=1)
-
-                    db_gathered = [torch.zeros_like(beta_local.grad) for _ in range(world_size)]
-                    dist.all_gather(db_gathered, beta_local.grad)
-                    db_cp_global = torch.cat(db_gathered, dim=1)
-
-                    if rank == 0:
-                        print(f"\n[{test_name}] Verification:")
-                        assert_close("Output", ref_out, o_cp_global, atol=5e-3)
-                        assert_close("dq", ref_dq, dq_cp_global, atol=8e-3)
-                        assert_close("dk", ref_dk, dk_cp_global, atol=8e-3)
-                        assert_close("dv", ref_dv, dv_cp_global, atol=8e-3)
-                        assert_close("dg", ref_dg, dg_cp_global, atol=2e-2)
-                        assert_close("db", ref_db, db_cp_global, atol=2e-2)
-                        print(f"✅ [{test_name}] Passed!")
-
-                    dist.barrier()
-
-                if rank == 0:
-                    print("\n" + "=" * 60)
-                    print("All tests passed!")
-                    print("=" * 60)
-
-            finally:
-                cleanup_distributed()
-    else:
-        # Not running with torchrun, show usage
-        print("Run tests with pytest or torchrun:")
-        print("  pytest tests/context_parallel/test_cp_kda.py -v")
-        print("  torchrun --nproc_per_node=2 tests/context_parallel/test_cp_kda.py")
-        print("  torchrun --nproc_per_node=4 tests/context_parallel/test_cp_kda.py")
