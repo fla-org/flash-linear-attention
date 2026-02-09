@@ -2,7 +2,7 @@
 
 Context Parallel for GDN (Gated Delta Rule) and KDA (Kimi Delta Attention).
 
-> CP was first introduce in [PR #691](https://github.com/fla-org/flash-linear-attention/pull/691), Special thanks to [mdy666](https://github.com/mdy666)
+> CP was first introduced in [PR #691](https://github.com/fla-org/flash-linear-attention/pull/691), Special thanks to [mdy666](https://github.com/mdy666)
 
 ## Core Recurrence
 
