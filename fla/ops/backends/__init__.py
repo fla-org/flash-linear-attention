@@ -21,6 +21,8 @@ class BaseBackend:
     backend_type: ClassVar[str] = "base"
     package_name: ClassVar[str | None] = None
     env_var: ClassVar[str | None] = None
+    # Lower number = higher priority, default is 5
+    priority: ClassVar[int] = 5
 
     @classmethod
     def is_available(cls) -> bool:
@@ -70,8 +72,25 @@ class BackendRegistry:
         """Register a backend."""
         with self._lock:
             self._backends[backend.backend_type] = backend
-            if self._active is None and backend.can_use():
+            # Update active backend based on priority
+            self._update_active_backend()
+
+    def _get_sorted_backends(self) -> list[BaseBackend]:
+        """Get backends sorted by priority (lower number = higher priority).
+
+        Backends with the same priority are sorted by registration order.
+        """
+        return sorted(
+            self._backends.values(),
+            key=lambda b: (b.priority, list(self._backends.values()).index(b))
+        )
+
+    def _update_active_backend(self) -> None:
+        """Update active backend based on priority."""
+        for backend in self._get_sorted_backends():
+            if backend.can_use():
                 self._active = backend
+                return
 
     def get_active(self) -> BaseBackend | None:
         """Get active backend."""
@@ -112,10 +131,9 @@ def dispatch(operation: str):
             if registry is None:
                 return func(*args, **kwargs)
 
-            # Iterate through all registered backends to find one that can handle this call
-            # Note: _backends is only modified during registration, which happens at import time
-            # After initialization, it's safe to read without lock
-            backends_list = registry._backends.values()
+            # Iterate through all registered backends sorted by priority
+            # to find one that can handle this call
+            backends_list = registry._get_sorted_backends()
 
             for be in backends_list:
                 if not be.can_use():
