@@ -41,6 +41,7 @@ Test Scenarios:
 4. Single long sequence spanning all ranks
 """
 
+import logging
 import os
 
 import pytest
@@ -50,10 +51,17 @@ import torch.multiprocessing as mp
 
 from fla.modules.convolution import causal_conv1d
 from fla.ops.cp import build_cp_context
+from fla.utils import assert_close
+
+# Configure logging to see assert_close messages
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
 def init_distributed(rank, world_size):
     """Initialize distributed environment for a single process."""
+    # Configure logging in worker process
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '29500'
     os.environ['RANK'] = str(rank)
@@ -68,13 +76,6 @@ def cleanup_distributed():
     """Clean up distributed environment."""
     if dist.is_initialized():
         dist.destroy_process_group()
-
-
-def assert_close(name, ref, tri, atol=1e-3, rtol=1e-3):
-    """Helper function for assertion with detailed diff output."""
-    diff = (ref - tri).abs().max().item()
-    print(f"  Checking {name:<10} | Max Diff: {diff:.6f}")
-    assert diff < atol, f"{name} mismatch. Max diff: {diff}"
 
 
 def run_cp_conv_test_worker(
@@ -109,7 +110,7 @@ def run_cp_conv_test_worker(
         torch.manual_seed(42)
         B = 1
 
-        x_global = torch.randn(B, T, D, device=device, dtype=dtype)
+        x_global = torch.randn(B, T, D, device=device, dtype=dtype) * 100
         dy_global = torch.randn(B, T, D, device=device, dtype=dtype)
 
         weight = torch.randn(D, W, device=device, dtype=dtype)
@@ -197,10 +198,10 @@ def run_cp_conv_test_worker(
         if rank == 0:
             print(f"\n[{test_name}] Verification Results:")
             try:
-                assert_close("Output", ref_out, y_cp_global, atol=1e-3)
-                assert_close("dx", ref_dx, dx_cp_global, atol=1e-3)
-                assert_close("dw", ref_dw, dw_cp, atol=1e-3)
-                assert_close("db", ref_db, db_cp, atol=1e-3)
+                assert_close("Output", ref_out, y_cp_global, ratio=0.001)
+                assert_close("dx", ref_dx, dx_cp_global, ratio=0.001)
+                assert_close("dw", ref_dw, dw_cp, ratio=0.001)
+                assert_close("db", ref_db, db_cp, ratio=0.001)
                 print(f"✅ [{test_name}] Test Passed!\n")
             except AssertionError as e:
                 print(f"❌ [{test_name}] Test Failed: {e}\n")
@@ -378,115 +379,3 @@ def setup_distributed_torchrun():
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     return True
-
-
-if __name__ == "__main__":
-    # Check if running with torchrun
-    if 'RANK' in os.environ:
-        # Running with torchrun
-        if setup_distributed_torchrun():
-            from fla.utils import device as fla_device
-
-            world_size = dist.get_world_size()
-            rank = dist.get_rank()
-
-            try:
-                if rank == 0:
-                    print("=" * 60)
-                    print("Running CP Conv1d Tests (torchrun mode)")
-                    print("=" * 60)
-
-                # Define test configs based on world_size
-                if world_size == 2:
-                    test_configs = [
-                        ("CP2_SequenceCut", 1024, 128, 4, [300, 400, 324]),
-                        ("CP2_BoundaryAligned", 1024, 128, 4, [512, 512]),
-                        ("CP2_ManyShortSequences", 1024, 128, 4, [100, 150, 200, 250, 124, 100, 100]),
-                    ]
-                elif world_size == 4:
-                    test_configs = [
-                        ("CP4_Complex", 1024, 128, 4, [700, 324]),
-                        ("CP4_SingleSequence", 1024, 128, 4, [1024]),
-                    ]
-                else:
-                    test_configs = [
-                        (f"CP{world_size}_SingleSequence", 1024, 128, 4, [1024]),
-                    ]
-
-                for test_name, T, D, W, lengths in test_configs:
-                    # Run test inline (already in distributed context)
-                    torch.manual_seed(42)
-                    B = 1
-
-                    x_global = torch.randn(B, T, D, device=fla_device, dtype=torch.float32)
-                    dy_global = torch.randn(B, T, D, device=fla_device, dtype=torch.float32)
-                    weight = torch.randn(D, W, device=fla_device, dtype=torch.float32)
-                    bias = torch.randn(D, device=fla_device, dtype=torch.float32)
-
-                    dist.broadcast(weight, src=0)
-                    dist.broadcast(bias, src=0)
-
-                    cu_seqlens_list = [0] + torch.cumsum(torch.tensor(lengths), 0).tolist()
-                    cu_seqlens_global = torch.tensor(cu_seqlens_list, device=fla_device, dtype=torch.int32)
-
-                    # Reference
-                    ref_out, ref_dx, ref_dw, ref_db = None, None, None, None
-                    if rank == 0:
-                        x_ref = x_global.clone().detach().requires_grad_(True)
-                        weight_ref = weight.clone().detach().requires_grad_(True)
-                        bias_ref = bias.clone().detach().requires_grad_(True)
-                        y_ref, _ = causal_conv1d(x=x_ref, weight=weight_ref, bias=bias_ref,
-                                                 activation='swish', backend='triton', cu_seqlens=cu_seqlens_global)
-                        y_ref.backward(dy_global)
-                        ref_out, ref_dx = y_ref.detach(), x_ref.grad.detach()
-                        ref_dw, ref_db = weight_ref.grad.detach(), bias_ref.grad.detach()
-
-                    dist.barrier()
-                    context = build_cp_context(cu_seqlens_global, group=dist.group.WORLD, conv1d_kernel_size=W)
-
-                    chunk_size = T // world_size
-                    start_idx, end_idx = rank * chunk_size, (rank + 1) * chunk_size
-                    x_local = x_global[:, start_idx:end_idx, :].clone().detach().requires_grad_(True)
-                    dy_local = dy_global[:, start_idx:end_idx, :].clone()
-                    weight_local = weight.clone().detach().requires_grad_(True)
-                    bias_local = bias.clone().detach().requires_grad_(True)
-
-                    y_local, _ = causal_conv1d(x=x_local, weight=weight_local, bias=bias_local,
-                                               activation='swish', cp_context=context)
-                    y_local.backward(dy_local)
-
-                    y_gathered = [torch.zeros_like(y_local) for _ in range(world_size)]
-                    dist.all_gather(y_gathered, y_local)
-                    y_cp_global = torch.cat(y_gathered, dim=1)
-
-                    dx_gathered = [torch.zeros_like(x_local.grad) for _ in range(world_size)]
-                    dist.all_gather(dx_gathered, x_local.grad)
-                    dx_cp_global = torch.cat(dx_gathered, dim=1)
-
-                    dw_cp, db_cp = weight_local.grad.clone(), bias_local.grad.clone()
-                    dist.all_reduce(dw_cp, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(db_cp, op=dist.ReduceOp.SUM)
-
-                    if rank == 0:
-                        print(f"\n[{test_name}] Verification:")
-                        assert_close("Output", ref_out, y_cp_global, atol=1e-3)
-                        assert_close("dx", ref_dx, dx_cp_global, atol=1e-3)
-                        assert_close("dw", ref_dw, dw_cp, atol=1e-3)
-                        assert_close("db", ref_db, db_cp, atol=1e-3)
-                        print(f"✅ [{test_name}] Passed!")
-
-                    dist.barrier()
-
-                if rank == 0:
-                    print("\n" + "=" * 60)
-                    print("All tests passed!")
-                    print("=" * 60)
-
-            finally:
-                cleanup_distributed()
-    else:
-        # Not running with torchrun, show usage
-        print("Run tests with pytest or torchrun:")
-        print("  pytest tests/context_parallel/test_cp_conv.py -v")
-        print("  torchrun --nproc_per_node=2 tests/context_parallel/test_cp_conv.py")
-        print("  torchrun --nproc_per_node=4 tests/context_parallel/test_cp_conv.py")
