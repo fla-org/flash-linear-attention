@@ -1,17 +1,13 @@
-# -*- coding: utf-8 -*-
 
 import os
-from typing import List, Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange
 
-from fla.ops.gated_oja_rule import fused_recurrent_gated_oja_rule
-from fla.ops.gated_oja_rule import chunk_gated_oja_rule
+from fla.ops.gated_oja_rule import chunk_gated_oja_rule, fused_recurrent_gated_oja_rule
 from fla.utils import assert_close, device, is_intel_alchemist
-
 
 
 def recurrent_oja_ref(
@@ -36,7 +32,7 @@ def recurrent_oja_ref(
     for i in range(T):
         b_q = q[:, :, i]
         b_k = k[:, :, i]
-        b_v = v[:, :, i] # B H D
+        b_v = v[:, :, i]  # B H D
         g_i = g[:, :, i]
         # breakpoint()
         h = h * g_i.exp()[:, :, None, :]
@@ -81,7 +77,7 @@ def chunk_oja_ref(
     chunk_size = BT
     b, h, l, d_k = q.shape
     d_v = v.shape[-1]
-    q = q * scale # B H T D
+    q = q * scale  # B H T D
     assert l % chunk_size == 0
     # note that diagonal is masked.
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
@@ -89,19 +85,19 @@ def chunk_oja_ref(
         lambda x: rearrange(x, 'b h (n c) ... -> b h n c ...', c=chunk_size),
         [q, k, v, beta, g]
     )
-    g = g.cumsum(-2) # b h n c d
+    g = g.cumsum(-2)  # b h n c d
 
     """
     vector decay for attention
     qkvg (B H N C D)
     """
-    attn = torch.zeros(*q.shape[:-1], chunk_size, dtype=torch.float, device=q.device) # B H N C C
+    attn = torch.zeros(*q.shape[:-1], chunk_size, dtype=torch.float, device=q.device)  # B H N C C
     # attn = -((v_beta @ v.transpose(-1, -2))* L_mask).masked_fill(mask, 0) # B H N C C
     for i in range(BT):
-        v_i = v[..., i, :] # B H N D
-        g_i = g[..., i:i+1, :] # B H N 1 Dv
-        attn[..., i] = torch.einsum('... c d, ... d -> ... c', v * (g - g_i).exp(), v_i) # B H N C
-    attn = attn * beta[..., None] # B H N C C
+        v_i = v[..., i, :]  # B H N D
+        g_i = g[..., i:i+1, :]  # B H N 1 Dv
+        attn[..., i] = torch.einsum('... c d, ... d -> ... c', v * (g - g_i).exp(), v_i)  # B H N C
+    attn = attn * beta[..., None]  # B H N C C
 
     attn = -attn.masked_fill(mask, 0)
 
@@ -109,8 +105,8 @@ def chunk_oja_ref(
         attn[..., i, :i] = attn[..., i, :i].clone() + (attn[..., i, :i, None].clone() * attn[..., :i, :i].clone()).sum(-2)
     attn = (attn + torch.eye(chunk_size, dtype=torch.float, device=q.device)) * beta[..., None, :]
 
-    W = attn @ (v * g.exp()) # B H N C Dv
-    U = attn @ k # B H N C Dk
+    W = attn @ (v * g.exp())  # B H N C Dv
+    U = attn @ k  # B H N C Dk
 
     S = k.new_zeros(b, h, d_k, d_v)
 
@@ -119,15 +115,15 @@ def chunk_oja_ref(
     o = torch.zeros_like(v)
     mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=1)
     for i in range(0, l // chunk_size):
-        q_i, u_i, v_i, g_i = q[:, :, i], U[:, :, i], v[:, :, i], g[:, :, i] # B H C Dv
-        k_new = u_i - W[:, :, i] @ S.transpose(-1, -2) # b h c dk - b h c dv @ b h dv dk
-        attn = q_i @ k_new.transpose(-1, -2) # b h c d @ b h d c -> b h c c
-        attn = attn.masked_fill(mask, 0) # b h c c
-        g_last = g_i[:, :, -1, :] # b h dv
-        o_inter = (q_i @ S) # b h c dv
+        q_i, u_i, v_i, g_i = q[:, :, i], U[:, :, i], v[:, :, i], g[:, :, i]  # B H C Dv
+        k_new = u_i - W[:, :, i] @ S.transpose(-1, -2)  # b h c dk - b h c dv @ b h dv dk
+        attn = q_i @ k_new.transpose(-1, -2)  # b h c d @ b h d c -> b h c c
+        attn = attn.masked_fill(mask, 0)  # b h c c
+        g_last = g_i[:, :, -1, :]  # b h dv
+        o_inter = (q_i @ S)  # b h c dv
         vg_i = v_i / g_i.exp()
         o[:, :, i] = (o_inter + (attn @ vg_i)) * g_i.exp()    # b h c dv + b h c c @ b h c dv
-        S = S * g_last[:, :, None, :].exp() # B H Dk Dv @ B H 1 D
+        S = S * g_last[:, :, None, :].exp()  # B H Dk Dv @ B H 1 D
         S += k_new.transpose(-1, -2) @ (v_i * (g_last[:, :, None, :] - g_i).exp())
     if not output_final_state:
         S = None
@@ -136,6 +132,7 @@ def chunk_oja_ref(
     o = o[:, :, :T]
     o = o.transpose(1, 2)
     return o, S
+
 
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
@@ -188,7 +185,6 @@ def test_naive_chunk_oja(
     )
     assert_close('ht', ref_ht, tri_ht, 0.002)
     assert_close('o', ref, tri, 0.002)
-    
 
 
 @pytest.mark.parametrize(
@@ -254,7 +250,7 @@ def test_fused_recurrent(
             (1, 63, 1, 64, 1, 0.01, 0, torch.float16),
             (2, 500, 3, 60, 1, 1, 0, torch.float16),
             (2, 1000, 3, 64, 0.1, 1, 0.5, torch.float16),
-            (3, 1024, 4, 100, 1, 0.1, 0, torch.float16), 
+            (3, 1024, 4, 100, 1, 0.1, 0, torch.float16),
             (4, 1024, 4, 128, 0.1, 1, 0, torch.float16),
         ]
     ]
@@ -350,11 +346,11 @@ def test_chunk(
         output_final_state=True,
         initial_state=h0.clone(),
     )
-    
+
     ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
     q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
-    
+
     tri, tri_ht = chunk_gated_oja_rule(
         q=q.clone(),
         k=k.clone(),
@@ -365,11 +361,11 @@ def test_chunk(
         output_final_state=True,
         initial_state=h0.clone(),
     )
-    
+
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
     q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
-    
+
     # breakpoint()
 
     assert_close('o', ref, tri, 0.005)
@@ -380,7 +376,6 @@ def test_chunk(
     assert_close('dv', ref_dv, tri_dv, 0.008)
     assert_close('db', ref_dbeta, tri_dbeta, 0.02)
     assert_close('dg', ref_dg, tri_dg, 0.005)
-    
 
 
 @pytest.mark.parametrize(
@@ -403,7 +398,7 @@ def test_chunk_varlen(
     H: int,
     D: int,
     mask_p: float,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:

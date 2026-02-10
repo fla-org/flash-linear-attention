@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -95,7 +93,7 @@ def fused_recurrent_oja_fwd_kernel(
         if USE_GV:
             b_gv = tl.load(p_gv).to(tl.float32)
             b_h *= exp(b_gv[None, :])
-        
+
         b_k = b_beta * (b_k - tl.sum(b_h * b_v[None, :], 1))
         b_h += b_k[:, None] * b_v
 
@@ -120,15 +118,15 @@ def fused_recurrent_oja_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    gv: Optional[torch.Tensor] = None,
-    beta: Optional[torch.Tensor] = None,
+    gv: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_q_l2norm: bool = False,
     use_k_l2norm: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     assert V <= 128
     HV = v.shape[2]
@@ -179,14 +177,14 @@ class FusedRecurrentFunction(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        gv: Optional[torch.Tensor] = None,
-        beta: Optional[torch.Tensor] = None,
+        gv: torch.Tensor | None = None,
+        beta: torch.Tensor | None = None,
         scale: float = None,
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
         use_q_l2norm: bool = False,
         use_k_l2norm: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         o, final_state = fused_recurrent_oja_fwd(
             q=q,
@@ -218,16 +216,16 @@ def fused_recurrent_gated_oja_rule(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    gv: Optional[torch.Tensor] = None,
-    beta: Optional[torch.Tensor] = None,
+    gv: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_q_l2norm: bool = False,
     use_k_l2norm: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     **kwargs,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
 
     if 'use_qk_l2norm_in_kernel' in kwargs and (not use_q_l2norm and not use_k_l2norm):
         use_q_l2norm = True

@@ -1,27 +1,22 @@
-# # -*- coding: utf-8 -*-
 # # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 import warnings
-from typing import Optional
 
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.gated_oja_rule.chunk_h import chunk_oja_bwd_dhu, chunk_oja_bwd_dvwg_h, chunk_oja_fwd_h
+from fla.ops.gated_oja_rule.chunk_kkt import chunk_scaled_dot_kkt_bwd_gk, chunk_scaled_dot_kkt_fwd
+from fla.ops.gated_oja_rule.chunk_o import (
+    chunk_oja_bwd_dA,
+    chunk_oja_bwd_dqk,
+    chunk_oja_bwd_dv_o,
+    chunk_oja_fwd_o,
+)
+from fla.ops.gated_oja_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
-from fla.ops.gated_oja_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
-from fla.ops.gated_oja_rule.chunk_kkt import chunk_scaled_dot_kkt_fwd, chunk_scaled_dot_kkt_bwd_gk
-from fla.ops.gated_oja_rule.chunk_h import (
-    chunk_oja_fwd_h, 
-    chunk_oja_bwd_dhu, 
-    chunk_oja_bwd_dvwg_h)
-from fla.ops.gated_oja_rule.chunk_o import (
-    chunk_oja_fwd_o, 
-    chunk_oja_bwd_dA, 
-    chunk_oja_bwd_dqk, 
-    chunk_oja_bwd_dv_o, 
-    )
 
 def chunk_oja_fwd(
     q: torch.Tensor,
@@ -33,8 +28,8 @@ def chunk_oja_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     g_cumsum: bool = True,
-    cu_seqlens: Optional[torch.LongTensor] = None
-):  
+    cu_seqlens: torch.LongTensor | None = None
+):
     if g_cumsum:
         gv = chunk_local_cumsum(gv, chunk_size=64, cu_seqlens=cu_seqlens)
     A = chunk_scaled_dot_kkt_fwd(
@@ -90,9 +85,9 @@ def chunk_oja_bwd(
     initial_state: torch.Tensor,
     do: torch.Tensor,
     dht: torch.Tensor,
-    dgk: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-):  
+    dgk: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+):
     w, u, vg = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -111,7 +106,7 @@ def chunk_oja_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
     )
-    
+
     dAqk = chunk_oja_bwd_dA(
         v=v,
         gv=gv,
@@ -185,7 +180,7 @@ def chunk_oja_bwd(
         dA=dAvv,
         cu_seqlens=cu_seqlens,
     )
-    
+
     dv = dv.add_(dv1).add_(dv2)
     db = db.add_(db2)
     dgv = dgv_last.add_(chunk_local_cumsum(dgv1.add_(dgv2).add_(dgv3), chunk_size=64, reverse=True, cu_seqlens=cu_seqlens))
@@ -207,7 +202,7 @@ class ChunkOJAFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
         use_q_l2norm: bool = False,
         use_k_l2norm: bool = False,
     ):
@@ -277,7 +272,7 @@ def chunk_gated_oja_rule(
     output_final_state: bool = False,
     use_q_l2norm: bool = False,
     use_k_l2norm: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     **kwargs,
 ):
     if 'head_first' in kwargs:

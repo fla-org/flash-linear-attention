@@ -1,14 +1,11 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
 
-
-from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
+from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem
 
@@ -60,7 +57,7 @@ def recompute_w_u_fwd_kernel(
 
     p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_A = tl.load(p_A, boundary_check=(0, 1))
-    
+
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_w = tl.make_block_ptr(w + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -162,21 +159,21 @@ def prepare_wy_repr_bwd_kernel(
         b_dv = b_dvbg * b_gv_exp * b_b[:, None]
         b_db += tl.sum(b_dvbg * b_v * b_gv_exp, 1)
         b_dgv = b_dvbg * b_vbg
-        
+
         p_dgv = tl.make_block_ptr(dgv + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         tl.store(p_dgv, b_dgv.to(p_dgv.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-        
+
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_du = tl.make_block_ptr(du + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         # [BT, BK]
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_kb = (b_k * b_b[:, None]).to(b_k.dtype) # BT BK
-        b_du = tl.load(p_du, boundary_check=(0, 1)) # BT BK
-        b_dA += tl.dot(b_du, tl.trans(b_kb)) # BT BT
-        b_dkb = tl.dot(b_A, b_du) # BT BK
+        b_kb = (b_k * b_b[:, None]).to(b_k.dtype)  # BT BK
+        b_du = tl.load(p_du, boundary_check=(0, 1))  # BT BK
+        b_dA += tl.dot(b_du, tl.trans(b_kb))  # BT BT
+        b_dkb = tl.dot(b_A, b_du)  # BT BK
         b_dk = b_dkb * b_b[:, None]
         b_db += tl.sum(b_dkb * b_k, 1)
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -189,7 +186,7 @@ def prepare_wy_repr_bwd_kernel(
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
 
     b_dA = tl.where(m_A, -b_dA, 0)
-    
+
     # if USE_GV:
     p_dA = tl.make_block_ptr(dA + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
@@ -201,9 +198,9 @@ def recompute_w_u_fwd(
     v: torch.Tensor,
     beta: torch.Tensor,
     A: torch.Tensor,
-    gv: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    gv: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
     BK = 64
@@ -245,8 +242,8 @@ def prepare_wy_repr_bwd(
     dw: torch.Tensor,
     du: torch.Tensor,
     gv: torch.Tensor = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = 64
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
@@ -261,7 +258,7 @@ def prepare_wy_repr_bwd(
     dgv = torch.empty_like(gv, dtype=torch.float)
     dA = torch.empty_like(A, dtype=torch.float)
     db = torch.empty_like(beta, dtype=torch.float)
-        
+
     prepare_wy_repr_bwd_kernel[(NT, B * H)](
         k=k,
         v=v,
@@ -285,5 +282,5 @@ def prepare_wy_repr_bwd(
         BK=BK,
         BV=BV,
     )
-    
+
     return dk, dv, db, dgv, dA

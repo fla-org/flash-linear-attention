@@ -1,4 +1,3 @@
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -7,12 +6,10 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.utils import check_shared_mem, is_nvidia_hopper
-from fla.ops.utils.cumsum import chunk_local_cumsum
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
-exp = tl.exp
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
@@ -98,7 +95,6 @@ def chunk_oja_fwd_inter(
         tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
 
-
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
@@ -177,10 +173,8 @@ def chunk_oja_fwd_intra(
     p_o = tl.make_block_ptr(o + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))
     b_o += tl.load(p_o, boundary_check=(0, 1))
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-    
-    
-    
-    
+
+
 def chunk_oja_fwd_o(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -188,9 +182,9 @@ def chunk_oja_fwd_o(
     gv: torch.Tensor,
     h: torch.Tensor,
     scale: float = 1.,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BC = min(16, BT)
@@ -245,9 +239,6 @@ def chunk_oja_fwd_o(
         num_stages=2
     )
     return A, o
-
-
-
 
 
 @triton.heuristics({
@@ -341,12 +332,9 @@ def chunk_oja_bwd_kernel_dA(
             p_v += H*V
             p_gv += H*V
         b_dA = tl.where(m_dA, b_dA, 0.)
-        
+
     p_dA = tl.make_block_ptr(dA+((i_v*all+bos)*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t*BT+i_i*BC, i_j*BC), (BC, BC), (1, 0))
     tl.store(p_dA, b_dA.to(dA.dtype.element_ty), boundary_check=(0, 1))
-    
-    
-
 
 
 def chunk_oja_bwd_dA(
@@ -354,7 +342,7 @@ def chunk_oja_bwd_dA(
     gv: torch.Tensor,
     do: torch.Tensor,
     scale: float = 1.,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64
 ):
     B, T, H, V = v.shape
@@ -390,10 +378,6 @@ def chunk_oja_bwd_dA(
     dA = dA.sum(0, dtype=dA.dtype)
 
     return dA
-
-
-
-
 
 
 @triton.heuristics({
@@ -448,20 +432,20 @@ def chunk_oja_bwd_kernel_dqk(
 
     o_i = tl.arange(0, BT)
     m_s = o_i[:, None] >= o_i[None, :]
-    
+
     # [B, T, H, BT]
     p_q = tl.make_block_ptr(q + (bos*H+i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k + (bos*H+i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_A = tl.make_block_ptr(A + ((i_k*all+bos)*H+i_h)*BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_k = tl.load(p_k, boundary_check=(0, 1))
-    
+
     b_A = tl.dot((b_q * scale).to(b_q.dtype), tl.trans(b_k))
     b_A = tl.where(m_s, b_A, 0.)
     tl.store(p_A, b_A.to(p_A.dtype.element_ty), boundary_check=(0, 1))
 
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
-    
+
     # 先计算do对应的dq
     for i_v in range(tl.cdiv(V, BV)):
         p_h = tl.make_block_ptr(h + (i_tg * H + i_h) * K*V, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
@@ -472,7 +456,7 @@ def chunk_oja_bwd_kernel_dqk(
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
         b_do = (b_do * exp(b_gv) * scale).to(b_do.dtype)
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
-        
+
     # 接着计算dA对应的dq, dk
     p_dA = tl.make_block_ptr(dA + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     p_dq = tl.make_block_ptr(dq + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -485,9 +469,7 @@ def chunk_oja_bwd_kernel_dqk(
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    
-    
-    
+
 
 def chunk_oja_bwd_dqk(
     q: torch.Tensor,
@@ -497,7 +479,7 @@ def chunk_oja_bwd_dqk(
     dA: torch.Tensor,
     do: torch.Tensor,
     scale: float = 1.,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64
 ):
     B, T, H, K, V = *q.shape, gv.shape[-1]
@@ -538,11 +520,8 @@ def chunk_oja_bwd_dqk(
     )
 
     A = A.sum(0, dtype=A.dtype)
-    
+
     return A, dq, dk
-
-
-
 
 
 @triton.heuristics({
@@ -640,8 +619,6 @@ def chunk_oja_bwd_kernel_dv_o(
     tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 
 
-
-
 def chunk_oja_bwd_dv_o(
     v: torch.Tensor,
     gv: torch.Tensor,
@@ -649,7 +626,7 @@ def chunk_oja_bwd_dv_o(
     A: torch.Tensor,
     dv: torch.Tensor,
     do: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64
 ):
     B, T, H, V = v.shape
@@ -687,5 +664,3 @@ def chunk_oja_bwd_dv_o(
         num_stages=2
     )
     return dv2, dgv
-
-

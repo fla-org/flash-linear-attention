@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -383,10 +381,10 @@ def chunk_scaled_dot_kkt_bwd_kernel_gk(
 
 def chunk_scaled_dot_kkt_fwd(
     k: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    gk: Optional[torch.Tensor] = None,
-    beta: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:
@@ -476,7 +474,7 @@ def chunk_scaled_dot_kkt_bwd_gk(
     g: torch.Tensor,
     beta: torch.Tensor,
     dA: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64
 ):
     B, T, H, K = k.shape

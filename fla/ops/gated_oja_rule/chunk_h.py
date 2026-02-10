@@ -1,4 +1,3 @@
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -6,8 +5,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
-from fla.utils import is_nvidia_hopper, use_cuda_graph
-from fla.utils import check_shared_mem
+from fla.utils import check_shared_mem, is_nvidia_hopper, use_cuda_graph
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
@@ -53,7 +51,7 @@ def chunk_oja_fwd_kernel_h_blockdim64(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_KEY: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-):  
+):
     # (triton.cdiv(K, meta['BK']), N*H)
     i_k, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -90,7 +88,6 @@ def chunk_oja_fwd_kernel_h_blockdim64(
         h0 = h0 + i_nh * K*V
     if STORE_FINAL_STATE:
         ht = ht + i_nh * K*V
-    BV=64
 
     # load initial state
     if USE_INITIAL_STATE:
@@ -122,7 +119,7 @@ def chunk_oja_fwd_kernel_h_blockdim64(
 
         p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0))
         b_w = tl.load(p_w, boundary_check=(0, 1))
-        b_k = tl.dot(b_w, tl.trans(b_h1).to(b_w.dtype)) # BT BK
+        b_k = tl.dot(b_w, tl.trans(b_h1).to(b_w.dtype))  # BT BK
         if V > 64:
             p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 64), (BT, 64), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
@@ -162,10 +159,10 @@ def chunk_oja_fwd_kernel_h_blockdim64(
                 b_gk_last4 = tl.load(gv + (bos + last_idx) * H*V + i_h * V + o_v4, mask=(o_v4 < K), other=0.)
                 b_h4 *= exp(b_gk_last4)[None, :]
 
-        b_k = b_k.to(v.dtype.element_ty) # BT BK
+        b_k = b_k.to(v.dtype.element_ty)  # BT BK
 
         p_v = tl.make_block_ptr(v, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0))
-        b_v = tl.load(p_v, boundary_check=(0, 1)) # BT BV
+        b_v = tl.load(p_v, boundary_check=(0, 1))  # BT BV
         b_h1 += tl.dot(tl.trans(b_k), b_v)
         if V > 64:
             p_v = tl.make_block_ptr(v, (T, V), (stride_v, 1), (i_t * BT, 64), (BT, 64), (1, 0))
@@ -198,13 +195,13 @@ def chunk_oja_fwd_h(
     v: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    gv: Optional[torch.Tensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    gv: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_key: bool = True,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, V, K = *v.shape, u.shape[-1]
     BT = chunk_size
 
@@ -239,9 +236,6 @@ def chunk_oja_fwd_h(
         BT=BT
     )
     return h, k_new, final_state
-
-
-
 
 
 @triton.heuristics({
@@ -327,7 +321,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         dht += i_nh * K*V
 
     if USE_FINAL_STATE_GRADIENT:
-        p_dht1 = tl.make_block_ptr(dht, (K, V), (V, 1), (i_k * BK, 0), (BK, 64), (1, 0)) # [BK, BV]
+        p_dht1 = tl.make_block_ptr(dht, (K, V), (V, 1), (i_k * BK, 0), (BK, 64), (1, 0))  # [BK, BV]
         b_dh1 += tl.load(p_dht1, boundary_check=(0, 1))
         if V > 64:
             p_dht2 = tl.make_block_ptr(dht, (K, V), (V, 1), (i_k * BK, 64), (BK, 64), (1, 0))
@@ -355,17 +349,17 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         last_idx = min((i_t + 1) * BT, T) - 1
 
         # Update dk_new, 按K切分
-        p_dk = tl.make_block_ptr(dk, (T, K), (stride_k, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)) # [BT, BK]
-        p_dk2 = tl.make_block_ptr(dk2, (T, K), (stride_k, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)) # [BT, BK]
+        p_dk = tl.make_block_ptr(dk, (T, K), (stride_k, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))  # [BT, BK]
+        p_dk2 = tl.make_block_ptr(dk2, (T, K), (stride_k, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))  # [BT, BK]
 
         if V > 0:
             p_v = tl.make_block_ptr(vg, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0))
-            b_v = tl.load(p_v, boundary_check=(0, 1)) # [BT, BV]
-            b_dk = tl.dot(b_v, tl.trans(b_dh1).to(b_v.dtype)) # [BT, BV] @ [BV, BK] -> [BT, BK]
+            b_v = tl.load(p_v, boundary_check=(0, 1))  # [BT, BV]
+            b_dk = tl.dot(b_v, tl.trans(b_dh1).to(b_v.dtype))  # [BT, BV] @ [BV, BK] -> [BT, BK]
 
         if V > 64:
             p_v = tl.make_block_ptr(vg, (T, V), (stride_v, 1), (i_t * BT, 64), (BT, 64), (1, 0))
-            b_v = tl.load(p_v, boundary_check=(0, 1))   
+            b_v = tl.load(p_v, boundary_check=(0, 1))
             b_dk += tl.dot(b_v, tl.trans(b_dh2).to(b_v.dtype))
 
         if V > 128:
@@ -381,33 +375,33 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         b_dk += tl.load(p_dk, boundary_check=(0, 1))
 
         tl.store(p_dk2, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-        
-        
+
         # Update dh, 按照K切分，收集所有V维度，q一次就好，wdo要收集所有
-        
-        p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (i_k * BK, i_t * BT), (BK, BT), (0, 1)) # [BK, BT]
-        b_q = tl.load(p_q, boundary_check=(0, 1))   
-        
+
+        p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (i_k * BK, i_t * BT), (BK, BT), (0, 1))  # [BK, BT]
+        b_q = tl.load(p_q, boundary_check=(0, 1))
+
         if V > 0:
-            p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0)) # [BT, BV]
+            p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0))  # [BT, BV]
             b_do = tl.load(p_do, boundary_check=(0, 1))
-            p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0)) # [BT, BV]
+            p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0))  # [BT, BV]
             b_w = tl.load(p_w, boundary_check=(0, 1))
-            p_gv = tl.make_block_ptr(gv, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0)) # [BT, BV]
+            p_gv = tl.make_block_ptr(gv, (T, V), (stride_v, 1), (i_t * BT, 0), (BT, 64), (1, 0))  # [BT, BV]
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
             if USE_GV:
                 o_v1 = tl.arange(0, 64)
                 b_gv_last1 = tl.load(gv + last_idx * H*V + o_v1, mask=(o_v1 < V), other=0.)
                 b_dh1 *= exp(b_gv_last1[None, :])
                 b_do *= exp(b_gv)
-            b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(tl.trans(b_dk).to(b_w.dtype), b_w) # [BK, BT] @ [BT, BV] - [BK, BT] @ [BT, BV]
+            b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - \
+                tl.dot(tl.trans(b_dk).to(b_w.dtype), b_w)  # [BK, BT] @ [BT, BV] - [BK, BT] @ [BT, BV]
 
         if V > 64:
             p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, 64), (BT, 64), (1, 0))
             b_do = tl.load(p_do, boundary_check=(0, 1))
-            p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 64), (BT, 64), (1, 0)) # [BT, BV]
+            p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 64), (BT, 64), (1, 0))  # [BT, BV]
             b_w = tl.load(p_w, boundary_check=(0, 1))
-            p_gv = tl.make_block_ptr(gv, (T, V), (stride_v, 1), (i_t * BT, 64), (BT, 64), (1, 0)) # [BT, BV]
+            p_gv = tl.make_block_ptr(gv, (T, V), (stride_v, 1), (i_t * BT, 64), (BT, 64), (1, 0))  # [BT, BV]
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
             if USE_GV:
                 o_v2 = 64 + o_v1
@@ -419,9 +413,9 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         if V > 128:
             p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, 128), (BT, 64), (1, 0))
             b_do = tl.load(p_do, boundary_check=(0, 1))
-            p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 128), (BT, 64), (1, 0)) # [BT, BV]
+            p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 128), (BT, 64), (1, 0))  # [BT, BV]
             b_w = tl.load(p_w, boundary_check=(0, 1))
-            p_gv = tl.make_block_ptr(gv, (T, V), (stride_v, 1), (i_t * BT, 128), (BT, 64), (1, 0)) # [BT, BV]
+            p_gv = tl.make_block_ptr(gv, (T, V), (stride_v, 1), (i_t * BT, 128), (BT, 64), (1, 0))  # [BT, BV]
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
             if USE_GV:
                 o_v3 = 128 + o_v1
@@ -433,9 +427,9 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         if V > 192:
             p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, 192), (BT, 64), (1, 0))
             b_do = tl.load(p_do, boundary_check=(0, 1))
-            p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 192), (BT, 64), (1, 0)) # [BT, BV]
+            p_w = tl.make_block_ptr(w, (T, V), (stride_v, 1), (i_t * BT, 192), (BT, 64), (1, 0))  # [BT, BV]
             b_w = tl.load(p_w, boundary_check=(0, 1))
-            p_gv = tl.make_block_ptr(gv, (T, V), (stride_v, 1), (i_t * BT, 192), (BT, 64), (1, 0)) # [BT, BV]
+            p_gv = tl.make_block_ptr(gv, (T, V), (stride_v, 1), (i_t * BT, 192), (BT, 64), (1, 0))  # [BT, BV]
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
             if USE_GV:
                 o_v4 = 192 + o_v1
@@ -456,7 +450,7 @@ def chunk_oja_bwd_kernel_dhu_blockdim64(
         if V > 192:
             p_dh3 = tl.make_block_ptr(dh0, (K, V), (V, 1), (i_k * BK, 192), (BK, 64), (1, 0))
             tl.store(p_dh3, b_dh4.to(p_dh3.dtype.element_ty), boundary_check=(0, 1))
-        
+
 
 def chunk_oja_bwd_dhu(
     q: torch.Tensor,
@@ -464,14 +458,14 @@ def chunk_oja_bwd_dhu(
     w: torch.Tensor,
     do: torch.Tensor,
     dk: torch.Tensor,
-    gv: Optional[torch.Tensor] = None,
-    h0: Optional[torch.Tensor] = None,
-    dht: Optional[torch.Tensor] = None,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    gv: torch.Tensor | None = None,
+    h0: torch.Tensor | None = None,
+    dht: torch.Tensor | None = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     states_in_fp32: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *q.shape, do.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     BT = 64
@@ -509,11 +503,6 @@ def chunk_oja_bwd_dhu(
         BT=BT,
     )
     return dh, dh0, dk2
-
-
-
-
-
 
 
 @triton.heuristics({
@@ -648,13 +637,8 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
 
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    
-    
 
-    
-    
-    
-    
+
 @triton.heuristics({
     'USE_GV': lambda args: args['gv'] is not None,
     'HAVE_GK': lambda args: args['dgk'] is not None,
@@ -729,46 +713,44 @@ def chunk_oja_bwd_kernel_dvwg_h(
         p_gv = tl.make_block_ptr(gv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_gn = tl.load(p_gn, mask=m_v, other=0)
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
-        
+
     for i_k in range(tl.cdiv(K, BK)):
         p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_h = tl.make_block_ptr(h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
         p_dh = tl.make_block_ptr(dh, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_k = tl.load(p_k, boundary_check=(0, 1)) # BT BK
-        b_dk = tl.load(p_dk, boundary_check=(0, 1)) # BT BK
-        b_h = tl.load(p_h, boundary_check=(0, 1)) # BK BV
-        b_dh = tl.load(p_dh, boundary_check=(0, 1)) # BK BV
+        b_k = tl.load(p_k, boundary_check=(0, 1))  # BT BK
+        b_dk = tl.load(p_dk, boundary_check=(0, 1))  # BT BK
+        b_h = tl.load(p_h, boundary_check=(0, 1))  # BK BV
+        b_dh = tl.load(p_dh, boundary_check=(0, 1))  # BK BV
 
-        b_dvg += tl.dot(b_k, b_dh.to(b_k.dtype)) # BT BK @ BK BV -> BT BV
-        b_dw += tl.dot(b_dk.to(b_k.dtype), b_h.to(b_k.dtype)) # BT BK @ BK BV -> BT BV
+        b_dvg += tl.dot(b_k, b_dh.to(b_k.dtype))  # BT BK @ BK BV -> BT BV
+        b_dw += tl.dot(b_dk.to(b_k.dtype), b_h.to(b_k.dtype))  # BT BK @ BK BV -> BT BV
         b_dgv_last += tl.sum((b_h * b_dh) * exp(b_gn), axis=0)
 
     if USE_GV:
         b_dv = b_dvg * exp(b_gn[None, :] - b_gv)
-    
+
     p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_dw = tl.make_block_ptr(dw, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_dgv_last = tl.make_block_ptr(dgv_last, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     b_v = tl.load(p_v, boundary_check=(0, 1))
-    
+
     b_dgv_last += tl.sum(b_dv * b_v, axis=0)
-    
+
     # 留给GSA2的接口
     if HAVE_GK:
         dgk += (bos * H + i_h) * V
         p_dgk = tl.make_block_ptr(dgk, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_dgk = tl.load(p_dgk, boundary_check=(0, 1))
         b_dgv_last = b_dgk + b_dgv_last[None, :]
-    else:   
+    else:
         b_dgv_last = tl.zeros([BT, BV], dtype=tl.float32) + b_dgv_last[None, :]
-    
+
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dgv_last, b_dgv_last.to(p_dgv_last.dtype.element_ty), boundary_check=(0, 1))
-    
-      
 
 
 def chunk_oja_bwd_dvwg_h(
@@ -777,11 +759,11 @@ def chunk_oja_bwd_dvwg_h(
     h: torch.Tensor,
     dh: torch.Tensor,
     dk: torch.Tensor,
-    gv: Optional[torch.Tensor] = None,
-    dgk: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    gv: torch.Tensor | None = None,
+    dgk: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
