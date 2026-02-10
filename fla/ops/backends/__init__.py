@@ -133,8 +133,10 @@ def dispatch(operation: str):
 
                 log_key = f"{operation}:{func_name}:{be.backend_type}"
                 if log_key not in registry._logged:
-                    registry._logged.add(log_key)
-                    logger.info(f"[FLA Backend] {operation}.{func_name} -> {be.backend_type}")
+                    with registry._lock:
+                        if log_key not in registry._logged:
+                            registry._logged.add(log_key)
+                            logger.info(f"[FLA Backend] {operation}.{func_name} -> {be.backend_type}")
 
                 return result
 
