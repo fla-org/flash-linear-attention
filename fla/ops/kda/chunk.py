@@ -143,8 +143,8 @@ def chunk_kda(
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
@@ -283,7 +283,14 @@ def chunk_kda(
         assert "A_log" in kwargs, "A_log must be provided when use_gate_in_kernel=True."
         A_log, dt_bias = kwargs["A_log"], kwargs.get("dt_bias")
 
+    if safe_gate:
+        if lower_bound is None:
+            raise ValueError("`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`.")
+        if not (-5 <= lower_bound < 0):
+            raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
+
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
+    assert k.shape[-1] <= 256, "Currently we only support key headdim <=256 for KDA :-("
     assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
 
