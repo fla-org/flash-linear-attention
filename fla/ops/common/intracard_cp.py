@@ -99,15 +99,11 @@ def prepare_subseq_cu_seqlens(
     subseq_len: int,
     chunk_size: int = 64,
     max_splits: int = 32,
-) -> tuple[torch.Tensor, SplitSeqInfo, int]:
+) -> tuple[torch.Tensor, SplitSeqInfo | bool, int]:
     """Insert subseq split points into original cu_seqlens."""
     N = len(cu_seqlens_cpu) - 1
     if N == 0:
-        return cu_seqlens_cpu.clone(), SplitSeqInfo(
-            torch.tensor([], dtype=torch.int32),
-            torch.tensor([], dtype=torch.int32),
-            torch.tensor([], dtype=torch.int32)
-        ), 0
+        return cu_seqlens_cpu, False, 0
 
     seq_starts = cu_seqlens_cpu[:-1]
     seq_ends = cu_seqlens_cpu[1:]
@@ -139,6 +135,9 @@ def prepare_subseq_cu_seqlens(
         start_subseq_idx=cumsum_offset[split_indices].cpu(),
         num_subseqs=num_ss[split_indices].cpu(),
     )
+
+    if not split_info:
+        return cu_seqlens_cpu, False, 0
 
     total_subseqs = int(num_ss.sum().item())
 
@@ -285,13 +284,12 @@ def intracard_fwd_h(
     num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     subseq_len = compute_subseq_len(max_seq_len, num_sms, H, chunk_size)
 
-    cu_seqlens_subseq, split_info, total_subseqs = prepare_subseq_cu_seqlens(
-        cu_seqlens_cpu, subseq_len, chunk_size, max_splits=max_splits
-    )
-
-    N_orig = len(cu_seqlens_cpu) - 1
-
-    if not split_info:
+    early_return = (seq_lens < 2 * subseq_len).all()
+    if not early_return:
+        cu_seqlens_subseq, split_info, total_subseqs = prepare_subseq_cu_seqlens(
+            cu_seqlens_cpu, subseq_len, chunk_size, max_splits=max_splits
+        )
+    if early_return or not split_info:
         return _raw_chunk_gated_delta_rule_fwd_h(
             k=k, w=w, u=u, g=g, gk=gk,
             initial_state=initial_state,
@@ -303,7 +301,8 @@ def intracard_fwd_h(
             use_exp2=use_exp2,
         )
 
-    cu_seqlens_subseq_gpu = cu_seqlens_subseq.to(device, non_blocking=True)
+    N_orig = len(cu_seqlens_cpu) - 1
+    cu_seqlens_subseq_gpu = cu_seqlens_subseq.to(device)
 
     starts = split_info.start_subseq_idx
     num_ss_list = split_info.num_subseqs
