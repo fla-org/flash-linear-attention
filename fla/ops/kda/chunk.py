@@ -194,6 +194,18 @@ def chunk_kda(
         cu_seqlens_cpu (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        safe_gate (bool):
+            Whether the kernel can assume the input gate values `g` are in a safe range.
+            When `True`, the kernel can use M=16 TensorCore acceleration.
+            The safe range is approximately [-5, 0). Default: `False`.
+        lower_bound (Optional[float]):
+            Lower bound for the forget gate activation function when `use_gate_in_kernel=True`.
+            This parameter modifies the internal forget gate activation and is recommended
+            to be set to `-5` when `safe_gate` is enabled. Default: `None`.
+        disable_recompute (bool):
+            Whether to disable gradient recomputation in the kernel. When `True`, the kernel
+            will save all intermediate activations for backward pass, which is beneficial
+            for training small models at the cost of increased memory usage. Default: `False`.
         return_intermediate_states (bool):
             If True, returns intermediate state `h` for inference scenarios (e.g., vLLM).
             Must be used within `torch.inference_mode()` and will return a 3-tuple instead of 2-tuple.
