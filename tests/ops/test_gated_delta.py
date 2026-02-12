@@ -352,3 +352,78 @@ def test_chunk_varlen(
     assert_close('db', ref_dbeta, tri_dbeta, 0.015)
     assert_close('dg', ref_dg, tri_dg, 0.015)
     assert_close('dh0', ref_dh0, tri_dh0, 0.007)
+
+
+@pytest.mark.parametrize(
+    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (4, 60, 0, [0, 8192], torch.float16),
+            (4, 60, 0, [0, 15], torch.float16),
+            (4, 64, 0, [0, 256, 500, 1000], torch.float16),
+            (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
+            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
+        ]
+    ],
+)
+@pytest.mark.skipif(
+    os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
+)
+@torch.inference_mode()
+def test_chunk_varlen_prefill(
+    H: int,
+    D: int,
+    mask_p: float,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+):
+    if IS_INTEL_ALCHEMIST and D > 128:
+        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    # randomly split the sequence into N segments
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    # seq-first required for inputs with variable lengths
+    q = torch.randn((1, T, H, D), dtype=dtype).to(device)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype).to(device)
+    v = torch.randn((1, T, H, D), dtype=dtype).to(device)
+    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype)).to(device)
+    g = g * (torch.rand_like(g) > mask_p)
+    beta = torch.rand(1, T, H, dtype=dtype).sigmoid().to(device)
+    h0 = torch.randn((N, H, D, D), dtype=dtype).to(device)
+
+    tri, tri_ht = chunk_gated_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        beta=beta.clone(),
+        g=g.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+    )
+
+    ref = []
+    ref_ht = []
+    for i in range(N):
+        ref_i, ref_ht_i = recurrent_gated_delta_rule_ref(
+            q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            beta=beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            initial_state=h0[i],
+            output_final_state=True,
+        )
+        ref.append(ref_i)
+        ref_ht.append(ref_ht_i)
+    ref = torch.cat(ref, 1)
+    ref_ht = torch.cat(ref_ht, 0)
+
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
