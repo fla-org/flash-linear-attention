@@ -60,7 +60,7 @@ def _raw_chunk_gated_delta_rule_fwd_h(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     h = k.new_empty(B, NT, H, K, V)
-    final_state = k.new_empty(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    final_state = k.new_zeros(N, H, K, V, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u) if save_new_value else None
 
     def grid(meta):

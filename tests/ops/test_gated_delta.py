@@ -397,8 +397,6 @@ def test_chunk_varlen_prefill(
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=dtype)
 
-    q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
-
     tri, tri_ht = chunk_gated_delta_rule(
         q=q.clone(),
         k=k.clone(),

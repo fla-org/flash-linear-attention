@@ -566,10 +566,6 @@ def test_chunk_varlen_prefill(
     beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn((N, H, D, D), dtype=torch.float32)
 
-    q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, g, beta, h0))
-    if use_gate_in_kernel:
-        A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(), (A_log, dt_bias))
-
     tri, tri_ht = chunk_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=k.clone(),  # k is already normalized
