@@ -445,12 +445,10 @@ def intracard_fwd_h(
         initial_state=initial_state,
     )
 
-    initial_state_expanded = k.new_empty(total_subseqs, H, K, V, dtype=torch.float32)
+    initial_state_expanded = k.new_zeros(total_subseqs, H, K, V, dtype=torch.float32)
 
     if initial_state is not None:
         initial_state_expanded[first_subseq_indices] = initial_state
-    else:
-        initial_state_expanded[first_subseq_indices] = 0
 
     if initial_states_merge is not None and num_non_first > 0:
         initial_state_expanded[non_first_indices] = initial_states_merge
