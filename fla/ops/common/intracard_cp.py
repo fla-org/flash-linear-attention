@@ -291,13 +291,12 @@ def _precompute_intracard_indices(
     split_info: SplitSeqInfo,
     cu_seqlens_subseq_values: list[int],
     N_orig: int,
-) -> tuple[list[int], int, list[int], list[int], list[int], list[int], int, list[int], list[int]]:
+) -> tuple[list[int], int, list[int], list[int], list[int], int, list[int], list[int]]:
     """Pre-compute all derived indices using pure Python loops.
 
     Returns:
         cu_seqlens_split_values: flattened cu_seqlens boundaries for split seqs (for pre_scan)
         S_split_total: total number of sub-sequences from splits
-        num_subseqs_per_seq: [N_orig] number of sub-sequences per original sequence
         non_first_indices: indices for scattering merge results into initial_state_expanded
         first_subseq_indices: indices of first sub-sequence for each original sequence
         last_subseq_indices: indices of last sub-sequence for each original sequence
@@ -352,7 +351,6 @@ def _precompute_intracard_indices(
     return (
         cu_seqlens_split_values,
         S_split_total,
-        num_subseqs_per_seq,
         non_first_indices,
         first_subseq_indices,
         last_subseq_indices,
@@ -415,7 +413,6 @@ def intracard_fwd_h(
     (
         cu_seqlens_split_values,
         S_split_total,
-        num_subseqs_per_seq,
         non_first_indices,
         first_subseq_indices,
         last_subseq_indices,
