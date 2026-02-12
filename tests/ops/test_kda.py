@@ -547,13 +547,13 @@ def test_chunk_varlen_prefill(
     N = len(cu_seqlens) - 1
 
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype)
-    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((1, T, H, D), dtype=dtype)
-    g = torch.randn(1, T, H, D, dtype=torch.float if not use_gate_in_kernel else dtype)
+    q = torch.randn((1, T, H, D), dtype=dtype).to(device)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype).to(device)
+    v = torch.randn((1, T, H, D), dtype=dtype).to(device)
+    g = torch.randn(1, T, H, D, dtype=torch.float if not use_gate_in_kernel else dtype).to(device)
     if use_gate_in_kernel:
-        A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32, device=device).uniform_(1, 16))
-        dt_bias = torch.randn(H * D, dtype=torch.float32, device=device)
+        A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32, device=device).uniform_(1, 16)).to(device)
+        dt_bias = torch.randn(H * D, dtype=torch.float32, device=device).to(device)
     else:
         g = F.logsigmoid(g)
         g = g * (torch.rand_like(g) > mask_p)
@@ -563,8 +563,8 @@ def test_chunk_varlen_prefill(
         assert use_gate_in_kernel is False
         g = g.clamp(-5, 0)
 
-    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=torch.float32)
+    beta = torch.rand(1, T, H, dtype=dtype).sigmoid().to(device)
+    h0 = torch.randn((N, H, D, D), dtype=torch.float32).to(device)
 
     tri, tri_ht = chunk_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),

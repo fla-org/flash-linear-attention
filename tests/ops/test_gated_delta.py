@@ -389,13 +389,13 @@ def test_chunk_varlen_prefill(
     N = len(cu_seqlens) - 1
 
     # seq-first required for inputs with variable lengths
-    q = torch.randn((1, T, H, D), dtype=dtype)
-    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((1, T, H, D), dtype=dtype)
-    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
+    q = torch.randn((1, T, H, D), dtype=dtype).to(device)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype).to(device)
+    v = torch.randn((1, T, H, D), dtype=dtype).to(device)
+    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype)).to(device)
     g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.rand(1, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    beta = torch.rand(1, T, H, dtype=dtype).sigmoid().to(device)
+    h0 = torch.randn((N, H, D, D), dtype=dtype).to(device)
 
     tri, tri_ht = chunk_gated_delta_rule(
         q=q.clone(),
