@@ -111,8 +111,8 @@ def compute_subseq_len(
 
     # Floor: prevent subseq_len from being too small.
     # With chunk_size=64, MIN_SUBSEQ_CHUNKS=128 → subseq_len >= 8192 tokens,
-    # split threshold (2 * subseq_len) = 16384 tokens.
-    # Sequences shorter than 16k tokens won't be split.
+    # split threshold (3 * subseq_len) = 24576 tokens.
+    # Sequences shorter than it won't be split.
     MIN_SUBSEQ_CHUNKS = 128
     subseq_chunks = max(subseq_chunks, MIN_SUBSEQ_CHUNKS)
 
@@ -135,7 +135,7 @@ def prepare_subseq_cu_seqlens(
         return cu_seqlens_cpu, False, 0
 
     subseq_chunks = (subseq_len + chunk_size - 1) // chunk_size
-    four_subseq_len = 4 * subseq_len
+    threshold_subseq_len = 3 * subseq_len
 
     split_seq_ids: list[int] = []
     start_subseq_idxs: list[int] = []
@@ -151,7 +151,7 @@ def prepare_subseq_cu_seqlens(
         seq_len_i = seq_end - seq_start
         seq_chunks_i = (seq_len_i + chunk_size - 1) // chunk_size
 
-        if seq_len_i >= four_subseq_len:
+        if seq_len_i >= threshold_subseq_len:
             # This sequence needs splitting
             num_ss = min(max_splits, (seq_chunks_i + subseq_chunks - 1) // subseq_chunks)
             chunks_per = (seq_chunks_i + num_ss - 1) // num_ss
