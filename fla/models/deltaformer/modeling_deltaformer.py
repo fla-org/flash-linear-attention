@@ -221,8 +221,14 @@ class DeltaFormerForCausalLM(DeltaFormerPreTrainedModel, FLAGenerationMixin):
     def set_input_embeddings(self, value):
         self.model.set_input_embeddings(value)
 
-    def tie_weights(self):
-        self._tie_or_clone_weights(self.lm_head, self.get_input_embeddings())
+    def tie_weights(self, *args, **kwargs):
+        """Tie weights for the model. Accepts any arguments for transformers version compatibility."""
+        # Use _tie_or_clone_weights if available (older transformers), otherwise rely on parent class
+        if hasattr(self, '_tie_or_clone_weights'):
+            self._tie_or_clone_weights(self.lm_head, self.get_input_embeddings())
+        else:
+            # For newer transformers, rely on _tied_weights_keys
+            super().tie_weights(*args, **kwargs)
 
     def get_output_embeddings(self):
         return self.lm_head

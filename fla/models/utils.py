@@ -27,6 +27,7 @@ class FLALayer(CacheLayerMixin):
     def __init__(self):
         super().__init__()
         self.state = None
+        self._seen_tokens = 0
 
     def lazy_initialization(self, key_states: torch.Tensor):
         self.state = None
@@ -38,6 +39,7 @@ class FLALayer(CacheLayerMixin):
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,
+        offset: int = 1,
         cache_kwargs: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
@@ -59,8 +61,11 @@ class FLALayer(CacheLayerMixin):
         if recurrent_state is not None:
             self.state["recurrent_state"] = recurrent_state
 
-        if attn_state is not None:
-            input_size = attn_state[0].shape[1]
+        # Extract input_size from attn_state if available (before potential window truncation)
+        has_attn_state = attn_state and attn_state[0] is not None
+        input_size = attn_state[0].shape[1] if has_attn_state else 0
+
+        if has_attn_state:
             if self.state["attn_state"] is None:
                 if window_size is not None and input_size > window_size:
                     attn_state = tuple(x[:, -window_size:].contiguous() for x in attn_state)
@@ -92,11 +97,18 @@ class FLALayer(CacheLayerMixin):
                 self.device = state.device if isinstance(state, torch.Tensor) else state[0].device
                 break
 
+        # Track seen tokens from attn_state if available, otherwise use offset
+        if has_attn_state:
+            # Use input_size captured before potential window truncation
+            self._seen_tokens += input_size
+        else:
+            # For layers without attn_state (e.g., rwkv7, gated_deltanet), use offset
+            self._seen_tokens += offset
+
         return self.state
 
     def get_seq_length(self, cache_position=None) -> int:
-        # we do not store seen_tokens here
-        return 0
+        return self._seen_tokens
 
     def get_max_cache_shape(self) -> int:
         return -1
@@ -322,14 +334,14 @@ class FLACache(HFCacheBase):
         else:
             while len(self.layers) <= layer_idx:
                 self.layers.append(self.layer_class_to_replicate())
-        if layer_idx == 0:
-            self._seen_tokens += int(offset)
+        # Per-layer seen_tokens is now tracked in FLALayer.update()
 
         return self.layers[layer_idx].update(
             recurrent_state=recurrent_state,
             attn_state=attn_state,
             conv_state=conv_state,
             ffn_state=ffn_state,
+            offset=offset if offset is not None else 1,
             cache_kwargs=cache_kwargs,
         )
 
@@ -348,16 +360,15 @@ class FLACache(HFCacheBase):
     def get_seq_length(self, layer_idx: int | None = 0, cache_position=None) -> int:
         if len(self.layers) <= (layer_idx or 0):
             return 0
-        return self._seen_tokens
+        return self.layers[layer_idx or 0].get_seq_length()
 
     def get_max_cache_shape(self, layer_idx: int = 0) -> int:
         return -1
 
     def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
-        # Respect your global seen_tokens semantics
         # kv_length = past_seen + current_query_length
         query_len = int(cache_position.shape[0]) if cache_position is not None else 0
-        kv_length = int(self._seen_tokens) + query_len
+        kv_length = int(self.get_seq_length(layer_idx)) + query_len
         return kv_length, 0
 
     def to_legacy_cache(self) -> tuple[dict[str, Any], ...]:

@@ -223,6 +223,7 @@ def benchmark_all_kernels(B, T, H, K, V):
             USE_EXP2=True,
             IS_VARLEN=True,
             BLOCK_SIZE=BLOCK_SIZE,
+            MULTI_SEQS=False,
         )
 
     ms, min_ms, max_ms = triton.testing.do_bench(kernel_fwd_merged, quantiles=quantiles)
@@ -253,11 +254,17 @@ def benchmark_all_kernels(B, T, H, K, V):
             ag_hm=tensors["ag_hm"],
             pre_or_post_num_ranks=1,
             rank=1,
+            seq_offsets=None,
+            init_offsets=None,
+            h0_seq_ids=None,
+            h0=None,
             H=H,
             K=K,
             V=V,
             BK=BK,
             FORWARD=True,
+            INTRACARD_MODE=False,
+            NUM_SEQ_ENTRIES=0,
         )
 
     ms, min_ms, max_ms = triton.testing.do_bench(kernel_merge_fwd, quantiles=quantiles)
@@ -383,11 +390,17 @@ def benchmark_all_kernels(B, T, H, K, V):
             ag_hm=tensors["ag_dhm"],
             pre_or_post_num_ranks=1,
             rank=1,
+            seq_offsets=None,
+            init_offsets=None,
+            h0_seq_ids=None,
+            h0=None,
             H=H,
             K=K,
             V=V,
             BK=BK,
             FORWARD=False,
+            INTRACARD_MODE=False,
+            NUM_SEQ_ENTRIES=0,
         )
 
     ms, min_ms, max_ms = triton.testing.do_bench(kernel_merge_bwd, quantiles=quantiles)

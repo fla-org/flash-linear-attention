@@ -60,6 +60,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
             safe_gate=safe_gate,
             lower_bound=lower_bound,

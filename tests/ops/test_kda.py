@@ -516,6 +516,96 @@ def test_chunk_varlen(
 
 
 @pytest.mark.parametrize(
+    ("H", "D", "mask_p", "cu_seqlens", "dtype", "use_gate_in_kernel", "safe_gate", "disable_recompute"),
+    [
+        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}-safe_gate{}-disable_recompute{}".format(*test))
+        for test in [
+            (4, 60, 0.1, [0, 8192], torch.float16, True, False, False),
+            (4, 64, 0.9, [0, 256, 500, 1000], torch.float16, True, False, False),
+            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, False, False),
+            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, False, False),
+            (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False, True, True),
+        ]
+    ],
+)
+@torch.inference_mode()
+def test_chunk_varlen_prefill(
+    H: int,
+    D: int,
+    mask_p: float,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+    use_gate_in_kernel: bool,
+    safe_gate: bool,
+    disable_recompute: bool,
+):
+    torch.manual_seed(42)
+    # randomly split the sequence into N segments
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    cu_seqlens_cpu = cu_seqlens.cpu()
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    # seq-first required for inputs with variable lengths
+    q = torch.randn((1, T, H, D), dtype=dtype).to(device)
+    k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype).to(device)
+    v = torch.randn((1, T, H, D), dtype=dtype).to(device)
+    g = torch.randn(1, T, H, D, dtype=torch.float if not use_gate_in_kernel else dtype).to(device)
+    if use_gate_in_kernel:
+        A_log = torch.log(torch.randn(1, 1, H, 1, dtype=torch.float32, device=device).uniform_(1, 16)).to(device)
+        dt_bias = torch.randn(H * D, dtype=torch.float32, device=device).to(device)
+    else:
+        g = F.logsigmoid(g)
+        g = g * (torch.rand_like(g) > mask_p)
+    mask = torch.rand_like(g) > mask_p
+    g = g * mask + (~mask) * (-1000)
+    if safe_gate:
+        assert use_gate_in_kernel is False
+        g = g.clamp(-5, 0)
+
+    beta = torch.rand(1, T, H, dtype=dtype).sigmoid().to(device)
+    h0 = torch.randn((N, H, D, D), dtype=torch.float32).to(device)
+
+    tri, tri_ht = chunk_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=k.clone(),  # k is already normalized
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        A_log=(A_log.clone() if use_gate_in_kernel else None),
+        dt_bias=(dt_bias.clone() if use_gate_in_kernel else None),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        disable_recompute=disable_recompute
+    )
+
+    ref = []
+    ref_ht = []
+    for i in range(N):
+        ref_i, ref_ht_i = naive_recurrent_kda(
+            q=F.normalize(q[:, cu_seqlens[i]: cu_seqlens[i + 1]], p=2, dim=-1),
+            k=k[:, cu_seqlens[i]: cu_seqlens[i + 1]],  # k is already normalized
+            v=v[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            beta=beta[:, cu_seqlens[i]: cu_seqlens[i + 1]],
+            g=(naive_kda_gate(g[:, cu_seqlens[i]: cu_seqlens[i + 1]].to(torch.float), A_log.to(torch.float),
+               dt_bias.to(torch.float)) if use_gate_in_kernel else g[:, cu_seqlens[i]: cu_seqlens[i + 1]]),
+            initial_state=h0[i],
+            output_final_state=True,
+        )
+        ref.append(ref_i)
+        ref_ht.append(ref_ht_i)
+    ref = torch.cat(ref, 1)
+    ref_ht = torch.cat(ref_ht, 0)
+
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize(
     ("B", "T", "H", "D", "HAS_BIAS", "LOWER_BOUND"),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-bias{}-lowerbound{}".format(*test))
