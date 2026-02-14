@@ -94,7 +94,7 @@ class FLALayer(CacheLayerMixin):
                 break
 
         # Track seen tokens from attn_state if available
-        if attn_state is not None:
+        if attn_state and attn_state[0] is not None:
             self._seen_tokens += attn_state[0].shape[1]
 
         return self.state
@@ -351,7 +351,7 @@ class FLACache(HFCacheBase):
     def get_seq_length(self, layer_idx: int | None = 0, cache_position=None) -> int:
         if len(self.layers) <= (layer_idx or 0):
             return 0
-        return self.layers[layer_idx].get_seq_length()
+        return self.layers[layer_idx or 0].get_seq_length()
 
     def get_max_cache_shape(self, layer_idx: int = 0) -> int:
         return -1
