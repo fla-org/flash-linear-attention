@@ -27,6 +27,7 @@ class FLALayer(CacheLayerMixin):
     def __init__(self):
         super().__init__()
         self.state = None
+        self._seen_tokens = 0
 
     def lazy_initialization(self, key_states: torch.Tensor):
         self.state = None
@@ -92,11 +93,14 @@ class FLALayer(CacheLayerMixin):
                 self.device = state.device if isinstance(state, torch.Tensor) else state[0].device
                 break
 
+        # Track seen tokens from attn_state if available
+        if attn_state is not None:
+            self._seen_tokens += attn_state[0].shape[1]
+
         return self.state
 
     def get_seq_length(self, cache_position=None) -> int:
-        # we do not store seen_tokens here
-        return 0
+        return self._seen_tokens
 
     def get_max_cache_shape(self) -> int:
         return -1
@@ -322,8 +326,7 @@ class FLACache(HFCacheBase):
         else:
             while len(self.layers) <= layer_idx:
                 self.layers.append(self.layer_class_to_replicate())
-        if layer_idx == 0:
-            self._seen_tokens += int(offset)
+        # Per-layer seen_tokens is now tracked in FLALayer.update()
 
         return self.layers[layer_idx].update(
             recurrent_state=recurrent_state,
@@ -348,16 +351,15 @@ class FLACache(HFCacheBase):
     def get_seq_length(self, layer_idx: int | None = 0, cache_position=None) -> int:
         if len(self.layers) <= (layer_idx or 0):
             return 0
-        return self._seen_tokens
+        return self.layers[layer_idx].get_seq_length()
 
     def get_max_cache_shape(self, layer_idx: int = 0) -> int:
         return -1
 
     def get_mask_sizes(self, cache_position: torch.Tensor, layer_idx: int) -> tuple[int, int]:
-        # Respect your global seen_tokens semantics
         # kv_length = past_seen + current_query_length
         query_len = int(cache_position.shape[0]) if cache_position is not None else 0
-        kv_length = int(self._seen_tokens) + query_len
+        kv_length = int(self.get_seq_length(layer_idx)) + query_len
         return kv_length, 0
 
     def to_legacy_cache(self) -> tuple[dict[str, Any], ...]:
