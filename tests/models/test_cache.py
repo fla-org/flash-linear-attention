@@ -115,7 +115,8 @@ def test_cache_incremental_update(
 
 def test_cache_get_seq_length_nonexistent_layer():
     """
-    Test that get_seq_length returns 0 for non-existent layers.
+    Test that get_seq_length returns 0 for non-existent layers
+    and handles None layer_idx correctly for populated caches.
     """
     cache = FLACache()
 
@@ -123,3 +124,37 @@ def test_cache_get_seq_length_nonexistent_layer():
     assert cache.get_seq_length(0) == 0
     assert cache.get_seq_length(5) == 0
     assert cache.get_seq_length(None) == 0
+
+    # Populate the cache with one layer
+    key_states = torch.randn(1, 10, 4, 16, device=device)
+    value_states = torch.randn(1, 10, 4, 16, device=device)
+    cache.update(attn_state=(key_states, value_states), layer_idx=0)
+
+    # After populating, get_seq_length(None) should default to layer 0
+    assert cache.get_seq_length(None) == 10
+    assert cache.get_seq_length(0) == 10
+
+
+def test_cache_window_size_does_not_undercount():
+    """
+    Test that window_size truncation doesn't undercount sequence length.
+    When window_size is applied and input exceeds it, the full input size
+    should still be counted in _seen_tokens.
+    """
+    cache = FLACache()
+    batch_size, seq_len, num_heads, head_dim = 1, 100, 4, 16
+    window_size = 10
+
+    key_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
+    value_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
+
+    # Update with window_size smaller than seq_len
+    cache.update(
+        attn_state=(key_states, value_states),
+        layer_idx=0,
+        cache_kwargs={"window_size": window_size}
+    )
+
+    # Sequence length should be the full seq_len, not window_size
+    assert cache.get_seq_length(0) == seq_len, \
+        f"Expected seq_length={seq_len}, got {cache.get_seq_length(0)} (window_size={window_size})"

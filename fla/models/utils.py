@@ -39,6 +39,7 @@ class FLALayer(CacheLayerMixin):
         attn_state: tuple[torch.Tensor, ...] | None = None,
         conv_state: Any | None = None,
         ffn_state: Any | None = None,
+        offset: int = 1,
         cache_kwargs: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
@@ -93,9 +94,13 @@ class FLALayer(CacheLayerMixin):
                 self.device = state.device if isinstance(state, torch.Tensor) else state[0].device
                 break
 
-        # Track seen tokens from attn_state if available
+        # Track seen tokens from attn_state if available, otherwise use offset
         if attn_state and attn_state[0] is not None:
-            self._seen_tokens += attn_state[0].shape[1]
+            # Use input_size captured before potential window truncation
+            self._seen_tokens += input_size
+        else:
+            # For layers without attn_state (e.g., rwkv7, gated_deltanet), use offset
+            self._seen_tokens += offset
 
         return self.state
 
@@ -333,6 +338,7 @@ class FLACache(HFCacheBase):
             attn_state=attn_state,
             conv_state=conv_state,
             ffn_state=ffn_state,
+            offset=offset if offset is not None else 1,
             cache_kwargs=cache_kwargs,
         )
 
