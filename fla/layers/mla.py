@@ -109,7 +109,7 @@ class MultiheadLatentAttention(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.v_head_dim, hidden_size, bias=False)
 
         self.scaling = self.qk_head_dim ** (-0.5)
-        if rope_scaling is not None:
+        if rope_scaling is not None and rope_scaling.get("rope_type", "default") != "default":
             mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
             scaling_factor = rope_scaling["factor"]
             if mscale_all_dim:
