@@ -61,8 +61,11 @@ class FLALayer(CacheLayerMixin):
         if recurrent_state is not None:
             self.state["recurrent_state"] = recurrent_state
 
-        if attn_state is not None:
-            input_size = attn_state[0].shape[1]
+        # Extract input_size from attn_state if available (before potential window truncation)
+        has_attn_state = attn_state and attn_state[0] is not None
+        input_size = attn_state[0].shape[1] if has_attn_state else 0
+
+        if has_attn_state:
             if self.state["attn_state"] is None:
                 if window_size is not None and input_size > window_size:
                     attn_state = tuple(x[:, -window_size:].contiguous() for x in attn_state)
@@ -95,7 +98,7 @@ class FLALayer(CacheLayerMixin):
                 break
 
         # Track seen tokens from attn_state if available, otherwise use offset
-        if attn_state and attn_state[0] is not None:
+        if has_attn_state:
             # Use input_size captured before potential window truncation
             self._seen_tokens += input_size
         else:
