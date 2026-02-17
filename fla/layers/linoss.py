@@ -158,7 +158,7 @@ class LinOSSAttention(nn.Module):
                 recurrent_state=recurrent_state,
                 conv_state=conv_state if self.use_short_conv else None,
                 layer_idx=self.layer_idx,
-                offset=i.shape[2] if len(i.shape) > 2 else 1,
+                offset=i.shape[1],
             )
 
         o = self.g_norm(o, self.g_proj(hidden_states))

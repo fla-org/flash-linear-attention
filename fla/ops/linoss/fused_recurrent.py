@@ -369,62 +369,12 @@ def fused_recurrent_linoss(
             Final state of shape `[B, 2, P]` if `output_final_state=True`.
     """
     if x.requires_grad:
-        o = _linoss_recurrent_torch(
-            x, B_re, B_im, C_re, C_im, a_diag, dt, d_skip, initial_state, discretization
-        )
-        final_state = None
-        if output_final_state:
-            B_t, T_t, H_t = x.shape
-            P_t = a_diag.shape[0]
-            a = torch.relu(a_diag)
-            step = torch.sigmoid(dt)
-
-            if discretization == 'IMEX':
-                M11 = torch.ones_like(a)
-                M12 = -step * a
-                M21 = step.clone()
-                M22 = 1.0 - step * step * a
-            else:
-                schur = 1.0 / (1.0 + step * step * a)
-                M11 = 1.0 - step * step * a * schur
-                M12 = -step * a * schur
-                M21 = step * schur
-                M22 = schur
-
-            Bu_re = torch.einsum('bth,ph->btp', x, B_re)
-            Bu_im = torch.einsum('bth,ph->btp', x, B_im)
-
-            with torch.no_grad():
-                h1_re = x.new_zeros(B_t, P_t)
-                h1_im = x.new_zeros(B_t, P_t)
-                h2_re = x.new_zeros(B_t, P_t)
-                h2_im = x.new_zeros(B_t, P_t)
-                if initial_state is not None:
-                    h1_re = initial_state[:, 0].to(x.dtype)
-                    h2_re = initial_state[:, 1].to(x.dtype)
-                for t in range(T_t):
-                    bu_re_t = Bu_re[:, t]
-                    bu_im_t = Bu_im[:, t]
-                    if discretization == 'IMEX':
-                        f1_re = bu_re_t * step.unsqueeze(0)
-                        f1_im = bu_im_t * step.unsqueeze(0)
-                        f2_re = bu_re_t * (step * step).unsqueeze(0)
-                        f2_im = bu_im_t * (step * step).unsqueeze(0)
-                    else:
-                        f1_re = M11.unsqueeze(0) * bu_re_t * step.unsqueeze(0)
-                        f1_im = M11.unsqueeze(0) * bu_im_t * step.unsqueeze(0)
-                        f2_re = M21.unsqueeze(0) * bu_re_t * step.unsqueeze(0)
-                        f2_im = M21.unsqueeze(0) * bu_im_t * step.unsqueeze(0)
-                    h1_re_n = M11.unsqueeze(0) * h1_re + M12.unsqueeze(0) * h2_re + f1_re
-                    h1_im_n = M11.unsqueeze(0) * h1_im + M12.unsqueeze(0) * h2_im + f1_im
-                    h2_re_n = M21.unsqueeze(0) * h1_re + M22.unsqueeze(0) * h2_re + f2_re
-                    h2_im_n = M21.unsqueeze(0) * h1_im + M22.unsqueeze(0) * h2_im + f2_im
-                    h1_re, h1_im = h1_re_n, h1_im_n
-                    h2_re, h2_im = h2_re_n, h2_im_n
-                final_state = torch.stack([h1_re, h2_re], dim=1)
-        return o, final_state
-    else:
         return FusedRecurrentLinOSSFunction.apply(
+            x, B_re, B_im, C_re, C_im, a_diag, dt, d_skip,
+            initial_state, output_final_state, discretization,
+        )
+    else:
+        return fused_recurrent_linoss_fwd(
             x, B_re, B_im, C_re, C_im, a_diag, dt, d_skip,
             initial_state, output_final_state, discretization,
         )
