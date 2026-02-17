@@ -5,10 +5,8 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from fla.modules import FusedRMSNormGated, ShortConvolution
-from fla.modules.activations import swiglu
 from fla.ops.linoss import fused_recurrent_linoss
 
 if TYPE_CHECKING:
