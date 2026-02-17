@@ -17,6 +17,7 @@ from .hgrn2 import HGRN2Attention
 from .kda import KimiDeltaAttention
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
+from .linoss import LinOSSAttention
 from .log_linear_mamba2 import LogLinearMamba2
 from .mamba import Mamba
 from .mamba2 import Mamba2
@@ -48,6 +49,7 @@ __all__ = [
     'KimiDeltaAttention',
     'LightNetAttention',
     'LinearAttention',
+    'LinOSSAttention',
     'LogLinearMamba2',
     'Mamba',
     'Mamba2',

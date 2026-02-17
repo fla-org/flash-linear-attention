@@ -18,6 +18,7 @@ from .hgrn import fused_recurrent_hgrn
 from .kda import chunk_kda, fused_recurrent_kda
 from .lightning_attn import chunk_lightning_attn, fused_recurrent_lightning_attn
 from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
+from .linoss import fused_recurrent_linoss
 from .log_linear_attn import chunk_log_linear_attn
 from .mesa_net import chunk_mesa_net
 from .nsa import parallel_nsa
@@ -43,6 +44,7 @@ __all__ = [
     'fused_recurrent_hgrn',
     'chunk_lightning_attn', 'fused_recurrent_lightning_attn',
     'chunk_linear_attn', 'fused_chunk_linear_attn', 'fused_recurrent_linear_attn',
+    'fused_recurrent_linoss',
     'chunk_log_linear_attn',
     'chunk_mesa_net',
     'parallel_nsa',
