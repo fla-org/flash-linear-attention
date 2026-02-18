@@ -29,13 +29,14 @@ def naive_recurrent_linoss(
         a_diag (torch.Tensor): diagonal A (pre-relu) `[P]`.
         dt (torch.Tensor): discretization steps (pre-sigmoid) `[P]`.
         d_skip (torch.Tensor): skip connection `[H]`.
-        initial_state (torch.Tensor | None): initial `[h1, h2]` state `[B, 2, P]`.
+        initial_state (torch.Tensor | None): initial state `[B, 4, P]` with
+            components `[h1_re, h1_im, h2_re, h2_im]`.
         output_final_state (bool): whether to return final state.
         discretization (str): 'IM' or 'IMEX'.
 
     Returns:
         o (torch.Tensor): output `[B, T, H]`.
-        final_state (torch.Tensor | None): `[B, 2, P]` if requested.
+        final_state (torch.Tensor | None): `[B, 4, P]` if requested.
     """
     dtype = x.dtype
     x = x.float()
@@ -75,8 +76,8 @@ def naive_recurrent_linoss(
     h2 = torch.zeros(Bat, P, dtype=torch.cfloat, device=x.device)
 
     if initial_state is not None:
-        h1 = initial_state[:, 0].to(torch.cfloat)
-        h2 = initial_state[:, 1].to(torch.cfloat)
+        h1 = torch.complex(initial_state[:, 0].float(), initial_state[:, 1].float())
+        h2 = torch.complex(initial_state[:, 2].float(), initial_state[:, 3].float())
 
     C_complex = torch.complex(C_re, C_im)
 
@@ -96,6 +97,9 @@ def naive_recurrent_linoss(
 
     final_state = None
     if output_final_state:
-        final_state = torch.stack([h1.real.to(dtype), h2.real.to(dtype)], dim=1)
+        final_state = torch.stack([
+            h1.real.to(dtype), h1.imag.to(dtype),
+            h2.real.to(dtype), h2.imag.to(dtype),
+        ], dim=1)
 
     return o, final_state

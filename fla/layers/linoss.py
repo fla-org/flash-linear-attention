@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from fla.modules import FusedRMSNormGated, ShortConvolution
-from fla.ops.linoss import fused_recurrent_linoss
+from fla.ops.linoss import chunk_linoss, fused_recurrent_linoss
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -46,7 +46,7 @@ class LinOSSAttention(nn.Module):
 
         self.layer_idx = layer_idx
 
-        assert mode in ['fused_recurrent'], f"Not supported mode `{mode}`."
+        assert mode in ['chunk', 'fused_recurrent'], f"Not supported mode `{mode}`."
         assert discretization in ['IM', 'IMEX'], f"Not supported discretization `{discretization}`."
 
         P = self.ssm_size
@@ -105,7 +105,7 @@ class LinOSSAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        mode = self.mode
+        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
         last_state = None
         if past_key_values is not None and len(past_key_values) > self.layer_idx:
@@ -136,7 +136,21 @@ class LinOSSAttention(nn.Module):
         C_re = self.C_param[..., 0].contiguous()
         C_im = self.C_param[..., 1].contiguous()
 
-        if mode == 'fused_recurrent':
+        if mode == 'chunk':
+            o, recurrent_state = chunk_linoss(
+                x=i,
+                B_re=B_re,
+                B_im=B_im,
+                C_re=C_re,
+                C_im=C_im,
+                a_diag=self.A_diag,
+                dt=self.dt,
+                d_skip=self.D,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                discretization=self.discretization,
+            )
+        elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_linoss(
                 x=i,
                 B_re=B_re,
@@ -167,7 +181,7 @@ class LinOSSAttention(nn.Module):
         return o, None, past_key_values
 
     def state_size(self, **kwargs) -> int:
-        state_size = 2 * self.ssm_size
+        state_size = 4 * self.ssm_size
         for module in self.children():
             if isinstance(module, ShortConvolution):
                 state_size += module.state_size
