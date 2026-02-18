@@ -201,7 +201,7 @@ def chunk_oja_fwd_h(
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_key: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     B, T, H, V, K = *v.shape, u.shape[-1]
     BT = chunk_size
 

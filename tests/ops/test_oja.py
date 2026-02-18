@@ -402,7 +402,7 @@ def test_chunk_varlen(
     dtype: torch.dtype,
 ):
     if is_intel_alchemist and D > 128:
-        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+        pytest.skip(reason='chunk_gated_oja_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     # randomly split the sequence into N segments

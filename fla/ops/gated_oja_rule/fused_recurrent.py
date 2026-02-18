@@ -91,7 +91,7 @@ def fused_recurrent_oja_fwd_kernel(
 
         # [BK, BV]
         if USE_GV:
-            b_gv = tl.load(p_gv).to(tl.float32)
+            b_gv = tl.load(p_gv, mask=mask_v, other=0).to(tl.float32)
             b_h *= exp(b_gv[None, :])
 
         b_k = b_beta * (b_k - tl.sum(b_h * b_v[None, :], 1))

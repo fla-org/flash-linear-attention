@@ -184,7 +184,7 @@ def chunk_oja_fwd_o(
     scale: float = 1.,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     BC = min(16, BT)

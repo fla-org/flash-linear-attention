@@ -200,7 +200,7 @@ def recompute_w_u_fwd(
     A: torch.Tensor,
     gv: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
     BK = 64
