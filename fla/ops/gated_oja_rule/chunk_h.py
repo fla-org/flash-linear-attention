@@ -146,17 +146,17 @@ def chunk_oja_fwd_kernel_h_blockdim64(
             o_v1 = tl.arange(0, 64)
             b_gk_last1 = tl.load(gv + (bos + last_idx) * H*V + i_h * V + o_v1, mask=(o_v1 < V), other=0.)
             b_h1 *= exp(b_gk_last1)[None, :]
-            if K > 64:
+            if V > 64:
                 o_v2 = 64 + o_v1
                 b_gk_last2 = tl.load(gv + (bos + last_idx) * H*V + i_h * V + o_v2, mask=(o_v2 < V), other=0.)
                 b_h2 *= exp(b_gk_last2)[None, :]
-            if K > 128:
+            if V > 128:
                 o_v3 = 128 + o_v1
                 b_gk_last3 = tl.load(gv + (bos + last_idx) * H*V + i_h * V + o_v3, mask=(o_v3 < V), other=0.)
                 b_h3 *= exp(b_gk_last3)[None, :]
-            if K > 192:
+            if V > 192:
                 o_v4 = 192 + o_v1
-                b_gk_last4 = tl.load(gv + (bos + last_idx) * H*V + i_h * V + o_v4, mask=(o_v4 < K), other=0.)
+                b_gk_last4 = tl.load(gv + (bos + last_idx) * H*V + i_h * V + o_v4, mask=(o_v4 < V), other=0.)
                 b_h4 *= exp(b_gk_last4)[None, :]
 
         b_k = b_k.to(v.dtype.element_ty)  # BT BK
