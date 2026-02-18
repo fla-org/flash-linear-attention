@@ -6,7 +6,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
