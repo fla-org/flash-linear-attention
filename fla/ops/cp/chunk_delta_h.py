@@ -309,9 +309,16 @@ def pre_process_fwd_kernel_merged(
     USE_GK: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    MULTI_SEQS: tl.constexpr,
 ):
     i_col, i_h = tl.program_id(0), tl.program_id(1)
-    i_n = 0
+    if MULTI_SEQS:
+        i_n = tl.program_id(2)
+        # Offset hm for this subseq: hm[i_n, h, k, v+k]
+        hm += i_n * H * K * (K + V) + i_h * K * (K + V)
+    else:
+        i_n = 0
+        hm += i_h * K * (K + V)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
@@ -324,9 +331,6 @@ def pre_process_fwd_kernel_merged(
     # i_col is in range [0, cdiv(V + K, BLOCK_SIZE))
     # Columns [0, V) are for h, columns [V, V+K) are for m
     is_h_part = i_col * BLOCK_SIZE < V
-
-    # Calculate offsets
-    hm += i_h * K * (K + V)
     k += ((bos * H + i_h) * K).to(tl.int64)
     w += ((bos * H + i_h) * K).to(tl.int64)
     stride_k = H * K
@@ -443,16 +447,17 @@ def pre_process_fwd_kernel_merged(
                 b_h4 += tl.dot(b_k, b_v)
 
         # Store h results
-        p_h1 = tl.make_block_ptr(hm, (K, V), (K + V, 1), (0, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
+        stride_hm_kv = K + V
+        p_h1 = tl.make_block_ptr(hm, (K, V), (stride_hm_kv, 1), (0, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
         if K > 64:
-            p_h2 = tl.make_block_ptr(hm, (K, V), (K + V, 1), (64, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
+            p_h2 = tl.make_block_ptr(hm, (K, V), (stride_hm_kv, 1), (64, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
             tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), boundary_check=(0, 1))
         if K > 128:
-            p_h3 = tl.make_block_ptr(hm, (K, V), (K + V, 1), (128, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
+            p_h3 = tl.make_block_ptr(hm, (K, V), (stride_hm_kv, 1), (128, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
             tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), boundary_check=(0, 1))
         if K > 192:
-            p_h4 = tl.make_block_ptr(hm, (K, V), (K + V, 1), (192, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
+            p_h4 = tl.make_block_ptr(hm, (K, V), (stride_hm_kv, 1), (192, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
     else:
         # ====== Stage 2: Compute m (K x K) ======
@@ -508,10 +513,14 @@ def pre_process_fwd_kernel_merged(
             b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
 
         # Store m result
-        p_m = tl.make_block_ptr(hm + V, (K, K), (K + V, 1), (0, i_k_col * BLOCK_SIZE), (BK1, BLOCK_SIZE), (1, 0))
+        stride_hm_kv = K + V
+        p_m = tl.make_block_ptr(hm + V, (K, K), (stride_hm_kv, 1), (0, i_k_col * BLOCK_SIZE), (BK1, BLOCK_SIZE), (1, 0))
         tl.store(p_m, b_m.to(p_m.dtype.element_ty), boundary_check=(0, 1))
 
 
+@triton.heuristics({
+    'HAS_H0': lambda args: args['h0'] is not None,
+})
 @triton.autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
@@ -523,38 +532,109 @@ def pre_process_fwd_kernel_merged(
     use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank'])
+@triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
 def merge_fwd_bwd_kernel(
-    h,
-    ag_hm,
-    pre_or_post_num_ranks,
-    rank,
+    h,                   # [H, K, V] or [num_non_first, H, K, V] for intracard
+    ag_hm,               # [H, K, K+V] or [S_split, H, K, K+V] for intracard
+    pre_or_post_num_ranks,  # num_ranks for CP, NUM_SPLIT_SEQS for intracard
+    rank,                # rank for CP, not used for intracard
+    seq_offsets,         # None for CP, [num_split_seqs+1] for intracard
+    init_offsets,        # None for CP, [num_split_seqs+1] for intracard
+    h0_seq_ids,          # None for CP, [num_split_seqs] for intracard
+    h0,                  # None or [N_orig, H, K, V] for intracard
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BV: tl.constexpr,
     BK: tl.constexpr,
-    FORWARD: tl.constexpr = True
+    FORWARD: tl.constexpr,                # True for FWD, False for BWD
+    INTRACARD_MODE: tl.constexpr,          # True: intracard mode, False: CP mode
+    NUM_SEQ_ENTRIES,         # num_split_seqs for intracard
+    HAS_H0: tl.constexpr,                  # Heuristic: whether h0 is provided
 ):
-    i_v, i_h = tl.program_id(0), tl.program_id(1)
-    num_ranks = pre_or_post_num_ranks.to(tl.int32)
-    h += i_h * K * V
-    ag_hm += i_h * K * (K + V)
-    stride = H * K * (K + V)
-    b_h = tl.zeros([BK, BV], dtype=tl.float32)
-    for idx in range(num_ranks):
-        if FORWARD:
-            cur_rank = rank - num_ranks + idx
+    """
+    Unified merge kernel for both CP and Intra-card modes.
+
+    CP mode (INTRACARD_MODE=False):
+        Grid: (V/BV, H)
+        Merges across ranks for context parallel.
+
+    Intra-card mode (INTRACARD_MODE=True):
+        Grid: (V/BV, NUM_SEQ_ENTRIES, H)
+        Merges across subseqs within card for intra-card context parallel.
+    """
+    i_v = tl.program_id(0)
+    if INTRACARD_MODE:
+        i_seq = tl.program_id(1)
+        i_h = tl.program_id(2)
+
+        if i_seq >= NUM_SEQ_ENTRIES:
+            return
+
+        # Load offsets for this sequence
+        ss_start = tl.load(seq_offsets + i_seq).to(tl.int32)
+        ss_end = tl.load(seq_offsets + i_seq + 1).to(tl.int32)
+        init_base = tl.load(init_offsets + i_seq).to(tl.int32)
+        num_subseqs = ss_end - ss_start
+
+        stride_hm_s = H * K * (V + K)
+        stride_hm_h = K * (V + K)
+
+        # Initialize from h0 if provided
+        if HAS_H0:
+            orig_seq_id = tl.load(h0_seq_ids + i_seq).to(tl.int32)
+            p_h0 = tl.make_block_ptr(
+                h0 + (orig_seq_id * H + i_h) * K * V,
+                (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
+            )
+            b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
         else:
-            cur_rank = rank + num_ranks - idx
-        p_ag_h = tl.make_block_ptr(ag_hm + cur_rank * stride, (K, V), (K + V, 1), (0, i_v * BV), (BK, BV), (1, 0))
-        b_ag_h = tl.load(p_ag_h, boundary_check=(0, 1))
-        p_ag_m = tl.make_block_ptr(ag_hm + cur_rank * stride + V, (K, K), (K + V, 1), (0, 0), (BK, BK), (1, 0))
-        b_ag_m = tl.load(p_ag_m, boundary_check=(0, 1))
-        # h = M @ h + h_ext
-        b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
-    p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
-    tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
+            b_h = tl.zeros([BK, BV], dtype=tl.float32)
+
+        # Merge loop over subseqs
+        for idx in range(num_subseqs):
+            i_ss = ss_start + idx
+            base = i_ss * stride_hm_s + i_h * stride_hm_h
+
+            p_he = tl.make_block_ptr(
+                ag_hm + base, (K, V), (V + K, 1), (0, i_v * BV), (BK, BV), (1, 0)
+            )
+            b_he = tl.load(p_he, boundary_check=(0, 1)).to(tl.float32)
+            p_m = tl.make_block_ptr(
+                ag_hm + base + V, (K, K), (V + K, 1), (0, 0), (BK, BK), (1, 0)
+            )
+            b_m = tl.load(p_m, boundary_check=(0, 1)).to(tl.float32)
+            b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32)) + b_he.to(tl.float32)
+
+            # Store for non-first subseqs
+            if idx < num_subseqs - 1:
+                init_idx = init_base + idx
+                stride_init = H * K * V
+                p_out = tl.make_block_ptr(
+                    h + init_idx * stride_init + i_h * K * V,
+                    (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
+                )
+                tl.store(p_out, b_h.to(p_out.dtype.element_ty), boundary_check=(0, 1))
+    else:
+        # CP mode
+        i_h = tl.program_id(1)
+        num_ranks = pre_or_post_num_ranks.to(tl.int32)
+        h += i_h * K * V
+        ag_hm += i_h * K * (K + V)
+        stride = H * K * (K + V)
+        b_h = tl.zeros([BK, BV], dtype=tl.float32)
+        for idx in range(num_ranks):
+            if FORWARD:
+                cur_rank = rank - num_ranks + idx
+            else:
+                cur_rank = rank + num_ranks - idx
+            p_ag_h = tl.make_block_ptr(ag_hm + cur_rank * stride, (K, V), (K + V, 1), (0, i_v * BV), (BK, BV), (1, 0))
+            b_ag_h = tl.load(p_ag_h, boundary_check=(0, 1))
+            p_ag_m = tl.make_block_ptr(ag_hm + cur_rank * stride + V, (K, K), (K + V, 1), (0, 0), (BK, BK), (1, 0))
+            b_ag_m = tl.load(p_ag_m, boundary_check=(0, 1))
+            b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
+        p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
+        tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -1063,19 +1143,27 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             BK1=BK,
             USE_EXP2=use_exp2,
             BLOCK_SIZE=BLOCK_SIZE,
+            MULTI_SEQS=False,
         )
     ag_hm, _ = all_gather_into_tensor(hm, group=context.group)
     if not context.is_first_rank:
         def grid(meta): return (triton.cdiv(V, meta['BV']), H)
         merge_fwd_bwd_kernel[grid](
-            initial_state[0],
-            ag_hm,
-            context.pre_num_ranks,
-            rank,
+            h=initial_state[0],
+            ag_hm=ag_hm,
+            pre_or_post_num_ranks=context.pre_num_ranks,
+            rank=rank,
+            seq_offsets=None,
+            init_offsets=None,
+            h0_seq_ids=None,
+            h0=None,
             H=H,
             K=K,
             V=V,
             BK=BK,
+            FORWARD=True,
+            INTRACARD_MODE=False,
+            NUM_SEQ_ENTRIES=0,
         )
     return initial_state
 
@@ -1143,15 +1231,21 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     if not context.is_last_rank:
         def grid(meta): return (triton.cdiv(V, meta['BV']), H)
         merge_fwd_bwd_kernel[grid](
-            dht[-1],
-            ag_dhm,
-            context.post_num_ranks,
-            rank,
+            h=dht[-1],
+            ag_hm=ag_dhm,
+            pre_or_post_num_ranks=context.post_num_ranks,
+            rank=rank,
+            seq_offsets=None,
+            init_offsets=None,
+            h0_seq_ids=None,
+            h0=None,
             H=H,
             K=K,
             V=V,
             BK=BK,
-            FORWARD=False
+            FORWARD=False,
+            INTRACARD_MODE=False,
+            NUM_SEQ_ENTRIES=0,
         )
 
     # initial_state is None in the CP mode

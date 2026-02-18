@@ -21,6 +21,8 @@ class BaseBackend:
     backend_type: ClassVar[str] = "base"
     package_name: ClassVar[str | None] = None
     env_var: ClassVar[str | None] = None
+    # Lower number = higher priority, default is 5
+    priority: ClassVar[int] = 5
 
     @classmethod
     def is_available(cls) -> bool:
@@ -70,8 +72,25 @@ class BackendRegistry:
         """Register a backend."""
         with self._lock:
             self._backends[backend.backend_type] = backend
-            if self._active is None and backend.can_use():
+            # Update active backend based on priority
+            self._update_active_backend()
+
+    def _get_sorted_backends(self) -> list[BaseBackend]:
+        """Get backends sorted by priority (lower number = higher priority).
+
+        Backends with the same priority are sorted by registration order.
+        """
+        return sorted(
+            self._backends.values(),
+            key=lambda b: (b.priority, list(self._backends.values()).index(b))
+        )
+
+    def _update_active_backend(self) -> None:
+        """Update active backend based on priority."""
+        for backend in self._get_sorted_backends():
+            if backend.can_use():
                 self._active = backend
+                return
 
     def get_active(self) -> BaseBackend | None:
         """Get active backend."""
@@ -95,7 +114,11 @@ class BackendRegistry:
 
 
 def dispatch(operation: str):
-    """Dispatch decorator with verifier support."""
+    """Dispatch decorator with verifier support.
+
+    Iterates through all registered backends and selects the first one
+    that passes the verifier for the given function call.
+    """
     def decorator(func: F) -> F:
         func_name = func.__name__
 
@@ -108,28 +131,35 @@ def dispatch(operation: str):
             if registry is None:
                 return func(*args, **kwargs)
 
-            be = registry.get_active()
-            if be is None:
-                return func(*args, **kwargs)
+            # Iterate through all registered backends sorted by priority
+            # to find one that can handle this call
+            backends_list = registry._get_sorted_backends()
 
-            can_use, _ = be.verify(func_name, *args, **kwargs)
-            if not can_use:
-                return func(*args, **kwargs)
+            for be in backends_list:
+                if not be.can_use():
+                    continue
 
-            impl = getattr(be, func_name, None)
-            if impl is None:
-                return func(*args, **kwargs)
+                can_use, _ = be.verify(func_name, *args, **kwargs)
+                if not can_use:
+                    continue
 
-            result = impl(*args, **kwargs)
+                impl = getattr(be, func_name, None)
+                if impl is None:
+                    continue
 
-            # Log first successful dispatch
-            log_key = f"{operation}:{func_name}:{be.backend_type}"
-            with registry._lock:
+                result = impl(*args, **kwargs)
+
+                log_key = f"{operation}:{func_name}:{be.backend_type}"
                 if log_key not in registry._logged:
-                    registry._logged.add(log_key)
-                    logger.info(f"[FLA Backend] {operation}.{func_name} -> {be.backend_type}")
+                    with registry._lock:
+                        if log_key not in registry._logged:
+                            registry._logged.add(log_key)
+                            logger.info(f"[FLA Backend] {operation}.{func_name} -> {be.backend_type}")
 
-            return result
+                return result
+
+            # No backend can handle this call, use default implementation
+            return func(*args, **kwargs)
 
         return wrapper
     return decorator
