@@ -8,7 +8,7 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
-BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
+BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
@@ -541,7 +541,7 @@ def chunk_bwd_dv(
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
-    elif check_shared_mem:
+    elif check_shared_mem('ada', k.device.index):
         CONST_TILING = 64
     else:
         CONST_TILING = 32
@@ -595,7 +595,7 @@ def chunk_bwd_dv_local(
     # H100 can have larger block size
     if check_shared_mem('hopper', k.device.index):
         CONST_TILING = 128
-    elif check_shared_mem:
+    elif check_shared_mem('ada', k.device.index):
         CONST_TILING = 64
     else:
         CONST_TILING = 32
@@ -648,7 +648,12 @@ def chunk_bwd_dqkwg(
     chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    CONST_TILING = 64 if check_shared_mem() else 32
+    if check_shared_mem('hopper', k.device.index):
+        CONST_TILING = 128
+    elif check_shared_mem('ada', k.device.index):
+        CONST_TILING = 64
+    else:
+        CONST_TILING = 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NK = triton.cdiv(K, BK)
