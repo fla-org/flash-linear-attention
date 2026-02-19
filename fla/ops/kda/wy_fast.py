@@ -6,7 +6,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
@@ -16,10 +16,9 @@ from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
 })
 @triton.autotune(
     configs=[
-        triton.Config({'DOT_PRECISION': DOT_PRECISION}, num_warps=num_warps, num_stages=num_stages)
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
-        for DOT_PRECISION in (["tf32", "tf32x3", "ieee"] if IS_TF32_SUPPORTED else ["ieee"])
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,
@@ -48,7 +47,6 @@ def recompute_w_u_fwd_kda_kernel(
     STORE_QG: tl.constexpr,
     STORE_KG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    DOT_PRECISION: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -69,7 +67,7 @@ def recompute_w_u_fwd_kda_kernel(
         p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
-        b_u = tl.dot(b_A, b_vb, input_precision=DOT_PRECISION)
+        b_u = tl.dot(b_A, b_vb)
         tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
 
     for i_k in range(tl.cdiv(K, BK)):
