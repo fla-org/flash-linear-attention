@@ -26,9 +26,11 @@ from fla.models.mamba2.configuration_mamba2 import Mamba2Config
 from fla.models.utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
+from torch.distributed._tensor.placement_types import Placement, Replicate
+from torch.distributed.device_mesh import DeviceMesh
 
 try:
-    from torch.distributed.tensor import DTensor
+    from torch.distributed._tensor.api import DTensor
 except (ImportError, AttributeError):
     DTensor = None
 
@@ -39,6 +41,30 @@ except ImportError:
 
 
 logger = logging.get_logger(__name__)
+
+
+def tensor_to_dtensor(
+    tensor: torch.Tensor,
+    device_mesh: DeviceMesh,
+    current_placement: Placement | list[Placement],
+    desired_placement: Placement | list[Placement] | None = None,
+    run_check: bool = False,
+):
+    if isinstance(tensor, DTensor):
+        return tensor
+
+    if isinstance(current_placement, Placement):
+        current_placement = [current_placement]
+
+    dtensor = DTensor.from_local(tensor, device_mesh=device_mesh, run_check=run_check, placements=current_placement)
+
+    if desired_placement is not None:
+        if isinstance(desired_placement, Placement):
+            desired_placement = [desired_placement]
+
+        dtensor = dtensor.redistribute(device_mesh=device_mesh, placements=desired_placement, async_op=True)
+
+    return dtensor
 
 
 class Mamba2Cache:
@@ -202,10 +228,18 @@ class Mamba2PreTrainedModel(PreTrainedModel):
             # --- A_log ---
             A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(0, 16)
             with torch.no_grad():
-                if not isinstance(module.A_log, DTensor):
-                    module.A_log.copy_(torch.log(A))
-                else:
-                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
+                A_log = torch.log(A)
+                if isinstance(module.A_log, DTensor):
+                    A_log = tensor_to_dtensor(
+                        tensor=A_log,
+                        device_mesh=module.A_log.device_mesh,
+                        current_placement=[Replicate()] * len(module.A_log.placements),
+                        desired_placement=module.A_log.placements,
+                        run_check=True,
+                    )
+
+                module.A_log.copy_(A_log)
+
             module.A_log._no_weight_decay = True
 
             # --- D ---
@@ -222,10 +256,16 @@ class Mamba2PreTrainedModel(PreTrainedModel):
             # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
-                if not isinstance(module.dt_bias, DTensor):
-                    module.dt_bias.copy_(inv_dt)
-                else:
-                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
+                if isinstance(module.dt_bias, DTensor):
+                    inv_dt = tensor_to_dtensor(
+                        tensor=inv_dt,
+                        device_mesh=module.dt_bias.device_mesh,
+                        current_placement=[Replicate()] * len(module.dt_bias.placements),
+                        desired_placement=module.dt_bias.placements,
+                        run_check=True,
+                    )
+
+            module.dt_bias.copy_(inv_dt)
             module.dt_bias._no_reinit = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
