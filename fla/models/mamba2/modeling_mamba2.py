@@ -261,7 +261,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
                         run_check=True,
                     )
 
-            module.dt_bias.copy_(inv_dt)
+                module.dt_bias.copy_(inv_dt)
             module.dt_bias._no_reinit = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
