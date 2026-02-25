@@ -17,6 +17,9 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from torch.distributed._tensor.placement_types import Placement, Replicate
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput, logging
 from transformers.utils.deprecation import deprecate_kwarg
@@ -26,9 +29,6 @@ from fla.models.mamba2.configuration_mamba2 import Mamba2Config
 from fla.models.utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
-from torch.distributed._tensor.placement_types import Placement, Replicate
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor
 
 try:
     from transformers.modeling_layers import GradientCheckpointingLayer
