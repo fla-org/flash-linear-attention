@@ -28,11 +28,7 @@ from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSN
 from fla.modules.l2warp import l2_warp
 from torch.distributed._tensor.placement_types import Placement, Replicate
 from torch.distributed.device_mesh import DeviceMesh
-
-try:
-    from torch.distributed._tensor.api import DTensor
-except (ImportError, AttributeError):
-    DTensor = None
+from torch.distributed.tensor import DTensor
 
 try:
     from transformers.modeling_layers import GradientCheckpointingLayer
