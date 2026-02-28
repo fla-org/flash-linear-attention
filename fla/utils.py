@@ -44,7 +44,7 @@ def check_environments():
     if sys.platform == 'win32':
         # Check if triton-windows is installed
         try:
-            from importlib.metadata import metadata, PackageNotFoundError
+            from importlib.metadata import PackageNotFoundError, metadata
             metadata('triton-windows')
             # triton-windows is installed, no warning needed
         except PackageNotFoundError:
