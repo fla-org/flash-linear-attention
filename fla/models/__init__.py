@@ -1,4 +1,3 @@
-
 from fla.models.abc import ABCConfig, ABCForCausalLM, ABCModel
 from fla.models.bitnet import BitNetConfig, BitNetForCausalLM, BitNetModel
 from fla.models.comba import CombaConfig, CombaForCausalLM, CombaModel
@@ -18,6 +17,7 @@ from fla.models.hgrn2 import HGRN2Config, HGRN2ForCausalLM, HGRN2Model
 from fla.models.kda import KDAConfig, KDAForCausalLM, KDAModel
 from fla.models.lightnet import LightNetConfig, LightNetForCausalLM, LightNetModel
 from fla.models.linear_attn import LinearAttentionConfig, LinearAttentionForCausalLM, LinearAttentionModel
+from fla.models.linoss import LinOSSConfig, LinOSSForCausalLM, LinOSSModel
 from fla.models.log_linear_mamba2 import LogLinearMamba2Config, LogLinearMamba2ForCausalLM, LogLinearMamba2Model
 from fla.models.mamba import MambaConfig, MambaForCausalLM, MambaModel
 from fla.models.mamba2 import Mamba2Config, Mamba2ForCausalLM, Mamba2Model
@@ -76,6 +76,9 @@ __all__ = [
     'LightNetConfig',
     'LightNetForCausalLM',
     'LightNetModel',
+    'LinOSSConfig',
+    'LinOSSForCausalLM',
+    'LinOSSModel',
     'LinearAttentionConfig',
     'LinearAttentionForCausalLM',
     'LinearAttentionModel',
