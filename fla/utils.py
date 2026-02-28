@@ -42,11 +42,17 @@ def check_environments():
     """
     # Check Operating System
     if sys.platform == 'win32':
-        logger.warning(
-            "Detected Windows operating system. Triton does not have an official Windows release, "
-            "thus FLA will not be adapted for Windows, and any potential errors will not be fixed. "
-            "Please consider using a Linux environment for compatibility.",
-        )
+        # Check if triton-windows is installed
+        try:
+            from importlib.metadata import metadata
+            metadata('triton-windows')
+            # triton-windows is installed, no warning needed
+        except Exception:
+            logger.warning(
+                "Detected Windows operating system. Consider installing triton-windows "
+                "(https://github.com/triton-lang/triton-windows) for better compatibility. "
+                "Without it, some features may not work correctly.",
+            )
 
     triton_version = version.parse(triton.__version__)
     required_triton_version = version.parse("3.2.0")
