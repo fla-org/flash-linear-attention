@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
-from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs
+from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 NUM_WARPS_AUTOTUNE = [1, 2, 4, 8, 16] if IS_AMD else [1, 2, 4, 8, 16, 32]
 
@@ -148,11 +148,13 @@ def sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = Fal
 class SigmoidFunction(torch.autograd.Function):
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     def forward(ctx, x):
         ctx.save_for_backward(x)
         return sigmoid_fwd(x)
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     def backward(ctx, dout):
         x, = ctx.saved_tensors
         return sigmoid_bwd(x, dout)
@@ -271,12 +273,14 @@ def logsigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, temperature: float = 1., o
 class LogSigmoidFunction(torch.autograd.Function):
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     def forward(ctx, x, temperature):
         ctx.save_for_backward(x)
         ctx.temperature = temperature
         return logsigmoid_fwd(x, temperature)
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     def backward(ctx, dy):
         x, = ctx.saved_tensors
         return logsigmoid_bwd(x, dy, ctx.temperature), None
@@ -380,11 +384,13 @@ def swish_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False
 class SwishFunction(torch.autograd.Function):
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     def forward(ctx, x):
         ctx.save_for_backward(x)
         return swish_fwd(x)
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     def backward(ctx, dout):
         x, = ctx.saved_tensors
         return swish_bwd(x, dout)
@@ -651,11 +657,13 @@ class SwiGLUFunction(torch.autograd.Function):
     """
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     def forward(ctx, x, y):
         ctx.save_for_backward(x, y)
         return swiglu_fwd(x, y)
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     def backward(ctx, dout):
         x, y = ctx.saved_tensors
         return swiglu_fwdbwd(x, y, dout)
@@ -672,6 +680,7 @@ class SwiGLULinearFunction(torch.autograd.Function):
     """
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     @autocast_custom_fwd
     def forward(ctx, x, y, weight, bias):
         z = swiglu_fwd(x, y, output_contiguous=True)
@@ -681,6 +690,7 @@ class SwiGLULinearFunction(torch.autograd.Function):
         return out
 
     @staticmethod
+    @input_guard(no_guard_contiguous=True)
     @autocast_custom_bwd
     def backward(ctx, dout, *args):
         x, y, weight = ctx.saved_tensors
