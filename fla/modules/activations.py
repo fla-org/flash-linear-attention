@@ -29,10 +29,12 @@ def _is_inner_contiguous(x: torch.Tensor) -> bool:
     This holds when stride(-1) == 1 and all dimensions above -2 are contiguous
     with respect to the dimension below them.
     """
-    if x.ndim < 2:
+    if x.ndim < 1:
         return True
     if x.stride(-1) != 1:
         return False
+    if x.ndim < 2:
+        return True
     expected = x.stride(-2) * x.shape[-2]
     for d in range(x.ndim - 3, -1, -1):
         if x.stride(d) != expected:
