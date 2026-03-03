@@ -45,7 +45,7 @@ def _is_inner_contiguous(x: torch.Tensor) -> bool:
 
 def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
     """Make the tensor inner-contiguous if it isn't already."""
-    if _is_inner_contiguous(x):
+    if not torch.compiler.is_compiling() and _is_inner_contiguous(x):
         return x
     return x.contiguous()
 
