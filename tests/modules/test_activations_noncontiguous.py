@@ -110,13 +110,13 @@ def test_swiglu(B: int, T: int, D: int, compile: bool):
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'D', 'compile'),
+    ('B', 'T', 'D'),
     [
-        (2, 500, 128, False),
-        (2, 512, 128, False),
+        (2, 500, 128),
+        (2, 512, 128),
     ],
 )
-def test_swiglu_contiguous(B: int, T: int, D: int, compile: bool):
+def test_swiglu_contiguous(B: int, T: int, D: int):
     """Test that contiguous inputs still work correctly."""
     torch.manual_seed(42)
 

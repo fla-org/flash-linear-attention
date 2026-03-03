@@ -606,6 +606,7 @@ def swiglu_fwdbwd_kernel(
 
 
 def swiglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
+    assert x.shape == y.shape, f"swiglu_fwd: shape mismatch x={x.shape} y={y.shape}"
     x = _ensure_inner_contiguous(x)
     y = _ensure_inner_contiguous(y)
     T, D = x.numel(), x.shape[-1]
@@ -626,6 +627,7 @@ def swiglu_fwdbwd(
     use_weight: bool = False,
     output_contiguous: bool = False,
 ):
+    assert x.shape == y.shape == g.shape, f"swiglu_fwdbwd: shape mismatch x={x.shape} y={y.shape} g={g.shape}"
     x = _ensure_inner_contiguous(x)
     y = _ensure_inner_contiguous(y)
     g = _ensure_inner_contiguous(g)
