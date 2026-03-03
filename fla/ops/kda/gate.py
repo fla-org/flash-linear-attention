@@ -77,7 +77,7 @@ def naive_kda_lowerbound_gate(
     key=["H", "D"],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def kda_gate_fwd_kernel(
     g,
     A_log,
@@ -133,7 +133,7 @@ def kda_gate_fwd_kernel(
     key=["H", "D"],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def kda_gate_bwd_kernel(
     g,
     A_log,
@@ -349,7 +349,7 @@ def fused_kda_gate(
         for BS in BS_LIST
         for num_warps in [2, 4, 8]
     ],
-    key=['B', 'H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
+    key=['H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -363,7 +363,6 @@ def kda_gate_chunk_cumsum_vector_kernel(
     chunk_indices,
     lower_bound,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     S: tl.constexpr,
     BT: tl.constexpr,
@@ -447,7 +446,6 @@ def kda_gate_chunk_cumsum(
         chunk_indices=chunk_indices,
         lower_bound=lower_bound,
         T=T,
-        B=B,
         H=H,
         S=S,
         BT=BT,
