@@ -32,7 +32,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     cu_seqlens,
     scale,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -85,7 +84,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
-    for _ in range(0, T):
+    for _ in tl.range(0, T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
@@ -174,7 +173,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         scale=scale,
         T=T,
-        B=B,
         H=H,
         HV=HV,
         K=K,
