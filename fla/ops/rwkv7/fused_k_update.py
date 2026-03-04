@@ -10,7 +10,6 @@ from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, i
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
-@torch.jit.script
 def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Tensor:
     return k.addcmul(k * (a - 1), ka)
 
