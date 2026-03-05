@@ -97,7 +97,7 @@ def parallel_path_bwd_dq_kernel(
 
     for offset_outer in range(0, curr_end, S):
         idx_j = offset_outer // S
-        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K),
+        p_q = tl.make_block_ptr(q + ((bos.to(tl.int64) * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K),
                                 (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
 
