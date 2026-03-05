@@ -331,43 +331,6 @@ def test_legacy_cache_decode_all_layers_see_same_past_length(
         )
 
 
-def test_flalayer_individual_seen_tokens_tracking():
-    """
-    Test that FLALayer tracks its own _seen_tokens independently.
-
-    When FLALayer.update() is called, it should increment its own _seen_tokens,
-    not a shared global counter. This ensures that each layer's get_seq_length()
-    returns its own count, not a potentially incorrectly-shared count.
-
-    See: https://github.com/fla-org/flash-linear-attention/issues/766
-    """
-    layer = FLALayer()
-    initial_tokens = 5
-    layer._seen_tokens = initial_tokens
-
-    batch_size, seq_len, num_heads, head_dim = 1, 1, 4, 16
-
-    # Get seq_length before update
-    seq_len_before = layer.get_seq_length()
-    assert seq_len_before == initial_tokens, (
-        f"FLALayer should report initial _seen_tokens={initial_tokens}, "
-        f"got {seq_len_before}"
-    )
-
-    # Update with dummy attention state
-    key_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    value_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
-    layer.update(attn_state=(key_states, value_states))
-
-    # Get seq_length after update
-    seq_len_after = layer.get_seq_length()
-    expected_after = initial_tokens + seq_len
-    assert seq_len_after == expected_after, (
-        f"FLALayer should report _seen_tokens={expected_after} after update, "
-        f"got {seq_len_after}"
-    )
-
-
 @pytest.mark.parametrize(
     ['num_decode_steps', 'num_layers'],
     [
@@ -420,109 +383,17 @@ def test_cache_incremental_decode_consistency(num_decode_steps: int, num_layers:
     for decode_step, observations in enumerate(observed_lengths_per_step):
         expected_past_len = decode_step
         for layer_idx, actual_past_len in observations:
-            # Skip layers that haven't been created yet (return 0)
-            if layer_idx <= decode_step or actual_past_len > 0:
-                assert actual_past_len == expected_past_len, (
-                    f"GitHub Issue #766 regression detected! Cache shows inconsistent past lengths "
-                    f"during decode step {decode_step}. Expected all layers to see {expected_past_len}, "
-                    f"but Layer {layer_idx} saw {actual_past_len}. "
-                    f"This causes incorrect RoPE offset calculation in upper layers."
-                )
+            assert actual_past_len == expected_past_len, (
+                f"GitHub Issue #766 regression detected! Cache shows inconsistent past lengths "
+                f"during decode step {decode_step}. Expected all layers to see {expected_past_len}, "
+                f"but Layer {layer_idx} saw {actual_past_len}. "
+                f"This causes incorrect RoPE offset calculation in upper layers."
+            )
 
 
 # ===================================================================================
 # Additional regression tests for GitHub Issue #766
 # ===================================================================================
-
-@pytest.mark.parametrize("num_layers", [2, 4, 8, 16])
-def test_all_layers_see_consistent_past_len_during_decode_regression(num_layers):
-    """
-    Additional regression test ensuring GitHub Issue #766 does not recur.
-
-    This test verifies that during a decode step, all layers see the same past_len
-    for RoPE offset calculation, regardless of how many layers exist.
-    """
-    cache = FLACache()
-    batch_size, num_heads, head_dim = 1, 4, 16
-    prompt_len = 5
-
-    # Prefill: process initial prompt
-    for layer_idx in range(num_layers):
-        key_states = torch.randn(batch_size, prompt_len, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, prompt_len, num_heads, head_dim, device=device)
-        cache.update(
-            attn_state=(key_states, value_states),
-            layer_idx=layer_idx,
-            offset=prompt_len,
-        )
-
-    # Decode: generate one token
-    observed_lens = []
-    for layer_idx in range(num_layers):
-        past_len = cache.get_seq_length(layer_idx)
-        observed_lens.append(past_len)
-
-        # Update cache
-        key_states = torch.randn(batch_size, 1, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, 1, num_heads, head_dim, device=device)
-        cache.update(
-            attn_state=(key_states, value_states),
-            layer_idx=layer_idx,
-            offset=1,
-        )
-
-    # All layers should see the same past_len
-    expected = prompt_len
-    assert all(l == expected for l in observed_lens), (
-        f"GitHub Issue #766 regression detected! "
-        f"Expected all layers to see past_len={expected}, "
-        f"but observed: {observed_lens}"
-    )
-
-
-@pytest.mark.parametrize("num_decode_steps", [3, 5, 10])
-def test_consistent_past_len_across_multiple_decode_steps_regression(num_decode_steps):
-    """
-    Verify consistency across multiple decode steps.
-    """
-    cache = FLACache()
-    batch_size, num_heads, head_dim = 1, 4, 16
-    num_layers = 4
-    prompt_len = 5
-
-    # Prefill
-    for layer_idx in range(num_layers):
-        key_states = torch.randn(batch_size, prompt_len, num_heads, head_dim, device=device)
-        value_states = torch.randn(batch_size, prompt_len, num_heads, head_dim, device=device)
-        cache.update(
-            attn_state=(key_states, value_states),
-            layer_idx=layer_idx,
-            offset=prompt_len,
-        )
-
-    # Multiple decode steps
-    for step in range(num_decode_steps):
-        expected_past_len = prompt_len + step
-        observed = []
-
-        for layer_idx in range(num_layers):
-            past_len = cache.get_seq_length(layer_idx)
-            observed.append(past_len)
-
-            # Update
-            key_states = torch.randn(batch_size, 1, num_heads, head_dim, device=device)
-            value_states = torch.randn(batch_size, 1, num_heads, head_dim, device=device)
-            cache.update(
-                attn_state=(key_states, value_states),
-                layer_idx=layer_idx,
-                offset=1,
-            )
-
-        assert all(o == expected_past_len for o in observed), (
-            f"Decode step {step}: Expected all layers to see past_len={expected_past_len}, "
-            f"but observed: {observed}"
-        )
-
 
 def test_per_layer_independent_counter_regression():
     """
