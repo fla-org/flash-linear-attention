@@ -114,12 +114,15 @@ def intra_chunk_preprocess_bwd_kernel(
 def intra_chunk_preprocess_bwd_fn(q, k, w, w2, beta,
                                   dq, dk, dA_local,
                                   dw1, dw2,
-                                  A, L, D, do, scale, cu_seqlens=None):
+                                  A, L, D, do, scale, cu_seqlens=None,
+                                  chunk_indices: torch.LongTensor | None = None):
     BT = A.shape[-1]
     HQ = q.shape[-2]
     B, T, H, K = k.shape
     G = HQ//H
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B*HQ)
     # better precision because h would be of norm smaller than 1 anyways

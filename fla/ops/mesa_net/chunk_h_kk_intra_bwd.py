@@ -71,7 +71,7 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
 
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_dv = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dbeta = tl.zeros([BT ], dtype=tl.float32)
+    b_dbeta = tl.zeros([BT], dtype=tl.float32)
     b_dg_last = tl.zeros([1], dtype=tl.float32)
     b_dg = tl.zeros([BT], dtype=tl.float32)
 
@@ -144,12 +144,14 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
     dk_beta: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     B, T, H, K = k.shape
     V = K
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     # CONST_TILING = 64

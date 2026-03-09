@@ -124,11 +124,13 @@ def chunk_gated_delta_product_fwd_o(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     num_householder: int = 1,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     assert q.shape[1] * num_householder == k.shape[1], "q.shape[1] * num_householder must be equal to k.shape[1]"
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     o = v.new_empty(B, T, H, V).fill_(-float('inf'))
     def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * H)

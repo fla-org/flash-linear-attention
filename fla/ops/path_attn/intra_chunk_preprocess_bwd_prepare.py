@@ -105,12 +105,13 @@ def chunk_transform_qk_bwd_kernel_prepare(
     tl.store(p_q_new, b_q.to(p_q_new.dtype.element_ty), boundary_check=(0, 1))
 
     if i_hq % G == 0:
-        b_Twb = tl.dot(b_T, b_w) # tf32
+        b_Twb = tl.dot(b_T, b_w)  # tf32
         p_h = tl.make_block_ptr(h, (T, K), (K * H, 1), (i_t * BT, 0), (BT, BK), (1, 0))
         tl.store(p_h, b_Twb.to(p_h.dtype.element_ty), boundary_check=(0, 1))
         b_T_wbk = tl.dot(b_T.to(b_wbk.dtype), b_wbk).to(b_kt.dtype)
         p_k_new = tl.make_block_ptr(k_new, (K, T), (1, K*H), (0, i_t * BT), (BK, BT), (0, 1))
-        tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)
+                           ).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
 
     if USE_GATE:
         p_g_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
@@ -142,7 +143,8 @@ def chunk_transform_qk_bwd_kernel_prepare(
     tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
-def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, do, scale, return_h=True, cu_seqlens=None):
+def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, do, scale, return_h=True, cu_seqlens=None,
+                                          chunk_indices: torch.LongTensor | None = None):
     BT = A.shape[-1]
     HQ = q.shape[-2]
     B, T, H, K = k.shape
@@ -152,7 +154,9 @@ def intra_chunk_preprocess_bwd_prepare_fn(q, k, v, w, beta, g_cumsum, A, L, D, d
     q_new = torch.empty_like(q)
     k_new = torch.empty_like(k)
 
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B*HQ)

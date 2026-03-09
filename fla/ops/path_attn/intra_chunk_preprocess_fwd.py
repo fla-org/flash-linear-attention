@@ -101,7 +101,8 @@ def intra_chunk_preprocess_fwd_kernel(
         tl.store(p_w2, b_Twb.to(p_w2.dtype.element_ty), boundary_check=(0, 1))
         b_T_wbk = tl.dot(b_T.to(b_kt.dtype), b_wbk).to(b_kt.dtype)
         p_k_new = tl.make_block_ptr(k_new, (K, T), (1, K*H), (0, i_t * BT), (BK, BT), (0, 1))
-        tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_k_new, (b_kt - tl.dot(tl.trans(b_w.to(b_kt.dtype)), b_T_wbk)
+                           ).to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
 
     if USE_G:
         p_g_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
@@ -122,16 +123,18 @@ def intra_chunk_preprocess_fwd_kernel(
     tl.store(p_l, l_i.to(p_l.dtype.element_ty), boundary_check=(0,))
 
 
-
-def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_seqlens):
+def intra_chunk_preprocess_fwd_fn(q, k, v, w, beta, g_cumsum, A, scale, BT, cu_seqlens,
+                                  chunk_indices: torch.LongTensor | None = None):
     HQ = q.shape[-2]
     B, T, H, K = k.shape
     V = v.shape[-1]
-    q_new = torch.empty_like(q, dtype=torch.float32) # for stability
+    q_new = torch.empty_like(q, dtype=torch.float32)  # for stability
     k_new = torch.empty_like(k)
     o = torch.empty(B, T, HQ, V, device=q.device, dtype=torch.float32)
 
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B*HQ)
     L = torch.empty(B, T, HQ, dtype=torch.float32, device=q.device)

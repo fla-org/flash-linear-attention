@@ -76,11 +76,14 @@ def transform_q_fwd_fn(
     BT,
     BS,
     S,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K = q.shape
     H = w1.shape[-2]
     G = HQ // H
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
 
     num_blocks = triton.cdiv(T, S) if cu_seqlens is None else get_max_num_splits(cu_seqlens, S)

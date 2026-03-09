@@ -183,6 +183,7 @@ def chunk_oja_fwd_o(
     h: torch.Tensor,
     scale: float = 1.,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -191,7 +192,8 @@ def chunk_oja_fwd_o(
     BV = min(64, triton.next_power_of_2(V))
     HQ = q.shape[2]
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NG = HQ // H
@@ -343,6 +345,7 @@ def chunk_oja_bwd_dA(
     do: torch.Tensor,
     scale: float = 1.,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64
 ):
     B, T, H, V = v.shape
@@ -350,7 +353,8 @@ def chunk_oja_bwd_dA(
     BC = min(16, BT)
     BV = min(64, triton.next_power_of_2(V))
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NV = triton.cdiv(V, BV)
@@ -480,6 +484,7 @@ def chunk_oja_bwd_dqk(
     do: torch.Tensor,
     scale: float = 1.,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64
 ):
     B, T, H, K, V = *q.shape, gv.shape[-1]
@@ -487,7 +492,8 @@ def chunk_oja_bwd_dqk(
     BK = min(64, triton.next_power_of_2(K))
     BV = min(64, triton.next_power_of_2(V))
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NK = triton.cdiv(K, BK)
 
@@ -627,6 +633,7 @@ def chunk_oja_bwd_dv_o(
     dv: torch.Tensor,
     do: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64
 ):
     B, T, H, V = v.shape
@@ -634,7 +641,8 @@ def chunk_oja_bwd_dv_o(
     BC = min(16, BT)
     BV = min(64, triton.next_power_of_2(V))
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
 

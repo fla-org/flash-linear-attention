@@ -767,11 +767,13 @@ def chunk_gla_fwd_intra_gk(
     scale: float,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K = k.shape
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(16, BT)
     NC = triton.cdiv(BT, BC)
@@ -938,11 +940,13 @@ def chunk_gla_bwd_dv(
     dh: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dv = torch.empty_like(do)
@@ -972,13 +976,15 @@ def chunk_gla_bwd_dqk_intra(
     dA: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K = q.shape
     BT = chunk_size
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
@@ -1019,11 +1025,13 @@ def chunk_gla_bwd_dqkg(
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dg = torch.empty_like(g)
@@ -1066,6 +1074,7 @@ def chunk_gla_fwd(
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if g_cumsum is None:
         g_cumsum = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
@@ -1092,6 +1101,7 @@ def chunk_gla_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     o = chunk_gla_fwd_o_gk(
         q=q,
@@ -1102,6 +1112,7 @@ def chunk_gla_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return g_cumsum, A, h, ht, o
 
@@ -1120,6 +1131,7 @@ def chunk_gla_bwd(
     dht: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     if g_cumsum is None:
         g_cumsum = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
@@ -1161,6 +1173,7 @@ def chunk_gla_bwd(
         dh=dh,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
 
     # dq dk in fp32
@@ -1170,6 +1183,7 @@ def chunk_gla_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     dq, dk = chunk_gla_bwd_dqk_intra(
         q=q,
@@ -1178,6 +1192,7 @@ def chunk_gla_bwd(
         dA=dA,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     dq, dk, dg = chunk_gla_bwd_dqkg(
         q=q,
@@ -1192,6 +1207,7 @@ def chunk_gla_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return dq, dk, dv, dg, dh0
 
@@ -1210,8 +1226,11 @@ class ChunkGLAFunction(torch.autograd.Function):
         initial_state,
         output_final_state,
         cu_seqlens,
+        cu_seqlens_cpu,
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
 
         g_cumsum, A, _, ht, o = chunk_gla_fwd(
             q=q,
@@ -1224,13 +1243,14 @@ class ChunkGLAFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
         )
         # recompute g_cumsum in bwd pass
         if g.dtype != torch.float:
             g_cumsum = None
         else:
             g = None
-        ctx.save_for_backward(q, k, v, g, g_cumsum, initial_state, A)
+        ctx.save_for_backward(q, k, v, g, g_cumsum, initial_state, A, chunk_indices)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
@@ -1239,7 +1259,7 @@ class ChunkGLAFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, do, dht):
-        q, k, v, g, g_cumsum, initial_state, A = ctx.saved_tensors
+        q, k, v, g, g_cumsum, initial_state, A, chunk_indices = ctx.saved_tensors
         chunk_size, scale, cu_seqlens = ctx.chunk_size, ctx.scale, ctx.cu_seqlens
         dq, dk, dv, dg, dh0 = chunk_gla_bwd(
             q=q,
@@ -1255,8 +1275,9 @@ class ChunkGLAFunction(torch.autograd.Function):
             dht=dht,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
         )
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None, None
 
 
 @torch.compiler.disable
@@ -1269,6 +1290,7 @@ def chunk_gla(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -1344,5 +1366,5 @@ def chunk_gla(
         assert initial_state.dtype == torch.float32, "initial_state must be in float32."
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
-    o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, cu_seqlens)
+    o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu)
     return o, final_state

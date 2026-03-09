@@ -104,12 +104,15 @@ def chunk_cumprod_householder_bwd_fn(
     S: int,  # split size, aka large chunk size
     BT: int,  # small chunk size
     cu_seqlens: torch.Tensor = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K = dk.shape
     H = k.shape[2]
     G = HQ // H
 
-    split_indices = prepare_chunk_indices(cu_seqlens, S) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, S)
+    split_indices = chunk_indices
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
 

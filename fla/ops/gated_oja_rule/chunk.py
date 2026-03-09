@@ -15,6 +15,7 @@ from fla.ops.gated_oja_rule.chunk_o import (
 )
 from fla.ops.gated_oja_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
+from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -28,20 +29,23 @@ def chunk_oja_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     g_cumsum: bool = True,
-    cu_seqlens: torch.LongTensor | None = None
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     if g_cumsum:
-        gv = chunk_local_cumsum(gv, chunk_size=64, cu_seqlens=cu_seqlens)
+        gv = chunk_local_cumsum(gv, chunk_size=64, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     A = chunk_scaled_dot_kkt_fwd(
         k=v,
         gk=gv,
         beta=beta,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         output_dtype=torch.float32
     )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         output_dtype=k.dtype
     )
     w, u, vg = recompute_w_u_fwd(
@@ -51,6 +55,7 @@ def chunk_oja_fwd(
         A=A,
         gv=gv,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     h, k_new, final_state = chunk_oja_fwd_h(
         v=vg,
@@ -60,6 +65,7 @@ def chunk_oja_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     _, o = chunk_oja_fwd_o(
         q=q,
@@ -69,6 +75,7 @@ def chunk_oja_fwd(
         gv=gv,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     return gv, o, A, final_state
 
@@ -87,6 +94,7 @@ def chunk_oja_bwd(
     dht: torch.Tensor,
     dgk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     w, u, vg = recompute_w_u_fwd(
         k=k,
@@ -95,6 +103,7 @@ def chunk_oja_bwd(
         A=A,
         gv=gv,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     h, k_new, _ = chunk_oja_fwd_h(
@@ -105,6 +114,7 @@ def chunk_oja_bwd(
         initial_state=initial_state,
         output_final_state=False,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     dAqk = chunk_oja_bwd_dA(
@@ -113,6 +123,7 @@ def chunk_oja_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     Aqk, dq, dk_new = chunk_oja_bwd_dqk(
@@ -124,6 +135,7 @@ def chunk_oja_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     dh, dh0, dk_new = chunk_oja_bwd_dhu(
@@ -137,10 +149,10 @@ def chunk_oja_bwd(
         dk=dk_new,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         states_in_fp32=False,
     )
 
-    # grid = (NV, NT, B * H)
     dv, dw, dgv_last = chunk_oja_bwd_dvwg_h(
         k=k_new,
         v=v,
@@ -150,6 +162,7 @@ def chunk_oja_bwd(
         dk=dk_new,
         dgk=dgk,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     dv, dgv1 = chunk_oja_bwd_dv_o(
@@ -160,6 +173,7 @@ def chunk_oja_bwd(
         dv=dv,
         do=do,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     dk, dv1, db, dgv2, dAvv = prepare_wy_repr_bwd(
@@ -171,6 +185,7 @@ def chunk_oja_bwd(
         dw=dw,
         du=dk_new,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     dv2, dgv3, db2 = chunk_scaled_dot_kkt_bwd_gk(
@@ -179,11 +194,14 @@ def chunk_oja_bwd(
         beta=beta,
         dA=dAvv,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     dv = dv.add_(dv1).add_(dv2)
     db = db.add_(db2)
-    dgv = dgv_last.add_(chunk_local_cumsum(dgv1.add_(dgv2).add_(dgv3), chunk_size=64, reverse=True, cu_seqlens=cu_seqlens))
+    dgv = dgv_last.add_(chunk_local_cumsum(
+        dgv1.add_(dgv2).add_(dgv3), chunk_size=64, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
+    ))
     return dq, dk, dv, db, dgv, dh0
 
 
@@ -203,6 +221,7 @@ class ChunkOJAFunction(torch.autograd.Function):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
         use_q_l2norm: bool = False,
         use_k_l2norm: bool = False,
     ):
@@ -212,6 +231,8 @@ class ChunkOJAFunction(torch.autograd.Function):
         if use_k_l2norm:
             k, k_rstd = l2norm_fwd(k)
 
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
         gv, o, A, final_state = chunk_oja_fwd(
             q=q,
             k=k,
@@ -222,8 +243,9 @@ class ChunkOJAFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, gv, beta, A, o, initial_state, cu_seqlens)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, gv, beta, A, o, initial_state, cu_seqlens, chunk_indices)
         ctx.scale = scale
         ctx.use_q_l2norm = use_q_l2norm
         ctx.use_k_l2norm = use_k_l2norm
@@ -237,7 +259,7 @@ class ChunkOJAFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor
     ):
-        q, q_rstd, k, k_rstd, v, gv, beta, A, o, initial_state, cu_seqlens = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, gv, beta, A, o, initial_state, cu_seqlens, chunk_indices = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0 = chunk_oja_bwd(
             q=q,
             k=k,
@@ -251,13 +273,14 @@ class ChunkOJAFunction(torch.autograd.Function):
             do=do,
             dht=dht,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
 
         if ctx.use_q_l2norm:
             dq = l2norm_bwd(q, q_rstd, dq)
         if ctx.use_k_l2norm:
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(gv), db.to(beta), None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(gv), db.to(beta), None, dh0, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -273,6 +296,7 @@ def chunk_gated_oja_rule(
     use_q_l2norm: bool = False,
     use_k_l2norm: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     **kwargs,
 ):
     if 'head_first' in kwargs:
@@ -307,6 +331,7 @@ def chunk_gated_oja_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
+        cu_seqlens_cpu,
         use_q_l2norm,
         use_k_l2norm
     )
