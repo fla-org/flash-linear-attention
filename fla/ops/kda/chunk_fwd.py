@@ -34,6 +34,7 @@ def chunk_kda_fwd(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext | None = None,
+    transpose_state_layout: bool = False,
 ):
     # Apply gate activation
     g_org = None
@@ -83,6 +84,7 @@ def chunk_kda_fwd(
             initial_state=initial_state,
             context=cp_context,
             use_exp2=True,
+            transpose_state_layout=transpose_state_layout,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -96,6 +98,7 @@ def chunk_kda_fwd(
         cu_seqlens_cpu=cu_seqlens_cpu,
         chunk_indices=chunk_indices,
         use_exp2=True,
+        transpose_state_layout=transpose_state_layout,
     )
 
     if cp_context is not None:
@@ -116,6 +119,7 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         use_exp2=True,
+        transpose_state_layout=transpose_state_layout,
     )
     if disable_recompute is False:
         # Delete to save memory

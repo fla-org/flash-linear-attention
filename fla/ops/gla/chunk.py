@@ -301,7 +301,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT'],
+    key=['BT', 'TRANSPOSE_STATE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -323,6 +323,7 @@ def chunk_gla_fwd_kernel_o(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_EXP2: tl.constexpr,
+    TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -344,7 +345,10 @@ def chunk_gla_fwd_kernel_o(
     for i_k in range(tl.cdiv(K, BK)):
         p_q = tl.make_block_ptr(q + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_g = tl.make_block_ptr(g + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_h = tl.make_block_ptr(h + (i_tg * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+        if TRANSPOSE_STATE:
+            p_h = tl.make_block_ptr(h + (i_tg * H + i_h) * K*V, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+        else:
+            p_h = tl.make_block_ptr(h + (i_tg * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
 
         # [BT, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -355,12 +359,12 @@ def chunk_gla_fwd_kernel_o(
             b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
         else:
             b_qg = (b_q * exp(b_g)).to(b_q.dtype)
-        # [BK, BV]
         b_h = tl.load(p_h, boundary_check=(0, 1))
-        # works but dkw, owing to divine benevolence
-        # [BT, BV]
         if i_k >= 0:
-            b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+            if TRANSPOSE_STATE:
+                b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
+            else:
+                b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
     b_o *= scale
     p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
     p_o = tl.make_block_ptr(o + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -867,6 +871,7 @@ def chunk_gla_fwd_o_gk(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = False,
+    transpose_state_layout: bool = False,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
@@ -894,6 +899,7 @@ def chunk_gla_fwd_o_gk(
         V=V,
         BT=BT,
         USE_EXP2=use_exp2,
+        TRANSPOSE_STATE=transpose_state_layout,
     )
     return o
 

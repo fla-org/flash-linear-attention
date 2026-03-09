@@ -534,14 +534,14 @@ def pre_process_fwd_kernel_merged(
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
 def merge_fwd_bwd_kernel(
-    h,                   # [H, K, V] or [num_non_first, H, K, V] for intracard
-    ag_hm,               # [H, K, K+V] or [S_split, H, K, K+V] for intracard
+    h,                   # [H, K, V] or [num_non_first, H, K, V] for intracard (or [V, K] when transposed)
+    ag_hm,               # [H, K, K+V] or [S_split, H, K, K+V] for intracard (always [K, V+K])
     pre_or_post_num_ranks,  # num_ranks for CP, NUM_SPLIT_SEQS for intracard
     rank,                # rank for CP, not used for intracard
     seq_offsets,         # None for CP, [num_split_seqs+1] for intracard
     init_offsets,        # None for CP, [num_split_seqs+1] for intracard
     h0_seq_ids,          # None for CP, [num_split_seqs] for intracard
-    h0,                  # None or [N_orig, H, K, V] for intracard
+    h0,                  # None or [N_orig, H, K, V] for intracard (or [V, K] when transposed)
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -551,6 +551,7 @@ def merge_fwd_bwd_kernel(
     INTRACARD_MODE: tl.constexpr,          # True: intracard mode, False: CP mode
     NUM_SEQ_ENTRIES,         # num_split_seqs for intracard
     HAS_H0: tl.constexpr,                  # Heuristic: whether h0 is provided
+    TRANSPOSE_STATE: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
 ):
     """
     Unified merge kernel for both CP and Intra-card modes.
@@ -562,6 +563,10 @@ def merge_fwd_bwd_kernel(
     Intra-card mode (INTRACARD_MODE=True):
         Grid: (V/BV, NUM_SEQ_ENTRIES, H)
         Merges across subseqs within card for intra-card context parallel.
+
+    When TRANSPOSE_STATE=True, h0 and output h use [V, K] layout.
+    ag_hm always uses [K, V+K] layout (from pre_scan).
+    The recurrence h' = M @ h + he becomes h_T' = h_T @ M^T + he^T.
     """
     i_v = tl.program_id(0)
     if INTRACARD_MODE:
@@ -583,19 +588,30 @@ def merge_fwd_bwd_kernel(
         # Initialize from h0 if provided
         if HAS_H0:
             orig_seq_id = tl.load(h0_seq_ids + i_seq).to(tl.int32)
-            p_h0 = tl.make_block_ptr(
-                h0 + (orig_seq_id * H + i_h) * K * V,
-                (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
-            )
-            b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+            if TRANSPOSE_STATE:
+                p_h0 = tl.make_block_ptr(
+                    h0 + (orig_seq_id * H + i_h) * V * K,
+                    (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0)
+                )
+                b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
+            else:
+                p_h0 = tl.make_block_ptr(
+                    h0 + (orig_seq_id * H + i_h) * K * V,
+                    (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
+                )
+                b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
         else:
-            b_h = tl.zeros([BK, BV], dtype=tl.float32)
+            if TRANSPOSE_STATE:
+                b_h = tl.zeros([BV, BK], dtype=tl.float32)
+            else:
+                b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
         # Merge loop over subseqs
         for idx in range(num_subseqs):
             i_ss = ss_start + idx
             base = i_ss * stride_hm_s + i_h * stride_hm_h
 
+            # he and m are always in [K, V+K] layout from pre_scan
             p_he = tl.make_block_ptr(
                 ag_hm + base, (K, V), (V + K, 1), (0, i_v * BV), (BK, BV), (1, 0)
             )
@@ -604,16 +620,26 @@ def merge_fwd_bwd_kernel(
                 ag_hm + base + V, (K, K), (V + K, 1), (0, 0), (BK, BK), (1, 0)
             )
             b_m = tl.load(p_m, boundary_check=(0, 1)).to(tl.float32)
-            b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32)) + b_he.to(tl.float32)
+            if TRANSPOSE_STATE:
+                # h_T' = h_T @ M^T + he^T
+                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m)) + tl.trans(b_he)
+            else:
+                b_h = tl.dot(b_m.to(tl.float32), b_h.to(tl.float32)) + b_he.to(tl.float32)
 
             # Store for non-first subseqs
             if idx < num_subseqs - 1:
                 init_idx = init_base + idx
                 stride_init = H * K * V
-                p_out = tl.make_block_ptr(
-                    h + init_idx * stride_init + i_h * K * V,
-                    (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
-                )
+                if TRANSPOSE_STATE:
+                    p_out = tl.make_block_ptr(
+                        h + init_idx * stride_init + i_h * V * K,
+                        (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0)
+                    )
+                else:
+                    p_out = tl.make_block_ptr(
+                        h + init_idx * stride_init + i_h * K * V,
+                        (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0)
+                    )
                 tl.store(p_out, b_h.to(p_out.dtype.element_ty), boundary_check=(0, 1))
     else:
         # CP mode
@@ -622,7 +648,10 @@ def merge_fwd_bwd_kernel(
         h += i_h * K * V
         ag_hm += i_h * K * (K + V)
         stride = H * K * (K + V)
-        b_h = tl.zeros([BK, BV], dtype=tl.float32)
+        if TRANSPOSE_STATE:
+            b_h = tl.zeros([BV, BK], dtype=tl.float32)
+        else:
+            b_h = tl.zeros([BK, BV], dtype=tl.float32)
         for idx in range(num_ranks):
             if FORWARD:
                 cur_rank = rank - num_ranks + idx
@@ -632,8 +661,14 @@ def merge_fwd_bwd_kernel(
             b_ag_h = tl.load(p_ag_h, boundary_check=(0, 1))
             p_ag_m = tl.make_block_ptr(ag_hm + cur_rank * stride + V, (K, K), (K + V, 1), (0, 0), (BK, BK), (1, 0))
             b_ag_m = tl.load(p_ag_m, boundary_check=(0, 1))
-            b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
-        p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
+            if TRANSPOSE_STATE:
+                b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32)) + tl.trans(b_ag_h).to(tl.float32)
+            else:
+                b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
+        if TRANSPOSE_STATE:
+            p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0))
+        else:
+            p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
         tl.store(p_h, b_h.to(p_h.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -1105,6 +1140,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     use_exp2: bool = False,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext = None,
+    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return initial_state
@@ -1123,7 +1159,10 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     hm = k.new_zeros(H, K, (V + K), dtype=torch.float32)
-    initial_state = k.new_zeros(N, H, K, V, dtype=torch.float32)
+    if transpose_state_layout:
+        initial_state = k.new_zeros(N, H, V, K, dtype=torch.float32)
+    else:
+        initial_state = k.new_zeros(N, H, K, V, dtype=torch.float32)
     if not context.is_last_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), H)
@@ -1164,6 +1203,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             FORWARD=True,
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
+            TRANSPOSE_STATE=transpose_state_layout,
         )
     return initial_state
 
@@ -1182,6 +1222,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     dht: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
+    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return dht, initial_state
@@ -1200,7 +1241,10 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         N = len(cu_seqlens) - 1
 
     dhm = q.new_zeros(H, K, V + K, dtype=torch.float32)
-    dht = q.new_zeros(N, H, K, V, dtype=torch.float32)
+    if transpose_state_layout:
+        dht = q.new_zeros(N, H, V, K, dtype=torch.float32)
+    else:
+        dht = q.new_zeros(N, H, K, V, dtype=torch.float32)
 
     if not context.is_first_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
@@ -1246,6 +1290,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             FORWARD=False,
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
+            TRANSPOSE_STATE=transpose_state_layout,
         )
 
     # initial_state is None in the CP mode

@@ -84,6 +84,7 @@ def _raw_chunk_gated_delta_rule_fwd_h(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = False,
+    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V = *k.shape, u.shape[-1]
     BT = chunk_size
@@ -95,8 +96,12 @@ def _raw_chunk_gated_delta_rule_fwd_h(
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
-    h = k.new_empty(B, NT, H, K, V)
-    final_state = k.new_zeros(N, H, K, V, dtype=torch.float32) if output_final_state else None
+    if transpose_state_layout:
+        h = k.new_empty(B, NT, H, V, K)
+        final_state = k.new_zeros(N, H, V, K, dtype=torch.float32) if output_final_state else None
+    else:
+        h = k.new_empty(B, NT, H, K, V)
+        final_state = k.new_zeros(N, H, K, V, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u) if save_new_value else None
 
     def grid(meta):
@@ -107,6 +112,7 @@ def _raw_chunk_gated_delta_rule_fwd_h(
         g=g, gk=gk, h=h, h0=initial_state, ht=final_state,
         cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
         T=T, H=H, K=K, V=V, BT=BT, USE_EXP2=use_exp2,
+        TRANSPOSE_STATE=transpose_state_layout,
     )
     return h, v_new, final_state
 
@@ -272,6 +278,7 @@ def intracard_merge(
     merge_init_offsets: list[int],
     device: torch.device,
     initial_state: torch.Tensor | None = None,
+    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor | None, int]:
     """Merge sub-sequence states using pre-computed parameters.
 
@@ -301,7 +308,10 @@ def intracard_merge(
     init_offsets = all_tensor[n_so:n_so + n_io]
     h0_seq_ids = all_tensor[n_so + n_io:]
 
-    initial_states_merge = hm.new_empty(num_non_first, H, K, V, dtype=torch.float32)
+    if transpose_state_layout:
+        initial_states_merge = hm.new_empty(num_non_first, H, V, K, dtype=torch.float32)
+    else:
+        initial_states_merge = hm.new_empty(num_non_first, H, K, V, dtype=torch.float32)
 
     def grid(meta):
         return (triton.cdiv(V, meta['BV']), num_split_seqs, H)
@@ -322,6 +332,7 @@ def intracard_merge(
         FORWARD=True,
         INTRACARD_MODE=True,
         NUM_SEQ_ENTRIES=num_split_seqs,
+        TRANSPOSE_STATE=transpose_state_layout,
     )
 
     return initial_states_merge, num_non_first
@@ -415,6 +426,7 @@ def intracard_fwd_h(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = False,
     max_splits: int = 32,
+    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
 
@@ -485,6 +497,7 @@ def intracard_fwd_h(
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             use_exp2=use_exp2,
+            transpose_state_layout=transpose_state_layout,
         )
 
     N_orig = len(cu_seqlens_cpu) - 1
@@ -544,9 +557,13 @@ def intracard_fwd_h(
         merge_init_offsets=merge_init_offsets,
         device=device,
         initial_state=initial_state,
+        transpose_state_layout=transpose_state_layout,
     )
 
-    initial_state_expanded = k.new_zeros(total_subseqs, H, K, V, dtype=torch.float32)
+    if transpose_state_layout:
+        initial_state_expanded = k.new_zeros(total_subseqs, H, V, K, dtype=torch.float32)
+    else:
+        initial_state_expanded = k.new_zeros(total_subseqs, H, K, V, dtype=torch.float32)
 
     if initial_state is not None:
         initial_state_expanded[first_subseq_indices] = initial_state
@@ -569,6 +586,7 @@ def intracard_fwd_h(
         cu_seqlens=cu_seqlens_subseq_gpu,
         chunk_indices=chunk_indices_subseq,
         use_exp2=use_exp2,
+        transpose_state_layout=transpose_state_layout,
     )
 
     if output_final_state and final_state_subseq is not None:
