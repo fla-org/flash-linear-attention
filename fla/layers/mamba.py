@@ -383,12 +383,13 @@ class Mamba(nn.Module):
                 hidden_states, last_state, use_cache, attention_mask, **kwargs
             )
 
-        update_layer_cache(
-            self,
-            past_key_values,
-            recurrent_state=ssm_state,
-            conv_state=conv_state,
-            offset=hidden_states.shape[1],
-        )
+        if use_cache and past_key_values is not None:
+            update_layer_cache(
+                self,
+                past_key_values,
+                recurrent_state=ssm_state,
+                conv_state=conv_state,
+                offset=hidden_states.shape[1],
+            )
 
         return output, None, past_key_values
