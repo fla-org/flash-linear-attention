@@ -147,13 +147,16 @@ def parallel_path_bwd_dq_fn(
     S,
     BT,
     BS,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, num_blocks, HQ, K = q.shape
     H, V = v.shape[-2:]
     G = HQ // H
     BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
 
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
 

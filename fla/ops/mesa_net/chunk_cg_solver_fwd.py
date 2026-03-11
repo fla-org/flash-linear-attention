@@ -144,6 +144,7 @@ def chunk_mesa_cg_fwd(
     chunk_size: int = 64,
     max_CG_iteration: int = 30,
     output_dtype: torch.dtype | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K = q.shape
     assert K <= 128, "head dimension must be less than 128"
@@ -154,7 +155,8 @@ def chunk_mesa_cg_fwd(
     assert h_kv is not None, "h_kv must be provided if calculate_output is True"
     o = torch.empty_like(v)
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, chunk_size) if cu_seqlens is None else len(chunk_indices)
     BK = max(triton.next_power_of_2(K), 16)
     grid = (NT, H*B)

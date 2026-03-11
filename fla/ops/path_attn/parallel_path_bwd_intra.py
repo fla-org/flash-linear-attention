@@ -74,7 +74,7 @@ def parallel_path_bwd_intra_chunk_kernel(
     if USE_GATE:
         p_gq_cumsum = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
         b_gq_cumsum = tl.load(p_gq_cumsum, boundary_check=(0, ))
-        b_dgq = tl.zeros([BT ], dtype=tl.float32)
+        b_dgq = tl.zeros([BT], dtype=tl.float32)
     else:
         b_dgq = None
 
@@ -148,6 +148,7 @@ def parallel_path_bwd_intra_chunk_fn(
     scale, L, D,
     cu_seqlens,
     S, BT,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     assert dk.dtype == dv.dtype == dw1.dtype == dw2.dtype == torch.float32, 'atomic_add requires float32'
     B, T, HQ, K = q.shape
@@ -156,7 +157,9 @@ def parallel_path_bwd_intra_chunk_fn(
     V = v.shape[-1]
     H = k.shape[-2]
     G = HQ // H
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     dq_new = torch.empty_like(dq, dtype=q.dtype)
     parallel_path_bwd_intra_chunk_kernel[(NT, B*HQ)](

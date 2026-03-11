@@ -63,6 +63,7 @@ def chunk_comba_cumsum_scalar_fwd(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -70,7 +71,8 @@ def chunk_comba_cumsum_scalar_fwd(
         B, T, H = g.shape
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     g0, g1 = torch.empty_like(g, dtype=output_dtype or g.dtype), torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
@@ -149,6 +151,7 @@ def chunk_comba_cumsum_scalar_bwd(
     cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
     output_dtype: torch.dtype | None = torch.float,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = dg0.shape
@@ -156,7 +159,8 @@ def chunk_comba_cumsum_scalar_bwd(
         B, T, H = dg0.shape
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     dg = torch.empty_like(dg0, dtype=output_dtype or dg0.dtype)
     grid = (NT, B * H)

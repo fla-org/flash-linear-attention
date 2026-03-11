@@ -382,6 +382,7 @@ def parallel_nsa_compression_bwd(
     scale: float = None,
     cu_seqlens: torch.LongTensor | None = None,
     token_indices: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K, V = *q.shape, v.shape[-1]
     TC = k.shape[1]
@@ -393,7 +394,8 @@ def parallel_nsa_compression_bwd(
     NV = triton.cdiv(V, BV)
     if cu_seqlens is not None:
         chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS)
-        chunk_indices = prepare_chunk_indices(chunk_offsets, BC)
+        if chunk_indices is None:
+            chunk_indices = prepare_chunk_indices(chunk_offsets, BC)
         NC = len(chunk_indices)
     else:
         chunk_indices, chunk_offsets = None, None

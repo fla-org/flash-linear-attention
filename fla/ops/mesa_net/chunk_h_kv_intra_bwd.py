@@ -155,6 +155,7 @@ def chunk_mesa_net_h_kv_bwd_intra_fn(
     do,
     cu_seqlens,
     chunk_size=64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     # share memory is not large enough for a single fused kernel
     if not check_shared_mem('ampere'):
@@ -169,10 +170,12 @@ def chunk_mesa_net_h_kv_bwd_intra_fn(
             do=do,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
         )
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BK = max(triton.next_power_of_2(K), 16)

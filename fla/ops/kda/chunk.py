@@ -36,6 +36,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
+        transpose_state_layout: bool = False,
     ):
         chunk_size = 64
 
@@ -70,6 +71,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             disable_recompute=disable_recompute,
             return_intermediate_states=return_intermediate_states,
             cp_context=cp_context,
+            transpose_state_layout=transpose_state_layout,
         )
 
         if return_intermediate_states:
@@ -90,6 +92,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.use_gate_in_kernel = use_gate_in_kernel
         ctx.disable_recompute = disable_recompute
         ctx.cp_context = cp_context
+        ctx.transpose_state_layout = transpose_state_layout
         return o.type_as(q), final_state
 
     @staticmethod
@@ -128,13 +131,14 @@ class ChunkKDAFunction(torch.autograd.Function):
             disable_recompute=ctx.disable_recompute,
             w=w, u=u, qg=qg, kg=kg, v_new=v_new, h=h,
             cp_context=ctx.cp_context,
+            transpose_state_layout=ctx.transpose_state_layout,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
 
         return (dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None, None)
 
 
 @torch.compiler.disable
@@ -156,6 +160,7 @@ def chunk_kda(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext = None,
+    transpose_state_layout: bool = False,
     **kwargs,
 ):
     r"""
@@ -329,4 +334,5 @@ def chunk_kda(
         disable_recompute,
         return_intermediate_states,
         cp_context,
+        transpose_state_layout,
     )

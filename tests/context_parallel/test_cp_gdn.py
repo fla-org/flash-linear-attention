@@ -99,6 +99,7 @@ def run_cp_gdn_test_worker(
     D: int,
     lengths: list[int],
     dtype,
+    transpose_state_layout: bool = False,
 ):
     """
     Worker function for CP GDN test.
@@ -166,6 +167,7 @@ def run_cp_gdn_test_worker(
                 g=g_ref,
                 beta=beta_ref,
                 cu_seqlens=cu_seqlens_global,
+                transpose_state_layout=transpose_state_layout,
             )
 
             o_ref.backward(do_global)
@@ -207,6 +209,7 @@ def run_cp_gdn_test_worker(
             g=g_local,
             beta=beta_local,
             cp_context=context,
+            transpose_state_layout=transpose_state_layout,
         )
 
         # CP Backward
@@ -277,6 +280,7 @@ def run_cp_test_with_spawn(
     D: int,
     lengths: list[int],
     dtype=torch.bfloat16,
+    transpose_state_layout: bool = False,
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -284,7 +288,7 @@ def run_cp_test_with_spawn(
     """
     mp.start_processes(
         run_cp_gdn_test_worker,
-        args=(world_size, test_name, T, H, D, lengths, dtype),
+        args=(world_size, test_name, T, H, D, lengths, dtype, transpose_state_layout),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -376,6 +380,40 @@ def test_cp2_many_short_sequences():
         T=10240, H=4, D=128,
         lengths=[1000, 1500, 2000, 2500, 1240, 1000, 1000],
         dtype=torch.bfloat16,
+    )
+
+
+# ============================================================
+# Transpose State Layout Tests
+# ============================================================
+
+def test_cp2_transpose_state():
+    """CP2: transpose_state_layout=True with sequence cut."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_TransposeState",
+        T=10240, H=4, D=128,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
+        transpose_state_layout=True,
+    )
+
+
+def test_cp4_transpose_state():
+    """CP4: transpose_state_layout=True with single long sequence."""
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name="CP4_TransposeState",
+        T=10240, H=4, D=128,
+        lengths=[10240],
+        dtype=torch.bfloat16,
+        transpose_state_layout=True,
     )
 
 

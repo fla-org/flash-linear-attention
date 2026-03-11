@@ -385,6 +385,7 @@ def chunk_scaled_dot_kkt_fwd(
     gk: torch.Tensor | None = None,
     beta: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:
@@ -403,6 +404,8 @@ def chunk_scaled_dot_kkt_fwd(
         cu_seqlens (torch.LongTensor):
             The cumulative sequence lengths of the input tensor.
             Default: None
+        chunk_indices (torch.LongTensor):
+            Pre-computed chunk indices. Default: None
         chunk_size (int):
             The chunk size. Default: 64.
         output_dtype (torch.dtype):
@@ -413,7 +416,8 @@ def chunk_scaled_dot_kkt_fwd(
     """
     B, T, H, K = k.shape
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if gk is None:
         A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
@@ -475,6 +479,7 @@ def chunk_scaled_dot_kkt_bwd_gk(
     beta: torch.Tensor,
     dA: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64
 ):
     B, T, H, K = k.shape
@@ -482,7 +487,8 @@ def chunk_scaled_dot_kkt_bwd_gk(
     BC = min(16, BT)
     BK = min(64, triton.next_power_of_2(K))
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)

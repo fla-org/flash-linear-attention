@@ -261,7 +261,7 @@ def causal_conv1d_bwd_kernel(
                 b_dw = tl.sum(b_dy_shift * b_x, 0)
                 # index of cache：c = W - i_w + t
                 if USE_INITIAL_STATE:
-                    mask_head_rows = (o_t < i_w)
+                    mask_head_rows = (o_t < i_w) & (o_t < T)
                     # dy_head = dy[t]
                     b_dy_head = tl.load(dy + bos * D + o_t[:, None] * D + o_d, mask=(mask_head_rows[:, None] & m_d[None, :]),
                                         other=0.0).to(tl.float32)

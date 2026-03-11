@@ -61,6 +61,7 @@ def fused_recurrent_kda_fwd_kernel(
     HAS_DT_BIAS: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    TRANSPOSE_STATE: tl.constexpr,
     num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -102,9 +103,15 @@ def fused_recurrent_kda_fwd_kernel(
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[:, None] & mask_v[None, :]
+    if TRANSPOSE_STATE:
+        mask_h = mask_v[:, None] & mask_k[None, :]
+    else:
+        mask_h = mask_k[:, None] & mask_v[None, :]
 
-    b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    if TRANSPOSE_STATE:
+        b_h = tl.zeros([BV, BK], dtype=tl.float32)
+    else:
+        b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
@@ -118,11 +125,15 @@ def fused_recurrent_kda_fwd_kernel(
                 )
                 * stride_init_state_token
             )
-            p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            if TRANSPOSE_STATE:
+                p_h0 = p_h0 + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
+            else:
+                p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         else:
-            # For non-continuous batching: h0 has shape [N, HV, K, V]
-            # where N = B (batch size) for equal-length sequences
-            p_h0 = h0 + (i_n * HV + i_hv) * K * V + o_k[:, None] * V + o_v[None, :]
+            if TRANSPOSE_STATE:
+                p_h0 = h0 + (i_n * HV + i_hv) * K * V + o_v[:, None] * K + o_k[None, :]
+            else:
+                p_h0 = h0 + (i_n * HV + i_hv) * K * V + o_k[:, None] * V + o_v[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
     for i_t in tl.range(0, T, num_stages=num_stages):
@@ -134,48 +145,45 @@ def fused_recurrent_kda_fwd_kernel(
             b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
             b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
         b_q = b_q * scale
-        # [BK, BV]
         b_g = tl.load(p_g, eviction_policy='evict_last').to(tl.float32)
 
-        # Compute gate if USE_GATE_IN_KERNEL is True
         if USE_GATE_IN_KERNEL:
-            # Load A_log for this head
             b_A = tl.load(A_log + i_h).to(tl.float32)
 
-            # Apply dt_bias if exists
             if HAS_DT_BIAS:
                 b_bias = tl.load(dt_bias + i_h * K + o_k, mask=mask_k, other=0).to(tl.float32)
                 b_g = b_g + b_bias
 
-            # Compute gate based on lower_bound
             if USE_LOWER_BOUND:
-                # lower_bound * sigmoid(exp(A_log) * g)
                 b_gk = lower_bound * tl.sigmoid(exp(b_A) * b_g)
             else:
-                # -exp(A_log) * softplus(g)
                 b_gk = -exp(b_A) * softplus(b_g)
         else:
-            # Use g directly as gate
             b_gk = b_g
 
-        b_h *= exp(b_gk[:, None])
+        if TRANSPOSE_STATE:
+            b_h *= exp(b_gk[None, :])
+        else:
+            b_h *= exp(b_gk[:, None])
 
-        # [BV]
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
+        if TRANSPOSE_STATE:
+            b_v -= tl.sum(b_h * b_k[None, :], 1)
+        else:
+            b_v -= tl.sum(b_h * b_k[:, None], 0)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0, eviction_policy='evict_first').to(tl.float32)
         else:
             b_beta = tl.load(p_beta, eviction_policy='evict_last').to(tl.float32)
         b_v *= b_beta
-        # [BK, BV]
-        b_h += b_k[:, None] * b_v[None, :]
-        # [BV]
-        b_o = tl.sum(b_h * b_q[:, None], 0)
+        if TRANSPOSE_STATE:
+            b_h += b_v[:, None] * b_k[None, :]
+            b_o = tl.sum(b_h * b_q[None, :], 1)
+        else:
+            b_h += b_k[:, None] * b_v[None, :]
+            b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v, eviction_policy='evict_first')
 
         if IS_CONTINUOUS_BATCHING:
-            # keep the states for multi-query tokens
-            # only save per step in vllm
             if INPLACE_FINAL_STATE:
                 p_ht = (
                     ht
@@ -186,7 +194,10 @@ def fused_recurrent_kda_fwd_kernel(
                 )
             else:
                 p_ht = ht + (bos + i_t) * stride_final_state_token
-            p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+            if TRANSPOSE_STATE:
+                p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
+            else:
+                p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
         p_q += H * K
@@ -197,11 +208,11 @@ def fused_recurrent_kda_fwd_kernel(
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
     if not IS_CONTINUOUS_BATCHING:
-        # Non-vLLM mode: only save final state at the end of loop (standard behavior)
         if STORE_FINAL_STATE:
-            # Use unified indexing: (i_n * HV + i_hv) for [N, HV, K, V] layout
-            # Both initial_state and final_state use this formula for consistency
-            p_ht = ht + (i_n * HV + i_hv) * K * V + o_k[:, None] * V + o_v[None, :]
+            if TRANSPOSE_STATE:
+                p_ht = ht + (i_n * HV + i_hv) * K * V + o_v[:, None] * K + o_k[None, :]
+            else:
+                p_ht = ht + (i_n * HV + i_hv) * K * V + o_k[:, None] * V + o_v[None, :]
             tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
@@ -225,6 +236,7 @@ def fused_recurrent_kda_fwd(
     use_gate_in_kernel: bool = False,
     lower_bound: float | None = None,
     out: torch.Tensor | None = None,
+    transpose_state_layout: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
@@ -244,7 +256,10 @@ def fused_recurrent_kda_fwd(
         assert initial_state is not None
         final_state = initial_state
     elif output_final_state:
-        final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
+        if transpose_state_layout:
+            final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
+        else:
+            final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
     else:
         final_state = None
 
@@ -291,6 +306,7 @@ def fused_recurrent_kda_fwd(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
+        TRANSPOSE_STATE=transpose_state_layout,
         num_warps=4,
         num_stages=2,
     )
@@ -314,6 +330,7 @@ def fused_recurrent_kda(
     use_gate_in_kernel: bool = False,
     lower_bound: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
+    transpose_state_layout: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -343,6 +360,8 @@ def fused_recurrent_kda(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        transpose_state_layout (bool):
+            Whether to use transposed state layout `[V, K]` instead of `[K, V]`. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -410,5 +429,6 @@ def fused_recurrent_kda(
         use_gate_in_kernel=use_gate_in_kernel,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
+        transpose_state_layout=transpose_state_layout,
     )
     return o, final_state
