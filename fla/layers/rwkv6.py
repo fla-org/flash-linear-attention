@@ -194,7 +194,7 @@ class RWKV6Attention(nn.Module):
             past_key_values,
             recurrent_state=recurrent_state,
             conv_state=hidden_states[:, -1],
-            offset=r.shape[2],
+            offset=seq_len,
         )
 
         o = self.g_norm(rearrange(o, '... h d -> ... (h d)')) * self.gate_fn(g)

@@ -253,6 +253,8 @@ class Mamba2(nn.Module):
 
         # Single step calculations via cache (decode)
         if last_state is not None:
+            if hidden_states.shape[1] != 1:
+                raise ValueError("Mamba2 cached decoding only supports a single new token per step.")
             conv_state = last_state['conv_state']
             ssm_state = last_state['recurrent_state']
 
@@ -346,6 +348,7 @@ class Mamba2(nn.Module):
                 )
 
                 # 2. Convolution sequence transformation
+                hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
                 # Compute conv_state for cache
                 new_conv_state = None
                 if use_cache:
@@ -431,6 +434,8 @@ class Mamba2(nn.Module):
 
         # 2. Convolution sequence transformation
         if last_state is not None:
+            if input_states.shape[1] != 1:
+                raise ValueError("Mamba2 cached decoding only supports a single new token per step.")
             # Decode path: single-step update
             conv_state = last_state['conv_state']
             ssm_state = last_state['recurrent_state']
@@ -449,6 +454,7 @@ class Mamba2(nn.Module):
             hidden_states_B_C = self.act(hidden_states_B_C)
         else:
             # Prefill path
+            hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
             new_conv_state = None
             if use_cache:
                 hidden_states_B_C_transposed = hidden_states_B_C.transpose(1, 2)

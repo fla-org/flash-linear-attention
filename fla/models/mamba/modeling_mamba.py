@@ -183,6 +183,9 @@ class MambaModel(MambaPreTrainedModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
+        output_attentions = (
+            output_attentions if output_attentions is not None else self.config.output_attentions
+        )
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -213,7 +216,7 @@ class MambaModel(MambaPreTrainedModel):
                 **kwargs,
             )
 
-            if output_attentions:
+            if output_attentions and attentions is not None:
                 all_attns = all_attns + (attentions,)
 
         hidden_states = self.norm_f(hidden_states)
@@ -228,7 +231,7 @@ class MambaModel(MambaPreTrainedModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
-            attentions=all_attns,
+            attentions=all_attns if all_attns else None,
         )
 
 

@@ -413,7 +413,7 @@ class LogLinearMamba2(nn.Module):
         # Single step calculations via cache
         if last_state is not None:
             if hidden_states.shape[1] != 1:
-                raise ValueError
+                raise ValueError("LogLinearMamba2 cached decoding only supports a single new token per step.")
 
             gate, xBC, dt, dl = torch.split(
                 projected_states.squeeze(1),
@@ -559,9 +559,10 @@ class LogLinearMamba2(nn.Module):
 
                 # 2. Convolution sequence transformation
                 # Init cache
+                masked_xBC = apply_mask_to_padding_states(xBC, attention_mask)
                 new_conv_state = None
                 if use_cache:
-                    xBC_t = rearrange(xBC, "b l d -> b d l")
+                    xBC_t = rearrange(masked_xBC, "b l d -> b d l")
                     new_conv_state = torch.nn.functional.pad(
                         xBC_t,
                         (self.conv_kernel_size - xBC_t.shape[-1], 0),

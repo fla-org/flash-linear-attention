@@ -9,6 +9,8 @@ from einops import rearrange, repeat
 from fla.ops.utils.index import prepare_cu_seqlens_from_mask, prepare_lens_from_mask
 from fla.utils import tensor_cache
 
+_LAYER_IDX_REQUIRED_MSG = "{cls} requires `layer_idx` when `past_key_values` is provided."
+
 
 class IndexFirstAxis(torch.autograd.Function):
 
@@ -198,9 +200,7 @@ def pad_input(
 def require_cache_layer_idx(module, past_key_values):
     layer_idx = getattr(module, "layer_idx", None)
     if past_key_values is not None and layer_idx is None:
-        raise ValueError(
-            f"{module.__class__.__name__} requires `layer_idx` when `past_key_values` is provided."
-        )
+        raise ValueError(_LAYER_IDX_REQUIRED_MSG.format(cls=module.__class__.__name__))
     return layer_idx
 
 
@@ -214,5 +214,5 @@ def get_layer_cache(module, past_key_values):
 def update_layer_cache(module, past_key_values, **kwargs):
     layer_idx = require_cache_layer_idx(module, past_key_values)
     if past_key_values is not None:
-        past_key_values.update(layer_idx=layer_idx, **kwargs)
-    return past_key_values
+        return past_key_values.update(layer_idx=layer_idx, **kwargs)
+    return None

@@ -97,7 +97,9 @@ class FLALayer(CacheLayerMixin):
                 if isinstance(state, torch.Tensor):
                     self.device = state.device
                 elif isinstance(state, (tuple, list)):
-                    self.device = state[0].device
+                    first_tensor = next((item for item in state if isinstance(item, torch.Tensor)), None)
+                    if first_tensor is not None:
+                        self.device = first_tensor.device
                 elif hasattr(state, 'device'):
                     self.device = state.device
                 else:

@@ -158,7 +158,7 @@ class HGRNAttention(nn.Module):
             past_key_values,
             recurrent_state=recurrent_state,
             conv_state=(conv_state_i, conv_state_f) if self.use_short_conv else None,
-            offset=i.shape[2],
+            offset=i.shape[1],
         )
 
         o = self.g_norm(o, self.g_proj(hidden_states))

@@ -146,6 +146,9 @@ class Mamba(nn.Module):
         attention_mask: torch.LongTensor | None = None,
         **kwargs: Unpack[dict],
     ):
+        if last_state is not None and hidden_states.shape[1] != 1:
+            raise ValueError("Mamba cached decoding only supports a single new token per step.")
+
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states).transpose(1, 2)
 
@@ -272,6 +275,9 @@ class Mamba(nn.Module):
         attention_mask: torch.LongTensor | None = None,
         **kwargs: Unpack[dict],
     ):
+        if last_state is not None and input_states.shape[1] != 1:
+            raise ValueError("Mamba cached decoding only supports a single new token per step.")
+
         batch_size, seq_len, _ = input_states.shape
         dtype = input_states.dtype
         # 1. Gated MLP's linear projection
