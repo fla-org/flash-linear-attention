@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import RMSNorm, ShortConvolution
 from fla.modules.activations import swish
 from fla.modules.layernorm import rms_norm_linear
@@ -92,7 +92,8 @@ class HGRN2Attention(nn.Module):
                 activation=None,
             )
 
-        self.g_norm = RMSNorm(hidden_size=self.hidden_size, elementwise_affine=elementwise_affine, eps=norm_eps, dtype=torch.float32)
+        self.g_norm = RMSNorm(hidden_size=self.hidden_size, elementwise_affine=elementwise_affine,
+                              eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.input_dim, hidden_size, bias=False)
 
     def forward(
@@ -115,9 +116,7 @@ class HGRN2Attention(nn.Module):
         batch_size, q_len, _ = hidden_states.shape
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if attention_mask is not None:
@@ -195,13 +194,13 @@ class HGRN2Attention(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_f, conv_state_i) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q_len,
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_f, conv_state_i) if self.use_short_conv else None,
+            offset=q_len,
+        )
 
         o = rearrange(o, '... h d -> ... (h d)')
         o = rms_norm_linear(o, self.g_norm.weight, self.g_norm.bias, self.o_proj.weight, self.o_proj.bias)

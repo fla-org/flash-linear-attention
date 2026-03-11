@@ -10,7 +10,7 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.gate import fused_kda_gate
@@ -176,9 +176,7 @@ class KimiDeltaAttention(nn.Module):
         if self.training:
             assert mode == "chunk", "Only chunk mode is supported in training."
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get("cu_seqlens")
         if attention_mask is not None:
@@ -258,13 +256,13 @@ class KimiDeltaAttention(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q_len,
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q_len,
+        )
 
         o = self.o_norm(o, rearrange(self.g_proj(hidden_states), "... (h d) -> ... h d", d=self.head_v_dim))
         o = rearrange(o, "b t h d -> b t (h d)")

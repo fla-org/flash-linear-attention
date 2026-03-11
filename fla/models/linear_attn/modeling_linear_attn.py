@@ -87,10 +87,15 @@ class LinearAttentionBlock(GradientCheckpointingLayer):
         **kwargs,
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         residual = hidden_states
-        # currently not supported
-        attentions, past_key_values = None, None
         hidden_states = self.attn_norm(hidden_states)
-        hidden_states = self.attn(hidden_states=hidden_states, **kwargs)
+        hidden_states, attentions, past_key_values = self.attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            **kwargs,
+        )
         if self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:

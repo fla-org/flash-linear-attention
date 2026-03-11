@@ -1,14 +1,21 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import RMSNorm
 from fla.modules.feature_map import DPFPFeatureMap, HadamardFeatureMap, HedgehogFeatureMap, T2RFeatureMap
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
+
+if TYPE_CHECKING:
+    from fla.models.utils import Cache
 
 
 class LinearAttention(nn.Module):
@@ -29,6 +36,7 @@ class LinearAttention(nn.Module):
         do_feature_map_norm: bool = False,
         elementwise_affine: bool = True,
         norm_eps: float = 1e-5,
+        layer_idx: int | None = None,
         **kwargs,
     ):
         super().__init__()
@@ -50,6 +58,7 @@ class LinearAttention(nn.Module):
         self.head_k_dim = self.key_dim // num_heads
         self.head_v_dim = self.value_dim // num_heads
         self.do_feature_map_norm = do_feature_map_norm
+        self.layer_idx = layer_idx
 
         if feature_map == 'hedgehog':
             if tie_feature_map_qk:
@@ -97,7 +106,8 @@ class LinearAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, self.value_dim_per_group, bias=False)
 
         if output_norm == 'rmsnorm':
-            self.norm = RMSNorm(hidden_size=self.head_v_dim, elementwise_affine=elementwise_affine, eps=norm_eps, dtype=torch.float32)
+            self.norm = RMSNorm(hidden_size=self.head_v_dim, elementwise_affine=elementwise_affine,
+                                eps=norm_eps, dtype=torch.float32)
         elif output_norm == 'identity':
             self.norm = nn.Identity()
         else:
@@ -111,12 +121,22 @@ class LinearAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
         **kwargs,
-    ) -> torch.Tensor:
-        mode = self.mode
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+        # Match other recurrent layers: use the recurrent kernel for decode/small chunks.
+        mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
+        last_state = get_layer_cache(self, past_key_values)
+
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
+
+        if attention_mask is not None:
+            v = v.mul(attention_mask[:, -v.shape[-2]:, None])
 
         q = rearrange(q, '... (h d) -> ... h d', d=self.head_k_dim)
         if self.num_kv_groups > 1:
@@ -134,11 +154,14 @@ class LinearAttention(nn.Module):
         if self.norm_k:
             k = k / (k.sum(-1, True) + 1e-4)
 
+        recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
             o, final_state = chunk_linear_attn(
                 q=q,
                 k=k,
                 v=v,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
                 normalize=self.do_feature_map_norm,
             )
         elif mode == 'fused_chunk':
@@ -146,6 +169,8 @@ class LinearAttention(nn.Module):
                 q=q,
                 k=k,
                 v=v,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
                 normalize=self.do_feature_map_norm,
             )
         elif mode == 'fused_recurrent':
@@ -153,11 +178,19 @@ class LinearAttention(nn.Module):
                 q=q,
                 k=k,
                 v=v,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
                 normalize=self.do_feature_map_norm,
             )
         else:
             raise NotImplementedError
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=final_state,
+            offset=q.shape[1],
+        )
         o = self.norm(o)
         o = rearrange(o, '... h d -> ... (h d)')
         o = self.o_proj(o)
-        return o
+        return o, None, past_key_values

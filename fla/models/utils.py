@@ -94,7 +94,19 @@ class FLALayer(CacheLayerMixin):
             self.device = 'cpu'
         for state in (recurrent_state, attn_state, conv_state, ffn_state):
             if state is not None:
-                self.device = state.device if isinstance(state, torch.Tensor) else state[0].device
+                if isinstance(state, torch.Tensor):
+                    self.device = state.device
+                elif isinstance(state, (tuple, list)):
+                    self.device = state[0].device
+                elif hasattr(state, 'device'):
+                    self.device = state.device
+                else:
+                    # For custom state objects (e.g., LogLinearAttentionState),
+                    # try to find a tensor attribute to get the device.
+                    for attr in vars(state).values():
+                        if isinstance(attr, torch.Tensor):
+                            self.device = attr.device
+                            break
                 break
 
         # Track seen tokens from attn_state if available, otherwise use offset

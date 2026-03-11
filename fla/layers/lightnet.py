@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.modules.fused_norm_gate import rms_norm_swish_gate_linear
 from fla.ops.gla import chunk_gla, fused_recurrent_gla
@@ -122,9 +123,7 @@ class LightNetAttention(nn.Module):
         # launching the triton kernel for just one token will actually be slower
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if self.use_short_conv:
@@ -160,17 +159,33 @@ class LightNetAttention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
+            v = v.mul(attention_mask[:, -v.shape[-2]:, None])
 
         q = F.silu(q)
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_f_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_i_dim)
         # TODO: this 2 steps took huge amount of time, which should be optimized
-        z = k.float().logcumsumexp(1)
-
-        if cu_seqlens is not None:
-            raise NotImplementedError("LightNet does not support variable-length sequences for now.")
-        k, g = torch.exp(k - z).to(k.dtype), (torch.cat((z[:, :1], z[:, :-1]), 1) - z).to(k.dtype)
+        last_z = last_state['ffn_state'] if last_state is not None and last_state.get('ffn_state') is not None else None
+        if last_z is not None:
+            # Decode path: continue logcumsumexp from cached state
+            z = torch.logaddexp(last_z, k.float())
+            k, g = torch.exp(k - z).to(k.dtype), (last_z - z).to(k.dtype)
+        else:
+            # Prefill path: mask padding positions to -inf so they don't affect logcumsumexp
+            if cu_seqlens is not None:
+                raise NotImplementedError("LightNet does not support variable-length sequences for now.")
+            k_float = k.float()
+            if attention_mask is not None:
+                pad_mask = attention_mask[:, -k.shape[1]:, None, None]  # (B, T, 1, 1)
+                k_for_z = k_float.masked_fill(pad_mask == 0, float('-inf'))
+            else:
+                k_for_z = k_float
+            z = k_for_z.logcumsumexp(1)
+            k_new = torch.exp(k_float - z)
+            g_new = torch.cat((z[:, :1], z[:, :-1]), 1) - z
+            # NaN/inf arise at fully-masked positions (-inf - (-inf)), zero them out
+            k = torch.nan_to_num(k_new, nan=0.0, posinf=0.0).to(k.dtype)
+            g = torch.nan_to_num(g_new, nan=0.0, posinf=0.0, neginf=0.0).to(k.dtype)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'fused_recurrent':
@@ -196,13 +211,14 @@ class LightNetAttention(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q.shape[1],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            ffn_state=z[:, -1:],
+            offset=q.shape[1],
+        )
 
         o = rms_norm_swish_gate_linear(
             rearrange(o, 'b t h d -> b t (h d)'),

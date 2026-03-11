@@ -71,7 +71,7 @@ class RWKV6FeedForward(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         if attention_mask is not None:
-            x = x.mul_(attention_mask[:, -x.shape[-2]:, None])
+            x = x.mul(attention_mask[:, -x.shape[-2]:, None])
         if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
             delta = shifted - x
