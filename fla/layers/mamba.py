@@ -126,6 +126,18 @@ class Mamba(nn.Module):
             self.causal_conv1d_update = causal_conv1d_update
         self.backend = backend
 
+    def _to_causal_conv_layout(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states.transpose(1, 2).contiguous()
+
+    def _from_causal_conv_layout(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states.transpose(1, 2).contiguous()
+
+    def _build_conv_state(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        seq_len = hidden_states.shape[-1]
+        if seq_len >= self.conv_kernel_size:
+            return hidden_states[..., -self.conv_kernel_size:].contiguous()
+        return nn.functional.pad(hidden_states, (self.conv_kernel_size - seq_len, 0)).contiguous()
+
     def cuda_kernels_forward(
         self,
         hidden_states: torch.Tensor,
@@ -162,29 +174,48 @@ class Mamba(nn.Module):
             hidden_states = hidden_states * attention_mask.unsqueeze(1)
 
         # 2. Convolution sequence transformation
+        conv_inputs = hidden_states
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
         if last_state is not None:
             conv_state = last_state['conv_state']
             ssm_state = last_state['recurrent_state']
 
-            hidden_states = self.causal_conv1d_update(
-                hidden_states.squeeze(-1),
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-            )
-            hidden_states = hidden_states.unsqueeze(-1)
+            if self.backend == 'triton':
+                hidden_states, conv_state = self.causal_conv1d_update(
+                    x=self._to_causal_conv_layout(conv_inputs),
+                    cache=conv_state,
+                    weight=conv_weights,
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                )
+                hidden_states = self._from_causal_conv_layout(hidden_states)
+            else:
+                hidden_states = self.causal_conv1d_update(
+                    conv_inputs.squeeze(-1),
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                )
+                hidden_states = hidden_states.unsqueeze(-1)
         else:
             conv_state = None
             ssm_state = None
-            if use_cache:
-                conv_state = nn.functional.pad(
-                    hidden_states, (self.conv_kernel_size - hidden_states.shape[-1], 0),
+            if self.backend == 'triton':
+                hidden_states, conv_state = self.causal_conv1d_fn(
+                    x=self._to_causal_conv_layout(conv_inputs),
+                    weight=conv_weights,
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                    output_final_state=bool(use_cache),
                 )
-            hidden_states = self.causal_conv1d_fn(
-                hidden_states, conv_weights, self.conv1d.bias, activation=self.activation,
-            )
+                hidden_states = self._from_causal_conv_layout(hidden_states)
+            else:
+                if use_cache:
+                    conv_state = self._build_conv_state(conv_inputs)
+                hidden_states = self.causal_conv1d_fn(
+                    conv_inputs, conv_weights, self.conv1d.bias, activation=self.activation,
+                )
 
         if attention_mask is not None and last_state is None:
             # Re-mask after the conv: causal kernels can regenerate non-zero values at masked positions,
@@ -270,10 +301,7 @@ class Mamba(nn.Module):
                 (batch_size, self.intermediate_size, self.ssm_state_size),
                 device=hidden_states.device, dtype=dtype,
             )
-            conv_state = nn.functional.pad(
-                hidden_states,
-                (self.conv_kernel_size - hidden_states.shape[-1], 0),
-            )
+            conv_state = self._build_conv_state(hidden_states)
             # [batch, intermediate_size, seq_len]
             hidden_states = self.act(self.conv1d(hidden_states)[..., :seq_len])
         else:
