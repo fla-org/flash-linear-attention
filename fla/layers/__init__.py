@@ -17,6 +17,7 @@ from .hgrn2 import HGRN2Attention
 from .kda import KimiDeltaAttention
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
+from .linoss import LinOSSAttention
 from .log_linear_mamba2 import LogLinearMamba2
 from .mamba import Mamba
 from .mamba2 import Mamba2
@@ -37,30 +38,31 @@ __all__ = [
     'BasedLinearAttention',
     'BitAttention',
     'Comba',
+    'DeltaFormerAttention',
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
     'GatedDeltaProduct',
     'GatedLinearAttention',
     'GatedSlotAttention',
-    'HGRNAttention',
     'HGRN2Attention',
+    'HGRNAttention',
     'KimiDeltaAttention',
     'LightNetAttention',
+    'LinOSSAttention',
     'LinearAttention',
     'LogLinearMamba2',
     'Mamba',
     'Mamba2',
     'MesaNet',
     'MomAttention',
-    'MultiheadLatentAttention',
     'MultiScaleRetention',
+    'MultiheadLatentAttention',
     'NativeSparseAttention',
     'PaTHAttention',
-    'ReBasedLinearAttention',
-    'RodimusAttention',
     'RWKV6Attention',
     'RWKV7Attention',
+    'ReBasedLinearAttention',
+    'RodimusAttention',
     'SlidingWindowSharedKeyAttention',
-    'DeltaFormerAttention',
 ]
