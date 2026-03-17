@@ -48,7 +48,7 @@ class MambaBlock(GradientCheckpointingLayer):
             state_size=config.state_size,
             conv_kernel=config.conv_kernel,
             intermediate_size=config.intermediate_size,
-            time_step_rank=config.time_step_rank,
+            dt_rank=config.time_step_rank,
             use_bias=config.use_bias,
             layer_idx=layer_idx,
         )

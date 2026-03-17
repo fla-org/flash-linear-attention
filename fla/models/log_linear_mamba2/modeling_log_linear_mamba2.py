@@ -36,7 +36,6 @@ class LogLinearMamba2Block(nn.Module):
             hidden_act=config.hidden_act,
             rms_norm=config.rms_norm,
             chunk_size=config.chunk_size,
-            time_step_rank=config.time_step_rank,
             time_step_limit=config.time_step_limit,
             time_step_min=config.time_step_min,
             time_step_max=config.time_step_max,
