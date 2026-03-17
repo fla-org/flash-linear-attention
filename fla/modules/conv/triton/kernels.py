@@ -507,7 +507,7 @@ def causal_conv1d_states_fwd_kernel(
         p_x = x + bos * stride_x_t
     else:
         seq_len = T
-        p_x = x + i_n * stride_x_n
+        p_x = x + tl.cast(i_n, tl.int64) * stride_x_n
 
     p_x = tl.make_block_ptr(p_x, (seq_len, D), (stride_x_t, stride_x_d), (seq_len - BW, i_d * BD), (BW, BD), (1, 0))
 
@@ -532,7 +532,7 @@ def causal_conv1d_states_fwd_kernel(
     # o_d[:, None] -> [BD, 1]
     # o_w[None, :] -> [1, BW]
     # p_final Shape -> [BD, BW]
-    p_final = final_state + i_n * D*W + o_d[:, None] * W + o_w[None, :]
+    p_final = final_state + tl.cast(i_n, tl.int64) * D*W + o_d[:, None] * W + o_w[None, :]
 
     # m_final Shape -> [BD, BW]
     m_final = m_d[:, None] & (o_w[None, :] >= 0)
