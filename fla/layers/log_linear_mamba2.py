@@ -52,8 +52,6 @@ def hmamba_chunk_scan_combined(
     dt_limit: tuple[float, float] = (0.0, float("inf")),
     return_final_states: bool = False,
 ):
-    if z is not None:
-        raise NotImplementedError
     if seq_idx is not None:
         raise NotImplementedError
     if cu_seqlens is not None:
@@ -67,11 +65,26 @@ def hmamba_chunk_scan_combined(
     if not B.shape == C.shape:
         raise ValueError("B and C must have the same shape")
 
+    squeeze_seqlen = x.dim() == 3
+    if squeeze_seqlen:
+        x = rearrange(x, "b h p -> b 1 h p")
+        dt = rearrange(dt, "b h -> b 1 h")
+        B = rearrange(B, "b g n -> b 1 g n")
+        C = rearrange(C, "b g n -> b 1 g n")
+        dl = rearrange(dl, "b h ell -> b 1 h ell")
+        if z is not None:
+            z = rearrange(z, "b h p -> b 1 h p")
+
     if D is not None:
-        if D.dim() != 1:
-            raise ValueError
-        D = rearrange(D, "h -> 1 1 h 1")
-        D_residual = x * D
+        if D.dim() == 1:
+            D = rearrange(D, "h -> 1 1 h 1")
+            D_residual = x * D
+        elif D.dim() == 2:
+            if D.shape != x.shape[-2:]:
+                raise ValueError("2D D must have shape (nheads, headdim)")
+            D_residual = x * rearrange(D, "h p -> 1 1 h p")
+        else:
+            raise ValueError("D must be 1D or 2D")
 
     if dt_bias is not None:
         dt = dt + rearrange(dt_bias, "h -> 1 1 h")
@@ -97,6 +110,12 @@ def hmamba_chunk_scan_combined(
 
     if D is not None:
         y = y + D_residual
+    if z is not None:
+        if z.shape != x.shape:
+            raise ValueError("z must match x shape")
+        y = y * torch.nn.functional.silu(z)
+    if squeeze_seqlen:
+        y = rearrange(y, "b 1 h p -> b h p")
 
     return y, state
 
@@ -154,21 +173,26 @@ def hmamba_split_conv1d_scan_combined(
         raise NotImplementedError
     if norm_before_gate is not False:
         raise NotImplementedError
-    if rmsnorm_weight is None:
-        raise NotImplementedError
     if activation not in ["silu", "swish"]:
         raise NotImplementedError
 
     batch, seqlen, _ = zxbcdtdl.shape
     dlambda = L.shape[-1]
-    (nheads,) = D.shape
+    if D.dim() == 1:
+        nheads = D.shape[0]
+        if headdim is None:
+            raise ValueError
+    elif D.dim() == 2:
+        nheads, d_headdim = D.shape
+        if headdim is None:
+            headdim = d_headdim
+        elif headdim != d_headdim:
+            raise ValueError("headdim must match D.shape[1] when D is 2D")
+    else:
+        raise ValueError("D must be 1D or 2D")
     dim = nheads * headdim
     dstate = (zxbcdtdl.shape[-1] - 2 * dim - nheads - nheads * dlambda) // ngroups // 2
 
-    if D.dim() != 1:
-        raise ValueError
-    if headdim is None:
-        raise ValueError
     if nheads % ngroups != 0:
         raise ValueError
     if zxbcdtdl.shape != (
@@ -183,11 +207,10 @@ def hmamba_split_conv1d_scan_combined(
         raise ValueError
     if L.shape != (nheads, dlambda):
         raise ValueError
-    if D.shape != (nheads,):
+    if D.dim() == 1 and D.shape != (nheads,):
         raise ValueError
-    if rmsnorm_weight is None:
+    if D.dim() == 2 and D.shape != (nheads, headdim):
         raise ValueError
-
     zxBCdtl_splits = [dim, dim + 2 * ngroups * dstate, nheads, nheads * dlambda]
     xBC_splits = [dim, ngroups * dstate, ngroups * dstate]
     z, xBC, dt, dl = torch.split(zxbcdtdl, zxBCdtl_splits, dim=-1)
@@ -217,7 +240,7 @@ def hmamba_split_conv1d_scan_combined(
         L=L,
         chunk_size=chunk_size,
         D=D,
-        z=z if rmsnorm_weight is None else None,
+        z=rearrange(z, "b l (h p) -> b l h p", h=nheads, p=headdim) if rmsnorm_weight is None else None,
         dt_bias=dt_bias,
         dt_softplus=True,
         seq_idx=seq_idx,
@@ -234,8 +257,8 @@ def hmamba_split_conv1d_scan_combined(
             bias=None,
             z=z,
             eps=rmsnorm_eps,
-            group_size=None,
-            norm_before_gate=False,
+            group_size=dim // ngroups,
+            norm_before_gate=norm_before_gate,
         )
     out = torch.nn.functional.linear(y, outproj_weight, outproj_bias)
     return out
@@ -334,7 +357,7 @@ class LogLinearMamba2(nn.Module):
         self.L._no_weight_decay = True
 
         self.norm = RMSNormGated(
-            self.intermediate_size, eps=self.layer_norm_epsilon, norm_before_gate=False,
+            self.intermediate_size//self.n_groups, eps=self.layer_norm_epsilon, norm_before_gate=False,
         )
         self.D = nn.Parameter(torch.ones(self.num_heads))
         self.D._no_weight_decay = True
@@ -343,6 +366,7 @@ class LogLinearMamba2(nn.Module):
             self.intermediate_size, self.hidden_size, bias=use_bias,
         )
         self.use_bias = use_bias
+        self.layer_idx = layer_idx
 
         if not is_fast_path_available:
             logger.warning_once(
@@ -482,7 +506,7 @@ class LogLinearMamba2(nn.Module):
                 C=C,
                 dl=dl_reshaped,
                 L=self.L,
-                D=self.D,
+                D=rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim else self.D,
                 z=None,
                 dt_bias=self.dt_bias,
                 dt_softplus=True,
@@ -496,7 +520,10 @@ class LogLinearMamba2(nn.Module):
                 h=self.num_heads,
                 p=self.head_dim,
             )
-            y = self.norm(y, gate)
+            if self.rmsnorm:
+                y = self.norm(y, gate)
+            else:
+                y = y * self.act(gate)
 
             # 4. Final linear projection
             out = self.out_proj(y)[:, None, ...]
@@ -525,19 +552,19 @@ class LogLinearMamba2(nn.Module):
                     dt_bias=self.dt_bias,
                     A=A,
                     L=self.L,
-                    D=self.D,
+                    D=rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim else self.D,
                     chunk_size=self.chunk_size,
                     conv1d_fn=self.causal_conv1d_fn,
                     conv_backend=self.backend,
                     seq_idx=None,  # was seq_idx
                     activation=self.activation,
-                    rmsnorm_weight=self.norm.weight,
-                    rmsnorm_eps=self.norm.eps,
+                    rmsnorm_weight=self.norm.weight if self.rmsnorm else None,
+                    rmsnorm_eps=self.norm.eps if self.rmsnorm else 1e-6,
                     outproj_weight=self.out_proj.weight,
                     outproj_bias=self.out_proj.bias,
-                    headdim=self.head_dim,
+                    headdim=None if self.D_has_hdim else self.head_dim,
                     ngroups=self.n_groups,
-                    norm_before_gate=False,
+                    norm_before_gate=self.norm_before_gate,
                     return_final_states=False,
                     **dt_limit_kwargs,
                 )
@@ -628,8 +655,8 @@ class LogLinearMamba2(nn.Module):
                     ),
                     L=self.L,
                     chunk_size=self.chunk_size,
-                    D=self.D,
-                    z=None,
+                    D=rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim else self.D,
+                    z=None if self.rmsnorm else rearrange(gate, "b l (h p) -> b l h p", h=self.num_heads, p=self.head_dim),
                     seq_idx=None,
                     return_final_states=True,
                     dt_bias=self.dt_bias,
@@ -646,7 +673,8 @@ class LogLinearMamba2(nn.Module):
                     p=self.head_dim,
                 )
                 # Multiply "gate" branch and apply extra normalization layer
-                y = self.norm(y, gate)
+                if self.rmsnorm:
+                    y = self.norm(y, gate)
 
                 # 4. Final linear projection
                 out = self.out_proj(y)
