@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import TYPE_CHECKING
 
@@ -52,8 +53,13 @@ class Mamba(nn.Module):
         conv_kernel: int = 4,
         use_conv_bias: bool = True,
         intermediate_size: int = 2048,
-        time_step_rank: int = 256,
-        use_bias: bool = True,
+        time_step_rank: int | str = "auto",
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init: str = "random",
+        dt_scale: float = 1.0,
+        dt_init_floor: float = 1e-4,
+        use_bias: bool = False,
         hidden_act: str = "silu",
         layer_idx: int = None,
         backend: str = "cuda",
@@ -65,7 +71,7 @@ class Mamba(nn.Module):
         self.conv_kernel_size = conv_kernel
         self.use_conv_bias = use_conv_bias
         self.intermediate_size = intermediate_size
-        self.time_step_rank = time_step_rank
+        self.time_step_rank = math.ceil(self.hidden_size / 16) if time_step_rank == "auto" else time_step_rank
         self.use_bias = use_bias
 
         self.conv1d = nn.Conv1d(
@@ -89,13 +95,36 @@ class Mamba(nn.Module):
         # time step projection (discretization)
         self.dt_proj = nn.Linear(self.time_step_rank, self.intermediate_size, bias=True)
 
+        # Initialize special dt projection to preserve variance at initialization
+        dt_init_std = self.dt_rank**-0.5 * dt_scale
+        if dt_init == "constant":
+            nn.init.constant_(self.dt_proj.weight, dt_init_std)
+        elif dt_init == "random":
+            nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
+        else:
+            raise NotImplementedError
+
+        # Initialize dt bias so that F.softplus(dt_bias) is between dt_min and dt_max
+        dt = torch.exp(
+            torch.rand(self.intermediate_size) * (math.log(dt_max) - math.log(dt_min))
+            + math.log(dt_min)
+        ).clamp(min=dt_init_floor)
+        # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+        inv_dt = dt + torch.log(-torch.expm1(-dt))
+        with torch.no_grad():
+            self.dt_proj.bias.copy_(inv_dt)
+        # Our initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
+        self.dt_proj.bias._no_reinit = True
+
         # S4D real initialization. These are not discretized!
         # The core is to load them, compute the discrete states, then write the updated state. Keeps the memory bounded
         A = torch.arange(1, self.ssm_state_size + 1, dtype=torch.float32)[None, :]
         A = A.expand(self.intermediate_size, -1).contiguous()
 
         self.A_log = nn.Parameter(torch.log(A))
+        self.A_log._no_weight_decay = True
         self.D = nn.Parameter(torch.ones(self.intermediate_size))
+        self.D._no_weight_decay = True
         self.out_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=use_bias)
 
         if not is_fast_path_available:
