@@ -63,7 +63,7 @@ def causal_conv1d_fwd_kernel(
     else:
         i_n = i_b
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
-        p_x = x + i_b * stride_x_n
+        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = tl.arange(0, BW) + W - BW
@@ -187,7 +187,7 @@ def causal_conv1d_bwd_kernel(
         i_tg = i_b * tl.num_programs(1) + i_t
         i_n = i_b
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
-        p_x = x + i_b * stride_x_n
+        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = tl.arange(0, BW) + W - BW
@@ -303,7 +303,7 @@ def causal_conv1d_bwd_kernel(
     if IS_VARLEN:
         p_dx = dx + bos * stride_dx_t
     else:
-        p_dx = dx + i_b * stride_dx_n
+        p_dx = dx + tl.cast(i_b, tl.int64) * stride_dx_n
 
     p_dx = tl.make_block_ptr(p_dx, (T, D), (stride_dx_t, stride_dx_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
     tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
@@ -434,7 +434,7 @@ def compute_dh0_kernel(
     else:
         seq_len = T
         # For non-varlen, dy is [B, T, D], offset by i_n * stride_dy_n
-        dy_base = dy + i_n * stride_dy_n
+        dy_base = dy + tl.cast(i_n, tl.int64) * stride_dy_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
@@ -457,7 +457,7 @@ def compute_dh0_kernel(
                     if IS_VARLEN:
                         p_y = y + bos * stride_dy_t + t * stride_dy_t + o_d
                     else:
-                        p_y = y + i_n * stride_dy_n + t * stride_dy_t + o_d
+                        p_y = y + tl.cast(i_n, tl.int64) * stride_dy_n + t * stride_dy_t + o_d
                     b_y = tl.load(p_y, mask=m_t, other=0).to(tl.float32)
                     b_ys = tl.sigmoid(b_y)
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
