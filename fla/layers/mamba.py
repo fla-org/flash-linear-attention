@@ -53,7 +53,7 @@ class Mamba(nn.Module):
         conv_kernel: int = 4,
         use_conv_bias: bool = True,
         intermediate_size: int = 2048,
-        time_step_rank: int | str = "auto",
+        dt_rank: int | str = "auto",
         dt_min: float = 0.001,
         dt_max: float = 0.1,
         dt_init: str = "random",
@@ -71,7 +71,7 @@ class Mamba(nn.Module):
         self.conv_kernel_size = conv_kernel
         self.use_conv_bias = use_conv_bias
         self.intermediate_size = intermediate_size
-        self.time_step_rank = math.ceil(self.hidden_size / 16) if time_step_rank == "auto" else time_step_rank
+        self.dt_rank = math.ceil(self.hidden_size / 16) if dt_rank == "auto" else dt_rank
         self.use_bias = use_bias
 
         self.conv1d = nn.Conv1d(
@@ -91,9 +91,9 @@ class Mamba(nn.Module):
         # projection of the input hidden states
         self.in_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=use_bias)
         # selective projection used to make dt, B and C input dependant
-        self.x_proj = nn.Linear(self.intermediate_size, self.time_step_rank + self.ssm_state_size * 2, bias=False)
+        self.x_proj = nn.Linear(self.intermediate_size, self.dt_rank + self.ssm_state_size * 2, bias=False)
         # time step projection (discretization)
-        self.dt_proj = nn.Linear(self.time_step_rank, self.intermediate_size, bias=True)
+        self.dt_proj = nn.Linear(self.dt_rank, self.intermediate_size, bias=True)
 
         # Initialize special dt projection to preserve variance at initialization
         dt_init_std = self.dt_rank**-0.5 * dt_scale
@@ -258,7 +258,7 @@ class Mamba(nn.Module):
         # 3.a. input varying initialization of time_step, B and C
         ssm_parameters = self.x_proj(hidden_states.transpose(1, 2))
         time_step, B, C = torch.split(
-            ssm_parameters, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size], dim=-1,
+            ssm_parameters, [self.dt_rank, self.ssm_state_size, self.ssm_state_size], dim=-1,
         )
         discrete_time_step = self.dt_proj.weight @ time_step.transpose(1, 2)
 
@@ -354,10 +354,10 @@ class Mamba(nn.Module):
             hidden_states = hidden_states * attention_mask.unsqueeze(1)
 
         # 3. State Space Model sequence transformation
-        # 3.a. Selection:  [batch, seq_len, self.time_step_rank + self.ssm_state_size * 2]
+        # 3.a. Selection:  [batch, seq_len, self.dt_rank + self.ssm_state_size * 2]
         ssm_parameters = self.x_proj(hidden_states.transpose(1, 2))
         time_step, B, C = torch.split(
-            ssm_parameters, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size], dim=-1,
+            ssm_parameters, [self.dt_rank, self.ssm_state_size, self.ssm_state_size], dim=-1,
         )
         # [batch, seq_len, intermediate_size]
         discrete_time_step = self.dt_proj(time_step)
