@@ -280,6 +280,7 @@ class LogLinearMamba2(nn.Module):
         state_size: int = 128,
         expand: int = 2,
         n_groups: int = 1,
+        D_has_hdim: bool = False,
         conv_kernel: int = 4,
         use_conv_bias: bool = False,
         hidden_act: str = "silu",
@@ -308,6 +309,7 @@ class LogLinearMamba2(nn.Module):
         self.rms_norm = rms_norm
 
         self.n_groups = n_groups
+        self.D_has_hdim = D_has_hdim
         self.head_dim = head_dim
         self.chunk_size = chunk_size
 
@@ -362,7 +364,7 @@ class LogLinearMamba2(nn.Module):
             norm_before_gate=False,
             group_size=self.intermediate_size // self.n_groups,
         )
-        self.D = nn.Parameter(torch.ones(self.num_heads))
+        self.D = nn.Parameter(torch.ones(self.intermediate_size if self.D_has_hdim else self.num_heads))
         self.D._no_weight_decay = True
 
         self.out_proj = nn.Linear(

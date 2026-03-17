@@ -31,6 +31,7 @@ class LogLinearMamba2Block(nn.Module):
             state_size=config.state_size,
             expand=config.expand,
             n_groups=config.n_groups,
+            D_has_hdim=config.D_has_hdim,
             conv_kernel=config.conv_kernel,
             use_conv_bias=config.use_conv_bias,
             hidden_act=config.hidden_act,
