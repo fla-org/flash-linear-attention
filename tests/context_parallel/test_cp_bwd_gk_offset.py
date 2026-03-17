@@ -24,8 +24,8 @@ With the bug:  all heads read head 0's gk (=0 in both A and B) → dh identical
 With the fix:  heads 1+ read their own gk → dh very different between A and B
 """
 
-import os
 import logging
+import os
 import tempfile
 
 import pytest
@@ -174,7 +174,8 @@ def _cp_bwd_worker(
         num_even_heads = triton.next_power_of_2(H)
         A_log = torch.log(torch.empty(num_even_heads, dtype=torch.float32, device=dev).uniform_(1, 16))
         proj_size = H * D
-        dt = torch.exp(torch.rand(proj_size, device=dev) * (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
+        dt = torch.exp(torch.rand(proj_size, device=dev) * (math.log(0.1) -
+                       math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
         dt_bias = dt + torch.log(-torch.expm1(-dt))
 
         cu_seqlens = torch.tensor([0, T], device=dev, dtype=torch.long)
@@ -244,7 +245,7 @@ def _cp_bwd_worker(
 
         dist.barrier()
         dist.destroy_process_group()
-    except Exception as e:
+    except Exception:
         if dist.is_initialized():
             dist.destroy_process_group()
         raise

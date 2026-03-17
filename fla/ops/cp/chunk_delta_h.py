@@ -953,9 +953,11 @@ def pre_process_bwd_kernel_merged(
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
                 if USE_EXP2:
-                    b_gk_last1 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
+                    b_gk_last1 = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                                         o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
                 else:
-                    b_gk_last1 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
+                    b_gk_last1 = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                                         o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
             b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype))
 
             if K > 64:
@@ -964,9 +966,11 @@ def pre_process_bwd_kernel_merged(
                 if USE_GK:
                     o_k2 = 64 + o_k1
                     if USE_EXP2:
-                        b_gk_last2 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
+                        b_gk_last2 = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                                             o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
                     else:
-                        b_gk_last2 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
+                        b_gk_last2 = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                                             o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
 
             if K > 128:
@@ -975,9 +979,11 @@ def pre_process_bwd_kernel_merged(
                 if USE_GK:
                     o_k3 = 128 + o_k1
                     if USE_EXP2:
-                        b_gk_last3 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
+                        b_gk_last3 = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                                             o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
                     else:
-                        b_gk_last3 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
+                        b_gk_last3 = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                                             o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
 
             if K > 192:
@@ -986,9 +992,11 @@ def pre_process_bwd_kernel_merged(
                 if USE_GK:
                     o_k4 = 192 + o_k1
                     if USE_EXP2:
-                        b_gk_last4 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
+                        b_gk_last4 = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                                             o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
                     else:
-                        b_gk_last4 = tl.load(gk + (bos + last_idx) * H * K + i_h * K + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
+                        b_gk_last4 = tl.load(gk + (bos + last_idx) * H * K + i_h * K +
+                                             o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
 
             if USE_G:
