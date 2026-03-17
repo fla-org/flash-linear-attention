@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+from einops import rearrange
 from transformers.utils import logging
 
 from fla.layers.utils import get_layer_cache, update_layer_cache
@@ -106,41 +107,50 @@ class Mamba2(nn.Module):
 
     def __init__(
         self,
-        num_heads: int,
+        num_heads: int = None,
         head_dim: int = 64,
         hidden_size: int = 2048,
         state_size: int = 128,
         expand: int = 2,
         n_groups: int = 1,
         conv_kernel: int = 4,
-        use_conv_bias: bool = False,
+        conv_init: float = None,
+        use_conv_bias: bool = True,
         hidden_act: str = "silu",
-        rms_norm: bool = True,
-        chunk_size: int = 256,
-        time_step_limit: tuple[float, float] = (0.0, float("inf")),
+        A_init_range: tuple[float, float] = (1, 16),
+        D_has_hdim: bool = False,
+        rmsnorm: bool = True,
+        norm_before_gate: bool = False,
         time_step_min: float = 0.001,
         time_step_max: float = 0.1,
-        use_bias: bool = True,
+        time_step_init_floor: float = 1e-4,
+        time_step_limit: tuple[float, float] = (0.0, float("inf")),
+        use_bias: bool = False,
         norm_eps: float = 1e-5,
+        chunk_size: int = 256,
         layer_idx: int = None,
         backend: str = "cuda",
     ) -> Mamba2:
         super().__init__()
 
-        self.num_heads = num_heads
-        self.head_dim = head_dim
         self.hidden_size = hidden_size
-        self.ssm_state_size = state_size
         self.expand = expand
         self.intermediate_size = int(expand * hidden_size)
+        self.head_dim = head_dim
+        self.num_heads = num_heads if num_heads is not None else self.intermediate_size // head_dim
+        self.ssm_state_size = state_size
         self.n_groups = n_groups
 
         self.conv_kernel_size = conv_kernel
+        self.conv_init = conv_init
         self.use_conv_bias = use_conv_bias
         self.activation = hidden_act
         self.act = ACT2FN[hidden_act]
 
-        self.rms_norm = rms_norm
+        self.A_init_range = A_init_range
+        self.D_has_hdim = D_has_hdim
+        self.rmsnorm = rmsnorm
+        self.norm_before_gate = norm_before_gate
         self.norm_eps = norm_eps
 
         self.chunk_size = chunk_size
@@ -158,6 +168,8 @@ class Mamba2(nn.Module):
             groups=self.conv_dim,
             padding=conv_kernel - 1,
         )
+        if self.conv_init is not None:
+            nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
 
         # projection of the input hidden states
         projection_size = self.intermediate_size + self.conv_dim + self.num_heads
@@ -171,26 +183,31 @@ class Mamba2(nn.Module):
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
         # hard coded for now
-        dt_init_floor = 1e-4
         dt = torch.exp(
             torch.rand(self.num_heads) * (
                 math.log(self.time_step_max) - math.log(self.time_step_min)
             ) + math.log(self.time_step_min)
         )
-        dt = torch.clamp(dt, min=dt_init_floor)
+        dt = torch.clamp(dt, min=time_step_init_floor)
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         self.dt_bias = nn.Parameter(inv_dt)
+        self.dt_bias._no_weight_decay = True
 
         # S4D real initialization. These are not discretized!
         # The core is to load them, compute the discrete states, then write the updated state. Keeps the memory bounded
-        A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(0, 16)
+        A = torch.empty(self.num_heads, dtype=torch.float32).uniform_(*self.A_init_range)
         self.A_log = nn.Parameter(torch.log(A))
         self.A_log._no_weight_decay = True
-        self.norm = RMSNormGated(
-            self.intermediate_size, eps=self.norm_eps, norm_before_gate=False,
-        )
-        self.D = nn.Parameter(torch.ones(self.num_heads))
+        self.norm = None
+        if self.rmsnorm:
+            self.norm = RMSNormGated(
+                self.intermediate_size,
+                eps=self.norm_eps,
+                norm_before_gate=self.norm_before_gate,
+                group_size=self.intermediate_size // n_groups
+            )
+        self.D = nn.Parameter(torch.ones(self.intermediate_size if self.D_has_hdim else self.num_heads))
         self.D._no_weight_decay = True
 
         self.out_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=use_bias)
@@ -284,7 +301,8 @@ class Mamba2(nn.Module):
             A = A[:, None, ...][:, :, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D = self.D[:, None, ...].expand(-1, self.head_dim)
+            D = (rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim
+                 else self.D[:, None, ...].expand(-1, self.head_dim))
             B = B.view(batch_size, self.n_groups, B.shape[1] // self.n_groups)
             C = C.view(batch_size, self.n_groups, C.shape[1] // self.n_groups)
             hidden_states_reshaped = hidden_states.view(batch_size, self.num_heads, self.head_dim)
@@ -297,12 +315,13 @@ class Mamba2(nn.Module):
                 B,
                 C,
                 D,
-                z=None,
+                z=None if self.rmsnorm else gate.view(batch_size, self.num_heads, self.head_dim),
                 dt_bias=dt_bias,
                 dt_softplus=True,
             )
             hidden_states = hidden_states.view(batch_size, self.num_heads * self.head_dim)
-            hidden_states = self.norm(hidden_states, gate)
+            if self.rmsnorm:
+                hidden_states = self.norm(hidden_states, gate)
 
             # 4. Final linear projection
             out = self.out_proj(hidden_states)[:, None, ...]
@@ -324,17 +343,17 @@ class Mamba2(nn.Module):
                     self.conv1d.bias,
                     self.dt_bias,
                     A,
-                    D=self.D,
+                    D=rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim else self.D,
                     chunk_size=self.chunk_size,
                     seq_idx=None,  # was seq_idx
                     activation=self.activation,
-                    rmsnorm_weight=self.norm.weight,
-                    rmsnorm_eps=self.norm.eps,
+                    rmsnorm_weight=self.norm.weight if self.rmsnorm else None,
+                    rmsnorm_eps=self.norm.eps if self.rmsnorm else 1e-6,
                     outproj_weight=self.out_proj.weight,
                     outproj_bias=self.out_proj.bias,
-                    headdim=self.head_dim,
+                    headdim=None if self.D_has_hdim else self.head_dim,
                     ngroups=self.n_groups,
-                    norm_before_gate=False,
+                    norm_before_gate=self.norm_before_gate,
                     return_final_states=False,
                     **dt_limit_kwargs,
                 )
@@ -393,8 +412,8 @@ class Mamba2(nn.Module):
                     B.view(batch_size, seq_len, self.n_groups, -1),
                     C.view(batch_size, seq_len, self.n_groups, -1),
                     chunk_size=self.chunk_size,
-                    D=self.D,
-                    z=None,
+                    D=rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim else self.D,
+                    z=None if self.rmsnorm else gate.view(batch_size, seq_len, self.num_heads, self.head_dim),
                     seq_idx=None,
                     return_final_states=True,
                     dt_bias=self.dt_bias,
@@ -404,7 +423,8 @@ class Mamba2(nn.Module):
 
                 scan_output = scan_output.view(batch_size, seq_len, -1)
                 # Multiply "gate" branch and apply extra normalization layer
-                scan_output = self.norm(scan_output, gate)
+                if self.rmsnorm:
+                    scan_output = self.norm(scan_output, gate)
 
                 # 4. Final linear projection
                 out = self.out_proj(scan_output)
@@ -525,13 +545,17 @@ class Mamba2(nn.Module):
 
             # D skip connection
             # [num_heads] -> [num_heads, head_dim]
-            D = self.D[..., None].expand(self.D.shape[0], self.head_dim)
+            D = (rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim
+                 else self.D[:, None, ...].expand(-1, self.head_dim))
             y = (y + hidden_states * D).to(y.dtype)
 
             # [bsz, num_heads, head_dim] -> [bsz, 1, intermediate_size]
             y = y.reshape(batch_size, -1)[:, None, ...]
 
-            scan_output = self.norm(y, gate)
+            if self.rmsnorm:
+                scan_output = self.norm(y, gate)
+            else:
+                scan_output = y * self.act(gate)
             contextualized_states = self.out_proj(scan_output.to(dtype))
             return contextualized_states, conv_state, ssm_state
         else:
@@ -546,7 +570,9 @@ class Mamba2(nn.Module):
             C = C.repeat(1, 1, self.num_heads // self.n_groups, 1)
             pad_size = (self.chunk_size - seq_len % self.chunk_size) % self.chunk_size
 
-            D_residual = self.D[..., None] * pad_tensor_by_size(hidden_states, pad_size)
+            D = (rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim
+                 else self.D[:, None, ...].expand(-1, self.head_dim))
+            D_residual = D * pad_tensor_by_size(hidden_states, pad_size)
 
             # Discretize x and A
             hidden_states = hidden_states * dt[..., None]
@@ -608,7 +634,10 @@ class Mamba2(nn.Module):
                 y = y[:, :seq_len, :, :]
             y = y.reshape(batch_size, seq_len, -1)
 
-            scan_output = self.norm(y, gate)
+            if self.rmsnorm:
+                scan_output = self.norm(y, gate)
+            else:
+                scan_output = y * self.act(gate)
 
             # end ssd naive
 
