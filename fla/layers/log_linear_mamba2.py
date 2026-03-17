@@ -357,7 +357,10 @@ class LogLinearMamba2(nn.Module):
         self.L._no_weight_decay = True
 
         self.norm = RMSNormGated(
-            self.intermediate_size//self.n_groups, eps=self.layer_norm_epsilon, norm_before_gate=False,
+            self.intermediate_size, 
+            eps=self.layer_norm_epsilon, 
+            norm_before_gate=False,
+            group_size=self.intermediate_size // self.n_groups,
         )
         self.D = nn.Parameter(torch.ones(self.num_heads))
         self.D._no_weight_decay = True
