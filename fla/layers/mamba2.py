@@ -117,7 +117,6 @@ class Mamba2(nn.Module):
         hidden_act: str = "silu",
         rms_norm: bool = True,
         chunk_size: int = 256,
-        time_step_rank: float = 256,
         time_step_limit: tuple[float, float] = (0.0, float("inf")),
         time_step_min: float = 0.001,
         time_step_max: float = 0.1,
@@ -146,7 +145,6 @@ class Mamba2(nn.Module):
 
         self.chunk_size = chunk_size
 
-        self.time_step_rank = int(time_step_rank)
         self.time_step_limit = time_step_limit
         self.time_step_min = time_step_min
         self.time_step_max = time_step_max

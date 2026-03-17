@@ -262,7 +262,6 @@ class LogLinearMamba2(nn.Module):
         hidden_act: str = "silu",
         rms_norm: bool = True,
         chunk_size: int = 64,
-        time_step_rank: float = 256,
         time_step_limit: tuple[float, float] = (0.0, float("inf")),
         time_step_min: float = 0.001,
         time_step_max: float = 0.1,
@@ -277,7 +276,6 @@ class LogLinearMamba2(nn.Module):
         self.ssm_state_size = state_size
         self.conv_kernel_size = conv_kernel
         self.intermediate_size = int(expand * self.hidden_size)
-        self.time_step_rank = int(time_step_rank)
         self.layer_idx = layer_idx
         self.use_conv_bias = use_conv_bias
         self.activation = hidden_act
