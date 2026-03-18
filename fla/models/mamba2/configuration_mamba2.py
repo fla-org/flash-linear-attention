@@ -78,7 +78,7 @@ class Mamba2Config(PretrainedConfig):
             Whether or not to rescale `out_proj` weights when initializing.
         use_cache (`bool`, *optional*, defaults to `True`):
             Whether or not the cache should be used.
-        rms_norm (`bool`, *optional*, defaults to `True`):
+        rmsnorm (`bool`, *optional*, defaults to `True`):
             Whether to use RMS norm or not.
         chunk_size (`int`, *optional*, defaults to 256):
             Size of the chunks that will comprise the sequence.
@@ -115,6 +115,8 @@ class Mamba2Config(PretrainedConfig):
         rescale_prenorm_residual: bool = True,
         use_cache: bool = True,
         rmsnorm: bool = True,
+        D_has_hdim: bool = False,
+        norm_before_gate: bool = False,
         chunk_size: int = 256,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
@@ -153,6 +155,8 @@ class Mamba2Config(PretrainedConfig):
         self.head_dim = head_dim
         self.num_heads = int(self.expand * self.hidden_size / self.head_dim)
         self.rmsnorm = rmsnorm
+        self.D_has_hdim = D_has_hdim
+        self.norm_before_gate = norm_before_gate
         self.state_size = state_size
         self.chunk_size = chunk_size
         self.time_step_limit = time_step_limit
