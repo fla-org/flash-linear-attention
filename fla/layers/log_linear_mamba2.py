@@ -171,8 +171,6 @@ def hmamba_split_conv1d_scan_combined(
         raise NotImplementedError
     if return_final_states is not False:
         raise NotImplementedError
-    if norm_before_gate is not False:
-        raise NotImplementedError
     if activation not in ["silu", "swish"]:
         raise NotImplementedError
 
