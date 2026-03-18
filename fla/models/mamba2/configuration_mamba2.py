@@ -67,13 +67,13 @@ class Mamba2Config(PretrainedConfig):
         residual_in_fp32 (`bool`, *optional*, defaults to `True`):
             Whether or not residuals should be in `float32`.
             If set to `False` residuals will keep the same `dtype` as the rest of the model
-        time_step_min (`float`, *optional*, defaults to 0.001):
-            Minimum `time_step` used to bound `dt_proj.bias`.
-        time_step_max (`float`, *optional*, defaults to 0.1):
-            Maximum `time_step` used to bound `dt_proj.bias`.
-        time_step_floor (`float`, *optional*, defaults to 0.0001):
+        dt_min (`float`, *optional*, defaults to 0.001):
+            Minimum `dt` used to bound `dt_proj.bias`.
+        dt_max (`float`, *optional*, defaults to 0.1):
+            Maximum `dt` used to bound `dt_proj.bias`.
+        dt_init_floor (`float`, *optional*, defaults to 0.0001):
             Minimum clamping value of the `dt_proj.bias` layer initialization.
-        time_step_limit (`tuple`, *optional*, defaults to `(0.0, inf)`):
+        dt_limit (`tuple`, *optional*, defaults to `(0.0, inf)`):
             Accepted range of time step values.
         rescale_prenorm_residual (`bool`, *optional*, defaults to `True`):
             Whether or not to rescale `out_proj` weights when initializing.
@@ -110,10 +110,10 @@ class Mamba2Config(PretrainedConfig):
         hidden_act: str = "silu",
         initializer_range: float = 0.02,
         residual_in_fp32: bool = True,
-        time_step_min: float = 0.001,
-        time_step_max: float = 0.1,
-        time_step_floor: float = 1e-4,
-        time_step_limit=(0.0, float("inf")),
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init_floor: float = 1e-4,
+        dt_limit=(0.0, float("inf")),
         rescale_prenorm_residual: bool = True,
         use_cache: bool = True,
         rmsnorm: bool = True,
@@ -144,9 +144,9 @@ class Mamba2Config(PretrainedConfig):
         self.use_conv_bias = use_conv_bias
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
-        self.time_step_min = time_step_min
-        self.time_step_max = time_step_max
-        self.time_step_floor = time_step_floor
+        self.dt_min = dt_min
+        self.dt_max = dt_max
+        self.dt_init_floor = dt_init_floor
         self.rescale_prenorm_residual = rescale_prenorm_residual
         self.residual_in_fp32 = residual_in_fp32
         self.use_cache = use_cache
@@ -158,7 +158,7 @@ class Mamba2Config(PretrainedConfig):
         self.norm_before_gate = norm_before_gate
         self.state_size = state_size
         self.chunk_size = chunk_size
-        self.time_step_limit = time_step_limit
+        self.dt_limit = dt_limit
         self.fuse_norm = fuse_norm
         self.fuse_cross_entropy = fuse_cross_entropy
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
