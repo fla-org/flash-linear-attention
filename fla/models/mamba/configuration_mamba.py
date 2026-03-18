@@ -113,6 +113,7 @@ class MambaConfig(PretrainedConfig):
         conv_kernel: int = 4,
         use_bias: bool = False,
         use_conv_bias: bool = True,
+        intermediate_size: int = None,
         hidden_act: str = "silu",
         initializer_range: float = 0.02,
         residual_in_fp32: bool = False,
@@ -138,7 +139,7 @@ class MambaConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.conv_kernel = conv_kernel
         self.expand = expand
-        self.intermediate_size = int(expand * self.hidden_size)
+        self.intermediate_size = intermediate_size if intermediate_size is not None else int(expand * self.hidden_size)
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.pad_token_id = pad_token_id

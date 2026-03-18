@@ -56,6 +56,10 @@ class Mamba2Config(PretrainedConfig):
             Whether or not to use bias in ["in_proj", "out_proj"] of the mixer block
         use_conv_bias (`bool`, *optional*, defaults to `True`):
             Whether or not to use bias in the convolution layer of the mixer block.
+        conv_init (`float`, *optional*, defaults to `None`):
+            Value for initialization range for the convolution layer.
+        A_init_range (`tuple`, *optional*, defaults to `(1, 16)`):
+            Range of values for the A matrix initialization.
         hidden_act (`str`, *optional*, defaults to `"silu"`):
             The non-linear activation function (function or string) in the decoder.
         initializer_range (`float`, *optional*, defaults to 0.02):
@@ -101,6 +105,8 @@ class Mamba2Config(PretrainedConfig):
         n_groups: int = 1,
         use_bias: bool = False,
         use_conv_bias: bool = True,
+        conv_init: float = None,
+        A_init_range: tuple[float, float] = (1, 16),
         hidden_act: str = "silu",
         initializer_range: float = 0.02,
         residual_in_fp32: bool = True,
@@ -127,7 +133,9 @@ class Mamba2Config(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.norm_eps = norm_eps
         self.conv_kernel = conv_kernel
+        self.conv_init = conv_init
         self.expand = expand
+        self.A_init_range = A_init_range
 
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
