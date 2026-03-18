@@ -114,7 +114,7 @@ class Mamba2Config(PretrainedConfig):
         time_step_limit=(0.0, float("inf")),
         rescale_prenorm_residual: bool = True,
         use_cache: bool = True,
-        rms_norm: bool = True,
+        rmsnorm: bool = True,
         chunk_size: int = 256,
         fuse_norm: bool = True,
         fuse_cross_entropy: bool = True,
@@ -152,7 +152,7 @@ class Mamba2Config(PretrainedConfig):
         self.n_groups = n_groups
         self.head_dim = head_dim
         self.num_heads = int(self.expand * self.hidden_size / self.head_dim)
-        self.rms_norm = rms_norm
+        self.rmsnorm = rmsnorm
         self.state_size = state_size
         self.chunk_size = chunk_size
         self.time_step_limit = time_step_limit

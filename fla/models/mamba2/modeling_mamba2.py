@@ -81,7 +81,7 @@ class Mamba2Block(GradientCheckpointingLayer):
             conv_kernel=config.conv_kernel,
             use_conv_bias=config.use_conv_bias,
             hidden_act=config.hidden_act,
-            rms_norm=config.rms_norm,
+            rmsnorm=config.rmsnorm,
             chunk_size=config.chunk_size,
             time_step_limit=config.time_step_limit,
             time_step_min=config.time_step_min,

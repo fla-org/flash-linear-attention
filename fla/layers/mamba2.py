@@ -246,6 +246,13 @@ class Mamba2(nn.Module):
             self.causal_conv1d_update = causal_conv1d_update
         self.backend = backend
 
+    def _get_D(self, expand_to_head_dim: bool = False) -> torch.Tensor:
+        if self.D_has_hdim:
+            return rearrange(self.D, "(h p) -> h p", p=self.head_dim)
+        if expand_to_head_dim:
+            return self.D[:, None].expand(-1, self.head_dim)
+        return self.D
+
     def cuda_kernels_forward(
         self,
         hidden_states: torch.Tensor,
@@ -301,8 +308,7 @@ class Mamba2(nn.Module):
             A = A[:, None, ...][:, :, None].expand(-1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             dt = dt[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D = (rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim
-                 else self.D[:, None, ...].expand(-1, self.head_dim))
+            D = self._get_D(expand_to_head_dim=True)
             B = B.view(batch_size, self.n_groups, B.shape[1] // self.n_groups)
             C = C.view(batch_size, self.n_groups, C.shape[1] // self.n_groups)
             hidden_states_reshaped = hidden_states.view(batch_size, self.num_heads, self.head_dim)
@@ -343,7 +349,7 @@ class Mamba2(nn.Module):
                     self.conv1d.bias,
                     self.dt_bias,
                     A,
-                    D=rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim else self.D,
+                    D=self._get_D(),
                     chunk_size=self.chunk_size,
                     seq_idx=None,  # was seq_idx
                     activation=self.activation,
@@ -412,7 +418,7 @@ class Mamba2(nn.Module):
                     B.view(batch_size, seq_len, self.n_groups, -1),
                     C.view(batch_size, seq_len, self.n_groups, -1),
                     chunk_size=self.chunk_size,
-                    D=rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim else self.D,
+                    D=self._get_D(),
                     z=None if self.rmsnorm else gate.view(batch_size, seq_len, self.num_heads, self.head_dim),
                     seq_idx=None,
                     return_final_states=True,
@@ -545,8 +551,7 @@ class Mamba2(nn.Module):
 
             # D skip connection
             # [num_heads] -> [num_heads, head_dim]
-            D = (rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim
-                 else self.D[:, None, ...].expand(-1, self.head_dim))
+            D = self._get_D(expand_to_head_dim=True)
             y = (y + hidden_states * D).to(y.dtype)
 
             # [bsz, num_heads, head_dim] -> [bsz, 1, intermediate_size]
@@ -570,8 +575,7 @@ class Mamba2(nn.Module):
             C = C.repeat(1, 1, self.num_heads // self.n_groups, 1)
             pad_size = (self.chunk_size - seq_len % self.chunk_size) % self.chunk_size
 
-            D = (rearrange(self.D, "(h p) -> h p", p=self.head_dim) if self.D_has_hdim
-                 else self.D[:, None, ...].expand(-1, self.head_dim))
+            D = self._get_D(expand_to_head_dim=True)
             D_residual = D * pad_tensor_by_size(hidden_states, pad_size)
 
             # Discretize x and A
