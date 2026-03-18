@@ -121,10 +121,10 @@ class Mamba2(nn.Module):
         D_has_hdim: bool = False,
         rmsnorm: bool = True,
         norm_before_gate: bool = False,
-        time_step_min: float = 0.001,
-        time_step_max: float = 0.1,
-        time_step_init_floor: float = 1e-4,
-        time_step_limit: tuple[float, float] = (0.0, float("inf")),
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init_floor: float = 1e-4,
+        dt_limit: tuple[float, float] = (0.0, float("inf")),
         use_bias: bool = False,
         norm_eps: float = 1e-5,
         chunk_size: int = 256,
@@ -155,9 +155,9 @@ class Mamba2(nn.Module):
 
         self.chunk_size = chunk_size
 
-        self.time_step_limit = time_step_limit
-        self.time_step_min = time_step_min
-        self.time_step_max = time_step_max
+        self.dt_limit = dt_limit
+        self.dt_min = dt_min
+        self.dt_max = dt_max
 
         self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.ssm_state_size
         self.conv1d = nn.Conv1d(
@@ -185,10 +185,10 @@ class Mamba2(nn.Module):
         # hard coded for now
         dt = torch.exp(
             torch.rand(self.num_heads) * (
-                math.log(self.time_step_max) - math.log(self.time_step_min)
-            ) + math.log(self.time_step_min)
+                math.log(self.dt_max) - math.log(self.dt_min)
+            ) + math.log(self.dt_min)
         )
-        dt = torch.clamp(dt, min=time_step_init_floor)
+        dt = torch.clamp(dt, min=dt_init_floor)
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         self.dt_bias = nn.Parameter(inv_dt)
@@ -339,7 +339,7 @@ class Mamba2(nn.Module):
         # Fused calculations or step by step if no initialized cache is found (prefill)
         else:
             A = -torch.exp(self.A_log.float())  # (num_heads) or (intermediate_size, state_size)
-            dt_limit_kwargs = {} if self.time_step_limit == (0.0, float("inf")) else {"dt_limit": self.time_step_limit}
+            dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else {"dt_limit": self.dt_limit}
 
             # 2-4. Fused kernel for conv1d, SSM, and the final projection
             if self.training and not use_cache:
@@ -512,7 +512,7 @@ class Mamba2(nn.Module):
             dt_bias = self.dt_bias[..., None].expand(self.dt_bias.shape[0], self.head_dim)
 
             dt = torch.nn.functional.softplus(dt + dt_bias.to(dt.dtype))
-            dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
+            dt = torch.clamp(dt, self.dt_limit[0], self.dt_limit[1])
             A = A[..., None, None].expand(self.num_heads, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
             # [bsz, num_heads, head_dim, state_size]
             dA = (torch.exp(dt[..., None] * A)).to(device=cache_device)
@@ -567,7 +567,7 @@ class Mamba2(nn.Module):
             # Prefill path
             # begin ssd naive implementation without einsums
             dt = nn.functional.softplus(dt + self.dt_bias)
-            dt = torch.clamp(dt, self.time_step_limit[0], self.time_step_limit[1])
+            dt = torch.clamp(dt, self.dt_limit[0], self.dt_limit[1])
             hidden_states = hidden_states.reshape(batch_size, seq_len, -1, self.head_dim).float()
             B = B.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
             C = C.reshape(batch_size, seq_len, -1, self.ssm_state_size).float()
