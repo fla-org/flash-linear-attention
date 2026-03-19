@@ -299,6 +299,7 @@ class LogLinearMamba2(nn.Module):
         self.hidden_size = hidden_size
         self.ssm_state_size = state_size
         self.conv_kernel_size = conv_kernel
+        self.conv_init = conv_init
         self.intermediate_size = int(expand * self.hidden_size)
         self.layer_idx = layer_idx
         self.use_conv_bias = use_conv_bias
