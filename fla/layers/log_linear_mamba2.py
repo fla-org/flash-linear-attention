@@ -279,6 +279,7 @@ class LogLinearMamba2(nn.Module):
         expand: int = 2,
         n_groups: int = 1,
         conv_kernel: int = 4,
+        conv_init: float = None,
         use_conv_bias: bool = False,
         hidden_act: str = "silu",
         rmsnorm: bool = True,
@@ -326,6 +327,8 @@ class LogLinearMamba2(nn.Module):
             groups=self.conv_dim,
             padding=conv_kernel - 1,
         )
+        if self.conv_init is not None:
+            nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
 
         self.num_lambda_dims = MAX_NUM_LEVELS
         self.lambda_level_module = None

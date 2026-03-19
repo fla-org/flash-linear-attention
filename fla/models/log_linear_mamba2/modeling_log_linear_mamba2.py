@@ -117,6 +117,11 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
             nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
+            # --- conv1d ---
+            if self.config.conv_init is not None:
+                nn.init.uniform_(module.conv1d.weight, -self.config.conv_init, self.config.conv_init)
+                module.conv1d.weight._no_reinit = True
+
             # --- L ---
             nn.init.ones_(module.L)
             module.L._no_weight_decay = True

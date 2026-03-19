@@ -165,6 +165,11 @@ class Mamba2PreTrainedModel(PreTrainedModel):
             nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
+            # --- conv1d ---
+            if self.config.conv_init is not None:
+                nn.init.uniform_(module.conv1d.weight, -self.config.conv_init, self.config.conv_init)
+                module.conv1d.weight._no_reinit = True
+
             # --- dt_bias ---
             dt = torch.exp(
                 torch.rand(self.config.num_heads)
