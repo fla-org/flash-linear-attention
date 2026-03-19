@@ -121,7 +121,7 @@ class MambaPreTrainedModel(PreTrainedModel):
                 torch.rand(self.config.intermediate_size)
                 * (math.log(self.config.dt_max) - math.log(self.config.dt_min))
                 + math.log(self.config.dt_min),
-            ).clamp(min=self.config.dt_floor)
+            ).clamp(min=self.config.dt_init_floor)
             # # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():
