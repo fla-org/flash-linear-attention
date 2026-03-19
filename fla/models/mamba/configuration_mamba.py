@@ -72,7 +72,7 @@ class MambaConfig(PretrainedConfig):
             Maximum `time_step` used to bound `dt_proj.bias`. Default: 0.1.
         dt_init_scheme (`float`, *optional*):
             Init scheme used for `dt_proj.weight`. Should be one of `["random","uniform"]`. Default: `"random"`.
-        dt_floor (`float`, *optional*):
+        dt_init_floor (`float`, *optional*):
             Minimum clamping value of the `dt_proj.bias` layer initialization. Default: 0.0001.
         window_size (`int`, *optional*):
             The window size used for sliding window attention. Default: 2048.
@@ -122,7 +122,7 @@ class MambaConfig(PretrainedConfig):
         dt_min: float = 0.001,
         dt_max: float = 0.1,
         dt_init_scheme: str = "random",
-        dt_floor: float = 1e-4,
+        dt_init_floor: float = 1e-4,
         rescale_prenorm_residual: bool = False,
         use_cache: bool = True,
         fuse_norm: bool = True,
@@ -152,7 +152,7 @@ class MambaConfig(PretrainedConfig):
         self.dt_min = dt_min
         self.dt_max = dt_max
         self.dt_init_scheme = dt_init_scheme
-        self.dt_floor = dt_floor
+        self.dt_init_floor = dt_init_floor
         self.rescale_prenorm_residual = rescale_prenorm_residual
         self.residual_in_fp32 = residual_in_fp32
         self.use_cache = use_cache

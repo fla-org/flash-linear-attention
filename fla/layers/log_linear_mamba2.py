@@ -285,9 +285,9 @@ class LogLinearMamba2(nn.Module):
         D_has_hdim: bool = False,
         norm_before_gate: bool = False,
         chunk_size: int = 64,
-        time_step_limit: tuple[float, float] = (0.0, float("inf")),
-        time_step_min: float = 0.001,
-        time_step_max: float = 0.1,
+        dt_limit: tuple[float, float] = (0.0, float("inf")),
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
         use_bias: bool = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
@@ -313,9 +313,9 @@ class LogLinearMamba2(nn.Module):
         self.head_dim = head_dim
         self.chunk_size = chunk_size
 
-        self.time_step_limit = time_step_limit
-        self.time_step_min = time_step_min
-        self.time_step_max = time_step_max
+        self.dt_limit = dt_limit
+        self.dt_min = dt_min
+        self.dt_max = dt_max
 
         self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.ssm_state_size
         self.conv1d = nn.Conv1d(
@@ -549,8 +549,8 @@ class LogLinearMamba2(nn.Module):
             )  # (num_heads) or (intermediate_size, state_size)
             dt_limit_kwargs = (
                 {}
-                if self.time_step_limit == (0.0, float("inf"))
-                else {"dt_limit": self.time_step_limit}
+                if self.dt_limit == (0.0, float("inf"))
+                else {"dt_limit": self.dt_limit}
             )
 
             # 2-4. Fused kernel for conv1d, SSM, and the final projection

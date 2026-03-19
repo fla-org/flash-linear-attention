@@ -47,9 +47,16 @@ class MambaBlock(GradientCheckpointingLayer):
             hidden_size=config.hidden_size,
             state_size=config.state_size,
             conv_kernel=config.conv_kernel,
+            use_conv_bias=config.use_conv_bias,
             intermediate_size=config.intermediate_size,
-            dt_rank=config.time_step_rank,
+            dt_rank=config.dt_rank,
+            dt_min=config.dt_min,
+            dt_max=config.dt_max,
+            dt_init=config.dt_init_scheme,
+            dt_scale=config.dt_scale,
+            dt_init_floor=config.dt_init_floor,
             use_bias=config.use_bias,
+            hidden_act=config.hidden_act,
             layer_idx=layer_idx,
         )
 
@@ -104,17 +111,17 @@ class MambaPreTrainedModel(PreTrainedModel):
             module.A_log._no_weight_decay = True
             module.D._no_weight_decay = True
 
-            dt_init_std = self.config.time_step_rank**-0.5 * self.config.time_step_scale
-            if self.config.time_step_init_scheme == "constant":
+            dt_init_std = self.config.dt_rank**-0.5 * self.config.dt_scale
+            if self.config.dt_init_scheme == "constant":
                 nn.init.constant_(module.dt_proj.weight, dt_init_std)
-            elif self.config.time_step_init_scheme == "random":
+            elif self.config.dt_init_scheme == "random":
                 nn.init.uniform_(module.dt_proj.weight, -dt_init_std, dt_init_std)
 
             dt = torch.exp(
                 torch.rand(self.config.intermediate_size)
-                * (math.log(self.config.time_step_max) - math.log(self.config.time_step_min))
-                + math.log(self.config.time_step_min),
-            ).clamp(min=self.config.time_step_floor)
+                * (math.log(self.config.dt_max) - math.log(self.config.dt_min))
+                + math.log(self.config.dt_min),
+            ).clamp(min=self.config.dt_floor)
             # # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
             with torch.no_grad():

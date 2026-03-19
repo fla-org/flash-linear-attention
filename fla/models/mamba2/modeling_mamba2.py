@@ -79,13 +79,18 @@ class Mamba2Block(GradientCheckpointingLayer):
             expand=config.expand,
             n_groups=config.n_groups,
             conv_kernel=config.conv_kernel,
+            conv_init=config.conv_init,
             use_conv_bias=config.use_conv_bias,
             hidden_act=config.hidden_act,
+            A_init_range=config.A_init_range,
+            D_has_hdim=config.D_has_hdim,
             rmsnorm=config.rmsnorm,
+            norm_before_gate=config.norm_before_gate,
             chunk_size=config.chunk_size,
-            time_step_limit=config.time_step_limit,
-            time_step_min=config.time_step_min,
-            time_step_max=config.time_step_max,
+            dt_limit=config.dt_limit,
+            dt_min=config.dt_min,
+            dt_max=config.dt_max,
+            dt_init_floor=config.dt_init_floor,
             use_bias=config.use_bias,
             norm_eps=config.norm_eps,
             layer_idx=layer_idx,
@@ -140,7 +145,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
         if isinstance(module, Mamba2):
 
             # --- A_log ---
-            A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(0, 16)
+            A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(*self.config.A_init_range)
             with torch.no_grad():
                 A_log = torch.log(A)
                 if isinstance(module.A_log, DTensor):
@@ -163,9 +168,9 @@ class Mamba2PreTrainedModel(PreTrainedModel):
             # --- dt_bias ---
             dt = torch.exp(
                 torch.rand(self.config.num_heads)
-                * (math.log(self.config.time_step_max) - math.log(self.config.time_step_min))
-                + math.log(self.config.time_step_min),
-            ).clamp(min=self.config.time_step_floor)
+                * (math.log(self.config.dt_max) - math.log(self.config.dt_min))
+                + math.log(self.config.dt_min),
+            ).clamp(min=self.config.dt_init_floor)
 
             # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             inv_dt = dt + torch.log(-torch.expm1(-dt))
