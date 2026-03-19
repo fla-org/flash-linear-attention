@@ -116,6 +116,7 @@ class MambaPreTrainedModel(PreTrainedModel):
                 nn.init.constant_(module.dt_proj.weight, dt_init_std)
             elif self.config.dt_init_scheme == "random":
                 nn.init.uniform_(module.dt_proj.weight, -dt_init_std, dt_init_std)
+            module.dt_proj.weight._no_reinit = True
 
             dt = torch.exp(
                 torch.rand(self.config.intermediate_size)

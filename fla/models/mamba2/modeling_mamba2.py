@@ -186,6 +186,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
 
                 module.dt_bias.copy_(inv_dt)
             module.dt_bias._no_reinit = True
+            module.dt_bias._no_weight_decay = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
