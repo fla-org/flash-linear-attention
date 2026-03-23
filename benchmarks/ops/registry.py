@@ -281,7 +281,7 @@ register_op(OpConfig(
         'g': TensorSpec(shape_BTHD, transform=logsigmoid),
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
-    extra_kwargs={'use_qk_l2norm_in_kernel': True},
+    extra_kwargs={'use_qk_l2norm_in_kernel': True, 'safe_gate': True, 'lower_bound': -5},
     category='gate_beta',
 ))
 

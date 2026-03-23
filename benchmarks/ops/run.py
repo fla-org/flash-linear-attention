@@ -141,7 +141,6 @@ from registry import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.bench_cache')
 
 
 def _import_op(config: OpConfig):
@@ -355,27 +354,42 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
                         baseline_info: dict | None = None):
     """Print old / new / speedup comparison table.
 
-    The column header line ``B  T  H  D  mode  op  old(ms)  new(ms)  speedup``
-    is repeated before each shape group as a visual separator.  Data rows show
-    B/T/H/D values only on the first row; mode is shown when it changes.
+    Column order: ``mode  B  T  H  D  op  old(ms)  new(ms)  speedup``.
+    The mode column (``fwd`` / ``fwdbwd``) is shown when it changes.
+    A dash separator (not covering the mode column) and column header
+    are repeated before each shape group.
     """
     if not results:
         print("\n  No results to display.")
         return
 
-    old_map = {_make_result_key(r): r for r in baseline} if baseline else {}
+    has_baseline = baseline is not None and len(baseline) > 0
+    old_map = {_make_result_key(r): r for r in baseline} if has_baseline else {}
 
     new_git = machine_info.get('git_label', 'new') if machine_info else 'new'
-    old_git = baseline_info.get('git_label', 'main') if baseline_info else 'main'
-    old_hdr, new_hdr = _make_col_headers(old_git, new_git)
-    col_w = max(len(old_hdr), len(new_hdr), 10)
 
-    #   2 + B(4) + T(6) + H(4) + D(4) + mode(7) + op(28) + old(col_w) + new(col_w) + speedup(8)
-    width = 2 + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 7 + 1 + 28 + 2 + col_w + 1 + col_w + 1 + 8
+    # mode_w = 2 (indent) + 7 (mode field) + 1 (space) = 10 chars before B column
+    mode_pad = ' ' * 10
+
+    if has_baseline:
+        old_git = baseline_info.get('git_label', 'main') if baseline_info else 'main'
+        old_hdr, new_hdr = _make_col_headers(old_git, new_git)
+        col_w = max(len(old_hdr), len(new_hdr), 10)
+        inner_w = 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w + 1 + col_w + 1 + 8
+        inner_hdr = (f"{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
+                     f"  {old_hdr:>{col_w}s} {new_hdr:>{col_w}s} {'speedup':>8s}")
+    else:
+        new_hdr = _truncate_branch(new_git.split('[')[0]) if '[' in new_git else new_git
+        suffix = '[' + new_git.split('[', 1)[1] + '(ms)' if '[' in new_git else '(ms)'
+        new_hdr = new_hdr + suffix
+        col_w = max(len(new_hdr), 10)
+        inner_w = 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w
+        inner_hdr = (f"{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
+                     f"  {new_hdr:>{col_w}s}")
+
+    width = 10 + inner_w
     sep = '=' * width
-    hdr_line = (f"  {'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'mode':<7s} {'op':<28s}"
-                f"  {old_hdr:>{col_w}s} {new_hdr:>{col_w}s} {'speedup':>8s}")
-    dash_line = '-' * width
+    dash_line = mode_pad + '-' * inner_w
 
     print(f"\n{sep}")
     if machine_info:
@@ -390,37 +404,35 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
         cur_shape = (r['B'], r['T'], r['H'], r['D'])
         cur_mode = r['mode']
 
-        # Repeat column header as shape-group separator
-        if cur_shape != prev_shape:
+        # Show mode label + column header when mode changes; just a dash line between shapes
+        if cur_mode != prev_mode:
+            print(sep)
+            print(f"  {cur_mode:<7s} {inner_hdr}")
             print(dash_line)
-            print(hdr_line)
+        elif cur_shape != prev_shape:
             print(dash_line)
-            prev_mode = None
 
-        # Show B/T/H/D only on first row of each shape group
-        if cur_shape != prev_shape:
+        # Show B/T/H/D on first row of each shape group
+        if cur_mode != prev_mode or cur_shape != prev_shape:
             shape_str = f"{r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}"
         else:
             shape_str = f"{'':>4s} {'':>6s} {'':>4s} {'':>4s}"
 
-        # Show mode when it changes
-        if cur_mode != prev_mode:
-            mode_str = f"{cur_mode:<7s}"
-        else:
-            mode_str = f"{'':7s}"
-
         prev_shape = cur_shape
         prev_mode = cur_mode
 
-        old_r = old_map.get(_make_result_key(r))
         new_ms = r['median_ms']
-        prefix = f"  {shape_str}  {mode_str} {r['op']:<28s}"
-        if old_r:
-            old_ms = old_r['median_ms']
-            speedup = old_ms / new_ms if new_ms > 0 else float('inf')
-            print(f"{prefix}  {old_ms:>{col_w}.3f} {new_ms:>{col_w}.3f} {speedup:>7.2f}x")
+        prefix = f"{mode_pad}{shape_str}  {r['op']:<28s}"
+        if has_baseline:
+            old_r = old_map.get(_make_result_key(r))
+            if old_r:
+                old_ms = old_r['median_ms']
+                speedup = old_ms / new_ms if new_ms > 0 else float('inf')
+                print(f"{prefix}  {old_ms:>{col_w}.3f} {new_ms:>{col_w}.3f} {speedup:>7.2f}x")
+            else:
+                print(f"{prefix}  {'-':>{col_w}s} {new_ms:>{col_w}.3f} {'-':>8s}")
         else:
-            print(f"{prefix}  {'-':>{col_w}s} {new_ms:>{col_w}.3f} {'-':>8s}")
+            print(f"{prefix}  {new_ms:>{col_w}.3f}")
 
     print(sep)
 
@@ -517,7 +529,7 @@ def main():
     parser.add_argument(
         '--base', default=None,
         help='Git ref for the baseline (old) column, e.g. "main" or "HEAD~3". '
-             'Runs benchmarks at that ref via git worktree.',
+             'Auto-detected as "main" when on a feature branch.',
     )
     parser.add_argument(
         '--list', action='store_true',
@@ -553,48 +565,26 @@ def main():
         except Exception as e:
             logger.error(f"Failed to benchmark {op_name}: {e}")
 
-    # If --base is given, benchmark at that ref for the old column.
-    # Otherwise try loading cached baseline from .bench_cache/.
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    # Determine baseline ref: explicit --base, or auto-detect main if on a feature branch.
     git_label = machine_info.get('git_label', 'unknown')
     current_branch = git_label.split('[')[0] if '[' in git_label else git_label
+    base_ref = args.base
+    if base_ref is None and current_branch not in ('main', 'master', 'unknown'):
+        base_ref = 'main'
 
     baseline, baseline_info = None, None
-    if args.base:
-        # Run benchmarks at the base ref via git worktree
+    if base_ref:
         baseline, baseline_info = _bench_at_ref(
-            args.base, op_names, shape_configs, args.modes)
-        # Cache base results
-        if baseline:
-            base_name = args.base.replace('/', '_')
-            base_cache = os.path.join(CACHE_DIR, f'{base_name}.json')
-            with open(base_cache, 'w') as f:
-                json.dump({'machine_info': baseline_info, 'results': baseline}, f, indent=2)
-    else:
-        # Try loading main's cache as default baseline
-        main_cache = os.path.join(CACHE_DIR, 'main.json')
-        if current_branch != 'main' and os.path.exists(main_cache):
-            try:
-                with open(main_cache) as f:
-                    cache = json.load(f)
-                    baseline = cache.get('results', [])
-                    baseline_info = cache.get('machine_info')
-            except Exception:
-                pass
+            base_ref, op_names, shape_configs, args.modes)
 
-    # Sort by (B, T, H, D, mode, op) so the table groups by shape first
+    # Sort by (mode, B, T, H, D, op) so the table groups by mode first
     mode_order = {'fwd': 0, 'fwdbwd': 1}
-    all_results.sort(key=lambda r: (r['B'], r['T'], r['H'], r['D'], mode_order.get(r['mode'], 9), r['op']))
+    all_results.sort(key=lambda r: (mode_order.get(r['mode'], 9), r['B'], r['T'], r['H'], r['D'], r['op']))
 
     print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
 
-    # Save current results to branch cache
-    output = {'machine_info': machine_info, 'results': all_results}
-    branch_cache = os.path.join(CACHE_DIR, f'{current_branch}.json')
-    with open(branch_cache, 'w') as f:
-        json.dump(output, f, indent=2)
-
     if args.json_file:
+        output = {'machine_info': machine_info, 'results': all_results}
         with open(args.json_file, 'w') as f:
             json.dump(output, f, indent=2)
         print(f"\nResults saved to {args.json_file}")
