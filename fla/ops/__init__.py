@@ -5,7 +5,7 @@ from .based import fused_chunk_based, parallel_based
 from .comba import chunk_comba, fused_recurrent_comba
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from .forgetting_attn import parallel_forgetting_attn
-from .gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from .gated_delta_rule import chunk_gated_delta_rule, chunk_gdn, fused_recurrent_gated_delta_rule, fused_recurrent_gdn
 from .generalized_delta_rule import (
     chunk_dplr_delta_rule,
     chunk_iplr_delta_rule,
@@ -33,7 +33,7 @@ __all__ = [
     'fused_chunk_based', 'parallel_based',
     'chunk_delta_rule', 'fused_chunk_delta_rule', 'fused_recurrent_delta_rule',
     'parallel_forgetting_attn',
-    'chunk_gated_delta_rule', 'fused_recurrent_gated_delta_rule',
+    'chunk_gated_delta_rule', 'chunk_gdn', 'fused_recurrent_gated_delta_rule', 'fused_recurrent_gdn',
     'chunk_comba', 'fused_recurrent_comba',
     'chunk_dplr_delta_rule', 'chunk_iplr_delta_rule',
     'fused_recurrent_dplr_delta_rule', 'fused_recurrent_iplr_delta_rule',

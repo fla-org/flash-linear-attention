@@ -89,9 +89,10 @@ class OpConfig:
     """Registry entry describing how to benchmark a single op.
 
     Args:
-        name:           function name, e.g. 'chunk_gla'
+        name:           display/registry name, e.g. 'chunk_gla'
         import_path:    Python module path, e.g. 'fla.ops.gla'
         inputs:         param_name -> TensorSpec mapping
+        func_name:      actual function attribute name if different from *name*
         extra_kwargs:   constant keyword args passed to the op
         output_is_tuple: True if output[0] is the tensor to .backward()
         skip_backward:  True to skip fwdbwd mode
@@ -102,6 +103,7 @@ class OpConfig:
     name: str
     import_path: str
     inputs: dict[str, TensorSpec]
+    func_name: str | None = None
     extra_kwargs: dict[str, Any] = field(default_factory=dict)
     output_is_tuple: bool = True
     skip_backward: bool = False
@@ -259,13 +261,14 @@ register_op(OpConfig(
 # --- D: +gate + beta ---
 
 register_op(OpConfig(
-    name='chunk_gated_delta_rule',
+    name='chunk_gdn',
     import_path='fla.ops.gated_delta_rule',
     inputs={
         **_simple_qkv,
         'g': TensorSpec(shape_BTH, transform=logsigmoid),
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
+    func_name='chunk_gated_delta_rule',
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
     category='gate_beta',
 ))
@@ -275,7 +278,7 @@ register_op(OpConfig(
     import_path='fla.ops.kda',
     inputs={
         **_simple_qkv,
-        'g': TensorSpec(shape_BTH, transform=logsigmoid),
+        'g': TensorSpec(shape_BTHD, transform=logsigmoid),
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
@@ -381,4 +384,26 @@ register_op(OpConfig(
     inputs={**_simple_qkv},
     extra_kwargs={'layer_idx': 0, 'num_layers': 12},
     category='lightning',
+))
+
+# --- L: Attention baselines ---
+
+register_op(OpConfig(
+    name='parallel_attn',
+    import_path='fla.ops.attn',
+    inputs={**_simple_qkv},
+    output_is_tuple=False,
+    category='attn',
+))
+
+
+
+register_op(OpConfig(
+    name='flash_attn',
+    import_path='flash_attn',
+    inputs={**_simple_qkv},
+    func_name='flash_attn_func',
+    extra_kwargs={'causal': True},
+    output_is_tuple=False,
+    category='flash_attn',
 ))

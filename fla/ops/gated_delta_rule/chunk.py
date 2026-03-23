@@ -404,3 +404,6 @@ def chunk_gated_delta_rule(
         transpose_state_layout,
     )
     return o, final_state
+
+
+chunk_gdn = chunk_gated_delta_rule

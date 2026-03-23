@@ -147,10 +147,11 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.bench_cac
 def _import_op(config: OpConfig):
     """Dynamically import the op function from the installed fla package."""
     mod = importlib.import_module(config.import_path)
-    fn = getattr(mod, config.name, None)
+    attr = config.func_name or config.name
+    fn = getattr(mod, attr, None)
     if fn is None:
         raise ImportError(
-            f"Cannot find '{config.name}' in module '{config.import_path}'. "
+            f"Cannot find '{attr}' in module '{config.import_path}'. "
             f"Available: {[x for x in dir(mod) if not x.startswith('_')]}"
         )
     return fn
@@ -354,9 +355,9 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
                         baseline_info: dict | None = None):
     """Print old / new / speedup comparison table.
 
-    Column headers show ``branch[commit](ms)`` (branch name truncated to 8 chars).
-    If no baseline exists (first run), the old column shows ``-``.
-    Rows are grouped by mode with a blank line separator between fwd and fwdbwd.
+    The column header line ``B  T  H  D  mode  op  old(ms)  new(ms)  speedup``
+    is repeated before each shape group as a visual separator.  Data rows show
+    B/T/H/D values only on the first row; mode is shown when it changes.
     """
     if not results:
         print("\n  No results to display.")
@@ -369,32 +370,51 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
     old_hdr, new_hdr = _make_col_headers(old_git, new_git)
     col_w = max(len(old_hdr), len(new_hdr), 10)
 
-    #   2 + op(28) + mode(7) + B(4) + T(6) + H(4) + D(4) + old(col_w) + new(col_w) + speedup(8)
-    width = 2 + 28 + 1 + 7 + 1 + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + col_w + 1 + col_w + 1 + 8
-    print(f"\n{'=' * width}")
+    #   2 + B(4) + T(6) + H(4) + D(4) + mode(7) + op(28) + old(col_w) + new(col_w) + speedup(8)
+    width = 2 + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 7 + 1 + 28 + 2 + col_w + 1 + col_w + 1 + 8
+    sep = '=' * width
+    hdr_line = (f"  {'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'mode':<7s} {'op':<28s}"
+                f"  {old_hdr:>{col_w}s} {new_hdr:>{col_w}s} {'speedup':>8s}")
+    dash_line = '-' * width
+
+    print(f"\n{sep}")
     if machine_info:
         gpu = machine_info.get('gpu_name', 'N/A')
         cuda = machine_info.get('cuda_version', 'N/A')
         pytorch = machine_info.get('pytorch_version', 'N/A')
         print(f"  Machine: {gpu} | CUDA {cuda} | PyTorch {pytorch}")
-    print(f"{'=' * width}")
-    print(f"  {'op':<28s} {'mode':<7s} {'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}"
-          f"  {old_hdr:>{col_w}s} {new_hdr:>{col_w}s} {'speedup':>8s}")
-    print(f"  {'-' * 28} {'-' * 7} {'-' * 4} {'-' * 6} {'-' * 4} {'-' * 4}"
-          f"  {'-' * col_w} {'-' * col_w} {'-' * 8}")
 
+    prev_shape = None
     prev_mode = None
     for r in results:
-        # Insert blank line when mode changes (fwd -> fwdbwd)
+        cur_shape = (r['B'], r['T'], r['H'], r['D'])
         cur_mode = r['mode']
-        if prev_mode is not None and cur_mode != prev_mode:
-            print()
+
+        # Repeat column header as shape-group separator
+        if cur_shape != prev_shape:
+            print(dash_line)
+            print(hdr_line)
+            print(dash_line)
+            prev_mode = None
+
+        # Show B/T/H/D only on first row of each shape group
+        if cur_shape != prev_shape:
+            shape_str = f"{r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}"
+        else:
+            shape_str = f"{'':>4s} {'':>6s} {'':>4s} {'':>4s}"
+
+        # Show mode when it changes
+        if cur_mode != prev_mode:
+            mode_str = f"{cur_mode:<7s}"
+        else:
+            mode_str = f"{'':7s}"
+
+        prev_shape = cur_shape
         prev_mode = cur_mode
 
         old_r = old_map.get(_make_result_key(r))
         new_ms = r['median_ms']
-        prefix = (f"  {r['op']:<28s} {r['mode']:<7s}"
-                  f" {r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}")
+        prefix = f"  {shape_str}  {mode_str} {r['op']:<28s}"
         if old_r:
             old_ms = old_r['median_ms']
             speedup = old_ms / new_ms if new_ms > 0 else float('inf')
@@ -402,7 +422,7 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
         else:
             print(f"{prefix}  {'-':>{col_w}s} {new_ms:>{col_w}.3f} {'-':>8s}")
 
-    print(f"{'=' * width}")
+    print(sep)
 
 
 def _find_project_root() -> str:
@@ -562,9 +582,9 @@ def main():
             except Exception:
                 pass
 
-    # Sort so fwd rows come before fwdbwd, grouped by (mode, op, B, T, H, D)
+    # Sort by (B, T, H, D, mode, op) so the table groups by shape first
     mode_order = {'fwd': 0, 'fwdbwd': 1}
-    all_results.sort(key=lambda r: (mode_order.get(r['mode'], 9), r['op'], r['B'], r['T'], r['H'], r['D']))
+    all_results.sort(key=lambda r: (r['B'], r['T'], r['H'], r['D'], mode_order.get(r['mode'], 9), r['op']))
 
     print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
 
