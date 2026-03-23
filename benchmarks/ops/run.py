@@ -35,7 +35,30 @@ Usage::
 
 Results are cached per-branch in ``.bench_cache/<branch>.json``.  When run on
 a feature branch, the ``main`` branch's cached results are loaded as the
-baseline automatically.  Column headers display ``branch[commit](ms)``.
+baseline automatically.  Column headers display ``branch[commit](ms)``
+(branch names longer than 8 characters are truncated with ``...``).
+
+Sample output::
+
+    ==========================================================================================================================
+      Machine: NVIDIA GB200 | CUDA 12.9 | PyTorch 2.9.0+cu129.msh
+    ==========================================================================================================================
+      op                           mode       B      T    H    D  fuse-gdn...[51141dbc](ms)        main[7978c0bd](ms)  speedup
+      ---------------------------- ------- ---- ------ ---- ----  -------------------------  -------------------------  -------
+      chunk_gated_delta_rule       fwd        1   8192   96  128                      1.268                     1.506    1.19x
+      chunk_gated_delta_rule       fwd        2  16384   16  128                      0.988                     1.152    1.17x
+      chunk_gated_delta_rule       fwd        4   2048   16  128                      0.518                     0.582    1.12x
+      chunk_gated_delta_rule       fwd        4   4096   64  128                      1.600                     1.934    1.21x
+      chunk_gated_delta_rule       fwd        8    512    4   64                      0.524                     0.570    1.09x
+      chunk_gated_delta_rule       fwd        8   2048   32  256                      1.887                     2.034    1.08x
+
+      chunk_gated_delta_rule       fwdbwd     1   8192   96  128                      4.818                     5.065    1.05x
+      chunk_gated_delta_rule       fwdbwd     2  16384   16  128                      4.001                     4.168    1.04x
+      chunk_gated_delta_rule       fwdbwd     4   2048   16  128                      1.648                     1.682    1.02x
+      chunk_gated_delta_rule       fwdbwd     4   4096   64  128                      6.062                     6.398    1.06x
+      chunk_gated_delta_rule       fwdbwd     8    512    4   64                      1.609                     1.674    1.04x
+      chunk_gated_delta_rule       fwdbwd     8   2048   32  256                      8.838                     8.963    1.01x
+    ==========================================================================================================================
 
 Registering a new op
 ====================
@@ -298,11 +321,32 @@ def _make_result_key(r):
     return (r['op'], r['mode'], r['B'], r['T'], r['H'], r['D'])
 
 
-def _truncate_label(label: str, max_len: int = 8) -> str:
+def _truncate_branch(name: str, max_len: int = 8) -> str:
     """Truncate a branch name to *max_len* chars, adding ``...`` if needed."""
-    if len(label) <= max_len:
-        return label
-    return label[:max_len] + '...'
+    if len(name) > max_len:
+        return name[:max_len] + '...'
+    return name
+
+
+def _make_col_headers(old_git: str, new_git: str) -> tuple[str, str]:
+    """Build equal-width column headers like ``main    [abc1234](ms)``.
+
+    Both branch names are truncated to 8 chars (with ``...``), then
+    right-padded to the same width so the ``[commit](ms)`` parts align.
+    """
+    def _branch(git_label):
+        return git_label.split('[')[0] if '[' in git_label else git_label
+
+    def _suffix(git_label):
+        if '[' in git_label:
+            return '[' + git_label.split('[', 1)[1] + '(ms)'
+        return '(ms)'
+
+    old_br = _truncate_branch(_branch(old_git))
+    new_br = _truncate_branch(_branch(new_git))
+    br_w = max(len(old_br), len(new_br))
+    return (f"{old_br:>{br_w}s}{_suffix(old_git)}",
+            f"{new_br:>{br_w}s}{_suffix(new_git)}")
 
 
 def print_results_table(results: list[dict], machine_info: dict | None = None,
@@ -322,15 +366,7 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
 
     new_git = machine_info.get('git_label', 'new') if machine_info else 'new'
     old_git = baseline_info.get('git_label', 'main') if baseline_info else 'main'
-    # Truncate branch portion but keep [commit] intact
-    def _fmt_hdr(git_label):
-        if '[' in git_label:
-            branch, rest = git_label.split('[', 1)
-            return f"{_truncate_label(branch)}[{rest}(ms)"
-        return f"{_truncate_label(git_label)}(ms)"
-
-    old_hdr = _fmt_hdr(old_git)
-    new_hdr = _fmt_hdr(new_git)
+    old_hdr, new_hdr = _make_col_headers(old_git, new_git)
     col_w = max(len(old_hdr), len(new_hdr), 10)
 
     #   2 + op(28) + mode(7) + B(4) + T(6) + H(4) + D(4) + old(col_w) + new(col_w) + speedup(8)
