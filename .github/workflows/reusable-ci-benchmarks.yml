@@ -117,7 +117,6 @@ jobs:
           $CONDA_BIN_PATH/python scripts/run_benchmark_compare.py \
             --base ${{ inputs.base_ref }} \
             --head HEAD \
-            --shapes ci \
             --threshold ${{ inputs.threshold }} \
             --output benchmark_results.json
 

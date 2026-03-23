@@ -3,14 +3,92 @@
 """
 Unified CLI benchmark runner for all registered ops.
 
-Works both as a package module and as a standalone script from a temp directory:
-    python -m benchmarks.ops.run --op chunk_gla --shapes ci --json out.json
-    python /tmp/fla_bench_xxx/run.py --op chunk_gla --shapes ci --json out.json
+Running benchmarks
+==================
 
-The runner imports fla.ops.* via importlib at call time, so it resolves to
-whatever fla version is currently installed. This is critical for cross-commit
-comparisons where the runner is copied to a temp dir and the fla package is
-reinstalled at each commit.
+    # Benchmark one op (uses all 6 default shape configs)
+    python -m benchmarks.ops.run --op chunk_gla
+
+    # Multiple ops
+    python -m benchmarks.ops.run --op chunk_gla chunk_kda
+
+    # All registered ops
+    python -m benchmarks.ops.run --op all
+
+    # Forward only
+    python -m benchmarks.ops.run --op chunk_gla --modes fwd
+
+    # Save results to JSON
+    python -m benchmarks.ops.run --op chunk_gla --json results.json
+
+    # Custom shape (overrides default SHAPE_CONFIGS)
+    python -m benchmarks.ops.run --op chunk_gla \
+        --custom-shapes '{"test": {"B": 2, "T": 4096, "H": 32, "D": 128}}'
+
+    # List all registered ops
+    python -m benchmarks.ops.run --list
+
+Cross-commit comparison
+=======================
+Compare performance between two git commits (defaults: main vs current branch):
+
+    python scripts/run_benchmark_compare.py
+    python scripts/run_benchmark_compare.py --benchmark-ops chunk_gla chunk_kda
+    python scripts/run_benchmark_compare.py --base HEAD~3
+
+The compare script copies run.py + registry.py to a temp dir, then does
+``git checkout`` + ``pip install -e .`` at each commit.  run.py imports
+fla.ops.* via importlib, so it picks up whatever kernel version is installed.
+
+Registering a new op
+====================
+All op definitions live in ``registry.py``.  To add a new op:
+
+1. Pick shape helpers for each input tensor (defined in registry.py):
+
+       shape_BTHD  -> (B, T, H, D)     most q/k/v/g tensors
+       shape_BTH   -> (B, T, H)         per-head scalars (gates, beta)
+       shape_BTD   -> (B, T, H*D)       flattened hidden dim (HGRN)
+       shape_HD    -> (H, D)            per-head vectors (RWKV u)
+       shape_H     -> (H,)              per-head scalars
+
+2. Pick transforms to map randn into the right value range:
+
+       logsigmoid        -> negative values (log-space gates)
+       sigmoid_transform -> (0, 1) range (beta)
+       logsigmoid_clamp  -> logsigmoid clamped to >= -5
+
+3. Call register_op() in registry.py:
+
+       register_op(OpConfig(
+           name='chunk_my_op',                    # function name in the module
+           import_path='fla.ops.my_op',           # module for importlib.import_module()
+           inputs={
+               'q': TensorSpec(shape_BTHD),
+               'k': TensorSpec(shape_BTHD),
+               'v': TensorSpec(shape_BTHD),
+               'g': TensorSpec(shape_BTH, transform=logsigmoid),
+           },
+           extra_kwargs={'use_some_flag': True},   # non-tensor kwargs passed to the op
+           category='my_group',                    # label for --list output
+       ))
+
+4. Verify:  ``python -m benchmarks.ops.run --list``
+
+Special cases:
+- Non-standard param init:  use ``post_init`` callback (see _rwkv7_post_init)
+- Op only supports certain D: set ``dim_constraints={'D': [64, 128]}``
+- Op has no backward:        set ``skip_backward=True``
+- Output is a plain tensor:  set ``output_is_tuple=False``
+
+Benchmark methodology
+=====================
+1. **Warmup**: For each (op, shape), run fwd+bwd 5 times to trigger all
+   triton autotuning.  All shapes are warmed up before any timing begins.
+2. **Timing**: ``triton.testing.do_bench(fn, quantiles=[0.5, 0.2, 0.8])``
+   gives median, p20, p80 in milliseconds.
+3. Input tensors (including gate transforms like logsigmoid) are prepared
+   **before** timing — only the op call itself is measured.
 """
 
 from __future__ import annotations
@@ -34,10 +112,10 @@ import torch
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from registry import (  # noqa: E402
+    SHAPE_CONFIGS,
     OpConfig,
     generate_inputs,
     get_op,
-    get_shape_configs,
     list_ops,
 )
 
@@ -222,21 +300,46 @@ def benchmark_op(
                 )
                 continue
 
-            result = {
+            results.append({
                 'op': op_name,
                 'mode': mode,
                 'B': B, 'T': T, 'H': H, 'D': D,
                 'median_ms': ms[0],
                 'p20_ms': ms[1],
                 'p80_ms': ms[2],
-            }
-            results.append(result)
-            print(
-                f"  {op_name:30s} {mode:6s} B={B} T={T:5d} H={H:2d} D={D:3d}: "
-                f"{ms[0]:8.3f} ms (p20={ms[1]:.3f}, p80={ms[2]:.3f})"
-            )
+            })
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Table output
+# ---------------------------------------------------------------------------
+
+
+def print_results_table(results: list[dict], machine_info: dict | None = None):
+    """Print benchmark results as an aligned table."""
+    if not results:
+        print("\n  No results to display.")
+        return
+
+    print(f"\n{'=' * 95}")
+    if machine_info:
+        gpu = machine_info.get('gpu_name', 'N/A')
+        cuda = machine_info.get('cuda_version', 'N/A')
+        pytorch = machine_info.get('pytorch_version', 'N/A')
+        print(f"  Machine: {gpu} | CUDA {cuda} | PyTorch {pytorch}")
+    print(f"{'=' * 95}")
+    print(f"  {'op':<28s} {'mode':<7s} {'shape':<24s} "
+          f"{'median(ms)':>10s} {'p20(ms)':>10s} {'p80(ms)':>10s}")
+    print(f"  {'-' * 28} {'-' * 7} {'-' * 24} {'-' * 10} {'-' * 10} {'-' * 10}")
+
+    for r in results:
+        shape_str = f"B={r['B']} T={r['T']} H={r['H']} D={r['D']}"
+        print(f"  {r['op']:<28s} {r['mode']:<7s} {shape_str:<24s} "
+              f"{r['median_ms']:>10.3f} {r['p20_ms']:>10.3f} {r['p80_ms']:>10.3f}")
+
+    print(f"{'=' * 95}")
 
 
 # ---------------------------------------------------------------------------
@@ -253,12 +356,9 @@ def main():
         help='Op name(s) to benchmark, or "all"',
     )
     parser.add_argument(
-        '--shapes', default='ci', choices=['ci', 'full', 'custom'],
-        help='Shape config preset (default: ci)',
-    )
-    parser.add_argument(
         '--custom-shapes', default=None,
-        help='JSON string for custom shape dict, e.g. \'{"my": {"B":1,"T":2048,"H":16,"D":128}}\'',
+        help='JSON string to override default shapes, '
+             'e.g. \'{"my": {"B":1,"T":2048,"H":16,"D":128}}\'',
     )
     parser.add_argument(
         '--modes', nargs='+', default=['fwd', 'fwdbwd'],
@@ -293,19 +393,17 @@ def main():
         op_names = args.op
 
     # Determine shapes
-    if args.shapes == 'custom':
-        if args.custom_shapes is None:
-            parser.error("--custom-shapes is required when --shapes=custom")
+    if args.custom_shapes:
         shape_configs = json.loads(args.custom_shapes)
     else:
-        shape_configs = get_shape_configs(args.shapes)
+        shape_configs = SHAPE_CONFIGS
 
     # Run
     machine_info = _get_machine_info()
     print(f"Machine: {machine_info.get('gpu_name', 'N/A')} | "
           f"CUDA {machine_info.get('cuda_version', 'N/A')} | "
           f"PyTorch {machine_info.get('pytorch_version', 'N/A')}")
-    print(f"Shapes: {args.shapes} ({len(shape_configs)} configs)")
+    print(f"Shapes: {len(shape_configs)} configs")
     print(f"Ops: {op_names}")
 
     all_results = []
@@ -316,6 +414,8 @@ def main():
         except Exception as e:
             logger.error(f"Failed to benchmark {op_name}: {e}")
             continue
+
+    print_results_table(all_results, machine_info)
 
     # Save JSON
     if args.json_file:

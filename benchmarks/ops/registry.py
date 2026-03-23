@@ -3,8 +3,7 @@
 """
 Op registry, input factory, and shape configs for the unified benchmark system.
 
-Each op is registered as an OpConfig with TensorSpec descriptions for its inputs.
-The generate_inputs() factory creates correctly shaped tensors for any registered op.
+See ``benchmarks/ops/run.py`` docstring for full usage and how to register new ops.
 """
 
 from __future__ import annotations
@@ -145,27 +144,13 @@ def list_ops() -> list[str]:
 # ---------------------------------------------------------------------------
 
 SHAPE_CONFIGS = {
-    'small':    {'B': 8,  'T': 512,   'H': 4,  'D': 64},
-    'medium':   {'B': 4,  'T': 2048,  'H': 16, 'D': 128},
-    'large':    {'B': 1,  'T': 8192,  'H': 96, 'D': 128},
-    'long_seq': {'B': 2,  'T': 16384, 'H': 16, 'D': 128},
-    'wide':     {'B': 8,  'T': 2048,  'H': 32, 'D': 256},
+    'B1_T8192_H96_D128':  {'B': 1,  'T': 8192,  'H': 96, 'D': 128},
+    'B2_T16384_H16_D128': {'B': 2,  'T': 16384, 'H': 16, 'D': 128},
+    'B4_T2048_H16_D128':  {'B': 4,  'T': 2048,  'H': 16, 'D': 128},
+    'B4_T4096_H64_D128':  {'B': 4,  'T': 4096,  'H': 64, 'D': 128},
+    'B8_T2048_H32_D256':  {'B': 8,  'T': 2048,  'H': 32, 'D': 256},
+    'B8_T512_H4_D64':     {'B': 8,  'T': 512,   'H': 4,  'D': 64},
 }
-
-CI_SHAPE_CONFIGS = {
-    'ci_default': {'B': 4, 'T': 2048,  'H': 16, 'D': 128},
-    'ci_large':   {'B': 1, 'T': 8192,  'H': 96, 'D': 128},
-    'ci_long':    {'B': 2, 'T': 16384, 'H': 16, 'D': 128},
-}
-
-
-def get_shape_configs(mode: str) -> dict[str, dict[str, int]]:
-    if mode == 'ci':
-        return CI_SHAPE_CONFIGS
-    elif mode == 'full':
-        return SHAPE_CONFIGS
-    else:
-        raise ValueError(f"Unknown shape mode: {mode!r}. Use 'ci' or 'full'.")
 
 
 # ---------------------------------------------------------------------------

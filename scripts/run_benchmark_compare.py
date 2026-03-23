@@ -17,9 +17,6 @@ Usage:
     # Compare against a different base
     python scripts/run_benchmark_compare.py --base feature-branch --head HEAD
 
-    # Use full shapes instead of CI shapes
-    python scripts/run_benchmark_compare.py --shapes full
-
     # Custom threshold
     python scripts/run_benchmark_compare.py --threshold 10.0
 """
@@ -117,13 +114,11 @@ def run_unified_benchmark(
     runner_path: str,
     op_names: list[str],
     output_json: str,
-    shapes: str = 'ci',
 ) -> bool:
     """Run the unified runner from a temp directory."""
     cmd = [
         sys.executable, runner_path,
         '--op', *op_names,
-        '--shapes', shapes,
         '--json', output_json,
     ]
     print(f"\n  Running: {' '.join(cmd)}")
@@ -249,8 +244,6 @@ def main():
     parser.add_argument("--head", default="HEAD", help="Head commit/branch/tag (default: HEAD)")
     parser.add_argument("--benchmark-ops", nargs="*",
                         help="Op names to benchmark. If omitted, auto-detect from diff.")
-    parser.add_argument("--shapes", default="ci", choices=["ci", "full"],
-                        help="Shape preset (default: ci)")
     parser.add_argument("--threshold", type=float, default=5.0,
                         help="Regression threshold in percent (default: 5.0)")
     parser.add_argument("--output", help="Save comparison results to JSON file")
@@ -302,7 +295,7 @@ def main():
         checkout_and_install(args.head)
 
         head_json = os.path.join(tmpdir, "head.json")
-        run_unified_benchmark(runner_path, op_names, head_json, shapes=args.shapes)
+        run_unified_benchmark(runner_path, op_names, head_json)
 
         head_results = []
         if os.path.exists(head_json):
@@ -318,7 +311,7 @@ def main():
         checkout_and_install(args.base)
 
         base_json = os.path.join(tmpdir, "base.json")
-        run_unified_benchmark(runner_path, op_names, base_json, shapes=args.shapes)
+        run_unified_benchmark(runner_path, op_names, base_json)
 
         base_results = []
         if os.path.exists(base_json):
