@@ -3,10 +3,9 @@
 """
 Unified CLI benchmark runner for all registered ops.
 
-Running benchmarks
-==================
+Usage::
 
-    # Benchmark one op (uses all 6 default shape configs)
+    # Benchmark one op (uses all default shape configs)
     python -m benchmarks.ops.run --op chunk_gla
 
     # Multiple ops
@@ -18,19 +17,29 @@ Running benchmarks
     # Forward only
     python -m benchmarks.ops.run --op chunk_gla --modes fwd
 
+    # Compare against main (auto git worktree, no stash needed)
+    python -m benchmarks.ops.run --op chunk_gla --base main
+
+    # Compare against any branch/tag/commit
+    python -m benchmarks.ops.run --op chunk_gla --base HEAD~3
+
     # Save results to JSON
     python -m benchmarks.ops.run --op chunk_gla --json results.json
 
     # Custom shape (overrides default SHAPE_CONFIGS)
-    python -m benchmarks.ops.run --op chunk_gla \
+    python -m benchmarks.ops.run --op chunk_gla \\
         --custom-shapes '{"test": {"B": 2, "T": 4096, "H": 32, "D": 128}}'
 
     # List all registered ops
     python -m benchmarks.ops.run --list
 
+Results are cached to ``.bench_cache.json`` so each subsequent run
+automatically shows an old / new / speedup comparison table. Column headers
+display ``branch[commit](ms)`` to identify which code was measured.
+
 Cross-commit comparison
 =======================
-Compare performance between two git commits (defaults: main vs current branch):
+Compare performance between two git commits (defaults: main vs current branch)::
 
     python scripts/run_benchmark_compare.py
     python scripts/run_benchmark_compare.py --benchmark-ops chunk_gla chunk_kda
@@ -44,7 +53,7 @@ Registering a new op
 ====================
 All op definitions live in ``registry.py``.  To add a new op:
 
-1. Pick shape helpers for each input tensor (defined in registry.py):
+1. Pick shape helpers for each input tensor (defined in registry.py)::
 
        shape_BTHD  -> (B, T, H, D)     most q/k/v/g tensors
        shape_BTH   -> (B, T, H)         per-head scalars (gates, beta)
@@ -52,30 +61,31 @@ All op definitions live in ``registry.py``.  To add a new op:
        shape_HD    -> (H, D)            per-head vectors (RWKV u)
        shape_H     -> (H,)              per-head scalars
 
-2. Pick transforms to map randn into the right value range:
+2. Pick transforms to map randn into the right value range::
 
        logsigmoid        -> negative values (log-space gates)
        sigmoid_transform -> (0, 1) range (beta)
        logsigmoid_clamp  -> logsigmoid clamped to >= -5
 
-3. Call register_op() in registry.py:
+3. Call register_op() in registry.py::
 
        register_op(OpConfig(
-           name='chunk_my_op',                    # function name in the module
-           import_path='fla.ops.my_op',           # module for importlib.import_module()
+           name='chunk_my_op',
+           import_path='fla.ops.my_op',
            inputs={
                'q': TensorSpec(shape_BTHD),
                'k': TensorSpec(shape_BTHD),
                'v': TensorSpec(shape_BTHD),
                'g': TensorSpec(shape_BTH, transform=logsigmoid),
            },
-           extra_kwargs={'use_some_flag': True},   # non-tensor kwargs passed to the op
-           category='my_group',                    # label for --list output
+           extra_kwargs={'use_some_flag': True},
+           category='my_group',
        ))
 
 4. Verify:  ``python -m benchmarks.ops.run --list``
 
 Special cases:
+
 - Non-standard param init:  use ``post_init`` callback (see _rwkv7_post_init)
 - Op only supports certain D: set ``dim_constraints={'D': [64, 128]}``
 - Op has no backward:        set ``skip_backward=True``
@@ -99,17 +109,16 @@ import json
 import logging
 import os
 import platform
+import shutil
 import socket
+import subprocess
 import sys
+import tempfile
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Import registry: works from both package and standalone contexts.
-# When run as `python /tmp/fla_bench_xxx/run.py`, registry.py is in the same
-# directory.  When run as `python -m benchmarks.ops.run`, normal relative
-# imports would work but we keep the sys.path approach for uniformity.
-# ---------------------------------------------------------------------------
+# Import registry — works both as a package (python -m benchmarks.ops.run)
+# and standalone (python /tmp/fla_bench_xxx/run.py) for cross-commit use.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from registry import (  # noqa: E402
     SHAPE_CONFIGS,
@@ -121,10 +130,7 @@ from registry import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Op loader
-# ---------------------------------------------------------------------------
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.bench_cache')
 
 
 def _import_op(config: OpConfig):
@@ -139,9 +145,20 @@ def _import_op(config: OpConfig):
     return fn
 
 
-# ---------------------------------------------------------------------------
-# Machine info
-# ---------------------------------------------------------------------------
+def _get_git_label() -> str:
+    """Return 'branch[short_sha]', e.g. 'main[abc1234]'."""
+    try:
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        sha = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        return f"{branch}[{sha}]"
+    except Exception:
+        return 'unknown'
 
 
 def _get_machine_info() -> dict:
@@ -150,6 +167,7 @@ def _get_machine_info() -> dict:
         'platform': platform.platform(),
         'pytorch_version': torch.__version__,
         'cuda_version': torch.version.cuda or 'N/A',
+        'git_label': _get_git_label(),
     }
     try:
         import triton
@@ -170,28 +188,11 @@ def _get_machine_info() -> dict:
     return info
 
 
-# ---------------------------------------------------------------------------
-# Warmup
-# ---------------------------------------------------------------------------
-
-
 def _warmup_autotune(fn, n=5):
-    """Run fn multiple times to trigger all triton autotuning before timing.
-
-    triton.testing.do_bench has its own warmup, but its first fn() call
-    triggers autotuning for every kernel in the call graph. Autotuning
-    explores many configs and is orders of magnitude slower than a normal
-    call. Calling fn here guarantees all kernel configs are cached before
-    do_bench starts.
-    """
+    """Run *fn* multiple times so triton autotuning is fully cached."""
     for _ in range(n):
         fn()
     torch.cuda.synchronize()
-
-
-# ---------------------------------------------------------------------------
-# Core benchmark logic
-# ---------------------------------------------------------------------------
 
 
 def benchmark_op(
@@ -199,9 +200,9 @@ def benchmark_op(
     shapes: dict[str, dict[str, int]],
     modes: list[str] | None = None,
 ) -> list[dict]:
-    """Benchmark a single op across all shapes and modes.
+    """Benchmark a single op across all *shapes* and *modes*.
 
-    Returns list of result dicts with timing info.
+    Returns a list of result dicts (one per shape x mode).
     """
     import triton
 
@@ -214,7 +215,7 @@ def benchmark_op(
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
 
-    # Filter shapes by dim_constraints (fast, no GPU allocation)
+    # Filter shapes by dim_constraints
     valid_shapes = {}
     for shape_name, shape_dict in shapes.items():
         if config.dim_constraints:
@@ -238,16 +239,13 @@ def benchmark_op(
     device = 'cuda'
     dtype = torch.bfloat16
 
-    # Phase 1: warmup ALL shapes before timing ANY.
-    # Collect shapes that fail warmup so we can skip them in timing.
+    # Phase 1: warmup ALL shapes before timing ANY
     print(f"\n  [{op_name}] Warming up {len(valid_shapes)} shape(s)...")
     failed_shapes = set()
     for shape_name, shape_dict in valid_shapes.items():
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
         try:
             inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device)
-
-            # Run fwd once to get output shape for backward grad tensor
             out = op_fn(**inputs, **config.extra_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
@@ -261,13 +259,12 @@ def benchmark_op(
         except Exception as e:
             logger.warning(f"Warmup failed for {op_name} @ {shape_name}: {e}")
             failed_shapes.add(shape_name)
-            continue
 
     for name in failed_shapes:
         del valid_shapes[name]
     print(f"  [{op_name}] Warmup done.")
 
-    # Phase 2: actual timing
+    # Phase 2: timing
     results = []
     for shape_name, shape_dict in list(valid_shapes.items()):
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
@@ -277,7 +274,6 @@ def benchmark_op(
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
 
-        # Get output shape for backward grad tensor
         out = op_fn(**inputs, **config.extra_kwargs)
         out_tensor = out[0] if config.output_is_tuple else out
         do = torch.randn_like(out_tensor)
@@ -295,9 +291,7 @@ def benchmark_op(
             try:
                 ms = triton.testing.do_bench(fn, quantiles=[0.5, 0.2, 0.8])
             except Exception as e:
-                logger.warning(
-                    f"Bench failed for {op_name} {mode} @ {shape_name}: {e}"
-                )
+                logger.warning(f"Bench failed for {op_name} {mode} @ {shape_name}: {e}")
                 continue
 
             results.append({
@@ -312,39 +306,124 @@ def benchmark_op(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Table output
-# ---------------------------------------------------------------------------
+def _make_result_key(r):
+    return (r['op'], r['mode'], r['B'], r['T'], r['H'], r['D'])
 
 
-def print_results_table(results: list[dict], machine_info: dict | None = None):
-    """Print benchmark results as an aligned table."""
+def print_results_table(results: list[dict], machine_info: dict | None = None,
+                        baseline: list[dict] | None = None,
+                        baseline_info: dict | None = None):
+    """Print old / new / speedup comparison table.
+
+    Column headers show ``branch[commit](ms)``.
+    If no baseline exists (first run), the old column shows ``-``.
+    """
     if not results:
         print("\n  No results to display.")
         return
 
-    print(f"\n{'=' * 95}")
+    old_map = {_make_result_key(r): r for r in baseline} if baseline else {}
+
+    new_label = machine_info.get('git_label', 'new') if machine_info else 'new'
+    old_label = baseline_info.get('git_label', 'main') if baseline_info else 'main'
+    old_hdr = f"{old_label}(ms)"
+    new_hdr = f"{new_label}(ms)"
+    col_w = max(len(old_hdr), len(new_hdr), 10)
+
+    #   2 + op(28) + mode(7) + B(4) + T(6) + H(4) + D(4) + old(col_w) + new(col_w) + speedup(8)
+    width = 2 + 28 + 1 + 7 + 1 + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + col_w + 1 + col_w + 1 + 8
+    print(f"\n{'=' * width}")
     if machine_info:
         gpu = machine_info.get('gpu_name', 'N/A')
         cuda = machine_info.get('cuda_version', 'N/A')
         pytorch = machine_info.get('pytorch_version', 'N/A')
         print(f"  Machine: {gpu} | CUDA {cuda} | PyTorch {pytorch}")
-    print(f"{'=' * 95}")
-    print(f"  {'op':<28s} {'mode':<7s} {'shape':<24s} "
-          f"{'median(ms)':>10s} {'p20(ms)':>10s} {'p80(ms)':>10s}")
-    print(f"  {'-' * 28} {'-' * 7} {'-' * 24} {'-' * 10} {'-' * 10} {'-' * 10}")
+    print(f"{'=' * width}")
+    print(f"  {'op':<28s} {'mode':<7s} {'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}"
+          f"  {old_hdr:>{col_w}s} {new_hdr:>{col_w}s} {'speedup':>8s}")
+    print(f"  {'-' * 28} {'-' * 7} {'-' * 4} {'-' * 6} {'-' * 4} {'-' * 4}"
+          f"  {'-' * col_w} {'-' * col_w} {'-' * 8}")
 
     for r in results:
-        shape_str = f"B={r['B']} T={r['T']} H={r['H']} D={r['D']}"
-        print(f"  {r['op']:<28s} {r['mode']:<7s} {shape_str:<24s} "
-              f"{r['median_ms']:>10.3f} {r['p20_ms']:>10.3f} {r['p80_ms']:>10.3f}")
+        old_r = old_map.get(_make_result_key(r))
+        new_ms = r['median_ms']
+        prefix = (f"  {r['op']:<28s} {r['mode']:<7s}"
+                  f" {r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}")
+        if old_r:
+            old_ms = old_r['median_ms']
+            speedup = old_ms / new_ms if new_ms > 0 else float('inf')
+            print(f"{prefix}  {old_ms:>{col_w}.3f} {new_ms:>{col_w}.3f} {speedup:>7.2f}x")
+        else:
+            print(f"{prefix}  {'-':>{col_w}s} {new_ms:>{col_w}.3f} {'-':>8s}")
 
-    print(f"{'=' * 95}")
+    print(f"{'=' * width}")
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+def _find_project_root() -> str:
+    """Walk up from this file to find the git root."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    while d != '/':
+        if os.path.isdir(os.path.join(d, '.git')):
+            return d
+        d = os.path.dirname(d)
+    return os.getcwd()
+
+
+def _bench_at_ref(ref, op_names, shape_configs, modes):
+    """Run benchmarks at a git ref using a temporary worktree.
+
+    Returns (results_list, machine_info_dict) or (None, None) on failure.
+    Does NOT touch the current working tree.
+    """
+    project_root = _find_project_root()
+    tmpdir = tempfile.mkdtemp(prefix=f'fla_bench_{ref}_')
+    worktree_dir = os.path.join(tmpdir, 'worktree')
+
+    # Copy runner files to temp (constant across branches)
+    runner_dir = os.path.join(tmpdir, 'runner')
+    os.makedirs(runner_dir)
+    for fname in ('run.py', 'registry.py'):
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(runner_dir, fname))
+
+    try:
+        print(f"\n  Benchmarking at '{ref}' (via git worktree)...")
+        subprocess.run(
+            ['git', 'worktree', 'add', worktree_dir, ref],
+            cwd=project_root, capture_output=True, check=True,
+        )
+        subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '-e', '.', '-q'],
+            cwd=worktree_dir, capture_output=True,
+        )
+
+        runner = os.path.join(runner_dir, 'run.py')
+        out_json = os.path.join(tmpdir, 'results.json')
+        cmd = [sys.executable, runner, '--op', *op_names,
+               '--custom-shapes', json.dumps(shape_configs),
+               '--modes', *modes, '--json', out_json]
+        subprocess.run(cmd, cwd=worktree_dir)
+
+        if os.path.exists(out_json):
+            with open(out_json) as f:
+                data = json.load(f)
+            return data.get('results', []), data.get('machine_info')
+        return None, None
+    except Exception as e:
+        logger.warning(f"Failed to benchmark at '{ref}': {e}")
+        return None, None
+    finally:
+        subprocess.run(
+            ['git', 'worktree', 'remove', '--force', worktree_dir],
+            cwd=project_root, capture_output=True,
+        )
+        # Reinstall current branch's fla
+        subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '-e', '.', '-q'],
+            cwd=project_root, capture_output=True,
+        )
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def main():
@@ -370,6 +449,11 @@ def main():
         help='Output file path for JSON results',
     )
     parser.add_argument(
+        '--base', default=None,
+        help='Git ref for the baseline (old) column, e.g. "main" or "HEAD~3". '
+             'Runs benchmarks at that ref via git worktree.',
+    )
+    parser.add_argument(
         '--list', action='store_true',
         help='List all registered ops and exit',
     )
@@ -383,22 +467,12 @@ def main():
             print(f"  {name:30s}  [{cfg.category}]  {cfg.import_path}")
         return
 
-    # Determine ops
     if args.op is None:
         parser.error("--op is required (use --list to see available ops)")
 
-    if args.op == ['all']:
-        op_names = list_ops()
-    else:
-        op_names = args.op
+    op_names = list_ops() if args.op == ['all'] else args.op
+    shape_configs = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
 
-    # Determine shapes
-    if args.custom_shapes:
-        shape_configs = json.loads(args.custom_shapes)
-    else:
-        shape_configs = SHAPE_CONFIGS
-
-    # Run
     machine_info = _get_machine_info()
     print(f"Machine: {machine_info.get('gpu_name', 'N/A')} | "
           f"CUDA {machine_info.get('cuda_version', 'N/A')} | "
@@ -409,20 +483,48 @@ def main():
     all_results = []
     for op_name in op_names:
         try:
-            results = benchmark_op(op_name, shape_configs, modes=args.modes)
-            all_results.extend(results)
+            all_results.extend(benchmark_op(op_name, shape_configs, modes=args.modes))
         except Exception as e:
             logger.error(f"Failed to benchmark {op_name}: {e}")
-            continue
 
-    print_results_table(all_results, machine_info)
+    # If --base is given, benchmark at that ref for the old column.
+    # Otherwise try loading cached baseline from .bench_cache/.
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    git_label = machine_info.get('git_label', 'unknown')
+    current_branch = git_label.split('[')[0] if '[' in git_label else git_label
 
-    # Save JSON
+    baseline, baseline_info = None, None
+    if args.base:
+        # Run benchmarks at the base ref via git worktree
+        baseline, baseline_info = _bench_at_ref(
+            args.base, op_names, shape_configs, args.modes)
+        # Cache base results
+        if baseline:
+            base_name = args.base.replace('/', '_')
+            base_cache = os.path.join(CACHE_DIR, f'{base_name}.json')
+            with open(base_cache, 'w') as f:
+                json.dump({'machine_info': baseline_info, 'results': baseline}, f, indent=2)
+    else:
+        # Try loading main's cache as default baseline
+        main_cache = os.path.join(CACHE_DIR, 'main.json')
+        if current_branch != 'main' and os.path.exists(main_cache):
+            try:
+                with open(main_cache) as f:
+                    cache = json.load(f)
+                    baseline = cache.get('results', [])
+                    baseline_info = cache.get('machine_info')
+            except Exception:
+                pass
+
+    print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
+
+    # Save current results to branch cache
+    output = {'machine_info': machine_info, 'results': all_results}
+    branch_cache = os.path.join(CACHE_DIR, f'{current_branch}.json')
+    with open(branch_cache, 'w') as f:
+        json.dump(output, f, indent=2)
+
     if args.json_file:
-        output = {
-            'machine_info': machine_info,
-            'results': all_results,
-        }
         with open(args.json_file, 'w') as f:
             json.dump(output, f, indent=2)
         print(f"\nResults saved to {args.json_file}")

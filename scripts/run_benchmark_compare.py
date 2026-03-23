@@ -182,18 +182,25 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
 
     all_keys = sorted(set(list(head_map.keys()) + list(base_map.keys())))
 
+    base_hdr = f"base:{base_sha}(ms)"
+    head_hdr = f"head:{head_sha}(ms)"
+    col_w = max(len(base_hdr), len(head_hdr), 10)
+
+    #   2 + op(28) + mode(7) + B(4) + T(6) + H(4) + D(4) + base + head + speedup(8) + change(8)
+    width = 2 + 28 + 1 + 7 + 1 + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + col_w + 1 + col_w + 1 + 8 + 1 + 8
+
     # Header
-    print(f"\n{'=' * 105}")
+    print(f"\n{'=' * width}")
     if machine_info:
         gpu = machine_info.get('gpu_name', 'N/A')
         cuda = machine_info.get('cuda_version', 'N/A')
         pytorch = machine_info.get('pytorch_version', 'N/A')
         print(f"  Machine: {gpu} | CUDA {cuda} | PyTorch {pytorch}")
-    print(f"  Old (base): {base_sha} | New (head): {head_sha}")
-    print(f"{'=' * 105}")
-    print(f"  {'op':<28s} {'mode':<7s} {'shape':<22s} "
-          f"{'old(ms)':>9s} {'new(ms)':>9s} {'speedup':>8s} {'change':>8s}")
-    print(f"  {'-' * 28} {'-' * 7} {'-' * 22} {'-' * 9} {'-' * 9} {'-' * 8} {'-' * 8}")
+    print(f"{'=' * width}")
+    print(f"  {'op':<28s} {'mode':<7s} {'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}"
+          f"  {base_hdr:>{col_w}s} {head_hdr:>{col_w}s} {'speedup':>8s} {'change':>8s}")
+    print(f"  {'-' * 28} {'-' * 7} {'-' * 4} {'-' * 6} {'-' * 4} {'-' * 4}"
+          f"  {'-' * col_w} {'-' * col_w} {'-' * 8} {'-' * 8}")
 
     regressions = []
     for key in all_keys:
@@ -201,8 +208,7 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
         base_r = base_map.get(key)
         head_r = head_map.get(key)
 
-        shape_str = f"B={B} T={T} H={H} D={D}"
-
+        prefix = f"  {op:<28s} {mode:<7s} {B:>4d} {T:>6d} {H:>4d} {D:>4d}"
         if base_r and head_r:
             base_ms = base_r['median_ms']
             head_ms = head_r['median_ms']
@@ -214,19 +220,16 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
                 marker = ' <<< REGRESSION'
             elif change_pct < -threshold:
                 marker = ' SPEEDUP'
-            print(f"  {op:<28s} {mode:<7s} {shape_str:<22s} "
-                  f"{base_ms:>9.3f} {head_ms:>9.3f} {speedup:>7.2f}x "
+            print(f"{prefix}  {base_ms:>{col_w}.3f} {head_ms:>{col_w}.3f} {speedup:>7.2f}x "
                   f"{sign}{change_pct:>6.1f}%{marker}")
             if change_pct > threshold:
                 regressions.append((key, base_ms, head_ms, change_pct))
         elif head_r:
-            print(f"  {op:<28s} {mode:<7s} {shape_str:<22s} "
-                  f"{'N/A':>9s} {head_r['median_ms']:>9.3f} {'':>8s} {'new':>8s}")
+            print(f"{prefix}  {'-':>{col_w}s} {head_r['median_ms']:>{col_w}.3f} {'':>8s} {'new':>8s}")
         elif base_r:
-            print(f"  {op:<28s} {mode:<7s} {shape_str:<22s} "
-                  f"{base_r['median_ms']:>9.3f} {'N/A':>9s} {'':>8s} {'removed':>8s}")
+            print(f"{prefix}  {base_r['median_ms']:>{col_w}.3f} {'-':>{col_w}s} {'':>8s} {'removed':>8s}")
 
-    print(f"{'=' * 105}")
+    print(f"{'=' * width}")
 
     if regressions:
         print(f"\n  WARNING: {len(regressions)} regression(s) detected (>{threshold}% slower):")
