@@ -43,14 +43,6 @@ def shape_HD(B, T, H, D, **kw):
     return (H, D)
 
 
-def shape_BTHM(B, T, H, D, M=64, **kw):
-    return (B, T, H, M)
-
-
-def shape_BTHL(B, T, H, D, L=4, **kw):
-    return (B, T, H, L)
-
-
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------

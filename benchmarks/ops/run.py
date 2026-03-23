@@ -33,21 +33,9 @@ Usage::
     # List all registered ops
     python -m benchmarks.ops.run --list
 
-Results are cached to ``.bench_cache.json`` so each subsequent run
-automatically shows an old / new / speedup comparison table. Column headers
-display ``branch[commit](ms)`` to identify which code was measured.
-
-Cross-commit comparison
-=======================
-Compare performance between two git commits (defaults: main vs current branch)::
-
-    python scripts/run_benchmark_compare.py
-    python scripts/run_benchmark_compare.py --benchmark-ops chunk_gla chunk_kda
-    python scripts/run_benchmark_compare.py --base HEAD~3
-
-The compare script copies run.py + registry.py to a temp dir, then does
-``git checkout`` + ``pip install -e .`` at each commit.  run.py imports
-fla.ops.* via importlib, so it picks up whatever kernel version is installed.
+Results are cached per-branch in ``.bench_cache/<branch>.json``.  When run on
+a feature branch, the ``main`` branch's cached results are loaded as the
+baseline automatically.  Column headers display ``branch[commit](ms)``.
 
 Registering a new op
 ====================
@@ -310,13 +298,21 @@ def _make_result_key(r):
     return (r['op'], r['mode'], r['B'], r['T'], r['H'], r['D'])
 
 
+def _truncate_label(label: str, max_len: int = 8) -> str:
+    """Truncate a branch name to *max_len* chars, adding ``...`` if needed."""
+    if len(label) <= max_len:
+        return label
+    return label[:max_len] + '...'
+
+
 def print_results_table(results: list[dict], machine_info: dict | None = None,
                         baseline: list[dict] | None = None,
                         baseline_info: dict | None = None):
     """Print old / new / speedup comparison table.
 
-    Column headers show ``branch[commit](ms)``.
+    Column headers show ``branch[commit](ms)`` (branch name truncated to 8 chars).
     If no baseline exists (first run), the old column shows ``-``.
+    Rows are grouped by mode with a blank line separator between fwd and fwdbwd.
     """
     if not results:
         print("\n  No results to display.")
@@ -324,10 +320,17 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
 
     old_map = {_make_result_key(r): r for r in baseline} if baseline else {}
 
-    new_label = machine_info.get('git_label', 'new') if machine_info else 'new'
-    old_label = baseline_info.get('git_label', 'main') if baseline_info else 'main'
-    old_hdr = f"{old_label}(ms)"
-    new_hdr = f"{new_label}(ms)"
+    new_git = machine_info.get('git_label', 'new') if machine_info else 'new'
+    old_git = baseline_info.get('git_label', 'main') if baseline_info else 'main'
+    # Truncate branch portion but keep [commit] intact
+    def _fmt_hdr(git_label):
+        if '[' in git_label:
+            branch, rest = git_label.split('[', 1)
+            return f"{_truncate_label(branch)}[{rest}(ms)"
+        return f"{_truncate_label(git_label)}(ms)"
+
+    old_hdr = _fmt_hdr(old_git)
+    new_hdr = _fmt_hdr(new_git)
     col_w = max(len(old_hdr), len(new_hdr), 10)
 
     #   2 + op(28) + mode(7) + B(4) + T(6) + H(4) + D(4) + old(col_w) + new(col_w) + speedup(8)
@@ -344,7 +347,14 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
     print(f"  {'-' * 28} {'-' * 7} {'-' * 4} {'-' * 6} {'-' * 4} {'-' * 4}"
           f"  {'-' * col_w} {'-' * col_w} {'-' * 8}")
 
+    prev_mode = None
     for r in results:
+        # Insert blank line when mode changes (fwd -> fwdbwd)
+        cur_mode = r['mode']
+        if prev_mode is not None and cur_mode != prev_mode:
+            print()
+        prev_mode = cur_mode
+
         old_r = old_map.get(_make_result_key(r))
         new_ms = r['median_ms']
         prefix = (f"  {r['op']:<28s} {r['mode']:<7s}"
@@ -515,6 +525,10 @@ def main():
                     baseline_info = cache.get('machine_info')
             except Exception:
                 pass
+
+    # Sort so fwd rows come before fwdbwd, grouped by (mode, op, B, T, H, D)
+    mode_order = {'fwd': 0, 'fwdbwd': 1}
+    all_results.sort(key=lambda r: (mode_order.get(r['mode'], 9), r['op'], r['B'], r['T'], r['H'], r['D']))
 
     print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
 

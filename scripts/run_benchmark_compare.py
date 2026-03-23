@@ -169,10 +169,18 @@ def copy_runner_to_temp() -> str:
     return tmpdir
 
 
+def _truncate(s: str, max_len: int = 8) -> str:
+    """Truncate *s* to *max_len* chars, adding ``...`` if needed."""
+    return s if len(s) <= max_len else s[:max_len] + '...'
+
+
 def print_comparison(base_results: list[dict], head_results: list[dict],
                      base_sha: str, head_sha: str, threshold: float,
                      machine_info: dict | None = None):
-    """Print a comparison table with speedup ratios and detect regressions."""
+    """Print a comparison table with speedup ratios and detect regressions.
+
+    Rows are grouped by mode with a blank line between fwd and fwdbwd.
+    """
 
     def make_key(r):
         return (r['op'], r['mode'], r['B'], r['T'], r['H'], r['D'])
@@ -180,10 +188,15 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
     head_map = {make_key(r): r for r in head_results}
     base_map = {make_key(r): r for r in base_results}
 
-    all_keys = sorted(set(list(head_map.keys()) + list(base_map.keys())))
+    # Sort: fwd first, then fwdbwd
+    mode_order = {'fwd': 0, 'fwdbwd': 1}
+    all_keys = sorted(
+        set(list(head_map.keys()) + list(base_map.keys())),
+        key=lambda k: (mode_order.get(k[1], 9), k[0], k[2], k[3], k[4], k[5]),
+    )
 
-    base_hdr = f"base:{base_sha}(ms)"
-    head_hdr = f"head:{head_sha}(ms)"
+    base_hdr = f"base:{_truncate(base_sha)}(ms)"
+    head_hdr = f"head:{_truncate(head_sha)}(ms)"
     col_w = max(len(base_hdr), len(head_hdr), 10)
 
     #   2 + op(28) + mode(7) + B(4) + T(6) + H(4) + D(4) + base + head + speedup(8) + change(8)
@@ -203,8 +216,15 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
           f"  {'-' * col_w} {'-' * col_w} {'-' * 8} {'-' * 8}")
 
     regressions = []
+    prev_mode = None
     for key in all_keys:
         op, mode, B, T, H, D = key
+
+        # Blank line separator between fwd and fwdbwd
+        if prev_mode is not None and mode != prev_mode:
+            print()
+        prev_mode = mode
+
         base_r = base_map.get(key)
         head_r = head_map.get(key)
 
