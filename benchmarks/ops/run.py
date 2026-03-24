@@ -142,7 +142,6 @@ from registry import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-
 def _import_op(config: OpConfig):
     """Dynamically import the op function from the installed fla package."""
     mod = importlib.import_module(config.import_path)
