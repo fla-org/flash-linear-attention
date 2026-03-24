@@ -188,6 +188,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
                 dht=dht,
                 cu_seqlens=cu_seqlens * ctx.num_householder if cu_seqlens is not None else None,
                 chunk_indices=chunk_indices_dp,
+                use_exp2=False,
             )
             dg = rearrange(dg, 'b (l n) h  -> b l n h ', n=ctx.num_householder)[:, :, 0].contiguous().to(g)
         else:

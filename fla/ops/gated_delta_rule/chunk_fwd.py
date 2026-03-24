@@ -6,7 +6,7 @@ import triton.language as tl
 
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp2
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
@@ -43,6 +43,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     BC: tl.constexpr,
     BK: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     """
@@ -163,19 +164,34 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     ############################################################################
 
     if USE_G:
-        # diagonal blocks: g_diff = g_i - g_j within sub-chunk
-        b_A00 *= exp(b_g0[:, None] - b_g0[None, :])
-        b_A11 *= exp(b_g1[:, None] - b_g1[None, :])
-        b_A22 *= exp(b_g2[:, None] - b_g2[None, :])
-        b_A33 *= exp(b_g3[:, None] - b_g3[None, :])
+        if USE_EXP2:
+            # diagonal blocks: g_diff = g_i - g_j within sub-chunk
+            b_A00 *= exp2(b_g0[:, None] - b_g0[None, :])
+            b_A11 *= exp2(b_g1[:, None] - b_g1[None, :])
+            b_A22 *= exp2(b_g2[:, None] - b_g2[None, :])
+            b_A33 *= exp2(b_g3[:, None] - b_g3[None, :])
 
-        # off-diagonal blocks: g_diff = g_row - g_col (cross sub-chunk)
-        b_A10 *= exp(b_g1[:, None] - b_g0[None, :])
-        b_A20 *= exp(b_g2[:, None] - b_g0[None, :])
-        b_A21 *= exp(b_g2[:, None] - b_g1[None, :])
-        b_A30 *= exp(b_g3[:, None] - b_g0[None, :])
-        b_A31 *= exp(b_g3[:, None] - b_g1[None, :])
-        b_A32 *= exp(b_g3[:, None] - b_g2[None, :])
+            # off-diagonal blocks: g_diff = g_row - g_col (cross sub-chunk)
+            b_A10 *= exp2(b_g1[:, None] - b_g0[None, :])
+            b_A20 *= exp2(b_g2[:, None] - b_g0[None, :])
+            b_A21 *= exp2(b_g2[:, None] - b_g1[None, :])
+            b_A30 *= exp2(b_g3[:, None] - b_g0[None, :])
+            b_A31 *= exp2(b_g3[:, None] - b_g1[None, :])
+            b_A32 *= exp2(b_g3[:, None] - b_g2[None, :])
+        else:
+            # diagonal blocks: g_diff = g_i - g_j within sub-chunk
+            b_A00 *= exp(b_g0[:, None] - b_g0[None, :])
+            b_A11 *= exp(b_g1[:, None] - b_g1[None, :])
+            b_A22 *= exp(b_g2[:, None] - b_g2[None, :])
+            b_A33 *= exp(b_g3[:, None] - b_g3[None, :])
+
+            # off-diagonal blocks: g_diff = g_row - g_col (cross sub-chunk)
+            b_A10 *= exp(b_g1[:, None] - b_g0[None, :])
+            b_A20 *= exp(b_g2[:, None] - b_g0[None, :])
+            b_A21 *= exp(b_g2[:, None] - b_g1[None, :])
+            b_A30 *= exp(b_g3[:, None] - b_g0[None, :])
+            b_A31 *= exp(b_g3[:, None] - b_g1[None, :])
+            b_A32 *= exp(b_g3[:, None] - b_g2[None, :])
 
     # apply beta to row dimension and mask
     m_d = o_i[:, None] > o_i[None, :]
@@ -309,6 +325,7 @@ def chunk_gated_delta_rule_fwd_intra(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""
     GDN intra-chunk forward: fused kkt + solve_tril + recompute_w_u.
@@ -364,6 +381,7 @@ def chunk_gated_delta_rule_fwd_intra(
         K=K,
         BT=BT,
         BC=BC,
+        USE_EXP2=use_exp2,
     )
 
     # Step 2: recompute_w_u
@@ -375,5 +393,6 @@ def chunk_gated_delta_rule_fwd_intra(
         g=g,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
     )
     return w, u, A

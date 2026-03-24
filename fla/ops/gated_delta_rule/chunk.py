@@ -17,6 +17,7 @@ from fla.ops.cp.chunk_delta_h import (
 from fla.ops.gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -33,9 +34,16 @@ def chunk_gated_delta_rule_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = True,
     transpose_state_layout: bool = False,
 ):
-    g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    g = chunk_local_cumsum(
+        g,
+        chunk_size=64,
+        scale=RCP_LN2 if use_exp2 else None,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
     # obtain WY representation. u is actually the new v.
     # fused kkt + solve_tril + recompute_w_u
     w, u, A = chunk_gated_delta_rule_fwd_intra(
@@ -45,6 +53,7 @@ def chunk_gated_delta_rule_fwd(
         beta=beta,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
     )
 
     if cp_context is not None:
@@ -56,6 +65,7 @@ def chunk_gated_delta_rule_fwd(
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,
             context=cp_context,
+            use_exp2=use_exp2,
             transpose_state_layout=transpose_state_layout,
         )
 
@@ -68,6 +78,7 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
 
@@ -83,6 +94,7 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
     return g, o, A, final_state, initial_state
@@ -102,6 +114,7 @@ def chunk_gated_delta_rule_bwd(
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = True,
     transpose_state_layout: bool = False,
 ):
     w, u = recompute_w_u_fwd(
@@ -112,6 +125,7 @@ def chunk_gated_delta_rule_bwd(
         g=g,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
     )
 
     if cp_context is not None:
@@ -126,6 +140,7 @@ def chunk_gated_delta_rule_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
     dv = chunk_bwd_dv_local(
@@ -136,6 +151,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
     )
 
     if cp_context is not None:
@@ -153,6 +169,7 @@ def chunk_gated_delta_rule_bwd(
             dht=dht,
             initial_state=initial_state,
             context=cp_context,
+            use_exp2=use_exp2,
             transpose_state_layout=transpose_state_layout,
         )
 
@@ -168,6 +185,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
@@ -183,6 +201,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
     dk2, dv, db, dg2 = prepare_wy_repr_bwd(
@@ -195,6 +214,7 @@ def chunk_gated_delta_rule_bwd(
         du=dv,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
     )
     dk.add_(dk2)
     dg.add_(dg2)
