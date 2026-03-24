@@ -126,8 +126,6 @@ def run_unified_benchmark(
         cmd, capture_output=True, text=True,
         cwd=str(PROJECT_ROOT),
     )
-    if result.stdout:
-        print(result.stdout)
     if result.returncode != 0:
         print(f"  Warning: benchmark failed: {result.stderr[:500]}", file=sys.stderr)
         return False
