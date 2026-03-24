@@ -378,11 +378,3 @@ def chunk_comba(
         cu_seqlens_cpu,
     )
     return o, final_state
-        cu_seqlens,
-        cu_seqlens_cpu,
-    )
-    return o, final_state
-        cu_seqlens,
-        cu_seqlens_cpu,
-    )
-    return o, final_state
