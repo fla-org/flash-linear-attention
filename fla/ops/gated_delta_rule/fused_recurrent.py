@@ -380,3 +380,6 @@ def fused_recurrent_gated_delta_rule(
         transpose_state_layout,
     )
     return o, final_state
+
+
+fused_recurrent_gdn = fused_recurrent_gated_delta_rule

@@ -1,0 +1,130 @@
+name: Reusable CI Benchmarks
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'The self-hosted runner to use (e.g., nvidia-a100)'
+        required: true
+        type: string
+      conda_env_name:
+        description: 'The exact name of the pre-existing Conda environment to activate.'
+        required: true
+        type: string
+      base_ref:
+        description: 'Base ref to compare against (default: main)'
+        required: false
+        type: string
+        default: 'origin/main'
+      threshold:
+        description: 'Regression threshold in percent (default: 5.0)'
+        required: false
+        type: string
+        default: '5.0'
+      pytorch_version:
+        description: 'The PyTorch version to install (e.g., 2.7.0)'
+        required: false
+        type: string
+        default: '2.7.0'
+      pytorch_cuda_version:
+        description: 'The PyTorch CUDA version (e.g., cu128)'
+        required: false
+        type: string
+        default: 'cu128'
+      nvcc_toolkit_version:
+        description: 'The NVCC toolkit version to install (e.g., 12.8.1)'
+        required: false
+        type: string
+        default: '12.8.1'
+
+
+jobs:
+  benchmark:
+    runs-on: ${{ inputs.runner }}
+    env:
+      FLA_CI_ENV: 1
+
+    steps:
+      - name: Check out repo (full history for cross-commit comparison)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check skip keyword in LATEST commit
+        id: check_skip
+        run: |
+          COMMIT_MSG=$(git log --no-merges -1 --pretty=%s)
+          echo "Latest commit message: $COMMIT_MSG"
+          if echo "$COMMIT_MSG" | grep -qF "[skip bench]"; then
+            echo "::notice::Benchmarks skipped by commit message"
+            echo "skip_bench=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip_bench=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Discover Conda Path and Set Env Vars
+        if: steps.check_skip.outputs.skip_bench == 'false'
+        id: find_conda
+        shell: bash
+        run: |
+          set -e
+
+          TARGET_CONDA_ENV=""
+          echo "Determining conda environment based on runner: ${{ runner.name }}"
+          if [[ "${{ runner.name }}" == "nvidia-h100-1" ]]; then
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}"
+          elif [[ "${{ runner.name }}" == "nvidia-h100-2" ]]; then
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}_1"
+          else
+            TARGET_CONDA_ENV="${{ inputs.conda_env_name }}"
+          fi
+          echo "--> Runner is '${{ runner.name }}', selected environment is '${TARGET_CONDA_ENV}'"
+
+          POSSIBLE_NAMES=("miniforge3" "miniconda3" "anaconda3")
+          FOUND_PATH=""
+          for name in "${POSSIBLE_NAMES[@]}"; do
+            CANDIDATE_PATH="$HOME/$name"
+            if [ -d "${CANDIDATE_PATH}" ] && [ -x "${CANDIDATE_PATH}/bin/conda" ]; then
+              FOUND_PATH="${CANDIDATE_PATH}"
+              break
+            fi
+          done
+
+          if [ -n "${FOUND_PATH}" ]; then
+            echo "CONDA=${FOUND_PATH}" >> $GITHUB_ENV
+            echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${TARGET_CONDA_ENV}/bin" >> $GITHUB_ENV
+            echo "CONDA_ENV_NAME=${TARGET_CONDA_ENV}" >> $GITHUB_ENV
+          else
+            echo "::error::Could not find a Conda installation."
+            exit 1
+          fi
+
+      - name: Install Dependencies
+        if: steps.check_skip.outputs.skip_bench == 'false'
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
+          $CONDA/bin/conda install -n $CONDA_ENV_NAME nvidia/label/cuda-${{ inputs.nvcc_toolkit_version }}::cuda-nvcc -y
+          STABLE_URL="https://download.pytorch.org/whl/${{ inputs.pytorch_cuda_version }}"
+          $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} triton --index-url $STABLE_URL
+          $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops
+          $CONDA_BIN_PATH/pip install -e .
+
+      - name: Run benchmark comparison
+        if: steps.check_skip.outputs.skip_bench == 'false'
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/python scripts/run_benchmark_compare.py \
+            --base ${{ inputs.base_ref }} \
+            --head HEAD \
+            --threshold ${{ inputs.threshold }} \
+            --output benchmark_results.json
+
+      - name: Upload benchmark results
+        if: always() && steps.check_skip.outputs.skip_bench == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ inputs.runner }}
+          path: benchmark_results.json
+          if-no-files-found: ignore
+          retention-days: 30
