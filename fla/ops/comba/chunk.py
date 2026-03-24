@@ -1,6 +1,5 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -9,6 +8,7 @@ from fla.ops.comba.wy_fast import chunk_scaled_dot_comba_pkt_fwd, prepare_wy_rep
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices, solve_tril
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -25,7 +25,13 @@ def chunk_comba_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ):
-    g0, g = chunk_comba_cumsum_scalar_fwd(g, chunk_size=64, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    g0, g = chunk_comba_cumsum_scalar_fwd(
+        g,
+        chunk_size=64,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        scale=RCP_LN2,
+    )
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_comba_pkt_fwd(
         k=k,
@@ -36,6 +42,7 @@ def chunk_comba_fwd(
         cu_seqlens=cu_seqlens,
         output_dtype=torch.float32,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     A = solve_tril(
         A=A,
@@ -51,6 +58,7 @@ def chunk_comba_fwd(
         g_cumsum=g0,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -61,6 +69,7 @@ def chunk_comba_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     o = chunk_fwd_o(
         q=q,
@@ -71,6 +80,7 @@ def chunk_comba_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     return g0, g, o, A, final_state
 
@@ -99,6 +109,7 @@ def chunk_comba_bwd(
         g_cumsum=g0,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -109,6 +120,7 @@ def chunk_comba_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -118,6 +130,7 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
@@ -131,6 +144,7 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
@@ -145,6 +159,7 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     dk2, dv, dp, db, dg0, dg2 = prepare_wy_repr_bwd(
         k=k,
@@ -158,6 +173,7 @@ def chunk_comba_bwd(
         du=dv,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     dk.add_(dk2)
     dg.add_(dg2)
@@ -358,6 +374,14 @@ def chunk_comba(
         initial_state,
         output_final_state,
         use_qk_l2norm_in_kernel,
+        cu_seqlens,
+        cu_seqlens_cpu,
+    )
+    return o, final_state
+        cu_seqlens,
+        cu_seqlens_cpu,
+    )
+    return o, final_state
         cu_seqlens,
         cu_seqlens_cpu,
     )
