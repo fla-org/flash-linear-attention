@@ -34,4 +34,4 @@ jobs:
     with:
       runner: 'nvidia-h100-pt2-7'
       conda_env_name: 'pytorch_2_7'
-      base_ref: ${{ github.event.pull_request.base.ref }}
+      base_ref: origin/${{ github.event.pull_request.base.ref }}
