@@ -2,7 +2,7 @@
 """
 Extract best configs from Triton's autotune cache.
 
-This script searches Triton's cache directory (~/.triton/cache) for .autotune.json files,
+This script searches Triton's cache directory (~/.triton/cache/fla_triton_cache/) for .autotune.json files,
 extracts the best configuration for each kernel, and saves them to a human-readable format.
 
 Usage:
@@ -19,6 +19,8 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any
+
+import triton
 
 os.environ['FLA_DISABLE_CACHE'] = '1'
 
@@ -49,18 +51,20 @@ def get_gpu_info():
 
 
 def get_triton_cache_dir() -> Path:
-    """Get Triton's cache directory."""
-    cache_dir = os.environ.get("TRITON_CACHE_DIR", "~/.triton")
-    return Path(cache_dir).expanduser() / "cache"
+    """Get Triton's cache directory via Triton's internal API."""
+    from triton.runtime.cache import knobs
+    return Path(knobs.cache.dir)
 
 
 def get_fla_config_dir() -> Path:
     """Get FLA's configs directory.
 
     The directory can be overridden by setting the FLA_CONFIG_DIR environment variable.
-    If set, configs will be saved to $FLA_CONFIG_DIR/{GPU}/ instead of the default
-    fla/configs/{GPU}/ in the project.
+    If set, configs will be saved to $FLA_CONFIG_DIR/{triton_version}/{GPU}/ instead of
+    the default fla/configs/{triton_version}/{GPU}/ in the project.
     """
+
+
     # Check if custom config dir is set via environment variable
     if "FLA_CONFIG_DIR" in os.environ:
         base_dir = Path(os.environ["FLA_CONFIG_DIR"])
@@ -70,7 +74,7 @@ def get_fla_config_dir() -> Path:
         base_dir = project_dir / "fla" / "configs"
 
     gpu_name = get_gpu_info()
-    config_dir = base_dir / gpu_name
+    config_dir = base_dir / triton.__version__ / gpu_name
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
 
@@ -94,8 +98,9 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         if not configs_timings:
             return None
 
-        # configs_timings is a list of [config_dict, timing]
-        best_entry = min(configs_timings, key=lambda x: x[1] if isinstance(x[1], (int, float)) else x[1][0])
+        # configs_timings is a list of [config_dict, timings], where timings is either a scalar
+        # or a list of measurements [warmup, t1, t2, ...]. Use min(timings) to get the best run.
+        best_entry = min(configs_timings, key=lambda x: x[1] if isinstance(x[1], (int, float)) else min(x[1]))
         best_config_dict = best_entry[0]
         best_timing = best_entry[1]
 
@@ -185,8 +190,8 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
         output_dir: Output directory for extracted configs
     """
     if not triton_cache_dir.exists():
-        print(f"Triton cache directory not found: {triton_cache_dir}")
-        return
+        print(f"Triton cache directory not found: {triton_cache_dir}, creating it...")
+        triton_cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Find all .autotune.json files
     autotune_files = list(triton_cache_dir.rglob("*.autotune.json"))
@@ -232,13 +237,6 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
     print(f"Successfully exported {exported_count} configs to {output_dir}")
     print("=" * 60)
     sync_hopper_configs(output_dir)
-
-    # Remove Custom Triton Cache
-    try:
-        shutil.rmtree(triton_cache_dir)
-        print(f"Removed Triton cache directory: {triton_cache_dir}")
-    except Exception as e:
-        print(f"Warning: Failed to remove {triton_cache_dir}: {e}")
 
 
 def main():
@@ -299,18 +297,16 @@ def generate_triton_cache():
     from fla.ops.kda import chunk_kda
     from fla.utils import device
 
-    # Create a custom directory in the project for Triton cache
-    project_dir = Path(__file__).parent.parent
-    custom_cache_dir = project_dir / "tmp_triton_cache"
-    cache_path = custom_cache_dir / "triton" / "cache"
+    # Use a temporary subdirectory inside Triton's cache dir to isolate FLA autotune results
+    fla_triton_cache = get_triton_cache_dir() / "fla_triton_cache"
 
     # Clear and create the directory
-    if custom_cache_dir.exists():
-        shutil.rmtree(custom_cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
+    if fla_triton_cache.exists():
+        shutil.rmtree(fla_triton_cache)
+    fla_triton_cache.mkdir(parents=True, exist_ok=True)
+    os.environ["TRITON_CACHE_DIR"] = str(fla_triton_cache)
 
-    print(f"Using custom Triton cache directory: {cache_path}")
-    os.environ["TRITON_CACHE_DIR"] = str(cache_path)
+    print(f"Using FLA Triton cache directory: {fla_triton_cache}")
 
     # Generate cache by running the kernels
     torch.manual_seed(42)
@@ -378,7 +374,7 @@ def generate_triton_cache():
     tri, _ = causal_conv1d(x, weight, bias, residual=None, activation="silu")
     tri.backward(dy)
 
-    return str(cache_path)
+    return str(fla_triton_cache)
 
 
 if __name__ == "__main__":

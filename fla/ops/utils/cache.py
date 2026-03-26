@@ -47,8 +47,8 @@ def get_fla_config_dir() -> Path:
     """Get FLA's configs directory.
 
     The directory can be overridden by setting the FLA_CONFIG_DIR environment variable.
-    If set, configs will be loaded from $FLA_CONFIG_DIR/{GPU}/ instead of the default
-    fla/configs/{GPU}/ in the project.
+    If set, configs will be loaded from $FLA_CONFIG_DIR/{triton_version}/{GPU}/ instead of
+    the default fla/configs/{triton_version}/{GPU}/ in the project.
     """
     # Check if custom config dir is set via environment variable
     if "FLA_CONFIG_DIR" in os.environ:
@@ -59,7 +59,7 @@ def get_fla_config_dir() -> Path:
         base_dir = project_dir / "configs"
 
     gpu_name = get_gpu_info()
-    config_dir = base_dir / gpu_name
+    config_dir = base_dir / triton.__version__ / gpu_name
     return config_dir
 
 
