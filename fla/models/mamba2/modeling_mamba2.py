@@ -138,7 +138,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
         num_residuals_per_layer: int = 1,
     ):
         """Initialize the weights."""
-        if isinstance(module, Mamba2):
+        if isinstance(module, Mamba2) and next(module.parameters()).device.type != 'meta':
 
             # --- A_log ---
             A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(0, 16)
