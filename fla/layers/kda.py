@@ -144,7 +144,11 @@ class KimiDeltaAttention(nn.Module):
 
         self.A_log = nn.Parameter(torch.log(torch.empty(self.num_heads, dtype=torch.float32).uniform_(1, 16)))
         self.A_log._no_weight_decay = True
-        self.dt_bias = nn.Parameter(torch.zeros(self.key_dim, dtype=torch.float32))
+        dt = torch.exp(
+            torch.rand(self.key_dim, dtype=torch.float32) * (math.log(0.1) - math.log(0.001)) + math.log(0.001)
+        ).clamp(min=1e-4)
+        inv_dt = dt + torch.log(-torch.expm1(-dt))
+        self.dt_bias = nn.Parameter(inv_dt)
         self.dt_bias._no_weight_decay = True
 
         self.g_proj = nn.Sequential(

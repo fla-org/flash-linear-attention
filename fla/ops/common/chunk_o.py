@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp2
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
@@ -47,6 +47,7 @@ def chunk_fwd_kernel_o(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -99,14 +100,22 @@ def chunk_fwd_kernel_o(
         g += bos * H + i_h
         p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
-        b_o = b_o * exp(b_g)[:, None]
-        b_A = b_A * exp(b_g[:, None] - b_g[None, :])
+        if USE_EXP2:
+            b_o = b_o * exp2(b_g)[:, None]
+            b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+        else:
+            b_o = b_o * exp(b_g)[:, None]
+            b_A = b_A * exp(b_g[:, None] - b_g[None, :])
 
     if USE_G_GAMMA:
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (tl.arange(0, BT) + 1)
-        b_o = b_o * exp(b_g)[:, None]
-        b_A = b_A * exp(b_g[:, None] - b_g[None, :])
+        if USE_EXP2:
+            b_o = b_o * exp2(b_g)[:, None]
+            b_A = b_A * exp2(b_g[:, None] - b_g[None, :])
+        else:
+            b_o = b_o * exp(b_g)[:, None]
+            b_A = b_A * exp(b_g[:, None] - b_g[None, :])
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
@@ -166,6 +175,7 @@ def chunk_bwd_kernel_dqkwg(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     USE_DW: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -263,16 +273,25 @@ def chunk_bwd_kernel_dqkwg(
         p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_last = tl.load(g + (min(i_t * BT + BT, T) - 1) * H)
-        b_dg_last *= exp(b_g_last)
-
-        b_dq = b_dq * exp(b_g)[:, None] * scale
+        if USE_EXP2:
+            b_dg_last *= exp2(b_g_last)
+            b_dq = b_dq * exp2(b_g)[:, None] * scale
+        else:
+            b_dg_last *= exp(b_g_last)
+            b_dq = b_dq * exp(b_g)[:, None] * scale
         b_dg += tl.sum(b_dq * b_q, axis=1)
 
-        b_dk = b_dk * tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None]
+        if USE_EXP2:
+            b_dk = b_dk * tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
+        else:
+            b_dk = b_dk * tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None]
         b_dg -= tl.sum(b_k * b_dk, axis=1)
         b_dg_last += tl.sum(b_dk * b_k)
 
-        b_ds = tl.where(m_A, b_ds * exp(b_g[:, None] - b_g[None, :]), 0) * scale
+        if USE_EXP2:
+            b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
+        else:
+            b_ds = tl.where(m_A, b_ds * exp(b_g[:, None] - b_g[None, :]), 0) * scale
         b_ds2 = b_ds * tl.dot(b_q, tl.trans(b_k))
         b_dg += tl.sum(b_ds2, axis=1)
         b_dg -= tl.sum(b_ds2, axis=0)
@@ -290,9 +309,14 @@ def chunk_bwd_kernel_dqkwg(
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
     elif USE_G_GAMMA:
-        b_dq = b_dq * exp(b_g)[:, None] * scale
-        b_dk = b_dk * tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None]
-        b_ds = tl.where(m_A, b_ds * exp(b_g[:, None] - b_g[None, :]), 0) * scale
+        if USE_EXP2:
+            b_dq = b_dq * exp2(b_g)[:, None] * scale
+            b_dk = b_dk * tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
+            b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
+        else:
+            b_dq = b_dq * exp(b_g)[:, None] * scale
+            b_dk = b_dk * tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None]
+            b_ds = tl.where(m_A, b_ds * exp(b_g[:, None] - b_g[None, :]), 0) * scale
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
@@ -345,6 +369,7 @@ def chunk_bwd_kernel_dv(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -394,8 +419,12 @@ def chunk_bwd_kernel_dv(
 
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
     if USE_G or USE_G_GAMMA:
-        b_A = tl.where(m_A, b_A * exp(b_g[None, :] - b_g[:, None]) * scale, 0).to(do.dtype.element_ty)
-        b_dv *= tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None]
+        if USE_EXP2:
+            b_A = tl.where(m_A, b_A * exp2(b_g[None, :] - b_g[:, None]) * scale, 0).to(do.dtype.element_ty)
+            b_dv *= tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
+        else:
+            b_A = tl.where(m_A, b_A * exp(b_g[None, :] - b_g[:, None]) * scale, 0).to(do.dtype.element_ty)
+            b_dv *= tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None]
     else:
         b_A = tl.where(m_A, b_A * scale, 0).to(do.dtype.element_ty)
     p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -441,6 +470,7 @@ def chunk_bwd_kernel_dv_local(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
+    USE_EXP2: tl.constexpr,
     USE_A: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -480,7 +510,10 @@ def chunk_bwd_kernel_dv_local(
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_A += tl.dot(b_k, b_q) * scale
         if USE_G or USE_G_GAMMA:
-            b_A *= exp(b_g[None, :] - b_g[:, None])
+            if USE_EXP2:
+                b_A *= exp2(b_g[None, :] - b_g[:, None])
+            else:
+                b_A *= exp(b_g[None, :] - b_g[:, None])
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
@@ -506,6 +539,7 @@ def chunk_fwd_o(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
@@ -534,6 +568,7 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
+        USE_EXP2=use_exp2,
         TRANSPOSE_STATE=transpose_state_layout,
     )
     return o
@@ -550,6 +585,7 @@ def chunk_bwd_dv(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
@@ -589,6 +625,7 @@ def chunk_bwd_dv(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_EXP2=use_exp2,
     )
     return dv
 
@@ -604,6 +641,7 @@ def chunk_bwd_dv_local(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
@@ -640,6 +678,7 @@ def chunk_bwd_dv_local(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_EXP2=use_exp2,
     )
     return dv
 
@@ -659,6 +698,7 @@ def chunk_bwd_dqkwg(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
@@ -708,6 +748,7 @@ def chunk_bwd_dqkwg(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_EXP2=use_exp2,
         TRANSPOSE_STATE=transpose_state_layout,
     )
 
