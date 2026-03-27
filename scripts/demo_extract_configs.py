@@ -9,7 +9,7 @@ Usage:
     python extract_triton_autotune_cache.py [--output-dir DIR]
 
 The output files are saved to fla/configs/{GPU}/{kernel_name}.json
-Each file contains only the best_config for direct cache lookup.
+Each file contains the best_config fields plus kernel_name for inspection.
 """
 
 import argparse
@@ -218,8 +218,11 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
 
         try:
             with open(output_file, 'w') as f:
-                # Only save the best_config for direct lookup
-                output_data = result["best_config"]
+                # Keep config fields at top level for cache lookup, plus kernel name for inspection.
+                output_data = {
+                    **result["best_config"],
+                    "kernel_name": kernel_name,
+                }
                 json.dump(output_data, f, indent=2)
 
             exported_count += 1
