@@ -149,13 +149,13 @@ def test_mamba_layer_vs_official_inference(B, T, d_model, d_state, expand, dtype
 
     for i in range(T):
         token = x[:, i:i+1, :]
-        
+
         # FLA step
         with torch.no_grad():
             fla_out, _, returned_cache = custom(token, past_key_values=cache, use_cache=True)
             assert returned_cache is not None
             cache = returned_cache
-        
+
         # Official step
         # Official Mamba.step takes (hidden_states, conv_state, ssm_state)
         with torch.no_grad():
