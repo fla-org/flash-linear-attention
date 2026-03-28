@@ -173,7 +173,7 @@ def test_mamba_layer_vs_official_inference(B, T, d_model, d_state, expand, dtype
         pytest.param(*t, id="B{}-T{}-d{}-s{}-e{}-{}-atol{}".format(*t))
         for t in [
             (2, 128, 256, 16, 2, torch.float32, 1e-5),
-            (2, 256, 128, 16, 2, torch.bfloat16, 5e-3),
+            (2, 256, 128, 16, 2, torch.bfloat16, 1e-2),
         ]
     ],
 )

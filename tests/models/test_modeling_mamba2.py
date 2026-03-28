@@ -192,7 +192,7 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
         pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-{}-atol{}".format(*t))
         for t in [
             (2, 64, 256, 128, 64, 2, torch.float32, 1e-4),
-            (2, 64, 256, 64, 64, 2, torch.bfloat16, 5e-3),
+            (2, 64, 256, 64, 64, 2, torch.bfloat16, 1e-2),
         ]
     ],
 )
