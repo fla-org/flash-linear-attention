@@ -137,9 +137,17 @@ class Mamba2(nn.Module):
         self.expand = expand
         self.intermediate_size = int(expand * hidden_size)
         self.head_dim = head_dim
-        self.num_heads = num_heads if num_heads is not None else self.intermediate_size // head_dim
         self.ssm_state_size = state_size
         self.n_groups = n_groups
+
+        if num_heads is None or num_heads == 0:
+            if self.intermediate_size % head_dim != 0:
+                raise ValueError(f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by head_dim ({head_dim}) when num_heads is not provided")
+            self.num_heads = self.intermediate_size // head_dim
+        else:
+            if self.intermediate_size % num_heads != 0:
+                raise ValueError(f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by num_heads ({num_heads}) when num_heads is provided")
+            self.num_heads = num_heads
 
         self.conv_kernel_size = conv_kernel
         self.conv_init = conv_init
