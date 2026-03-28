@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
@@ -279,7 +279,7 @@ class LogLinearMamba2(nn.Module):
         expand: int = 2,
         n_groups: int = 1,
         conv_kernel: int = 4,
-        conv_init: float = None,
+        conv_init: Optional[float] = None,
         use_conv_bias: bool = False,
         hidden_act: str = "silu",
         rmsnorm: bool = True,
