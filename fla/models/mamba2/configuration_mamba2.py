@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import warnings
-from typing import Optional
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -107,7 +106,7 @@ class Mamba2Config(PretrainedConfig):
         n_groups: int = 1,
         use_bias: bool = False,
         use_conv_bias: bool = True,
-        conv_init: Optional[float] = None,
+        conv_init: float | None = None,
         A_init_range: tuple[float, float] = (1, 16),
         D_has_hdim: bool = False,
         hidden_act: str = "silu",

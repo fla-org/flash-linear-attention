@@ -14,7 +14,6 @@
 
 import math
 import warnings
-from typing import Optional
 
 from transformers.configuration_utils import PretrainedConfig
 
