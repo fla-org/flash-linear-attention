@@ -656,7 +656,7 @@ def layer_norm_bwd(
     _MAX_BT = 64  # largest BT in autotuner configs
     T_per_group = T // G
     NS = triton.cdiv(get_multiprocessor_count(x.device.index), G) * G
-    max_ns = max(triton.cdiv(T_per_group, _MAX_BT), 1) * G
+    max_ns = max(T_per_group // _MAX_BT, 1) * G
     NS = min(NS, max_ns)
     BS = triton.cdiv(T_per_group, NS // G)
     GS = NS // G
