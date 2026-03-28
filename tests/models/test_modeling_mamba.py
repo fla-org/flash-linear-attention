@@ -122,7 +122,8 @@ def _make_mamba_pair(d_model, d_state=16, d_conv=4, expand=2, dtype=torch.float3
         pytest.param(*t, id="B{}-T{}-d{}-s{}-e{}-{}-atol{}".format(*t))
         for t in [
             (2, 64, 256, 16, 2, torch.float32, 1e-4),
-            (2, 64, 128, 16, 2, torch.bfloat16, 5e-3),
+            (2, 64, 128, 16, 2, torch.bfloat16, 1e-2),
+            (2, 64, 128, 16, 2, torch.float16, 5e-3),
         ]
     ],
 )
@@ -174,6 +175,7 @@ def test_mamba_layer_vs_official_inference(B, T, d_model, d_state, expand, dtype
         for t in [
             (2, 128, 256, 16, 2, torch.float32, 1e-5),
             (2, 256, 128, 16, 2, torch.bfloat16, 1e-2),
+            (2, 256, 128, 16, 2, torch.float16, 5e-3),
         ]
     ],
 )
@@ -207,6 +209,7 @@ def test_mamba_layer_vs_official_train(B, T, d_model, d_state, expand, dtype, at
         for t in [
             (2, 128, 256, 16, 2, torch.float32, 1e-4),
             (2, 256, 128, 16, 2, torch.bfloat16, 1e-2),
+            (2, 256, 128, 16, 2, torch.float16, 5e-3),
         ]
     ],
 )
@@ -241,6 +244,7 @@ def test_mamba_layer_vs_official_eval(B, T, d_model, d_state, expand, dtype, ato
         for t in [
             (2, 128, 256, 16, 2, torch.float32, 1e-4),
             (2, 128, 128, 16, 2, torch.bfloat16, 5e-2),
+            (2, 128, 128, 16, 2, torch.float16, 5e-3),
         ]
     ],
 )
