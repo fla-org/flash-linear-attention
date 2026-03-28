@@ -10,6 +10,11 @@ from fla.utils import device
 from .test_modeling_base import run_test_generation
 
 
+@pytest.fixture(autouse=True)
+def set_conv_backend(monkeypatch):
+    monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
+
+
 # ===================================================================================
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
@@ -38,7 +43,8 @@ def test_modeling(
     Test the forward and backward pass of the Mamba2 model by manually
     instantiating the configuration and the model.
     """
-    os.environ['FLA_CONV_BACKEND'] = conv_backend
+    if conv_backend:
+        os.environ['FLA_CONV_BACKEND'] = conv_backend
 
     # Manually create a consistent configuration
     # The key relationship is: num_heads = expand * hidden_size / head_dim
@@ -94,7 +100,8 @@ def test_generation(
     dtype: torch.dtype,
     conv_backend: str,
 ):
-    os.environ['FLA_CONV_BACKEND'] = conv_backend
+    if conv_backend:
+        os.environ['FLA_CONV_BACKEND'] = conv_backend
     expand = 2
     hidden_size = H * D // expand
 
@@ -140,7 +147,6 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
 
     from fla.layers.mamba2 import Mamba2 as CustomMamba2
 
-    os.environ['FLA_CONV_BACKEND'] = 'cuda'
     nheads = expand * d_model // headdim
 
     torch.manual_seed(42)

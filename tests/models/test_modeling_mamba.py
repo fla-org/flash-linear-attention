@@ -10,6 +10,11 @@ from fla.utils import device
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
 
+@pytest.fixture(autouse=True)
+def set_conv_backend(monkeypatch):
+    monkeypatch.setenv('FLA_CONV_BACKEND', 'cuda')
+
+
 # ===================================================================================
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
@@ -83,8 +88,6 @@ def _make_mamba_pair(d_model, d_state=16, d_conv=4, expand=2, dtype=torch.float3
     from mamba_ssm.modules.mamba_simple import Mamba as OfficialMamba
 
     from fla.layers.mamba import Mamba as CustomMamba
-
-    os.environ['FLA_CONV_BACKEND'] = 'cuda'
 
     torch.manual_seed(42)
     custom = CustomMamba(
