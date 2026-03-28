@@ -193,6 +193,7 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
         for t in [
             (2, 64, 256, 128, 64, 2, torch.float32, 1e-4),
             (2, 64, 256, 64, 64, 2, torch.bfloat16, 1e-2),
+            (2, 64, 256, 64, 64, 2, torch.float16, 5e-3),
         ]
     ],
 )
@@ -251,6 +252,7 @@ def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, exp
         for t in [
             (2, 128, 256, 128, 64, 2, torch.float32, 1e-5),
             (2, 256, 128, 64, 64, 2, torch.bfloat16, 5e-3),
+            (2, 256, 128, 64, 64, 2, torch.float16, 5e-3),
         ]
     ],
 )
