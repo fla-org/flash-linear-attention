@@ -166,6 +166,13 @@ class Mamba2Config(PretrainedConfig):
         self.use_l2warp = use_l2warp
         self.tie_word_embeddings = tie_word_embeddings
 
+        if len(A_init_range) != 2 or A_init_range[0] <= 0 or A_init_range[0] > A_init_range[1]:
+            raise ValueError("`A_init_range` must be a positive (min, max) pair.")
+        if dt_min <= 0 or dt_max < dt_min:
+            raise ValueError("`dt_min` and `dt_max` must satisfy 0 < dt_min <= dt_max.")
+        if dt_init_floor <= 0:
+            raise ValueError("`dt_init_floor` must be > 0.")
+
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
                 "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",

@@ -67,9 +67,9 @@ class MambaConfig(PretrainedConfig):
         dt_scale (`float`, *optional*):
             Scale used to initialize `dt_proj.weight`. Default: 1.0.
         dt_min (`float`, *optional*):
-            Minimum `time_step` used to bound `dt_proj.bias`. Default: 0.001.
+            Minimum `dt` used to bound `dt_proj.bias`. Default: 0.001.
         dt_max (`float`, *optional*):
-            Maximum `time_step` used to bound `dt_proj.bias`. Default: 0.1.
+            Maximum `dt` used to bound `dt_proj.bias`. Default: 0.1.
         dt_init_scheme (`str`, *optional*):
             Init scheme used for `dt_proj.weight`. Should be one of `["random","constant"]`. Default: `"random"`.
         dt_init_floor (`float`, *optional*):

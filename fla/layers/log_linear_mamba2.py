@@ -289,6 +289,7 @@ class LogLinearMamba2(nn.Module):
         dt_limit: tuple[float, float] = (0.0, float("inf")),
         dt_min: float = 0.001,
         dt_max: float = 0.1,
+        dt_init_floor: float = 1e-4,
         use_bias: bool = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
@@ -316,6 +317,8 @@ class LogLinearMamba2(nn.Module):
         self.chunk_size = chunk_size
 
         self.dt_limit = dt_limit
+        if tuple(dt_limit) != (0.0, float("inf")):
+            raise NotImplementedError("Non-default `dt_limit` is not implemented for `LogLinearMamba2` yet.")
         self.dt_min = dt_min
         self.dt_max = dt_max
 
@@ -349,7 +352,16 @@ class LogLinearMamba2(nn.Module):
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
-        self.dt_bias = nn.Parameter(torch.ones(self.num_heads))
+        dt = torch.exp(
+            torch.rand(self.num_heads) * (
+                math.log(self.dt_max) - math.log(self.dt_min)
+            ) + math.log(self.dt_min)
+        )
+        dt = torch.clamp(dt, min=dt_init_floor)
+        # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+        inv_dt = dt + torch.log(-torch.expm1(-dt))
+        self.dt_bias = nn.Parameter(inv_dt)
+        self.dt_bias._no_weight_decay = True
 
         # S4D real initialization. These are not discretized!
         # The core is to load them, compute the discrete states, then write the updated state. Keeps the memory bounded
