@@ -142,11 +142,13 @@ class Mamba2(nn.Module):
 
         if num_heads is None or num_heads == 0:
             if self.intermediate_size % head_dim != 0:
-                raise ValueError(f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by head_dim ({head_dim}) when num_heads is not provided")
+                raise ValueError(
+                    f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by head_dim ({head_dim}) when num_heads is not provided")
             self.num_heads = self.intermediate_size // head_dim
         else:
             if self.intermediate_size % num_heads != 0:
-                raise ValueError(f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by num_heads ({num_heads}) when num_heads is provided")
+                raise ValueError(
+                    f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by num_heads ({num_heads}) when num_heads is provided")
             self.num_heads = num_heads
 
         self.conv_kernel_size = conv_kernel
