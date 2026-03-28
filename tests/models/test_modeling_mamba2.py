@@ -131,6 +131,7 @@ def _copy_params(src, dst):
 
 
 def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
+                      D_has_hdim=False, rmsnorm=True, norm_before_gate=False,
                       dtype=torch.float32, official_use_mem_eff_path=True):
     """Create custom & official Mamba2 layers sharing identical weights.
 
@@ -160,9 +161,9 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
         conv_kernel=4,
         use_conv_bias=True,
         hidden_act="silu",
-        D_has_hdim=False,
-        rmsnorm=True,
-        norm_before_gate=False,
+        D_has_hdim=D_has_hdim,
+        rmsnorm=rmsnorm,
+        norm_before_gate=norm_before_gate,
         use_bias=False,
         norm_eps=1e-5,
         chunk_size=256,
@@ -177,9 +178,9 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
         expand=expand,
         headdim=headdim,
         ngroups=ngroups,
-        D_has_hdim=False,
-        rmsnorm=True,
-        norm_before_gate=False,
+        D_has_hdim=D_has_hdim,
+        rmsnorm=rmsnorm,
+        norm_before_gate=norm_before_gate,
         bias=False,
         conv_bias=True,
         chunk_size=256,
@@ -193,24 +194,26 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
 
 
 @pytest.mark.parametrize(
-    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'dtype', 'atol'],
+    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'D_has_hdim', 'rmsnorm', 'norm_before_gate', 'dtype', 'atol'],
     [
-        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-{}-atol{}".format(*t))
+        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-D{}-rms{}-nbg{}-{}-atol{}".format(*t))
         for t in [
-            (2, 64, 256, 128, 64, 2, torch.float32, 1e-4),
-            (2, 64, 256, 64, 64, 2, torch.bfloat16, 1e-2),
-            (2, 64, 256, 64, 64, 2, torch.float16, 5e-3),
+            (2, 64, 256, 128, 64, 2, False, True, False, torch.float32, 1e-4),
+            (2, 64, 256, 64, 64, 2, False, True, False, torch.bfloat16, 1e-2),
+            (2, 64, 256, 64, 64, 2, False, True, False, torch.float16, 5e-3),
+            (2, 64, 256, 128, 64, 2, True, False, True, torch.float32, 1e-4),
         ]
     ],
 )
-def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, expand, dtype, atol):
+def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
     """
     Step-by-step inference comparison between custom Mamba2 and official mamba_ssm.Mamba2.
     Starting with empty inference params and passing in identical sequences of input tokens step by step.
     """
     custom, official = _make_mamba2_pair(
-        d_model, d_state, headdim, expand=expand, dtype=dtype,
-        official_use_mem_eff_path=False,
+        d_model, d_state, headdim, expand=expand,
+        D_has_hdim=D_has_hdim, rmsnorm=rmsnorm, norm_before_gate=norm_before_gate,
+        dtype=dtype, official_use_mem_eff_path=False,
     )
     custom.eval()
     official.eval()
@@ -252,24 +255,26 @@ def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, exp
 
 
 @pytest.mark.parametrize(
-    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'dtype', 'atol'],
+    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'D_has_hdim', 'rmsnorm', 'norm_before_gate', 'dtype', 'atol'],
     [
-        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-{}-atol{}".format(*t))
+        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-D{}-rms{}-nbg{}-{}-atol{}".format(*t))
         for t in [
-            (2, 128, 256, 128, 64, 2, torch.float32, 1e-5),
-            (2, 256, 128, 64, 64, 2, torch.bfloat16, 5e-3),
-            (2, 256, 128, 64, 64, 2, torch.float16, 5e-3),
+            (2, 128, 256, 128, 64, 2, False, True, False, torch.float32, 1e-5),
+            (2, 256, 128, 64, 64, 2, False, True, False, torch.bfloat16, 5e-3),
+            (2, 256, 128, 64, 64, 2, False, True, False, torch.float16, 5e-3),
+            (2, 256, 256, 64, 64, 2, True, False, True, torch.float32, 1e-4),
         ]
     ],
 )
-def test_mamba2_layer_vs_official_train(B, T, d_model, d_state, headdim, expand, dtype, atol):
+def test_mamba2_layer_vs_official_train(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
     """Training-mode output of custom Mamba2 must match official mamba_ssm.Mamba2.
 
     Both should use mamba_split_conv1d_scan_combined (the fused kernel) in this mode.
     """
     custom, official = _make_mamba2_pair(
-        d_model, d_state, headdim, expand=expand, dtype=dtype,
-        official_use_mem_eff_path=True,
+        d_model, d_state, headdim, expand=expand,
+        D_has_hdim=D_has_hdim, rmsnorm=rmsnorm, norm_before_gate=norm_before_gate,
+        dtype=dtype, official_use_mem_eff_path=True,
     )
     custom.train()
     official.train()
@@ -288,17 +293,17 @@ def test_mamba2_layer_vs_official_train(B, T, d_model, d_state, headdim, expand,
 
 
 @pytest.mark.parametrize(
-    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'dtype', 'atol'],
+    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'D_has_hdim', 'rmsnorm', 'norm_before_gate', 'dtype', 'atol'],
     [
-        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-{}-atol{}".format(*t))
+        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-D{}-rms{}-nbg{}-{}-atol{}".format(*t))
         for t in [
-            (2, 128, 256, 128, 64, 2, torch.float32, 1e-4),
-            (2, 256, 256, 64, 64, 2, torch.bfloat16, 1e-2),
-            (2, 256, 256, 64, 64, 2, torch.float16, 5e-3),
+            (2, 128, 256, 128, 64, 2, False, True, False, torch.float32, 1e-4),
+            (2, 256, 256, 64, 64, 2, False, True, False, torch.bfloat16, 1e-2),
+            (2, 256, 256, 64, 64, 2, False, True, False, torch.float16, 5e-3),
         ]
     ],
 )
-def test_mamba2_layer_vs_official_eval(B, T, d_model, d_state, headdim, expand, dtype, atol):
+def test_mamba2_layer_vs_official_eval(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
     """Eval-mode output of custom Mamba2 must match official mamba_ssm.Mamba2.
 
     Both use the non-fused path: causal_conv1d_fn + mamba_chunk_scan_combined.
@@ -309,8 +314,9 @@ def test_mamba2_layer_vs_official_eval(B, T, d_model, d_state, headdim, expand, 
     tensor to causal_conv1d_fn whose channel-last path requires 8-byte alignment.
     """
     custom, official = _make_mamba2_pair(
-        d_model, d_state, headdim, expand=expand, dtype=dtype,
-        official_use_mem_eff_path=False,
+        d_model, d_state, headdim, expand=expand,
+        D_has_hdim=D_has_hdim, rmsnorm=rmsnorm, norm_before_gate=norm_before_gate,
+        dtype=dtype, official_use_mem_eff_path=False,
     )
     custom.eval()
     official.eval()
@@ -329,17 +335,18 @@ def test_mamba2_layer_vs_official_eval(B, T, d_model, d_state, headdim, expand, 
 
 
 @pytest.mark.parametrize(
-    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'dtype', 'atol'],
+    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'D_has_hdim', 'rmsnorm', 'norm_before_gate', 'dtype', 'atol'],
     [
-        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-{}-atol{}".format(*t))
+        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-D{}-rms{}-nbg{}-{}-atol{}".format(*t))
         for t in [
-            (2, 128, 256, 128, 64, 2, torch.float32, 1e-4),
-            (2, 128, 256, 64, 64, 2, torch.bfloat16, 5e-2),
-            (2, 128, 256, 64, 64, 2, torch.float16, 5e-3),
+            (2, 128, 256, 128, 64, 2, False, True, False, torch.float32, 1e-4),
+            (2, 128, 256, 64, 64, 2, False, True, False, torch.bfloat16, 5e-2),
+            (2, 128, 256, 64, 64, 2, False, True, False, torch.float16, 5e-3),
+            (2, 128, 256, 128, 64, 2, True, False, True, torch.float32, 1e-4),
         ]
     ],
 )
-def test_mamba2_layer_gradient_vs_official(B, T, d_model, d_state, headdim, expand, dtype, atol):
+def test_mamba2_layer_gradient_vs_official(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
     """Gradients of custom Mamba2 (train) must match official mamba_ssm.Mamba2.
 
     Both use the fused mamba_split_conv1d_scan_combined kernel in train mode,
@@ -347,8 +354,9 @@ def test_mamba2_layer_gradient_vs_official(B, T, d_model, d_state, headdim, expa
     We compare both input gradients and parameter gradients.
     """
     custom, official = _make_mamba2_pair(
-        d_model, d_state, headdim, expand=expand, dtype=dtype,
-        official_use_mem_eff_path=True,
+        d_model, d_state, headdim, expand=expand,
+        D_has_hdim=D_has_hdim, rmsnorm=rmsnorm, norm_before_gate=norm_before_gate,
+        dtype=dtype, official_use_mem_eff_path=True,
     )
     custom.train()
     official.train()
