@@ -1,11 +1,10 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp2
 from fla.utils import input_guard
 
 
@@ -40,6 +39,7 @@ def fused_recurrent_comba_fwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_EXP2: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -89,7 +89,10 @@ def fused_recurrent_comba_fwd_kernel(
         # [BV]
         b_v -= tl.sum(b_h * b_p[:, None], 0)
         # [BK, BV]
-        b_h *= exp(b_g)
+        if USE_EXP2:
+            b_h *= exp2(b_g)
+        else:
+            b_h *= exp(b_g)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
@@ -126,6 +129,7 @@ def fused_recurrent_comba_fwd(
     output_final_state: bool,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -165,6 +169,7 @@ def fused_recurrent_comba_fwd(
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        USE_EXP2=use_exp2,
         num_warps=num_warps,
         num_stages=num_stages,
     )

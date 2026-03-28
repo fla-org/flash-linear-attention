@@ -80,7 +80,7 @@ def test_fused_recurrent(
             id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, False, torch.float16),
+            (2, 75, 4, 64, 1, 0.01, 0, False, torch.float16),
             (2, 500, 3, 60, 1, 1, 0, False, torch.float16),
             (2, 1000, 3, 64, 0.1, 1, 0.5, False, torch.float16),
             (3, 1024, 4, 100, 1, 0.1, 0, False, torch.float16),

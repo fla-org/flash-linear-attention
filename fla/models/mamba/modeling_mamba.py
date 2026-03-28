@@ -107,8 +107,15 @@ class MambaPreTrainedModel(PreTrainedModel):
             if module.bias is not None:
                 if not getattr(module.bias, "_no_reinit", False):
                     nn.init.zeros_(module.bias)
-        elif isinstance(module, Mamba):
+        elif isinstance(module, Mamba) and next(module.parameters()).device.type != 'meta':
+            # S4D real initialization
+            A = torch.arange(1, module.ssm_state_size + 1, dtype=torch.float32)[None, :]
+            A = A.expand(module.intermediate_size, -1).contiguous()
+            with torch.no_grad():
+                module.A_log.copy_(torch.log(A))
             module.A_log._no_weight_decay = True
+
+            nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
             dt_init_std = self.config.dt_rank**-0.5 * self.config.dt_scale
