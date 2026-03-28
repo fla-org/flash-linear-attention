@@ -356,3 +356,267 @@ def prepare_wy_repr_bwd(
 
 fwd_recompute_w_u = recompute_w_u_fwd
 bwd_prepare_wy_repr = prepare_wy_repr_bwd
+
+
+# ============================================================================
+# Tricked WY kernels: use G/G_inv scaling instead of gating in the coupling matrix
+# ============================================================================
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def tricked_wy_fwd_kernel(
+    k, v, beta, w, u, A, g,
+    cu_seqlens, chunk_indices,
+    T,
+    H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
+    BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
+    USE_EXP2: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        bos = i_b * T
+
+    b_b = tl.load(tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)), boundary_check=(0,))
+    b_A = tl.load(tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1),
+                  (i_t * BT, 0), (BT, BT), (1, 0)), boundary_check=(0, 1))
+
+    b_g = tl.load(tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)), boundary_check=(0,)).to(tl.float32)
+    # Normalize g by subtracting max to prevent exp overflow (exp(g_max) * exp(-g_max) cancels)
+    b_g_max = tl.max(b_g, 0)
+    b_g_normalized = b_g - b_g_max
+    if USE_EXP2:
+        b_G = exp2(b_g_normalized)
+        b_G_inv = exp2(-b_g_normalized)
+    else:
+        b_G = exp(b_g_normalized)
+        b_G_inv = exp(-b_g_normalized)
+
+    for i_v in range(tl.cdiv(V, BV)):
+        p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_vb = (b_v * (b_b * b_G_inv)[:, None]).to(b_v.dtype)
+        b_u = tl.dot(b_A, b_vb, allow_tf32=False) * b_G[:, None]
+        tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+
+    for i_k in range(tl.cdiv(K, BK)):
+        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_w = tl.dot(b_A, (b_k * b_b[:, None]).to(b_k.dtype)) * b_G[:, None]
+        tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+
+
+def tricked_recompute_w_u_fwd(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    A: torch.Tensor,
+    g: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    BT = A.shape[-1]
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    w, u = torch.empty_like(k), torch.empty_like(v)
+    tricked_wy_fwd_kernel[(NT, B*H)](
+        k=k, v=v, beta=beta, w=w, u=u, A=A, g=g,
+        cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+        T=T, H=H, K=K, V=V, BT=BT, BK=64, BV=64,
+        USE_EXP2=use_exp2,
+    )
+    return w, u
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [2, 4]
+        for num_stages in [2, 3, 4]
+    ],
+    key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def tricked_wy_bwd_kernel(
+    k, v, beta, g,
+    A,
+    w, u,
+    dw, du,
+    dk, dv, db, dg,
+    cu_seqlens, chunk_indices,
+    T,
+    H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
+    BT: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
+    USE_EXP2: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    b_b = tl.load(tl.make_block_ptr(beta + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)), boundary_check=(0,))
+    b_A = tl.load(tl.make_block_ptr(A + (bos*H + i_h) * BT, (BT, T), (1, H*BT),
+                  (0, i_t * BT), (BT, BT), (0, 1)), boundary_check=(0, 1))
+
+    b_g = tl.load(tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)), boundary_check=(0,)).to(tl.float32)
+    b_g_max = tl.max(b_g, 0)
+    b_g_normalized = b_g - b_g_max
+    if USE_EXP2:
+        b_G = exp2(b_g_normalized)
+        b_G_inv = exp2(-b_g_normalized)
+    else:
+        b_G = exp(b_g_normalized)
+        b_G_inv = exp(-b_g_normalized)
+
+    b_db = tl.zeros([BT], dtype=tl.float32)
+    b_dA = tl.zeros([BT, BT], dtype=tl.float32)
+    b_dG = tl.zeros([BT], dtype=tl.float32)
+    b_dG_inv = tl.zeros([BT], dtype=tl.float32)
+
+    # --- w path: w = G · (M_inv @ (k·β)) ---
+    for i_k in range(tl.cdiv(K, BK)):
+        off = i_k * BK
+        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, off), (BT, BK), (1, 0))
+        p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, off), (BT, BK), (1, 0))
+        p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, off), (BT, BK), (1, 0))
+        p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, off), (BT, BK), (1, 0))
+
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_kb = b_k * b_b[:, None]
+        b_dw_blk = tl.load(p_dw, boundary_check=(0, 1))
+        b_w_blk = tl.load(p_w, boundary_check=(0, 1))
+
+        b_dG += tl.sum(b_dw_blk * b_w_blk, 1)
+
+        b_dy_w = b_dw_blk * b_G[:, None]
+        b_dA += tl.dot(b_dy_w, tl.trans(b_kb).to(b_dy_w.dtype))
+        b_dk_raw = tl.dot(b_A, b_dy_w.to(b_A.dtype))
+        b_dk_val = b_dk_raw * b_b[:, None]
+        b_db += tl.sum(b_dk_raw * b_k, 1)
+
+        tl.store(p_dk, b_dk_val.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+
+    # --- u path: u = G · (M_inv @ (G_inv · v · β)) ---
+    for i_v in range(tl.cdiv(V, BV)):
+        off = i_v * BV
+        p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, off), (BT, BV), (1, 0))
+        p_dv = tl.make_block_ptr(dv + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, off), (BT, BV), (1, 0))
+        p_du = tl.make_block_ptr(du + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, off), (BT, BV), (1, 0))
+        p_u = tl.make_block_ptr(u + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, off), (BT, BV), (1, 0))
+
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_vb_Ginv = (b_v * (b_b * b_G_inv)[:, None]).to(b_v.dtype)
+        b_du_blk = tl.load(p_du, boundary_check=(0, 1))
+        b_u_blk = tl.load(p_u, boundary_check=(0, 1))
+
+        b_dG += tl.sum(b_du_blk * b_u_blk, 1)
+        b_dy_u = b_du_blk * b_G[:, None]
+        b_dA += tl.dot(b_dy_u, tl.trans(b_vb_Ginv).to(b_dy_u.dtype))
+        b_dx_u = tl.dot(b_A, b_dy_u.to(b_A.dtype))
+        b_dv_val = b_dx_u * (b_G_inv * b_b)[:, None]
+        b_db += tl.sum(b_dx_u * b_G_inv[:, None] * b_v, 1)
+        b_dG_inv += tl.sum(b_dx_u * b_v * b_b[:, None], 1)
+
+        tl.store(p_dv, b_dv_val.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
+
+    # --- Gradient through solve_tril (ungated) ---
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+    b_dA = tl.where(m_A, b_dA, 0)
+    b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
+    b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
+
+    b_M = tl.zeros([BT, BT], dtype=tl.float32)
+    b_dA = tl.where(m_A, -b_dA, 0).to(k.dtype.element_ty)
+
+    tl.debug_barrier()
+    for i_k in range(tl.cdiv(K, BK)):
+        off = i_k * BK
+        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, off), (BT, BK), (1, 0))
+        p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, off), (BT, BK), (1, 0))
+        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_kt = tl.trans(b_k)
+        b_ktb = b_kt * b_b[None, :]
+
+        b_M += tl.dot(b_k, b_kt)
+        b_dkb = tl.dot(b_dA, b_k)
+        b_db += tl.sum(b_dkb * b_k, 1)
+        b_dk_val = b_dkb * b_b[:, None] + tl.trans(tl.dot(b_ktb.to(b_dA.dtype), b_dA))
+        b_dk_val += tl.load(p_dk, boundary_check=(0, 1))
+        tl.store(p_dk, b_dk_val.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
+
+    tl.store(tl.make_block_ptr(db + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)),
+             b_db.to(db.dtype.element_ty), boundary_check=(0,))
+
+    # --- dg from G/G_inv scaling ---
+    b_dg_val = b_dG - b_dG_inv * b_G_inv
+    tl.store(tl.make_block_ptr(dg + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)),
+             b_dg_val.to(dg.dtype.element_ty), boundary_check=(0,))
+
+
+def tricked_prepare_wy_repr_bwd(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+    A: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    dw: torch.Tensor,
+    du: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    BT = 64
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    CONST_TILING = 64 if check_shared_mem() else 32
+    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
+    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
+
+    dk, dv = torch.empty_like(k), torch.empty_like(v)
+    db = torch.empty_like(beta)
+    dg = torch.empty_like(g)
+
+    tricked_wy_bwd_kernel[(NT, B * H)](
+        k=k, v=v, beta=beta, g=g, A=A, w=w, u=u,
+        dw=dw, du=du, dk=dk, dv=dv, db=db, dg=dg,
+        cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+        T=T, H=H, K=K, V=V, BT=BT, BK=BK, BV=BV,
+        USE_EXP2=use_exp2,
+    )
+    return dk, dv, db, dg
