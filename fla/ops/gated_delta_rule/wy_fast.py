@@ -557,10 +557,8 @@ def tricked_wy_bwd_kernel(
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
 
-    b_M = tl.zeros([BT, BT], dtype=tl.float32)
     b_dA = tl.where(m_A, -b_dA, 0).to(k.dtype.element_ty)
 
-    tl.debug_barrier()
     for i_k in range(tl.cdiv(K, BK)):
         off = i_k * BK
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, off), (BT, BK), (1, 0))
@@ -569,7 +567,6 @@ def tricked_wy_bwd_kernel(
         b_kt = tl.trans(b_k)
         b_ktb = b_kt * b_b[None, :]
 
-        b_M += tl.dot(b_k, b_kt)
         b_dkb = tl.dot(b_dA, b_k)
         b_db += tl.sum(b_dkb * b_k, 1)
         b_dk_val = b_dkb * b_b[:, None] + tl.trans(tl.dot(b_ktb.to(b_dA.dtype), b_dA))

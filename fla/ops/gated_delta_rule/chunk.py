@@ -342,7 +342,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         )
 
         T = q.shape[1]
-        cache_wu = not mem_efficient and T > 2048
+        cache_wu = not mem_efficient and T >= 2048
         if cache_wu:
             g, o, A, w, u, final_state, initial_state = result
             ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, w, u,
@@ -522,7 +522,7 @@ def chunk_gated_delta_rule(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    if not torch.is_grad_enabled():
+    if not torch.is_grad_enabled() and cp_context is None:
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
 
