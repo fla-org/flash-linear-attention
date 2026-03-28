@@ -288,6 +288,7 @@ def test_mamba2_layer_vs_official_train(B, T, d_model, d_state, headdim, expand,
         for t in [
             (2, 128, 256, 128, 64, 2, torch.float32, 1e-4),
             (2, 256, 256, 64, 64, 2, torch.bfloat16, 1e-2),
+            (2, 256, 256, 64, 64, 2, torch.float16, 5e-3),
         ]
     ],
 )
@@ -328,6 +329,7 @@ def test_mamba2_layer_vs_official_eval(B, T, d_model, d_state, headdim, expand, 
         for t in [
             (2, 128, 256, 128, 64, 2, torch.float32, 1e-4),
             (2, 128, 256, 64, 64, 2, torch.bfloat16, 5e-2),
+            (2, 128, 256, 64, 64, 2, torch.float16, 5e-3),
         ]
     ],
 )
