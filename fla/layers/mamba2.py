@@ -107,14 +107,14 @@ class Mamba2(nn.Module):
 
     def __init__(
         self,
-        num_heads: int = None,
+        num_heads: int | None = None,
         head_dim: int = 64,
         hidden_size: int = 2048,
         state_size: int = 128,
         expand: int = 2,
         n_groups: int = 1,
         conv_kernel: int = 4,
-        conv_init: float = None,
+        conv_init: float | None = None,
         use_conv_bias: bool = True,
         hidden_act: str = "silu",
         A_init_range: tuple[float, float] = (1, 16),
@@ -128,7 +128,7 @@ class Mamba2(nn.Module):
         use_bias: bool = False,
         norm_eps: float = 1e-5,
         chunk_size: int = 256,
-        layer_idx: int = None,
+        layer_idx: int | None = None,
         backend: str = "cuda",
     ) -> Mamba2:
         super().__init__()
@@ -140,15 +140,19 @@ class Mamba2(nn.Module):
         self.ssm_state_size = state_size
         self.n_groups = n_groups
 
+        if self.intermediate_size % head_dim != 0:
+            raise ValueError(
+                f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by `head_dim` ({head_dim})."
+            )
+        inferred_num_heads = self.intermediate_size // head_dim
         if num_heads is None or num_heads == 0:
-            if self.intermediate_size % head_dim != 0:
-                raise ValueError(
-                    f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by head_dim ({head_dim}) when num_heads is not provided")
-            self.num_heads = self.intermediate_size // head_dim
+            self.num_heads = inferred_num_heads
         else:
-            if self.intermediate_size % num_heads != 0:
+            if num_heads != inferred_num_heads:
                 raise ValueError(
-                    f"`expand * hidden_size` ({self.intermediate_size}) must be divisible by num_heads ({num_heads}) when num_heads is provided")
+                    f"`num_heads * head_dim` ({num_heads * head_dim}) must equal "
+                    f"`expand * hidden_size` ({self.intermediate_size})."
+                )
             self.num_heads = num_heads
 
         self.conv_kernel_size = conv_kernel
