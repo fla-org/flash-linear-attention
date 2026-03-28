@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 # Copyright (c) 2023, Tri Dao
 # https://github.com/state-spaces/mamba/blob/fb7b5310fa865dbd62aa059b1e26f2b431363e2a/mamba_ssm/ops/triton/layernorm.py
@@ -373,24 +373,24 @@ def layer_norm_bwd_kernel(
         b_b = tl.load(b + i_g * D + o_d, mask=m_d, other=0.0).to(tl.float32)
         b_db = tl.zeros((BT, BD), dtype=tl.float32)
 
-    # Separate the full tensor dimension (for make_block_ptr shapes) from
-    # the per-program work bound (for loop range). On GPUs with many SMs,
-    # some programs have no work (i_sg * BS >= T_g) — the loop range is
-    # empty so no iterations execute, avoiding out-of-bounds access.
-    T_g = T // G
-    T_end = min(i_sg * BS + BS, T_g)
-    for i_t in range(i_sg * BS, T_end, BT):
-        p_x = tl.make_block_ptr(x + i_g * D, (T_g, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
-        p_dy = tl.make_block_ptr(dy + i_g * D, (T_g, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
-        p_dx = tl.make_block_ptr(dx + i_g * D, (T_g, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
+    # Tg: number of tokens per group, used as the logical shape for make_block_ptr.
+    # for mean/rstd with shape (T,) and stride (G,), the strided view has Tg elements per group.
+    # the caller guarantees NS capped so every program has work.
+    # the last program's range may slightly exceed Tg (since BS = cdiv(T, NS));
+    # boundary_check handles the partial tail tile, m_t < Tg masks dw/db accumulation.
+    Tg = T // G
+    for i_t in range(i_sg * BS, i_sg * BS + BS, BT):
+        p_x = tl.make_block_ptr(x + i_g * D, (Tg, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
+        p_dy = tl.make_block_ptr(dy + i_g * D, (Tg, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
+        p_dx = tl.make_block_ptr(dx + i_g * D, (Tg, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
         # [BT, BD]
         b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
         b_dy = tl.load(p_dy, boundary_check=(0, 1)).to(tl.float32)
 
         if not IS_RMS_NORM:
-            p_mean = tl.make_block_ptr(mean + i_g, (T_g,), (G,), (i_t,), (BT,), (0,))
+            p_mean = tl.make_block_ptr(mean + i_g, (Tg,), (G,), (i_t,), (BT,), (0,))
             b_mean = tl.load(p_mean, boundary_check=(0,))
-        p_rstd = tl.make_block_ptr(rstd + i_g, (T_g,), (G,), (i_t,), (BT,), (0,))
+        p_rstd = tl.make_block_ptr(rstd + i_g, (Tg,), (G,), (i_t,), (BT,), (0,))
         b_rstd = tl.load(p_rstd, boundary_check=(0,))
         # Compute dx
         b_xhat = (b_x - b_mean[:, None]) * b_rstd[:, None] if not IS_RMS_NORM else b_x * b_rstd[:, None]
@@ -400,13 +400,13 @@ def layer_norm_bwd_kernel(
         if HAS_BIAS:
             b_y = b_y + b_b[None, :]
         if RECOMPUTE_OUTPUT:
-            p_y = tl.make_block_ptr(y + i_g * D, (T_g, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
+            p_y = tl.make_block_ptr(y + i_g * D, (Tg, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
             tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
 
         b_wdy = b_dy
 
         if HAS_WEIGHT or HAS_BIAS:
-            m_t = (i_t + tl.arange(0, BT)) < T_end
+            m_t = (i_t + tl.arange(0, BT)) < Tg
         if HAS_WEIGHT:
             b_wdy = b_dy * b_w
             b_dw += tl.where(m_t[:, None], b_dy * b_xhat, 0.0)
@@ -420,12 +420,12 @@ def layer_norm_bwd_kernel(
             b_c1 = tl.sum(b_xhat * b_wdy, axis=1) / D
             b_dx = (b_wdy - b_xhat * b_c1[:, None]) * b_rstd[:, None]
         if HAS_DRESIDUAL:
-            p_dres = tl.make_block_ptr(dres + i_g * D, (T_g, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
+            p_dres = tl.make_block_ptr(dres + i_g * D, (Tg, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
             b_dres = tl.load(p_dres, boundary_check=(0, 1)).to(tl.float32)
             b_dx += b_dres
         # Write dx
         if STORE_DRESIDUAL:
-            p_dres_in = tl.make_block_ptr(dres_in + i_g * D, (T_g, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
+            p_dres_in = tl.make_block_ptr(dres_in + i_g * D, (Tg, D), (G*D, 1), (i_t, 0), (BT, BD), (1, 0))
             tl.store(p_dres_in, b_dx.to(p_dres_in.dtype.element_ty), boundary_check=(0, 1))
 
         tl.store(p_dx, b_dx.to(p_dx.dtype.element_ty), boundary_check=(0, 1))
@@ -646,8 +646,11 @@ def layer_norm_bwd(
     BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    # each program handles one group only
-    NS = triton.cdiv(get_multiprocessor_count(x.device.index), G) * G
+    # each program handles one group only.
+    # cap per-group program count to T // G so no program is completely idle.
+    # without this, high-SM GPUs (e.g. B200, 160 SMs) with small T would
+    # launch idle programs whose make_block_ptr offsets exceed the tensor shape.
+    NS = min(triton.cdiv(get_multiprocessor_count(x.device.index), G), T // G) * G
     BS = triton.cdiv(T, NS)
     GS = NS // G
 
