@@ -65,13 +65,13 @@ class MambaConfig(PretrainedConfig):
             Rank of the the discretization projection matrix.
             `"auto"` means that it will default to `math.ceil(self.hidden_size / 16)`. Default: `"auto"`.
         dt_scale (`float`, *optional*):
-            Scale used used to scale `dt_proj.bias`. Default: 1.0.
+            Scale used to initialize `dt_proj.weight`. Default: 1.0.
         dt_min (`float`, *optional*):
             Minimum `time_step` used to bound `dt_proj.bias`. Default: 0.001.
         dt_max (`float`, *optional*):
             Maximum `time_step` used to bound `dt_proj.bias`. Default: 0.1.
-        dt_init_scheme (`float`, *optional*):
-            Init scheme used for `dt_proj.weight`. Should be one of `["random","uniform"]`. Default: `"random"`.
+        dt_init_scheme (`str`, *optional*):
+            Init scheme used for `dt_proj.weight`. Should be one of `["random","constant"]`. Default: `"random"`.
         dt_init_floor (`float`, *optional*):
             Minimum clamping value of the `dt_proj.bias` layer initialization. Default: 0.0001.
         window_size (`int`, *optional*):
