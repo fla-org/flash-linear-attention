@@ -1,8 +1,11 @@
 
 import os
+import types
 
 import pytest
 import torch
+import torch.nn.functional as F
+from einops import rearrange, repeat
 
 from fla.models import Mamba2Config, Mamba2ForCausalLM
 from fla.utils import device
@@ -193,6 +196,96 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
     return custom, official
 
 
+def _official_mamba2_step_fixed_d_has_hdim(self, hidden_states, conv_state, ssm_state):
+    """Copy of mamba_ssm Mamba2.step with D shaped like forward() when D_has_hdim.
+
+    Upstream uses ``repeat(self.D, "h -> h p", ...)``, which is only valid for
+    ``D.shape == (nheads,)``. When ``D_has_hdim`` is True, ``D`` is ``(nheads * headdim,)``
+    and must use ``rearrange(self.D, "(h p) -> h p", p=headdim)``, same as ``forward()``.
+    """
+    pytest.importorskip("causal_conv1d")
+    from causal_conv1d import causal_conv1d_update
+    from mamba_ssm.ops.triton.selective_state_update import selective_state_update
+
+    dtype = hidden_states.dtype
+    assert hidden_states.shape[1] == 1, "Only support decoding with 1 token at a time for now"
+    zxbcdt = self.in_proj(hidden_states.squeeze(1))
+    d_mlp = (zxbcdt.shape[-1] - 2 * self.d_ssm - 2 * self.ngroups * self.d_state - self.nheads) // 2
+    z0, x0, z, xBC, dt = torch.split(
+        zxbcdt,
+        [d_mlp, d_mlp, self.d_ssm, self.d_ssm + 2 * self.ngroups * self.d_state, self.nheads],
+        dim=-1,
+    )
+
+    if causal_conv1d_update is None:
+        conv_state.copy_(torch.roll(conv_state, shifts=-1, dims=-1))
+        conv_state[:, :, -1] = xBC
+        xBC = torch.sum(conv_state * rearrange(self.conv1d.weight, "d 1 w -> d w"), dim=-1)
+        if self.conv1d.bias is not None:
+            xBC = xBC + self.conv1d.bias
+        xBC = self.act(xBC).to(dtype=dtype)
+    else:
+        xBC = causal_conv1d_update(
+            xBC,
+            conv_state,
+            rearrange(self.conv1d.weight, "d 1 w -> d w"),
+            self.conv1d.bias,
+            self.activation,
+        )
+
+    x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
+    A = -torch.exp(self.A_log.float())
+
+    if selective_state_update is None:
+        assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
+        dt = F.softplus(dt + self.dt_bias.to(dtype=dt.dtype))
+        dA = torch.exp(dt * A)
+        x = rearrange(x, "b (h p) -> b h p", p=self.headdim)
+        dBx = torch.einsum("bh,bn,bhp->bhpn", dt, B, x)
+        ssm_state.copy_(ssm_state * rearrange(dA, "b h -> b h 1 1") + dBx)
+        y = torch.einsum("bhpn,bn->bhp", ssm_state.to(dtype), C)
+        D_part = rearrange(self.D.to(dtype), "(h p) -> h p", p=self.headdim) if self.D_has_hdim else rearrange(
+            self.D.to(dtype), "h -> h 1"
+        )
+        y = y + D_part * x
+        y = rearrange(y, "b h p -> b (h p)")
+        if not self.rmsnorm:
+            y = y * self.act(z)
+    else:
+        A = repeat(A, "h -> h p n", p=self.headdim, n=self.d_state).to(dtype=torch.float32)
+        dt = repeat(dt, "b h -> b h p", p=self.headdim)
+        dt_bias = repeat(self.dt_bias, "h -> h p", p=self.headdim)
+        D = (
+            rearrange(self.D, "(h p) -> h p", p=self.headdim)
+            if self.D_has_hdim
+            else repeat(self.D, "h -> h p", p=self.headdim)
+        )
+        B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
+        C = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
+        x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.headdim)
+        if not self.rmsnorm:
+            z = rearrange(z, "b (h p) -> b h p", p=self.headdim)
+        y = selective_state_update(
+            ssm_state,
+            x_reshaped,
+            dt,
+            A,
+            B,
+            C,
+            D,
+            z=z if not self.rmsnorm else None,
+            dt_bias=dt_bias,
+            dt_softplus=True,
+        )
+        y = rearrange(y, "b h p -> b (h p)")
+    if self.rmsnorm:
+        y = self.norm(y, z)
+    if d_mlp > 0:
+        y = torch.cat([F.silu(z0) * x0, y], dim=-1)
+    out = self.out_proj(y)
+    return out.unsqueeze(1), conv_state, ssm_state
+
+
 @pytest.mark.parametrize(
     ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'D_has_hdim', 'rmsnorm', 'norm_before_gate', 'dtype', 'atol'],
     [
@@ -207,8 +300,10 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
 )
 def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
     """
-    Step-by-step inference comparison between custom Mamba2 and official mamba_ssm.Mamba2.
-    Starting with empty inference params and passing in identical sequences of input tokens step by step.
+    Step-by-step decode: FLA cached forward vs ``mamba_ssm.Mamba2.step`` with rolling
+    ``(conv_state, ssm_state)``. When ``D_has_hdim`` is True, the reference step is
+    ``_official_mamba2_step_fixed_d_has_hdim`` because upstream ``step()`` mis-shapes ``D``
+    (``forward()`` uses ``rearrange("(h p) -> h p")`` instead).
     """
     custom, official = _make_mamba2_pair(
         d_model, d_state, headdim, expand=expand,
@@ -217,34 +312,30 @@ def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, exp
     )
     custom.eval()
     official.eval()
+    # True step-by-step decode: conv_state + ssm_state, one token per call.
+    # When D_has_hdim, upstream mamba_ssm.step mis-shapes D; use the same fix as forward().
+    if D_has_hdim:
+        official.step = types.MethodType(_official_mamba2_step_fixed_d_has_hdim, official)
 
     torch.manual_seed(7)
     x = torch.randn(B, T, d_model, dtype=dtype, device=device)
 
-    # Official inference state
-    # Mamba2 official doesn't have a simple 'allocate_inference_cache' like Mamba1 in some versions,
-    # but we can use the same logic as in their generation.
-    # For Mamba2, the state is (conv_state, ssm_state)
     d_inner = expand * d_model
     nheads = d_inner // headdim
     conv_state = torch.zeros(B, custom.conv_dim, custom.conv_kernel_size, device=device, dtype=dtype)
     ssm_state = torch.zeros(B, nheads, headdim, d_state, device=device, dtype=dtype)
 
-    # FLA inference state (using Cache)
     from fla.models.utils import Cache
     cache = Cache()
 
     for i in range(T):
         token = x[:, i:i+1, :]
 
-        # FLA step
         with torch.no_grad():
             fla_out, _, returned_cache = custom(token, past_key_values=cache, use_cache=True)
             assert returned_cache is not None
             cache = returned_cache
 
-        # Official step
-        # Official Mamba2.step takes (hidden_states, conv_state, ssm_state)
         with torch.no_grad():
             official_out, conv_state, ssm_state = official.step(token, conv_state, ssm_state)
 
