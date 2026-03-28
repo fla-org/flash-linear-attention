@@ -96,6 +96,7 @@ def _make_mamba_pair(d_model, d_state=16, d_conv=4, expand=2, dtype=torch.float3
         dt_rank="auto",
         use_bias=False,
         hidden_act="silu",
+        layer_idx=0,
         backend="cuda",
     ).to(dtype=dtype, device=device)
 
@@ -113,6 +114,57 @@ def _make_mamba_pair(d_model, d_state=16, d_conv=4, expand=2, dtype=torch.float3
 
     _copy_params(custom, official)
     return custom, official
+
+
+@pytest.mark.parametrize(
+    ['B', 'T', 'd_model', 'd_state', 'expand', 'dtype', 'atol'],
+    [
+        pytest.param(*t, id="B{}-T{}-d{}-s{}-e{}-{}-atol{}".format(*t))
+        for t in [
+            (2, 64, 256, 16, 2, torch.float32, 1e-4),
+            (2, 64, 128, 16, 2, torch.bfloat16, 5e-3),
+        ]
+    ],
+)
+def test_mamba_layer_vs_official_inference(B, T, d_model, d_state, expand, dtype, atol):
+    """
+    Step-by-step inference comparison between custom Mamba and official mamba_ssm.Mamba.
+    Starting with empty inference params and passing in identical sequences of input tokens step by step.
+    """
+    custom, official = _make_mamba_pair(d_model, d_state, expand=expand, dtype=dtype)
+    custom.eval()
+    official.eval()
+
+    torch.manual_seed(7)
+    x = torch.randn(B, T, d_model, dtype=dtype, device=device)
+
+    # Official inference state
+    d_inner = expand * d_model
+    conv_state = torch.zeros(B, d_inner, custom.conv_kernel_size, device=device, dtype=dtype)
+    ssm_state = torch.zeros(B, d_inner, d_state, device=device, dtype=dtype)
+
+    # FLA inference state (using FLACache)
+    from fla.models.utils import Cache
+    cache = Cache()
+
+    for i in range(T):
+        token = x[:, i:i+1, :]
+        
+        # FLA step
+        with torch.no_grad():
+            fla_out, _, returned_cache = custom(token, past_key_values=cache, use_cache=True)
+            assert returned_cache is not None
+            cache = returned_cache
+        
+        # Official step
+        # Official Mamba.step takes (hidden_states, conv_state, ssm_state)
+        with torch.no_grad():
+            official_out, conv_state, ssm_state = official.step(token, conv_state, ssm_state)
+
+        assert fla_out.shape == official_out.shape
+        diff = (fla_out - official_out).abs().max().item()
+        assert torch.allclose(fla_out, official_out, atol=atol, rtol=0), \
+            f"Output mismatch at step {i}: max diff = {diff}"
 
 
 @pytest.mark.parametrize(

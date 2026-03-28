@@ -160,6 +160,7 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
         use_bias=False,
         norm_eps=1e-5,
         chunk_size=256,
+        layer_idx=0,
         backend="cuda",
     ).to(dtype=dtype, device=device)
 
@@ -183,6 +184,64 @@ def _make_mamba2_pair(d_model, d_state=128, headdim=64, ngroups=1, expand=2,
 
     _copy_params(custom, official)
     return custom, official
+
+
+@pytest.mark.parametrize(
+    ['B', 'T', 'd_model', 'd_state', 'headdim', 'expand', 'dtype', 'atol'],
+    [
+        pytest.param(*t, id="B{}-T{}-d{}-s{}-hd{}-e{}-{}-atol{}".format(*t))
+        for t in [
+            (2, 64, 256, 128, 64, 2, torch.float32, 1e-4),
+            (2, 64, 256, 64, 64, 2, torch.bfloat16, 5e-3),
+        ]
+    ],
+)
+def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, expand, dtype, atol):
+    """
+    Step-by-step inference comparison between custom Mamba2 and official mamba_ssm.Mamba2.
+    Starting with empty inference params and passing in identical sequences of input tokens step by step.
+    """
+    custom, official = _make_mamba2_pair(
+        d_model, d_state, headdim, expand=expand, dtype=dtype,
+        official_use_mem_eff_path=False,
+    )
+    custom.eval()
+    official.eval()
+
+    torch.manual_seed(7)
+    x = torch.randn(B, T, d_model, dtype=dtype, device=device)
+
+    # Official inference state
+    # Mamba2 official doesn't have a simple 'allocate_inference_cache' like Mamba1 in some versions,
+    # but we can use the same logic as in their generation.
+    # For Mamba2, the state is (conv_state, ssm_state)
+    d_inner = expand * d_model
+    nheads = d_inner // headdim
+    conv_state = torch.zeros(B, custom.conv_dim, custom.conv_kernel_size, device=device, dtype=dtype)
+    ssm_state = torch.zeros(B, nheads, headdim, d_state, device=device, dtype=dtype)
+
+    # FLA inference state (using Cache)
+    from fla.models.utils import Cache
+    cache = Cache()
+
+    for i in range(T):
+        token = x[:, i:i+1, :]
+        
+        # FLA step
+        with torch.no_grad():
+            fla_out, _, returned_cache = custom(token, past_key_values=cache, use_cache=True)
+            assert returned_cache is not None
+            cache = returned_cache
+        
+        # Official step
+        # Official Mamba2.step takes (hidden_states, conv_state, ssm_state)
+        with torch.no_grad():
+            official_out, conv_state, ssm_state = official.step(token, conv_state, ssm_state)
+
+        assert fla_out.shape == official_out.shape
+        diff = (fla_out - official_out).abs().max().item()
+        assert torch.allclose(fla_out, official_out, atol=atol, rtol=0), \
+            f"Output mismatch at step {i}: max diff = {diff}"
 
 
 @pytest.mark.parametrize(
