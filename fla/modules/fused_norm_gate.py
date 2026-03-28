@@ -275,7 +275,9 @@ def layer_norm_gated_bwd_kernel(
         b_wdy = b_dy
 
         if HAS_WEIGHT or HAS_BIAS:
-            m_t = (i_t + tl.arange(0, BT)) < T
+            # when BT > BS, a tile may span into the next program's range;
+            # mask to this program's upper bound to avoid double-counting dw/db.
+            m_t = (i_t + tl.arange(0, BT)) < min(i_s * BS + BS, T)
         if HAS_WEIGHT:
             b_wdy = b_dy * b_w
             b_dw += tl.where(m_t[:, None], b_dy * b_xhat, 0.0)
