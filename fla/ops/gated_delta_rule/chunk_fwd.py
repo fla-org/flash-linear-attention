@@ -668,6 +668,10 @@ def tricked_fusemaxxed_kernel(
         b_Ginv2 = exp2(-b_g2)
         b_G3 = exp2(b_g3)
         b_Ginv3 = exp2(-b_g3)
+        b_Gw0 = b_G0 * exp2(b_g_max)
+        b_Gw1 = b_G1 * exp2(b_g_max)
+        b_Gw2 = b_G2 * exp2(b_g_max)
+        b_Gw3 = b_G3 * exp2(b_g_max)
     else:
         b_G0 = exp(b_g0)
         b_Ginv0 = exp(-b_g0)
@@ -677,6 +681,10 @@ def tricked_fusemaxxed_kernel(
         b_Ginv2 = exp(-b_g2)
         b_G3 = exp(b_g3)
         b_Ginv3 = exp(-b_g3)
+        b_Gw0 = b_G0 * exp(b_g_max)
+        b_Gw1 = b_G1 * exp(b_g_max)
+        b_Gw2 = b_G2 * exp(b_g_max)
+        b_Gw3 = b_G3 * exp(b_g_max)
 
     b_Ai00 = b_Ai00.to(k.dtype.element_ty)
     b_Ai11 = b_Ai11.to(k.dtype.element_ty)
@@ -697,7 +705,7 @@ def tricked_fusemaxxed_kernel(
         b_k0 = tl.load(p_k0, boundary_check=(0, 1))
         b_kb0 = (b_k0 * b_b0[:, None]).to(b_k0.dtype)
 
-        b_w0 = tl.dot(b_Ai00, b_kb0) * b_G0[:, None]
+        b_w0 = tl.dot(b_Ai00, b_kb0) * b_Gw0[:, None]
         p_w0 = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_tc0, off_k), (BC, BK), (1, 0))
         tl.store(p_w0, b_w0.to(w.dtype.element_ty), boundary_check=(0, 1))
 
@@ -706,7 +714,7 @@ def tricked_fusemaxxed_kernel(
             b_k1 = tl.load(p_k1, boundary_check=(0, 1))
             b_kb1 = (b_k1 * b_b1[:, None]).to(b_k1.dtype)
 
-            b_w1 = (tl.dot(b_Ai10, b_kb0) + tl.dot(b_Ai11, b_kb1)) * b_G1[:, None]
+            b_w1 = (tl.dot(b_Ai10, b_kb0) + tl.dot(b_Ai11, b_kb1)) * b_Gw1[:, None]
             p_w1 = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_tc1, off_k), (BC, BK), (1, 0))
             tl.store(p_w1, b_w1.to(w.dtype.element_ty), boundary_check=(0, 1))
 
@@ -715,7 +723,7 @@ def tricked_fusemaxxed_kernel(
                 b_k2 = tl.load(p_k2, boundary_check=(0, 1))
                 b_kb2 = (b_k2 * b_b2[:, None]).to(b_k2.dtype)
 
-                b_w2 = (tl.dot(b_Ai20, b_kb0) + tl.dot(b_Ai21, b_kb1) + tl.dot(b_Ai22, b_kb2)) * b_G2[:, None]
+                b_w2 = (tl.dot(b_Ai20, b_kb0) + tl.dot(b_Ai21, b_kb1) + tl.dot(b_Ai22, b_kb2)) * b_Gw2[:, None]
                 p_w2 = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_tc2, off_k), (BC, BK), (1, 0))
                 tl.store(p_w2, b_w2.to(w.dtype.element_ty), boundary_check=(0, 1))
 
@@ -725,7 +733,7 @@ def tricked_fusemaxxed_kernel(
                     b_kb3 = (b_k3 * b_b3[:, None]).to(b_k3.dtype)
 
                     b_w3 = (tl.dot(b_Ai30, b_kb0) + tl.dot(b_Ai31, b_kb1) +
-                            tl.dot(b_Ai32, b_kb2) + tl.dot(b_Ai33, b_kb3)) * b_G3[:, None]
+                            tl.dot(b_Ai32, b_kb2) + tl.dot(b_Ai33, b_kb3)) * b_Gw3[:, None]
                     p_w3 = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_tc3, off_k), (BC, BK), (1, 0))
                     tl.store(p_w3, b_w3.to(w.dtype.element_ty), boundary_check=(0, 1))
 

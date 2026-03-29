@@ -404,9 +404,11 @@ def tricked_wy_fwd_kernel(
     if USE_EXP2:
         b_G = exp2(b_g_normalized)
         b_G_inv = exp2(-b_g_normalized)
+        b_G_full = b_G * exp2(b_g_max)
     else:
         b_G = exp(b_g_normalized)
         b_G_inv = exp(-b_g_normalized)
+        b_G_full = b_G * exp(b_g_max)
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -420,7 +422,7 @@ def tricked_wy_fwd_kernel(
         p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_w = tl.dot(b_A, (b_k * b_b[:, None]).to(b_k.dtype)) * b_G[:, None]
+        b_w = tl.dot(b_A, (b_k * b_b[:, None]).to(b_k.dtype)) * b_G_full[:, None]
         tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -494,9 +496,11 @@ def tricked_wy_bwd_kernel(
     if USE_EXP2:
         b_G = exp2(b_g_normalized)
         b_G_inv = exp2(-b_g_normalized)
+        b_G_full = b_G * exp2(b_g_max)
     else:
         b_G = exp(b_g_normalized)
         b_G_inv = exp(-b_g_normalized)
+        b_G_full = b_G * exp(b_g_max)
 
     b_db = tl.zeros([BT], dtype=tl.float32)
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
@@ -518,7 +522,7 @@ def tricked_wy_bwd_kernel(
 
         b_dG += tl.sum(b_dw_blk * b_w_blk, 1)
 
-        b_dy_w = b_dw_blk * b_G[:, None]
+        b_dy_w = b_dw_blk * b_G_full[:, None]
         b_dA += tl.dot(b_dy_w, tl.trans(b_kb).to(b_dy_w.dtype))
         b_dk_raw = tl.dot(b_A, b_dy_w.to(b_A.dtype))
         b_dk_val = b_dk_raw * b_b[:, None]
