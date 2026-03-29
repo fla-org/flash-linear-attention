@@ -34,6 +34,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     chunk_indices,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
@@ -56,7 +57,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + (bos*Hq + i_h // (H // Hq)) * K, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_A += tl.dot(b_k, tl.trans(b_k))
 
@@ -105,7 +106,8 @@ def chunk_scaled_dot_kkt_fwd(
     Returns:
         beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
     """
-    B, T, H, K = k.shape
+    B, T, Hq, K = k.shape
+    H = beta.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -120,6 +122,7 @@ def chunk_scaled_dot_kkt_fwd(
         chunk_indices=chunk_indices,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         BT=BT,
     )

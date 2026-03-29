@@ -300,6 +300,7 @@ def pre_process_fwd_kernel_merged(
     cu_seqlens,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -331,9 +332,10 @@ def pre_process_fwd_kernel_merged(
     # i_col is in range [0, cdiv(V + K, BLOCK_SIZE))
     # Columns [0, V) are for h, columns [V, V+K) are for m
     is_h_part = i_col * BLOCK_SIZE < V
-    k += ((bos * H + i_h) * K).to(tl.int64)
+    k += ((bos * Hq + i_h // (H // Hq)) * K).to(tl.int64)
     w += ((bos * H + i_h) * K).to(tl.int64)
-    stride_k = H * K
+    stride_k = Hq * K
+    stride_w = H * K
 
     if is_h_part:
         # ====== Stage 1: Compute h (K x V) ======
@@ -353,19 +355,19 @@ def pre_process_fwd_kernel_merged(
         # Main recurrence for h
         for i_t in range(NT):
             # Compute decayed v
-            p_w = tl.make_block_ptr(w, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, 64), (1, 0))
+            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, 64), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_v_decay = tl.dot(b_w, b_h1.to(b_w.dtype))
             if K > 64:
-                p_w = tl.make_block_ptr(w, (T, K), (stride_k, 1), (i_t * BT, 64), (BT, 64), (1, 0))
+                p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 64), (BT, 64), (1, 0))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
                 b_v_decay += tl.dot(b_w, b_h2.to(b_w.dtype))
             if K > 128:
-                p_w = tl.make_block_ptr(w, (T, K), (stride_k, 1), (i_t * BT, 128), (BT, 64), (1, 0))
+                p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 128), (BT, 64), (1, 0))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
                 b_v_decay += tl.dot(b_w, b_h3.to(b_w.dtype))
             if K > 192:
-                p_w = tl.make_block_ptr(w, (T, K), (stride_k, 1), (i_t * BT, 192), (BT, 64), (1, 0))
+                p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 192), (BT, 64), (1, 0))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
                 b_v_decay += tl.dot(b_w, b_h4.to(b_w.dtype))
 
@@ -480,7 +482,7 @@ def pre_process_fwd_kernel_merged(
             # Load k and w with full BK1 rows
             p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
-            p_w = tl.make_block_ptr(w, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
+            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
 
             last_idx = min((i_t + 1) * BT, T) - 1
@@ -877,6 +879,7 @@ def pre_process_bwd_kernel_merged(
     scale,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -908,11 +911,12 @@ def pre_process_bwd_kernel_merged(
     is_dh_part = i_col * BLOCK_SIZE < V
 
     # Calculate offsets
-    q += ((bos * H + i_h) * K).to(tl.int64)
-    k += ((bos * H + i_h) * K).to(tl.int64)
+    q += ((bos * Hq + i_h // (H // Hq)) * K).to(tl.int64)
+    k += ((bos * Hq + i_h // (H // Hq)) * K).to(tl.int64)
     w += ((bos * H + i_h) * K).to(tl.int64)
     dhm += i_h * K * (V + K)
-    stride_k = H * K
+    stride_qk = Hq * K
+    stride_w = H * K
 
     if is_dh_part:
         # ====== Stage 1: Compute dh (K x V) ======
@@ -948,7 +952,7 @@ def pre_process_bwd_kernel_merged(
             b_do = tl.load(p_do, boundary_check=(0, 1))
 
             # Update dv
-            p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, 64), (1, 0))
+            p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 0), (BT, 64), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
@@ -961,7 +965,7 @@ def pre_process_bwd_kernel_merged(
             b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype))
 
             if K > 64:
-                p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 64), (BT, 64), (1, 0))
+                p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 64), (BT, 64), (1, 0))
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k2 = 64 + o_k1
@@ -974,7 +978,7 @@ def pre_process_bwd_kernel_merged(
                 b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
 
             if K > 128:
-                p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 128), (BT, 64), (1, 0))
+                p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 128), (BT, 64), (1, 0))
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k3 = 128 + o_k1
@@ -987,7 +991,7 @@ def pre_process_bwd_kernel_merged(
                 b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
 
             if K > 192:
-                p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 192), (BT, 64), (1, 0))
+                p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 192), (BT, 64), (1, 0))
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k4 = 192 + o_k1
@@ -1006,8 +1010,8 @@ def pre_process_bwd_kernel_merged(
             b_dv += tl.load(p_dv, boundary_check=(0, 1))
 
             # Update dh
-            p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
-            p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
+            p_w = tl.make_block_ptr(w, (K, T), (1, stride_w), (0, i_t * BT), (64, BT), (0, 1))
+            p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (0, i_t * BT), (64, BT), (0, 1))
             b_w = tl.load(p_w, boundary_check=(0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             if USE_G:
@@ -1021,8 +1025,8 @@ def pre_process_bwd_kernel_merged(
             b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 64:
-                p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-                p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
+                p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (64, i_t * BT), (64, BT), (0, 1))
+                p_w = tl.make_block_ptr(w, (K, T), (1, stride_w), (64, i_t * BT), (64, BT), (0, 1))
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
                 if USE_G:
@@ -1036,8 +1040,8 @@ def pre_process_bwd_kernel_merged(
                 b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 128:
-                p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-                p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
+                p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (128, i_t * BT), (64, BT), (0, 1))
+                p_w = tl.make_block_ptr(w, (K, T), (1, stride_w), (128, i_t * BT), (64, BT), (0, 1))
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
                 if USE_G:
@@ -1051,8 +1055,8 @@ def pre_process_bwd_kernel_merged(
                 b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 192:
-                p_q = tl.make_block_ptr(q, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-                p_w = tl.make_block_ptr(w, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
+                p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (192, i_t * BT), (64, BT), (0, 1))
+                p_w = tl.make_block_ptr(w, (K, T), (1, stride_w), (192, i_t * BT), (64, BT), (0, 1))
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_w = tl.load(p_w, boundary_check=(0, 1))
                 if USE_G:
@@ -1096,9 +1100,9 @@ def pre_process_bwd_kernel_merged(
             i_t = NT - 1 - _i_t
 
             # Load k and w with full BK1 rows
-            p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
+            p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
-            p_w = tl.make_block_ptr(w, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
+            p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
 
             last_idx = min((i_t + 1) * BT, T) - 1
@@ -1155,7 +1159,9 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     assert initial_state is None, "When enable CP, the provided initial_state must be None."
     rank = dist.get_rank(group=context.group)
 
-    B, T, H, K, V = *k.shape, u.shape[-1]
+    B, T, Hq, K = k.shape
+    V = u.shape[-1]
+    H = u.shape[2]
     BT = chunk_size
     BK = triton.next_power_of_2(K)
 
@@ -1184,6 +1190,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             cu_seqlens=cu_seqlens[-2:],
             T=T,
             H=H,
+            Hq=Hq,
             K=K,
             V=V,
             BT=BT,
@@ -1237,7 +1244,9 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     assert dht is None, "When enable CP, the provided dht must be None."
     rank = dist.get_rank(context.group)
 
-    B, T, H, K, V = *q.shape, do.shape[-1]
+    B, T, Hq, K = q.shape
+    H = do.shape[2]
+    V = do.shape[-1]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     BT = 64
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
@@ -1270,6 +1279,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             scale=scale,
             T=T,
             H=H,
+            Hq=Hq,
             K=K,
             V=V,
             BT=BT,
