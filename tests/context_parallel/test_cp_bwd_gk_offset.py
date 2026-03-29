@@ -109,7 +109,7 @@ class TestBwdGkOffset:
         dhm_a = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
         pre_process_bwd_kernel_merged[grid](
             q=q, k=k, w=w, g=None, gk=gk_zero, do=do, dhm=dhm_a, dv=dv,
-            cu_seqlens=cu_seqlens, scale=1.0, T=T, H=H, K=K, V=V,
+            cu_seqlens=cu_seqlens, scale=1.0, T=T, H=H, Hq=H, K=K, V=V,
             BT=BT, BK1=BK, USE_EXP2=True, BLOCK_SIZE=BLOCK_SIZE,
         )
 
@@ -117,7 +117,7 @@ class TestBwdGkOffset:
         dhm_b = torch.zeros(H, K, V + K, dtype=torch.float32, device=device)
         pre_process_bwd_kernel_merged[grid](
             q=q, k=k, w=w, g=None, gk=gk_diff, do=do, dhm=dhm_b, dv=dv,
-            cu_seqlens=cu_seqlens, scale=1.0, T=T, H=H, K=K, V=V,
+            cu_seqlens=cu_seqlens, scale=1.0, T=T, H=H, Hq=H, K=K, V=V,
             BT=BT, BK1=BK, USE_EXP2=True, BLOCK_SIZE=BLOCK_SIZE,
         )
 
