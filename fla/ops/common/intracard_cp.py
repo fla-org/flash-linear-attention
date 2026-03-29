@@ -435,7 +435,7 @@ def intracard_fwd_h(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
 
-    _, _, Hq, K = k.shape
+    _, _, _Hq, K = k.shape
     V = u.shape[-1]
     H = u.shape[2]
     device = k.device

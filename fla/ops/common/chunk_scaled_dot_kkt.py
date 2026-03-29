@@ -88,9 +88,9 @@ def chunk_scaled_dot_kkt_fwd(
 
     Args:
         k (torch.Tensor):
-            The key tensor of shape `[B, T, H, K]`.
+            The key tensor of shape `[B, T, Hq, K]` where `Hq` is the number of query/key heads.
         beta (torch.Tensor):
-            The beta tensor of shape `[B, T, H]`.
+            The beta tensor of shape `[B, T, H]` where `H` is the number of value/output heads.
         g (torch.Tensor):
             The cumulative sum of the gate tensor of shape `[B, T, H]`. Default: `None`.
         gk (torch.Tensor):
@@ -105,6 +105,7 @@ def chunk_scaled_dot_kkt_fwd(
 
     Returns:
         beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
+        For GQA, Hq < H and H % Hq == 0. For standard attention, Hq == H.
     """
     B, T, Hq, K = k.shape
     H = beta.shape[2]
