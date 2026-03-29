@@ -154,7 +154,7 @@ def fused_cross_entropy_forward(
 
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
-    # Set these similar to https://github.com/openai/triton/blob/main/python/tutorials/02-fused-softmax.py
+    # Set these similar to https://github.com/triton-lang/triton/blob/main/python/tutorials/02-fused-softmax.py
     MAX_BLOCK_SIZE = 64 * 1024
     BLOCK_SIZE = min(triton.next_power_of_2(n_cols), MAX_BLOCK_SIZE)
     num_warps = (

@@ -38,7 +38,7 @@ setup(
     ],
     python_requires='>=3.10',
     install_requires=[
-        'torch',
+        'torch>=2.7.0',
         'transformers',
         'einops',
     ],
