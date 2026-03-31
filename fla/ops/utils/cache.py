@@ -47,8 +47,8 @@ def get_fla_config_dir() -> Path:
     """Get FLA's configs directory.
 
     The directory can be overridden by setting the FLA_CONFIG_DIR environment variable.
-    If set, configs will be loaded from $FLA_CONFIG_DIR/{triton_version}/{GPU}/ instead of
-    the default fla/configs/{triton_version}/{GPU}/ in the project.
+    If set, configs will be loaded from $FLA_CONFIG_DIR/{GPU}/ instead of the default
+    fla/configs/{GPU}/ in the project.
     """
     # Check if custom config dir is set via environment variable
     if "FLA_CONFIG_DIR" in os.environ:
@@ -59,7 +59,7 @@ def get_fla_config_dir() -> Path:
         base_dir = project_dir / "configs"
 
     gpu_name = get_gpu_info()
-    config_dir = base_dir / triton.__version__ / gpu_name
+    config_dir = base_dir / gpu_name
     return config_dir
 
 
@@ -83,7 +83,7 @@ def load_cached_config(kernel_name: str) -> dict[str, Any] | None:
         Best config dictionary or None if not found or disabled
     """
     # Check if cache is disabled via environment variable
-    if os.environ.get("FLA_DISABLE_CACHE") == "1":
+    if FLA_DISABLE_CACHE:
         return None
 
     config_dir = get_fla_config_dir()
@@ -221,3 +221,20 @@ def cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=None,
                                )
 
     return decorator
+
+
+def configure_fla_cache_autotune():
+    triton.autotune = cache_autotune
+    warnings.warn(
+        "configure_fla_cache_autotune() is enabling FLA cache_autotune; "
+        "triton.autotune will be replaced with cache_autotune."
+    )
+
+
+def restore_autotune_backend():
+    from triton.runtime.autotuner import autotune as original_autotune
+    triton.autotune = original_autotune
+    warnings.warn(
+        "restore_autotune_backend() is restoring Triton's original autotune; "
+        "triton.autotune will be replaced with triton.runtime.autotuner.autotune."
+    )

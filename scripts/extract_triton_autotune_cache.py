@@ -6,7 +6,17 @@ This script searches Triton's cache directory (~/.triton/cache/fla_triton_cache/
 extracts the best configuration for each kernel, and saves them to a human-readable format.
 
 Usage:
-    python extract_triton_autotune_cache.py [--output-dir DIR]
+    # Generate cache and extract configs (default head_dim=128)
+    python scripts/extract_triton_autotune_cache.py -g
+
+    # Generate cache for GDN
+    python scripts/extract_triton_autotune_cache.py -g --op gdn
+
+    # Specify head_dim (affects autotune results)
+    python scripts/extract_triton_autotune_cache.py -g -d 64
+
+    # List available cache files without extracting
+    python scripts/extract_triton_autotune_cache.py -l
 
 The output files are saved to fla/configs/{GPU}/{kernel_name}.json
 Each file contains the best_config fields plus kernel_name for inspection.
@@ -16,67 +26,22 @@ import argparse
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 from typing import Any
 
 import triton
 
+from fla.ops.utils.cache import get_fla_config_dir, get_gpu_info
+
 os.environ['FLA_DISABLE_CACHE'] = '1'
 
 
-def get_gpu_info():
-    """Get GPU model information.
-
-    This function detects the GPU model and returns a sanitized string identifier.
-    It prioritizes FLA_GPU_NAME environment variable if set, then detects from
-    available hardware (CUDA, ROCm, Intel GPU, or CPU).
-    """
-    import torch
-
-    # Check if GPU name is overridden via environment variable
-    if "FLA_GPU_NAME" in os.environ:
-        gpu_name = os.environ["FLA_GPU_NAME"]
-        return gpu_name.replace(" ", "_").replace("(", "_").replace(")", "_").replace("-", "_")
-
-    # Try to get device name based on availability
-    if torch.cuda.is_available():
-        # Works for both NVIDIA and AMD GPUs (ROCm)
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_name = gpu_name.replace(" ", "_").replace("(", "_").replace(")", "_").replace("-", "_")
-        return gpu_name
-
-    # Default to CPU if no GPU available
-    return "cpu"
-
-
-def get_triton_cache_dir() -> Path:
+def get_triton_cache_dir(path: str | None = None) -> Path:
     """Get Triton's cache directory via Triton's internal API."""
+    if path is not None:
+        return Path(path)
     from triton.runtime.cache import knobs
     return Path(knobs.cache.dir)
-
-
-def get_fla_config_dir() -> Path:
-    """Get FLA's configs directory.
-
-    The directory can be overridden by setting the FLA_CONFIG_DIR environment variable.
-    If set, configs will be saved to $FLA_CONFIG_DIR/{triton_version}/{GPU}/ instead of
-    the default fla/configs/{triton_version}/{GPU}/ in the project.
-    """
-
-
-    # Check if custom config dir is set via environment variable
-    if "FLA_CONFIG_DIR" in os.environ:
-        base_dir = Path(os.environ["FLA_CONFIG_DIR"])
-    else:
-        # Default: project_dir/fla/configs/
-        project_dir = Path(__file__).parent.parent
-        base_dir = project_dir / "fla" / "configs"
-
-    gpu_name = get_gpu_info()
-    config_dir = base_dir / triton.__version__ / gpu_name
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir
 
 
 def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
@@ -98,9 +63,12 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         if not configs_timings:
             return None
 
-        # configs_timings is a list of [config_dict, timings], where timings is either a scalar
-        # or a list of measurements [warmup, t1, t2, ...]. Use min(timings) to get the best run.
-        best_entry = min(configs_timings, key=lambda x: x[1] if isinstance(x[1], (int, float)) else min(x[1]))
+        def timing_key(entry):
+            t = entry[1]
+            return (t,) if isinstance(t, (int, float)) else tuple(t)
+
+        # configs_timings is a list of [config_dict, timing]
+        best_entry = min(configs_timings, key=timing_key)
         best_config_dict = best_entry[0]
         best_timing = best_entry[1]
 
@@ -181,6 +149,31 @@ def sync_hopper_configs(updated_dir: Path):
     print("=" * 60)
 
 
+def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> tuple[str, Path | None]:
+    backup_file = None
+
+    if output_file.exists():
+        try:
+            with open(output_file) as f:
+                existing_data = json.load(f)
+        except Exception:
+            existing_data = None
+
+        if existing_data != output_data:
+            backup_file = output_file.with_suffix(output_file.suffix + ".bak")
+            shutil.copy2(output_file, backup_file)
+            status = "updated"
+        else:
+            status = "unchanged"
+    else:
+        status = "created"
+
+    with open(output_file, 'w') as f:
+        json.dump(output_data, f, indent=2)
+
+    return status, backup_file
+
+
 def extract_configs(triton_cache_dir: Path, output_dir: Path):
     """
     Extract all autotune configs from Triton cache.
@@ -207,6 +200,10 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
 
     # Process each file
     exported_count = 0
+    created_count = 0
+    overwritten_count = 0
+    backup_files = []
+    unchanged_count = 0
     for autotune_file in autotune_files:
         result = process_autotune_file(autotune_file)
         if result is None:
@@ -217,19 +214,29 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
         output_file = output_dir / f"{kernel_name}.json"
 
         try:
-            with open(output_file, 'w') as f:
-                # Keep config fields at top level for cache lookup, plus kernel name for inspection.
-                output_data = {
-                    **result["best_config"],
-                    "kernel_name": kernel_name,
-                }
-                json.dump(output_data, f, indent=2)
+            # Keep config fields at top level for cache lookup, plus kernel name for inspection.
+            output_data = {
+                **result["best_config"],
+                "kernel_name": kernel_name,
+            }
+            status, backup_file = save_extracted_config(output_file, output_data)
 
             exported_count += 1
+            if status == "created":
+                created_count += 1
+            else:
+                overwritten_count += 1
+                if status == "unchanged":
+                    unchanged_count += 1
+                elif status == "updated":
+                    backup_files.append(backup_file)
 
             print(f"\n[{exported_count}] {kernel_name}")
             print(f"    Source: {autotune_file}")
             print(f"    Output: {output_file}")
+            print(f"    Status: {status}")
+            if status == "updated":
+                print(f"    Backup: {backup_file}")
             print(f"    Best config: {result['best_config']}")
             print(f"    Timing: {result['best_timing']}")
 
@@ -238,6 +245,12 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
 
     print("\n" + "=" * 60)
     print(f"Successfully exported {exported_count} configs to {output_dir}")
+    print(f"New files created: {created_count}")
+    print(f"Existing files overwritten: {overwritten_count}")
+    print(f"Existing files with identical content: {unchanged_count}")
+    print(f"Backups created for changed files: {len(backup_files)}")
+    for backup_file in backup_files:
+        print(f"  {backup_file}")
     print("=" * 60)
     sync_hopper_configs(output_dir)
 
@@ -245,7 +258,7 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
 def main():
     parser = argparse.ArgumentParser(description='Extract Triton autotune configs')
     parser.add_argument(
-        '--output-dir', '-o',
+        '--output-dir',
         type=str,
         help='Output directory (default: fla/configs/autotune/{GPU})'
     )
@@ -264,17 +277,41 @@ def main():
         action='store_true',
         help='Generate new cache with custom temporary directory'
     )
+    parser.add_argument(
+        '--op',
+        choices=('kda', 'gdn'),
+        default='kda',
+        help='FLA op used to generate the Triton cache (default: kda)'
+    )
+    parser.add_argument(
+        '--head-dim', '-d',
+        type=int,
+        default=128,
+        help='Head dimension used when generating the Triton cache (default: 128). '
+             'Different head_dim values produce different autotune configs.'
+    )
+    parser.add_argument(
+        '--versioned', '-v',
+        action='store_true',
+        help=f'Include Triton version ({triton.__version__}) as a subdirectory in the output path'
+    )
 
     args = parser.parse_args()
 
     # Determine directories
     if args.generate_cache:
-        # Generate cache with temporary directory
-        triton_cache_dir = Path(generate_triton_cache())
+        # Run FLA kernels to populate the fla_triton_cache subdirectory
+        triton_cache_dir = Path(generate_fla_cache(args.op, args.head_dim, args.triton_cache_dir))
     else:
-        triton_cache_dir = Path(args.triton_cache_dir) if args.triton_cache_dir else get_triton_cache_dir()
+        triton_cache_dir = get_triton_cache_dir(args.triton_cache_dir)
 
     output_dir = Path(args.output_dir) if args.output_dir else get_fla_config_dir()
+    # Only append the Triton version subdirectory when using the default output path.
+    # If the user explicitly provided --output-dir, respect it as-is without modification.
+    if not args.output_dir and args.versioned:
+        output_dir = output_dir / triton.__version__
+
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.list_only:
         # Just list the files
@@ -293,29 +330,12 @@ def main():
     extract_configs(triton_cache_dir, output_dir)
 
 
-def generate_triton_cache():
-    """Generate Triton cache with custom directory."""
-    import torch
-
-    from fla.ops.kda import chunk_kda
-    from fla.utils import device
-
-    # Use a temporary subdirectory inside Triton's cache dir to isolate FLA autotune results
-    fla_triton_cache = get_triton_cache_dir() / "fla_triton_cache"
-
-    # Clear and create the directory
-    if fla_triton_cache.exists():
-        shutil.rmtree(fla_triton_cache)
-    fla_triton_cache.mkdir(parents=True, exist_ok=True)
-    os.environ["TRITON_CACHE_DIR"] = str(fla_triton_cache)
-
-    print(f"Using FLA Triton cache directory: {fla_triton_cache}")
-
+def prepare_kernel_cache_tensors(head_dim: int, *, torch, device):
     # Generate cache by running the kernels
     torch.manual_seed(42)
     dtype = torch.bfloat16
-    # Just for DEMO.
-    B, T, H, D = 1, 8192, 32, 128
+    B, T, H, D = 1, 8192, 32, head_dim
+    print(f"Generating cache with head_dim={D}")
 
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
@@ -326,10 +346,21 @@ def generate_triton_cache():
     beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
-    q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
+    q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
+    g = g.to(device).requires_grad_(True)
 
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
+    return q, k, v, g, beta, h0, do, dht, A_log, dt_bias
+
+
+def generate_kda_cache(head_dim: int, *, torch, device):
+    from fla.ops.kda import chunk_kda
+    q, k, v, g, beta, h0, do, dht, A_log, dt_bias = prepare_kernel_cache_tensors(
+        head_dim,
+        torch=torch,
+        device=device,
+    )
 
     tri, tri_ht = chunk_kda(
         q=q.clone(),
@@ -366,33 +397,80 @@ def generate_triton_cache():
     )
     ((tri0 * do).sum() + (tri_ht0 * dht).sum()).backward()
 
+
+def generate_gdn_cache(head_dim: int, *, torch, device):
+    import torch.nn.functional as F
+
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+    q, k, v, g, beta, h0, do, dht, _, _ = prepare_kernel_cache_tensors(
+        head_dim,
+        torch=torch,
+        device=device,
+    )
+    g = g[..., 0].float().detach().requires_grad_(True)
+
+    for use_qk_l2norm_in_kernel in (False, True):
+        tri, tri_ht = chunk_gated_delta_rule(
+            q=(F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone()),
+            k=(F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone()),
+            v=v.clone(),
+            g=g.clone(),
+            beta=beta.clone(),
+            scale=None,
+            initial_state=h0.clone(),
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+        ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=not use_qk_l2norm_in_kernel)
+        q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
+
+
+def generate_conv_cache(head_dim: int, *, torch, device):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    B, T, H, D = 1, 8192, 32, head_dim
+
     W = 4
-    x = torch.randn(B, T, H*D).to(device, dtype).requires_grad_(True)
-    weight = torch.randn(H*D, W).to(device, dtype).requires_grad_(True)
+    x = torch.randn(B, T, H * D).to(device, dtype).requires_grad_(True)
+    weight = torch.randn(H * D, W).to(device, dtype).requires_grad_(True)
     bias = None
 
-    dy = torch.randn(B, T, H*D).to(device, dtype)
+    dy = torch.randn(B, T, H * D).to(device, dtype)
 
     from fla.modules.convolution import causal_conv1d
     tri, _ = causal_conv1d(x, weight, bias, residual=None, activation="silu")
     tri.backward(dy)
 
+
+def generate_fla_cache(op: str = 'kda', head_dim: int = 128, triton_cache_dir: str | None = None) -> str:
+    """Generate Triton cache with custom directory."""
+    import torch
+
+    from fla.utils import device
+
+    # Store FLA autotune results under fla_triton_cache/ to keep them separate from other Triton kernels
+    fla_triton_cache = get_triton_cache_dir(triton_cache_dir) / "fla_triton_cache"
+
+    # Clear and create the directory
+    if fla_triton_cache.exists():
+        shutil.rmtree(fla_triton_cache)
+    fla_triton_cache.mkdir(parents=True, exist_ok=True)
+    os.environ["TRITON_CACHE_DIR"] = str(fla_triton_cache)
+
+    print(f"Using FLA Triton cache directory: {fla_triton_cache}")
+
+    if op == 'kda':
+        generate_kda_cache(head_dim, torch=torch, device=device)
+    elif op == 'gdn':
+        generate_gdn_cache(head_dim, torch=torch, device=device)
+    else:
+        raise ValueError(f"Unsupported op: {op}")
+
+    generate_conv_cache(head_dim, torch=torch, device=device)
+
     return str(fla_triton_cache)
 
 
 if __name__ == "__main__":
-    # Check if we should extract to fla/configs
-    if "--extract-to-fla-configs" in sys.argv:
-        # Generate cache with temporary directory
-        triton_cache_dir = Path(generate_triton_cache())
-
-        # Compute output directory in fla/configs (relative to project root)
-        project_dir = Path(__file__).parent.parent
-        gpu_name = get_gpu_info()
-        output_dir = project_dir / "fla" / "configs" / gpu_name
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        print(f"\nExtracting configs to: {output_dir}")
-        extract_configs(triton_cache_dir, output_dir)
-    else:
-        main()
+    main()
