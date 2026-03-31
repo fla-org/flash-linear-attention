@@ -190,6 +190,17 @@ def backup_existing_file(output_file: Path) -> Path:
     return backup_file
 
 
+def backup_config_data(output_file: Path, config_data: dict[str, object]) -> Path:
+    backup_dir = output_file.parent / "bak"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    raw_bytes = json.dumps(config_data, indent=2, sort_keys=True).encode("utf-8")
+    digest = hashlib.sha256(raw_bytes).hexdigest()[:16]
+    backup_file = backup_dir / f"{output_file.stem}.{digest}{output_file.suffix}"
+    if not backup_file.exists():
+        backup_file.write_bytes(raw_bytes)
+    return backup_file
+
+
 def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> tuple[str, Path | None]:
     backup_file = None
 
@@ -202,12 +213,13 @@ def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> 
 
         if existing_data != output_data:
             chosen_data = choose_preferred_config(existing_data, output_data)
-            output_data = chosen_data
             if chosen_data != existing_data:
                 backup_file = backup_existing_file(output_file)
                 status = "updated"
             else:
+                backup_file = backup_config_data(output_file, output_data)
                 status = "unchanged"
+            output_data = chosen_data
         else:
             status = "unchanged"
     else:
