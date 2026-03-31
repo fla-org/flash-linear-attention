@@ -6,7 +6,7 @@ This script searches Triton's cache directory (~/.triton/cache/fla_triton_cache/
 extracts the best configuration for each kernel, and saves them to a human-readable format.
 
 Usage:
-    # Generate cache and extract configs (default head_dim=128)
+    # Generate cache for KDA and extract configs (default head_dim=128)
     python scripts/extract_triton_autotune_cache.py -g
 
     # Generate cache for GDN
@@ -340,8 +340,8 @@ def main():
     parser.add_argument(
         '--op',
         choices=('kda', 'gdn', 'both'),
-        default='both',
-        help='FLA op used to generate the Triton cache (default: both)'
+        default='kda',
+        help='FLA op used to generate the Triton cache (default: kda)'
     )
     parser.add_argument(
         '--head-dim', '-d',
@@ -390,12 +390,12 @@ def main():
     extract_configs(triton_cache_dir, output_dir)
 
 
-def prepare_kernel_cache_tensors(head_dim: int, *, torch, device):
+def prepare_kernel_cache_tensors(head_dim: int, *, torch, device, op_name: str):
     # Generate cache by running the kernels
     torch.manual_seed(42)
     dtype = torch.bfloat16
     B, T, H, D = 1, 8192, 32, head_dim
-    print(f"Generating cache with head_dim={D}")
+    print(f"Generating {op_name} cache with head_dim={D}")
 
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
@@ -421,6 +421,7 @@ def generate_kda_cache(head_dim: int, *, torch, device):
         head_dim,
         torch=torch,
         device=device,
+        op_name='kda',
     )
 
     tri, tri_ht = chunk_kda(
@@ -480,6 +481,7 @@ def generate_gdn_cache(head_dim: int, *, torch, device):
         head_dim,
         torch=torch,
         device=device,
+        op_name='gdn',
     )
     g = g[..., 0].float().detach().requires_grad_(True)
 
