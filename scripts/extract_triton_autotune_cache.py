@@ -113,24 +113,10 @@ def num_stages_preference_key(value: object) -> tuple[int, object]:
     return (3, float('inf'))
 
 
-def kwargs_preference_key(value: object) -> tuple[object, ...]:
-    if not isinstance(value, dict):
-        return (float('inf'),)
-    items: list[object] = []
-    for key in sorted(value):
-        item = value[key]
-        if isinstance(item, (int, float)):
-            items.append((key, -item))
-        else:
-            items.append((key, item))
-    return tuple(items)
-
-
 def config_preference_key(config: dict[str, object] | None) -> tuple[object, ...]:
     if not isinstance(config, dict):
-        return ((3, float('inf')), float('inf'), float('inf'), (float('inf'),))
+        return ((3, float('inf')), float('inf'), float('inf'))
     return (
-        kwargs_preference_key(config.get("kwargs")),
         num_stages_preference_key(config.get("num_stages")),
         config.get("num_warps", float('inf')),
         config.get("num_ctas", float('inf')),
@@ -357,7 +343,7 @@ def prepare_kernel_cache_tensors(head_dim: int, *, torch, device, op_name: str):
     # Generate cache by running the kernels
     torch.manual_seed(42)
     dtype = torch.bfloat16
-    B, T, H, D = 1, 8192, 32, head_dim
+    B, T, H, D = 2, 1500, 4, head_dim
     print(f"Generating {op_name} cache with head_dim={D}")
 
     q = torch.rand(B, T, H, D, dtype=dtype)
