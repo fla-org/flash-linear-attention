@@ -322,11 +322,12 @@ def chunk_gated_delta_rule(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]`.
+            queries of shape `[B, T, Hq, K]` where `Hq` is the number of query/key heads.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            keys of shape `[B, T, Hq, K]` where `Hq` is the number of query/key heads.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` where `H` is the number of value/output heads.
+            For standard attention, `Hq == H`. For GQA, `H % Hq == 0`.
         g (torch.Tensor):
             (forget) gating tensor (in log space!) of shape `[B, T, H]`.
         beta (torch.Tensor):
@@ -388,6 +389,14 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    # Validate GQA head divisibility
+    Hq, H = q.shape[2], v.shape[2]
+    if H % Hq != 0:
+        raise ValueError(
+            f"For GQA, num_heads (H={H}) must be evenly divisible by "
+            f"num_kv_heads (Hq={Hq}), but got H % Hq = {H % Hq}"
+        )
+
     if 'head_first' in kwargs:
         warnings.warn(
             "head_first is deprecated and will be removed in a future version. "

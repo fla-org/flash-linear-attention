@@ -61,6 +61,7 @@ def recompute_w_u_fwd_kernel(
     chunk_indices,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -100,7 +101,7 @@ def recompute_w_u_fwd_kernel(
             b_g = exp(tl.load(p_g, boundary_check=(0,)))
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + (bos*Hq + i_h // (H // Hq)) * K, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_w = tl.make_block_ptr(w + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_kb = b_k * b_b[:, None]
@@ -140,6 +141,7 @@ def prepare_wy_repr_bwd_kernel(
     chunk_indices,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -177,7 +179,7 @@ def prepare_wy_repr_bwd_kernel(
         b_dg = tl.zeros([BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + (bos*Hq + i_h // (H // Hq)) * K, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dw = tl.make_block_ptr(dw + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         # [BT, BK]
@@ -227,7 +229,7 @@ def prepare_wy_repr_bwd_kernel(
 
     tl.debug_barrier()
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(k + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k + (bos*Hq + i_h // (H // Hq)) * K, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_dk = tl.make_block_ptr(dk + (bos*H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_kt = tl.trans(b_k)
@@ -260,7 +262,9 @@ def recompute_w_u_fwd(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, Hq, K = k.shape
+    V = v.shape[-1]
+    H = v.shape[2]
     BT = A.shape[-1]
     BK = 64
     BV = 64
@@ -269,7 +273,7 @@ def recompute_w_u_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    w = torch.empty_like(k)
+    w = k.new_empty(B, T, H, K)
     u = torch.empty_like(v)
     recompute_w_u_fwd_kernel[(NT, B*H)](
         k=k,
@@ -283,6 +287,7 @@ def recompute_w_u_fwd(
         chunk_indices=chunk_indices,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=BT,
@@ -305,7 +310,9 @@ def prepare_wy_repr_bwd(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, Hq, K = k.shape
+    V = v.shape[-1]
+    H = v.shape[2]
     BT = 64
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -314,7 +321,7 @@ def prepare_wy_repr_bwd(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
-    dk = torch.empty_like(k)
+    dk = k.new_empty(B, T, H, K)
     dv = torch.empty_like(v)
     dg = torch.empty_like(g) if g is not None else None
     db = torch.empty_like(beta)
@@ -334,6 +341,7 @@ def prepare_wy_repr_bwd(
         chunk_indices=chunk_indices,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=BT,
@@ -341,6 +349,8 @@ def prepare_wy_repr_bwd(
         BV=BV,
         USE_EXP2=use_exp2,
     )
+    if Hq != H:
+        dk = dk.view(B, T, Hq, H // Hq, K).sum(3)
     return dk, dv, db, dg
 
 

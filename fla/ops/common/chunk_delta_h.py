@@ -46,6 +46,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     chunk_offsets,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -91,7 +92,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     # calculate offset
     h += (boh * H + i_h).to(tl.int64) * K*V
     v += (bos * H + i_h).to(tl.int64) * V
-    k += (bos * H + i_h).to(tl.int64) * K
+    k += (bos * Hq + i_h // (H // Hq)).to(tl.int64) * K
     w += (bos * H + i_h).to(tl.int64) * K
     if SAVE_NEW_VALUE:
         v_new += (bos * H + i_h).to(tl.int64) * V
@@ -263,28 +264,28 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 
         b_v = b_v.to(k.dtype.element_ty)
 
-        p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_t * BT), (64, BT), (0, 1))
+        p_k = tl.make_block_ptr(k, (K, T), (1, Hq*K), (0, i_t * BT), (64, BT), (0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         if TRANSPOSE_STATE:
             b_h1 += tl.trans(tl.dot(b_k, b_v))
         else:
             b_h1 += tl.dot(b_k, b_v)
         if K > 64:
-            p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (64, i_t * BT), (64, BT), (0, 1))
+            p_k = tl.make_block_ptr(k, (K, T), (1, Hq*K), (64, i_t * BT), (64, BT), (0, 1))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if TRANSPOSE_STATE:
                 b_h2 += tl.trans(tl.dot(b_k, b_v))
             else:
                 b_h2 += tl.dot(b_k, b_v)
         if K > 128:
-            p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (128, i_t * BT), (64, BT), (0, 1))
+            p_k = tl.make_block_ptr(k, (K, T), (1, Hq*K), (128, i_t * BT), (64, BT), (0, 1))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if TRANSPOSE_STATE:
                 b_h3 += tl.trans(tl.dot(b_k, b_v))
             else:
                 b_h3 += tl.dot(b_k, b_v)
         if K > 192:
-            p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (192, i_t * BT), (64, BT), (0, 1))
+            p_k = tl.make_block_ptr(k, (K, T), (1, Hq*K), (192, i_t * BT), (64, BT), (0, 1))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if TRANSPOSE_STATE:
                 b_h4 += tl.trans(tl.dot(b_k, b_v))
@@ -353,6 +354,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
     scale,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -395,8 +397,8 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dh4 = tl.zeros([64, BV], dtype=tl.float32)
 
     # calculate offset
-    q += (bos * H + i_h).to(tl.int64) * K
-    k += (bos * H + i_h).to(tl.int64) * K
+    q += (bos * Hq + i_h // (H // Hq)).to(tl.int64) * K
+    k += (bos * Hq + i_h // (H // Hq)).to(tl.int64) * K
     w += (bos * H + i_h).to(tl.int64) * K
     do += (bos * H + i_h).to(tl.int64) * V
     dv += (bos * H + i_h).to(tl.int64) * V
@@ -480,7 +482,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         b_do = tl.load(p_do, boundary_check=(0, 1))
 
         # Update dv
-        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, 64), (1, 0))
+        p_k = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_t * BT, 0), (BT, 64), (1, 0))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         if USE_GK:
             o_k1 = tl.arange(0, 64)
@@ -491,7 +493,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype))
 
         if K > 64:
-            p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 64), (BT, 64), (1, 0))
+            p_k = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_t * BT, 64), (BT, 64), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_GK:
                 o_k2 = 64 + o_k1
@@ -502,7 +504,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
 
         if K > 128:
-            p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 128), (BT, 64), (1, 0))
+            p_k = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_t * BT, 128), (BT, 64), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_GK:
                 o_k3 = 128 + o_k1
@@ -513,7 +515,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
                 b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
 
         if K > 192:
-            p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 192), (BT, 64), (1, 0))
+            p_k = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_t * BT, 192), (BT, 64), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_GK:
                 o_k4 = 192 + o_k1
@@ -534,7 +536,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
         # Update dh
         p_w = tl.make_block_ptr(w, (K, T), (1, H*K), (0, i_t * BT), (64, BT), (0, 1))
-        p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (0, i_t * BT), (64, BT), (0, 1))
+        p_q = tl.make_block_ptr(q, (K, T), (1, Hq*K), (0, i_t * BT), (64, BT), (0, 1))
         b_w = tl.load(p_w, boundary_check=(0, 1))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         if USE_G:
@@ -556,7 +558,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
         else:
             b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 64:
-            p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (64, i_t * BT), (64, BT), (0, 1))
+            p_q = tl.make_block_ptr(q, (K, T), (1, Hq*K), (64, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, H*K), (64, i_t * BT), (64, BT), (0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_w = tl.load(p_w, boundary_check=(0, 1))
@@ -579,7 +581,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             else:
                 b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 128:
-            p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (128, i_t * BT), (64, BT), (0, 1))
+            p_q = tl.make_block_ptr(q, (K, T), (1, Hq*K), (128, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, H*K), (128, i_t * BT), (64, BT), (0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_w = tl.load(p_w, boundary_check=(0, 1))
@@ -602,7 +604,7 @@ def chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64(
             else:
                 b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
         if K > 192:
-            p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (192, i_t * BT), (64, BT), (0, 1))
+            p_q = tl.make_block_ptr(q, (K, T), (1, Hq*K), (192, i_t * BT), (64, BT), (0, 1))
             p_w = tl.make_block_ptr(w, (K, T), (1, H*K), (192, i_t * BT), (64, BT), (0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_w = tl.load(p_w, boundary_check=(0, 1))
@@ -668,7 +670,9 @@ def chunk_gated_delta_rule_fwd_h(
     use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    B, T, H, K, V = *k.shape, u.shape[-1]
+    B, T, Hq, K = k.shape
+    V = u.shape[-1]
+    H = u.shape[2]
     BT = chunk_size
 
     if chunk_indices is None and cu_seqlens is not None:
@@ -703,6 +707,7 @@ def chunk_gated_delta_rule_fwd_h(
         chunk_offsets=chunk_offsets,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=BT,
@@ -729,7 +734,9 @@ def chunk_gated_delta_rule_bwd_dhu(
     use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *q.shape, do.shape[-1]
+    B, T, Hq, K = q.shape
+    V = do.shape[-1]
+    H = do.shape[2]
     # N: the actual number of sequences in the batch with either equal or variable lengths
     BT = 64
     assert K <= 256, "current kernel does not support head dimension being larger than 256."
@@ -766,6 +773,7 @@ def chunk_gated_delta_rule_bwd_dhu(
         scale=scale,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=BT,

@@ -8,6 +8,9 @@ Usage::
     # Benchmark one op (uses all default shape configs)
     python -m benchmarks.ops.run --op chunk_gla
 
+    # Ops touched by git diff (same rules as scripts/run_benchmark_compare.py)
+    python -m benchmarks.ops.run --from-diff --diff-base main --diff-head HEAD
+
     # Multiple ops
     python -m benchmarks.ops.run --op chunk_gla chunk_kda
 
@@ -104,10 +107,12 @@ Special cases:
 
 Benchmark methodology
 =====================
-1. **Warmup**: For each (op, shape), run fwd+bwd 5 times to trigger all
-   triton autotuning.  All shapes are warmed up before any timing begins.
-2. **Timing**: ``triton.testing.do_bench(fn, quantiles=[0.5, 0.2, 0.8])``
-   gives median, p20, p80 in milliseconds.
+1. **Warmup**: For each (op, shape), run fwd+bwd several times (default 5;
+   override with ``FLA_BENCH_OP_WARMUP_ITERS``) to trigger triton autotuning.
+   All shapes are warmed up before any timing begins.
+2. **Timing**: ``triton.testing.do_bench`` with quantiles ``[0.5, 0.2, 0.8]``,
+   ``warmup``/``rep`` in milliseconds (defaults 25 / 100; set
+   ``FLA_BENCH_WARMUP_MS`` / ``FLA_BENCH_REP_MS`` for noisier machines / CI).
 3. Input tensors (including gate transforms like logsigmoid) are prepared
    **before** timing — only the op call itself is measured.
 """
@@ -198,8 +203,22 @@ def _get_machine_info() -> dict:
     return info
 
 
-def _warmup_autotune(fn, n=5):
+def _warmup_iters() -> int:
+    """Extra per-shape forward+backward iterations before timing (not Triton do_bench warmup)."""
+    return max(1, int(os.environ.get('FLA_BENCH_OP_WARMUP_ITERS', '5')))
+
+
+def _do_bench_kw():
+    """Triton ``do_bench`` uses warmup/rep in *milliseconds* of timed execution (see Triton docs)."""
+    warmup_ms = int(os.environ.get('FLA_BENCH_WARMUP_MS', '25'))
+    rep_ms = int(os.environ.get('FLA_BENCH_REP_MS', '100'))
+    return {'warmup': max(1, warmup_ms), 'rep': max(1, rep_ms)}
+
+
+def _warmup_autotune(fn, n: int | None = None):
     """Run *fn* multiple times so triton autotuning is fully cached."""
+    if n is None:
+        n = _warmup_iters()
     for _ in range(n):
         fn()
     torch.cuda.synchronize()
@@ -299,7 +318,9 @@ def benchmark_op(
                     t.backward(do)
 
             try:
-                ms = triton.testing.do_bench(fn, quantiles=[0.5, 0.2, 0.8])
+                ms = triton.testing.do_bench(
+                    fn, quantiles=[0.5, 0.2, 0.8], **_do_bench_kw()
+                )
             except Exception as e:
                 logger.warning(f"Bench failed for {op_name} {mode} @ {shape_name}: {e}")
                 continue
@@ -534,6 +555,18 @@ def main():
         '--list', action='store_true',
         help='List all registered ops and exit',
     )
+    parser.add_argument(
+        '--from-diff', action='store_true',
+        help='Select ops from git diff (use with --diff-base / --diff-head, not with --op)',
+    )
+    parser.add_argument(
+        '--diff-base', default='main',
+        help='Base ref for --from-diff (default: main)',
+    )
+    parser.add_argument(
+        '--diff-head', default='HEAD',
+        help='Head ref for --from-diff (default: HEAD)',
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -544,10 +577,24 @@ def main():
             print(f"  {name:30s}  [{cfg.category}]  {cfg.import_path}")
         return
 
-    if args.op is None:
-        parser.error("--op is required (use --list to see available ops)")
+    if args.from_diff:
+        if args.op is not None:
+            parser.error('--from-diff cannot be used with --op')
+        project_root = _find_project_root()
+        scripts_dir = os.path.join(project_root, 'scripts')
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import run_benchmark_compare as _diff
+        changed = _diff.get_changed_files(args.diff_base, args.diff_head)
+        op_names = _diff.find_affected_op_names(changed)
+        if not op_names:
+            print('No affected ops for this diff.', file=sys.stderr)
+            return
+    elif args.op is None:
+        parser.error("--op is required unless --from-diff (use --list to see available ops)")
 
-    op_names = list_ops() if args.op == ['all'] else args.op
+    if not args.from_diff:
+        op_names = list_ops() if args.op == ['all'] else args.op
     shape_configs = json.loads(args.custom_shapes) if args.custom_shapes else SHAPE_CONFIGS
 
     machine_info = _get_machine_info()
