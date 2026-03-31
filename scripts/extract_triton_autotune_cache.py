@@ -150,6 +150,34 @@ def sync_hopper_configs(updated_dir: Path):
     print("=" * 60)
 
 
+def normalize_comparable_value(value):
+    if isinstance(value, dict):
+        return tuple((key, normalize_comparable_value(value[key])) for key in sorted(value))
+    if isinstance(value, list):
+        return tuple(normalize_comparable_value(item) for item in value)
+    return value
+
+
+def config_preference_key(config: dict[str, object] | None) -> tuple[object, ...]:
+    if not isinstance(config, dict):
+        return (float('inf'), (('__missing__', True),), float('inf'), float('inf'))
+    return (
+        config.get("num_stages", float('inf')),
+        config.get("num_warps", float('inf')),
+        normalize_comparable_value(config.get("kwargs", {})),
+        config.get("num_ctas", float('inf')),
+    )
+
+
+def choose_preferred_config(
+    existing_data: dict[str, object] | None,
+    output_data: dict[str, object],
+) -> dict[str, object]:
+    existing_key = config_preference_key(existing_data)
+    output_key = config_preference_key(output_data)
+    return output_data if output_key < existing_key else existing_data
+
+
 def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> tuple[str, Path | None]:
     backup_file = None
 
@@ -161,9 +189,14 @@ def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> 
             existing_data = None
 
         if existing_data != output_data:
-            backup_file = output_file.with_suffix(output_file.suffix + ".bak")
-            shutil.copy2(output_file, backup_file)
-            status = "updated"
+            chosen_data = choose_preferred_config(existing_data, output_data)
+            output_data = chosen_data
+            if chosen_data != existing_data:
+                backup_file = output_file.with_suffix(output_file.suffix + ".bak")
+                shutil.copy2(output_file, backup_file)
+                status = "updated"
+            else:
+                status = "unchanged"
         else:
             status = "unchanged"
     else:
