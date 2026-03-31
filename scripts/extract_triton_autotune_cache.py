@@ -415,6 +415,8 @@ def prepare_kernel_cache_tensors(head_dim: int, *, torch, device, op_name: str):
 
 
 def generate_kda_cache(head_dim: int, *, torch, device):
+    import torch.nn.functional as F
+
     from fla.ops.kda import chunk_kda, fused_recurrent_kda
     from fla.ops.kda.gate import fused_kda_gate
     q, k, v, g, beta, h0, do, dht, A_log, dt_bias = prepare_kernel_cache_tensors(
@@ -424,11 +426,51 @@ def generate_kda_cache(head_dim: int, *, torch, device):
         op_name='kda',
     )
 
+    g_nonsafe = F.logsigmoid(g.clone().float())
+    g_safe = -5 * torch.sigmoid(g.clone().float())
+
+    # Non-safe path: hits chunk_kda_fwd_kernel_intra_token_parallel.
     tri, tri_ht = chunk_kda(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
-        g=g.clone().float(),
+        g=g_nonsafe,
+        beta=beta.clone(),
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone(),
+        scale=None,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=False,
+        safe_gate=False,
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+
+    tri0, tri_ht0 = chunk_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone(),
+        scale=None,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        safe_gate=False,
+        lower_bound=-5,
+    )
+    ((tri0 * do).sum() + (tri_ht0 * dht).sum()).backward(retain_graph=True)
+
+    # Safe path: hits chunk_kda_fwd_kernel_intra_sub_chunk.
+    tri1, tri_ht1 = chunk_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_safe,
         beta=beta.clone(),
         A_log=A_log.clone(),
         dt_bias=dt_bias.clone(),
@@ -440,8 +482,9 @@ def generate_kda_cache(head_dim: int, *, torch, device):
         safe_gate=True,
         lower_bound=-5,
     )
-    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
-    tri0, tri_ht0 = chunk_kda(
+    ((tri1 * do).sum() + (tri_ht1 * dht).sum()).backward(retain_graph=True)
+
+    tri2, tri_ht2 = chunk_kda(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -457,7 +500,7 @@ def generate_kda_cache(head_dim: int, *, torch, device):
         safe_gate=True,
         lower_bound=-5,
     )
-    ((tri0 * do).sum() + (tri_ht0 * dht).sum()).backward()
+    ((tri2 * do).sum() + (tri_ht2 * dht).sum()).backward(retain_graph=True)
 
     g = fused_kda_gate(g=g.clone(), A_log=A_log.clone(), dt_bias=dt_bias.clone())
     fused_recurrent_kda(
