@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -68,12 +70,35 @@ def get_changed_files(base: str, head: str) -> list[str]:
     return [f for f in out.split('\n') if f]
 
 
-def find_affected_op_names(changed_files: list[str]) -> list[str]:
-    """Map changed file paths to registered op names.
+def _ops_subdirs_from_flapy_imports(relpath: str) -> set[str]:
+    path = PROJECT_ROOT / relpath
+    if not path.is_file():
+        return set()
+    try:
+        text = path.read_text(encoding='utf-8')
+        tree = ast.parse(text, filename=relpath)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return set()
 
-    Parses fla/ops/<dir>/ from each path and looks up the registry.
-    Changes in fla/ops/common/ or fla/ops/utils/ affect ALL ops.
-    """
+    subdirs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            mod = node.module or ''
+            if mod == 'fla.ops' or mod.startswith('fla.ops.'):
+                parts = mod.split('.')
+                if len(parts) >= 3 and parts[0] == 'fla' and parts[1] == 'ops':
+                    subdirs.add(parts[2])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.name
+                if name.startswith('fla.ops.'):
+                    parts = name.split('.')
+                    if len(parts) >= 3 and parts[0] == 'fla' and parts[1] == 'ops':
+                        subdirs.add(parts[2])
+    return subdirs
+
+
+def find_affected_op_names(changed_files: list[str]) -> list[str]:
     try:
         sys.path.insert(0, str(PROJECT_ROOT / 'benchmarks' / 'ops'))
         from registry import _REGISTRY
@@ -99,6 +124,9 @@ def find_affected_op_names(changed_files: list[str]) -> list[str]:
         m = _OP_DIR_RE.match(fpath)
         if m:
             affected_dirs.add(m.group(1))
+
+        if fpath.startswith('fla/') and not m:
+            affected_dirs.update(_ops_subdirs_from_flapy_imports(fpath))
 
     if common_changed:
         return sorted(_REGISTRY.keys())
@@ -340,6 +368,13 @@ def main():
                 data = json.load(f)
                 head_results = data.get('results', [])
                 machine_info = data.get('machine_info')
+
+        cooldown = int(os.environ.get('FLA_BENCH_COOLDOWN_SEC', '0'))
+        if cooldown > 0:
+            print(
+                f"\n  Waiting {cooldown}s before base benchmark "
+                f"(FLA_BENCH_COOLDOWN_SEC; reduces thermal bias between runs).\n")
+            time.sleep(cooldown)
 
         # Step 2: BASE
         print(f"\n{'=' * 60}")

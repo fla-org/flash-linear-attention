@@ -43,6 +43,11 @@ jobs:
     runs-on: ${{ inputs.runner }}
     env:
       FLA_CI_ENV: 1
+      # Longer Triton timing windows + pause between commits reduce clock/thermal variance.
+      FLA_BENCH_WARMUP_MS: 40
+      FLA_BENCH_REP_MS: 200
+      FLA_BENCH_OP_WARMUP_ITERS: 6
+      FLA_BENCH_COOLDOWN_SEC: 3
 
     steps:
       - name: Check out repo (full history for cross-commit comparison)
