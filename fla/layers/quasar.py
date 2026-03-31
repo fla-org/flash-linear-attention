@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 from typing import TYPE_CHECKING
 
@@ -308,15 +309,13 @@ class QuasarAttention(nn.Module):
                     (conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None
                 )
             else:
-                try:
+                with contextlib.suppress(TypeError):
                     past_key_values.update(
                         recurrent_state=recurrent_state,
                         conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
                         layer_idx=self.layer_idx,
                         offset=q_len,
                     )
-                except TypeError:
-                    pass
 
         # Final output gating using g_proj
         # Handle flattened inputs (unpadded) from FSDP/Flash-Linear-Attention
