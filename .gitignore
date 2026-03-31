@@ -43,3 +43,6 @@ __pycache__
 
 # macOS
 .DS_Store
+
+# fla config cache backup files
+*.bak

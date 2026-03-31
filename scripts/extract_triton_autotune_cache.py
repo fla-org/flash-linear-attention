@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+import sys
 from typing import Any
 
 import triton
@@ -183,8 +184,8 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
         output_dir: Output directory for extracted configs
     """
     if not triton_cache_dir.exists():
-        print(f"Triton cache directory not found: {triton_cache_dir}, creating it...")
-        triton_cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Triton cache directory not found: {triton_cache_dir}. Exiting as there's nothing to extract.")
+        sys.exit(1)
 
     # Find all .autotune.json files
     autotune_files = list(triton_cache_dir.rglob("*.autotune.json"))

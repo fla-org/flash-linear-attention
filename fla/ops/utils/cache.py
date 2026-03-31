@@ -155,7 +155,7 @@ class CachedAutotuner(Autotuner):
             )
 
 
-def cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=None, restore_value=None,
+def fla_cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=None, restore_value=None,
                    pre_hook=None, post_hook=None, warmup=None, rep=None, use_cuda_graph=False,
                    do_bench=None, cache_results=False):
     """
@@ -223,11 +223,11 @@ def cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=None,
     return decorator
 
 
-def configure_fla_cache_autotune():
-    triton.autotune = cache_autotune
+def configure_fla_fla_cache_autotune():
+    triton.autotune = fla_cache_autotune
     warnings.warn(
-        "configure_fla_cache_autotune() is enabling FLA cache_autotune; "
-        "triton.autotune will be replaced with cache_autotune."
+        "configure_fla_fla_cache_autotune() is enabling FLA fla_cache_autotune; "
+        "triton.autotune will be replaced with fla_cache_autotune."
     )
 
 

@@ -5,7 +5,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.cache import cache_autotune
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
 
@@ -13,7 +13,7 @@ from fla.utils import autotune_cache_kwargs
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@cache_autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BH': BH}, num_warps=num_warps)
         for BH in [1, 2, 4, 8]
