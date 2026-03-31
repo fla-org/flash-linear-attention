@@ -19,10 +19,11 @@ Usage:
     python scripts/extract_triton_autotune_cache.py -l
 
 The output files are saved to fla/configs/{GPU}/{kernel_name}.json
-Each file contains the best_config fields plus kernel_name for inspection.
+Each file contains the best_config fields plus kernel_name and key for inspection.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -178,6 +179,17 @@ def choose_preferred_config(
     return output_data if output_key < existing_key else existing_data
 
 
+def backup_existing_file(output_file: Path) -> Path:
+    backup_dir = output_file.parent / "bak"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    raw_bytes = output_file.read_bytes()
+    digest = hashlib.sha256(raw_bytes).hexdigest()[:16]
+    backup_file = backup_dir / f"{output_file.stem}.{digest}{output_file.suffix}"
+    if not backup_file.exists():
+        backup_file.write_bytes(raw_bytes)
+    return backup_file
+
+
 def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> tuple[str, Path | None]:
     backup_file = None
 
@@ -192,8 +204,7 @@ def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> 
             chosen_data = choose_preferred_config(existing_data, output_data)
             output_data = chosen_data
             if chosen_data != existing_data:
-                backup_file = output_file.with_suffix(output_file.suffix + ".bak")
-                shutil.copy2(output_file, backup_file)
+                backup_file = backup_existing_file(output_file)
                 status = "updated"
             else:
                 status = "unchanged"
@@ -252,6 +263,7 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
             output_data = {
                 **result["best_config"],
                 "kernel_name": kernel_name,
+                "key": result["cache_key"],
             }
             status, backup_file = save_extracted_config(output_file, output_data)
 
