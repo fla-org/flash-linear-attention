@@ -164,13 +164,27 @@ def num_stages_preference_key(value: object) -> tuple[int, object]:
     return (3, float('inf'))
 
 
+def kwargs_preference_key(value: object) -> tuple[object, ...]:
+    if not isinstance(value, dict):
+        return (float('inf'),)
+    items: list[object] = []
+    for key in sorted(value):
+        item = value[key]
+        if isinstance(item, (int, float)):
+            items.append((key, -item))
+        else:
+            items.append((key, item))
+    return tuple(items)
+
+
 def config_preference_key(config: dict[str, object] | None) -> tuple[object, ...]:
     if not isinstance(config, dict):
-        return ((3, float('inf')), float('inf'), float('inf'))
+        return ((3, float('inf')), float('inf'), float('inf'), (float('inf'),))
     return (
         num_stages_preference_key(config.get("num_stages")),
         config.get("num_warps", float('inf')),
         config.get("num_ctas", float('inf')),
+        kwargs_preference_key(config.get("kwargs")),
     )
 
 
