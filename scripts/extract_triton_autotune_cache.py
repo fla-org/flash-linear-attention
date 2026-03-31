@@ -103,57 +103,6 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         return None
 
 
-def sync_hopper_configs(updated_dir: Path):
-    """
-    Sync Hopper architecture GPU configs (NVIDIA_H100, NVIDIA_H200, NVIDIA_H20).
-
-    When one of these GPU configs is updated, copy its contents to the other directories.
-    Creates target directories if they don't exist.
-
-    Args:
-        updated_dir: The directory that was just updated (source directory)
-    """
-    # Define the GPU groups that share the same configs (with NVIDIA_ prefix)
-    hopper_gpus = ["NVIDIA_H100", "NVIDIA_H800", "NVIDIA_H20"]
-
-    # Get the parent directory (e.g., fla/configs)
-    parent_dir = updated_dir.parent
-
-    # Check if the updated_dir name matches any of the hopper GPUs
-    updated_gpu = updated_dir.name
-    if updated_gpu not in hopper_gpus:
-        return  # Not a hopper GPU, skip sync
-
-    print(f"\nSyncing Hopper configs from {updated_gpu} to other GPUs: {hopper_gpus}")
-    print("-" * 60)
-
-    # Copy to other hopper GPU directories
-    sync_count = 0
-    for target_gpu in hopper_gpus:
-        if target_gpu == updated_gpu:
-            continue  # Skip self
-
-        target_dir = parent_dir / target_gpu
-
-        try:
-            # Create target directory if it doesn't exist
-            target_dir.mkdir(parents=True, exist_ok=True)
-
-            # Copy all files from updated_dir to target_dir
-            for config_file in updated_dir.glob("*.json"):
-                if config_file.is_file():
-                    shutil.copy2(config_file, target_dir / config_file.name)
-
-            sync_count += 1
-            print(f"  ✓ Synced to {target_gpu} ({target_dir})")
-
-        except Exception as e:
-            print(f"  ✗ Failed to sync to {target_gpu}: {e}")
-
-    print(f"\nSuccessfully synced configs to {sync_count} GPU directories")
-    print("=" * 60)
-
-
 def num_stages_preference_key(value: object) -> tuple[int, object]:
     if value == 3:
         return (0, value)
@@ -327,7 +276,6 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
     for backup_file in backup_files:
         print(f"  {backup_file}")
     print("=" * 60)
-    sync_hopper_configs(output_dir)
 
 
 def main():
