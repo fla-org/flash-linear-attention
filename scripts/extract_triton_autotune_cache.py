@@ -154,21 +154,22 @@ def sync_hopper_configs(updated_dir: Path):
     print("=" * 60)
 
 
-def normalize_comparable_value(value):
-    if isinstance(value, dict):
-        return tuple((key, normalize_comparable_value(value[key])) for key in sorted(value))
-    if isinstance(value, list):
-        return tuple(normalize_comparable_value(item) for item in value)
-    return value
+def num_stages_preference_key(value: object) -> tuple[int, object]:
+    if value == 3:
+        return (0, value)
+    if isinstance(value, (int, float)):
+        if value == 2:
+            return (2, value)
+        return (1, value)
+    return (3, float('inf'))
 
 
 def config_preference_key(config: dict[str, object] | None) -> tuple[object, ...]:
     if not isinstance(config, dict):
-        return (float('inf'), (('__missing__', True),), float('inf'), float('inf'))
+        return ((3, float('inf')), float('inf'), float('inf'))
     return (
-        config.get("num_stages", float('inf')),
+        num_stages_preference_key(config.get("num_stages")),
         config.get("num_warps", float('inf')),
-        normalize_comparable_value(config.get("kwargs", {})),
         config.get("num_ctas", float('inf')),
     )
 
