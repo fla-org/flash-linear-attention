@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
@@ -16,7 +17,7 @@ STATIC_WARPS = 32 if not IS_AMD else 16
     'USE_INITIAL_STATE': lambda args: args['initial_state'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps)
         for BD in [16, 32, 64, 128]
@@ -133,7 +134,7 @@ def causal_conv1d_fwd_kernel(
     'USE_FINAL_STATE': lambda args: args['dht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps)
         for BD in [16, 32, 64, 128]
