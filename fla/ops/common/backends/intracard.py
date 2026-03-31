@@ -25,6 +25,7 @@ class IntraCardCPBackend(BaseBackend):
     backend_type = "intracard_cp"
     package_name = None  # No external package needed
     env_var = "FLA_INTRACARD_CP"
+    default_enable = False
 
     @classmethod
     def is_available(cls) -> bool:

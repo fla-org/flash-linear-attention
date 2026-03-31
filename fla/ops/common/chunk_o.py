@@ -40,6 +40,7 @@ def chunk_fwd_kernel_o(
     scale,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -66,8 +67,8 @@ def chunk_fwd_kernel_o(
         bos, eos = i_b * T, i_b * T + T
 
     # offset calculation
-    q += (bos * H + i_h) * K
-    k += (bos * H + i_h) * K
+    q += (bos * Hq + i_h // (H // Hq)) * K
+    k += (bos * Hq + i_h // (H // Hq)) * K
     v += (bos * H + i_h) * V
     o += (bos * H + i_h) * V
     h += (i_tg * H + i_h).to(tl.int64) * K*V
@@ -76,8 +77,8 @@ def chunk_fwd_kernel_o(
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        p_q = tl.make_block_ptr(q, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_k = tl.make_block_ptr(k, (K, T), (1, Hq*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
         if TRANSPOSE_STATE:
             p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
         else:
@@ -168,6 +169,7 @@ def chunk_bwd_kernel_dqkwg(
     B: tl.constexpr,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -200,8 +202,8 @@ def chunk_bwd_kernel_dqkwg(
     do += (bos * H + i_h) * V
     h += (i_tg * H + i_h).to(tl.int64) * K*V
     dh += (i_tg * H + i_h).to(tl.int64) * K*V
-    q += (bos * H + i_h) * K
-    k += (bos * H + i_h) * K
+    q += (bos * Hq + i_h // (H // Hq)) * K
+    k += (bos * Hq + i_h // (H // Hq)) * K
     dq += (bos * H + i_h) * K
     dk += (bos * H + i_h) * K
 
@@ -255,8 +257,8 @@ def chunk_bwd_kernel_dqkwg(
         tl.store(p_dw, -b_dw.to(p_dw.dtype.element_ty), boundary_check=(0, 1))
 
     tl.debug_barrier()
-    p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-    p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_q = tl.make_block_ptr(q, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+    p_k = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_k = tl.load(p_k, boundary_check=(0, 1))
 
@@ -362,6 +364,7 @@ def chunk_bwd_kernel_dv(
     scale,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -388,16 +391,16 @@ def chunk_bwd_kernel_dv(
     b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
     # offset calculation
-    q += (bos * H + i_h) * K
-    k += (bos * H + i_h) * K
+    q += (bos * Hq + i_h // (H // Hq)) * K
+    k += (bos * Hq + i_h // (H // Hq)) * K
     do += (bos * H + i_h) * V
     dv += (bos * H + i_h) * V
     dh += (i_tg * H + i_h).to(tl.int64) * K*V
 
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+        p_k = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+        p_q = tl.make_block_ptr(q, (K, T), (1, Hq*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_A += tl.dot(b_k, b_q)
@@ -463,6 +466,7 @@ def chunk_bwd_kernel_dv_local(
     scale,
     T,
     H: tl.constexpr,
+    Hq: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
@@ -484,8 +488,8 @@ def chunk_bwd_kernel_dv_local(
         bos, eos = i_b * T, i_b * T + T
 
     # offset calculation
-    q += (bos * H + i_h) * K
-    k += (bos * H + i_h) * K
+    q += (bos * Hq + i_h // (H // Hq)) * K
+    k += (bos * Hq + i_h // (H // Hq)) * K
     do += (bos * H + i_h) * V
     dv += (bos * H + i_h) * V
 
@@ -503,8 +507,8 @@ def chunk_bwd_kernel_dv_local(
 
         b_A = tl.zeros([BT, BT], dtype=tl.float32)
         for i_k in range(tl.cdiv(K, BK)):
-            p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_q = tl.make_block_ptr(q, (K, T), (1, H*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
+            p_k = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_q = tl.make_block_ptr(q, (K, T), (1, Hq*K), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
 
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -542,7 +546,9 @@ def chunk_fwd_o(
     use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> torch.Tensor:
-    B, T, H, K, V = *q.shape, v.shape[-1]
+    B, T, Hq, K = q.shape
+    V = v.shape[-1]
+    H = v.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -565,6 +571,7 @@ def chunk_fwd_o(
         scale=scale,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=BT,
@@ -587,7 +594,9 @@ def chunk_bwd_dv(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = False,
 ) -> torch.Tensor:
-    B, T, H, K, V = *k.shape, do.shape[-1]
+    B, T, Hq, K = k.shape
+    V = do.shape[-1]
+    H = do.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -620,6 +629,7 @@ def chunk_bwd_dv(
         scale=scale,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=BT,
@@ -643,7 +653,9 @@ def chunk_bwd_dv_local(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = False,
 ) -> torch.Tensor:
-    B, T, H, K, V = *k.shape, do.shape[-1]
+    B, T, Hq, K = k.shape
+    V = do.shape[-1]
+    H = do.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -673,6 +685,7 @@ def chunk_bwd_dv_local(
         scale=scale,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=BT,
@@ -702,7 +715,9 @@ def chunk_bwd_dqkwg(
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-    B, T, H, K, V = *k.shape, v.shape[-1]
+    B, T, Hq, K = k.shape
+    V = v.shape[-1]
+    H = v.shape[2]
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
@@ -717,8 +732,8 @@ def chunk_bwd_dqkwg(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NK = triton.cdiv(K, BK)
-    dq = torch.empty_like(q)
-    dk = torch.empty_like(k)
+    dq = q.new_empty(B, T, H, K)
+    dk = k.new_empty(B, T, H, K)
     dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
     dw = torch.empty_like(w) if w is not None else None
 
@@ -743,6 +758,7 @@ def chunk_bwd_dqkwg(
         B=B,
         T=T,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=BT,
@@ -752,6 +768,9 @@ def chunk_bwd_dqkwg(
         TRANSPOSE_STATE=transpose_state_layout,
     )
 
+    if Hq != H:
+        dq = dq.view(B, T, Hq, H // Hq, K).sum(3)
+        dk = dk.view(B, T, Hq, H // Hq, K).sum(3)
     if dg is not None:
         dg = dg.sum(0)
     return dq, dk, dw, dg

@@ -55,11 +55,11 @@ def check_environments():
             )
 
     triton_version = version.parse(triton.__version__)
-    required_triton_version = version.parse("3.2.0")
+    required_triton_version = version.parse("3.3.0")
 
     if triton_version < required_triton_version:
         logger.warning(
-            f"Current Triton version {triton_version} is below the recommended 3.2.0 version. "
+            f"Current Triton version {triton_version} is below the recommended 3.3.0 version. "
             "Errors may occur and these issues will not be fixed. "
             "Please consider upgrading Triton.",
         )

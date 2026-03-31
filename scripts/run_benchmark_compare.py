@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -68,12 +70,35 @@ def get_changed_files(base: str, head: str) -> list[str]:
     return [f for f in out.split('\n') if f]
 
 
-def find_affected_op_names(changed_files: list[str]) -> list[str]:
-    """Map changed file paths to registered op names.
+def _ops_subdirs_from_flapy_imports(relpath: str) -> set[str]:
+    path = PROJECT_ROOT / relpath
+    if not path.is_file():
+        return set()
+    try:
+        text = path.read_text(encoding='utf-8')
+        tree = ast.parse(text, filename=relpath)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return set()
 
-    Parses fla/ops/<dir>/ from each path and looks up the registry.
-    Changes in fla/ops/common/ or fla/ops/utils/ affect ALL ops.
-    """
+    subdirs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            mod = node.module or ''
+            if mod == 'fla.ops' or mod.startswith('fla.ops.'):
+                parts = mod.split('.')
+                if len(parts) >= 3 and parts[0] == 'fla' and parts[1] == 'ops':
+                    subdirs.add(parts[2])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.name
+                if name.startswith('fla.ops.'):
+                    parts = name.split('.')
+                    if len(parts) >= 3 and parts[0] == 'fla' and parts[1] == 'ops':
+                        subdirs.add(parts[2])
+    return subdirs
+
+
+def find_affected_op_names(changed_files: list[str]) -> list[str]:
     try:
         sys.path.insert(0, str(PROJECT_ROOT / 'benchmarks' / 'ops'))
         from registry import _REGISTRY
@@ -99,6 +124,9 @@ def find_affected_op_names(changed_files: list[str]) -> list[str]:
         m = _OP_DIR_RE.match(fpath)
         if m:
             affected_dirs.add(m.group(1))
+
+        if fpath.startswith('fla/') and not m:
+            affected_dirs.update(_ops_subdirs_from_flapy_imports(fpath))
 
     if common_changed:
         return sorted(_REGISTRY.keys())
@@ -174,10 +202,13 @@ def _truncate(s: str, max_len: int = 8) -> str:
 
 def print_comparison(base_results: list[dict], head_results: list[dict],
                      base_sha: str, head_sha: str, threshold: float,
-                     machine_info: dict | None = None):
+                     machine_info: dict | None = None) -> tuple[int, list, list]:
     """Print a comparison table with speedup ratios and detect regressions.
 
     Rows are grouped by mode with a blank line between fwd and fwdbwd.
+
+    Returns:
+        tuple of (exit_code, regressions, speedups)
     """
 
     def make_key(r):
@@ -214,6 +245,7 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
           f"  {'-' * col_w} {'-' * col_w} {'-' * 8} {'-' * 8}")
 
     regressions = []
+    speedups = []
     prev_mode = None
     for key in all_keys:
         op, mode, B, T, H, D = key
@@ -237,11 +269,15 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
             if change_pct > threshold:
                 marker = ' <<< REGRESSION'
             elif change_pct < -threshold:
-                marker = ' SPEEDUP'
+                marker = ' <<< SPEEDUP'
+            else:
+                marker = ''
             print(f"{prefix}  {base_ms:>{col_w}.3f} {head_ms:>{col_w}.3f} {speedup:>7.2f}x "
                   f"{sign}{change_pct:>6.1f}%{marker}")
             if change_pct > threshold:
                 regressions.append((key, base_ms, head_ms, change_pct))
+            elif change_pct < -threshold:
+                speedups.append((key, base_ms, head_ms, change_pct))
         elif head_r:
             print(f"{prefix}  {'-':>{col_w}s} {head_r['median_ms']:>{col_w}.3f} {'':>8s} {'new':>8s}")
         elif base_r:
@@ -253,10 +289,16 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
         print(f"\n  WARNING: {len(regressions)} regression(s) detected (>{threshold}% slower):")
         for key, base_ms, head_ms, pct in regressions:
             print(f"    {key}: {base_ms:.3f} -> {head_ms:.3f} ms (+{pct:.1f}%)")
-        return 1
-    else:
+
+    if speedups:
+        print(f"\n  INFO: {len(speedups)} speedup(s) detected (<-{threshold}% faster):")
+        for key, base_ms, head_ms, pct in speedups:
+            print(f"    {key}: {base_ms:.3f} -> {head_ms:.3f} ms ({pct:.1f}%)")
+
+    if not regressions:
         print(f"\n  No regressions detected (threshold: {threshold}%).")
-        return 0
+
+    return (1 if regressions else 0, regressions, speedups)
 
 
 def main():
@@ -268,6 +310,8 @@ def main():
     parser.add_argument("--threshold", type=float, default=5.0,
                         help="Regression threshold in percent (default: 5.0)")
     parser.add_argument("--output", help="Save comparison results to JSON file")
+    parser.add_argument("--no-fail-on-regression", action="store_true",
+                        help="Do not exit with non-zero code on performance regression")
     args = parser.parse_args()
 
     # Resolve commit SHAs
@@ -325,6 +369,13 @@ def main():
                 head_results = data.get('results', [])
                 machine_info = data.get('machine_info')
 
+        cooldown = int(os.environ.get('FLA_BENCH_COOLDOWN_SEC', '0'))
+        if cooldown > 0:
+            print(
+                f"\n  Waiting {cooldown}s before base benchmark "
+                f"(FLA_BENCH_COOLDOWN_SEC; reduces thermal bias between runs).\n")
+            time.sleep(cooldown)
+
         # Step 2: BASE
         print(f"\n{'=' * 60}")
         print(f"  Running benchmarks at BASE ({base_sha})")
@@ -349,7 +400,7 @@ def main():
             print("Warning: missing results from one or both commits.", file=sys.stderr)
             sys.exit(1)
 
-        exit_code = print_comparison(
+        exit_code, regressions, speedups = print_comparison(
             base_results, head_results,
             base_sha, head_sha, args.threshold,
             machine_info=machine_info,
@@ -363,11 +414,32 @@ def main():
                 'machine_info': machine_info,
                 'base_results': base_results,
                 'head_results': head_results,
+                'regressions': [
+                    {
+                        'op': key[0], 'mode': key[1], 'B': key[2], 'T': key[3],
+                        'H': key[4], 'D': key[5],
+                        'base_ms': base_ms, 'head_ms': head_ms, 'change_pct': change_pct
+                    }
+                    for key, base_ms, head_ms, change_pct in regressions
+                ],
+                'speedups': [
+                    {
+                        'op': key[0], 'mode': key[1], 'B': key[2], 'T': key[3],
+                        'H': key[4], 'D': key[5],
+                        'base_ms': base_ms, 'head_ms': head_ms, 'change_pct': change_pct
+                    }
+                    for key, base_ms, head_ms, change_pct in speedups
+                ],
+                'has_regression': len(regressions) > 0,
+                'has_speedup': len(speedups) > 0,
             }
             with open(args.output, 'w') as f:
                 json.dump(comparison, f, indent=2)
             print(f"\nFull results saved to {args.output}")
 
+        if args.no_fail_on_regression:
+            print("\n  --no-fail-on-regression set, exiting with code 0 despite regressions.")
+            sys.exit(0)
         sys.exit(exit_code)
 
     finally:

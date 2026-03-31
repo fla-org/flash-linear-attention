@@ -86,7 +86,9 @@ def _raw_chunk_gated_delta_rule_fwd_h(
     use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    B, T, H, K, V = *k.shape, u.shape[-1]
+    B, T, Hq, K = k.shape
+    V = u.shape[-1]
+    H = u.shape[2]
     BT = chunk_size
 
     if chunk_indices is None and cu_seqlens is not None:
@@ -111,7 +113,7 @@ def _raw_chunk_gated_delta_rule_fwd_h(
         k=k, v=u, w=w, v_new=v_new,
         g=g, gk=gk, h=h, h0=initial_state, ht=final_state,
         cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
-        T=T, H=H, K=K, V=V, BT=BT, USE_EXP2=use_exp2,
+        T=T, H=H, Hq=Hq, K=K, V=V, BT=BT, USE_EXP2=use_exp2,
         TRANSPOSE_STATE=transpose_state_layout,
     )
     return h, v_new, final_state
@@ -235,13 +237,15 @@ def intracard_pre_scan(
     kg: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    gk: torch.Tensor,
+    g: torch.Tensor | None,
+    gk: torch.Tensor | None,
     cu_seqlens_subseq_split: torch.Tensor,
     S_split: int,
     chunk_size: int = 64,
     use_exp2: bool = True,
 ):
-    H, K, V = kg.shape[2], kg.shape[3], u.shape[3]
+    Hq, K, V = kg.shape[2], kg.shape[3], u.shape[3]
+    H = u.shape[2]
     BK = triton.next_power_of_2(K)
     BLOCK_SIZE = 32 if K <= 64 else 64
 
@@ -252,12 +256,13 @@ def intracard_pre_scan(
         k=kg,
         v=u,
         w=w,
-        g=None,
+        g=g,
         gk=gk,
         hm=hm,
         cu_seqlens=cu_seqlens_subseq_split,
         T=0,
         H=H,
+        Hq=Hq,
         K=K,
         V=V,
         BT=chunk_size,
@@ -430,7 +435,9 @@ def intracard_fwd_h(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
 
-    _, _, H, K, V = *k.shape, u.shape[-1]
+    _, _, _Hq, K = k.shape
+    V = u.shape[-1]
+    H = u.shape[2]
     device = k.device
 
     if cu_seqlens_cpu is None:
@@ -542,7 +549,7 @@ def intracard_fwd_h(
             _intracard_cache.popitem(last=False)
 
     hm = intracard_pre_scan(
-        kg=k, w=w, u=u, gk=gk,
+        kg=k, w=w, u=u, g=g, gk=gk,
         cu_seqlens_subseq_split=cu_seqlens_split_flat,
         S_split=S_split_total,
         chunk_size=chunk_size,

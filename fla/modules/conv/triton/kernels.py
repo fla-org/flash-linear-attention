@@ -426,8 +426,8 @@ def compute_dh0_kernel(
 
     # Get sequence boundaries
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         seq_len = eos - bos
         # For varlen, dy is [1, total_T, D], offset by bos
         dy_base = dy + bos * stride_dy_t
@@ -501,9 +501,9 @@ def causal_conv1d_states_fwd_kernel(
     m_d = o_d < D
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        seq_len = eos - bos
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        seq_len = (eos - bos).to(tl.int32)
         p_x = x + bos * stride_x_t
     else:
         seq_len = T

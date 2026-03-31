@@ -43,6 +43,11 @@ jobs:
     runs-on: ${{ inputs.runner }}
     env:
       FLA_CI_ENV: 1
+      # Longer Triton timing windows + pause between commits reduce clock/thermal variance.
+      FLA_BENCH_WARMUP_MS: 40
+      FLA_BENCH_REP_MS: 200
+      FLA_BENCH_OP_WARMUP_ITERS: 6
+      FLA_BENCH_COOLDOWN_SEC: 3
 
     steps:
       - name: Check out repo (full history for cross-commit comparison)
@@ -112,12 +117,14 @@ jobs:
 
       - name: Run benchmark comparison
         if: steps.check_skip.outputs.skip_bench == 'false'
+        id: benchmark
         shell: bash
         run: |
           $CONDA_BIN_PATH/python scripts/run_benchmark_compare.py \
             --base ${{ inputs.base_ref }} \
             --head HEAD \
             --threshold ${{ inputs.threshold }} \
+            --no-fail-on-regression \
             --output benchmark_results.json
 
       - name: Upload benchmark results
@@ -128,3 +135,107 @@ jobs:
           path: benchmark_results.json
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Post benchmark results to PR
+        if: steps.check_skip.outputs.skip_bench == 'false' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'benchmark_results.json';
+
+            if (!fs.existsSync(path)) {
+              console.log('No benchmark results file found');
+              return;
+            }
+
+            const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const { base_sha, head_sha, machine_info, regressions, speedups, has_regression, has_speedup } = data;
+
+            const gpuName = machine_info?.gpu_name || 'Unknown';
+            const cudaVersion = machine_info?.cuda_version || 'Unknown';
+            const pytorchVersion = machine_info?.pytorch_version || 'Unknown';
+            const runnerName = '${{ inputs.runner }}';
+
+            // Format the summary table
+            let summary = '';
+            if (has_regression || has_speedup) {
+              summary = '| Op | Mode | B | T | H | D | Base (ms) | Head (ms) | Change |\n';
+              summary += '|:---|:---:|---:|---:|---:|---:|---:|---:|---:|\n';
+
+              // Add regressions
+              if (regressions && regressions.length > 0) {
+                for (const r of regressions) {
+                  const change = `+${r.change_pct.toFixed(1)}% 🔴`;
+                  summary += `| ${r.op} | ${r.mode} | ${r.B} | ${r.T} | ${r.H} | ${r.D} | ${r.base_ms.toFixed(3)} | ${r.head_ms.toFixed(3)} | ${change} |\n`;
+                }
+              }
+
+              // Add speedups
+              if (speedups && speedups.length > 0) {
+                for (const s of speedups) {
+                  const change = `${s.change_pct.toFixed(1)}% 🟢`;
+                  summary += `| ${s.op} | ${s.mode} | ${s.B} | ${s.T} | ${s.H} | ${s.D} | ${s.base_ms.toFixed(3)} | ${s.head_ms.toFixed(3)} | ${change} |\n`;
+                }
+              }
+            }
+
+            // Build the comment body
+            const statusEmoji = has_regression ? '⚠️' : '✅';
+            const statusText = has_regression
+              ? `${regressions.length} regression(s) detected`
+              : 'No significant performance regressions detected';
+
+            let body = `## ${statusEmoji} Benchmark Results (${runnerName.toUpperCase()})\n\n`;
+            body += `**Status:** ${statusText}\n\n`;
+            body += `| | |\n`;
+            body += `|:---|:---|\n`;
+            body += `| **GPU** | ${gpuName} |\n`;
+            body += `| **CUDA** | ${cudaVersion} |\n`;
+            body += `| **PyTorch** | ${pytorchVersion} |\n`;
+            body += `| **Base** | \`${base_sha}\` |\n`;
+            body += `| **Head** | \`${head_sha}\` |\n`;
+            body += `| **Threshold** | ${{ inputs.threshold }}% |\n\n`;
+
+            if (has_regression || has_speedup) {
+              body += `<details>\n<summary>📊 View Details (${(regressions?.length || 0) + (speedups?.length || 0)} significant changes)</summary>\n\n`;
+              body += summary;
+              body += '\n</details>\n';
+            } else {
+              body += '> All benchmarked operations are within the performance threshold.\n';
+            }
+
+            body += '\n---\n';
+            body += '*This comment is automatically updated with the latest benchmark results.*';
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes(`Benchmark Results (${runnerName.toUpperCase()})`)
+            );
+
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body,
+              });
+              console.log(`Updated existing benchmark comment for ${runnerName}`);
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+              console.log(`Created new benchmark comment for ${runnerName}`);
+            }

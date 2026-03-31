@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 import warnings
 
@@ -322,11 +322,12 @@ def chunk_gated_delta_rule(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]`.
+            queries of shape `[B, T, Hq, K]` where `Hq` is the number of query/key heads.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            keys of shape `[B, T, Hq, K]` where `Hq` is the number of query/key heads.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            values of shape `[B, T, H, V]` where `H` is the number of value/output heads.
+            For standard attention, `Hq == H`. For GQA, `H % Hq == 0`.
         g (torch.Tensor):
             (forget) gating tensor (in log space!) of shape `[B, T, H]`.
         beta (torch.Tensor):
@@ -345,6 +346,13 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        cp_context (Optional[FLACPContext]):
+            Context parallel context for distributed training across multiple devices.
+            When provided, `initial_state` and `output_final_state` are not supported,
+            and `cu_seqlens` will be overridden by the context. Default: `None`.
+        transpose_state_layout (Optional[bool]):
+            Whether to use the transposed state layout for the hidden state.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -381,6 +389,14 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    # Validate GQA head divisibility
+    Hq, H = q.shape[2], v.shape[2]
+    if H % Hq != 0:
+        raise ValueError(
+            f"For GQA, num_heads (H={H}) must be evenly divisible by "
+            f"num_kv_heads (Hq={Hq}), but got H % Hq = {H % Hq}"
+        )
+
     if 'head_first' in kwargs:
         warnings.warn(
             "head_first is deprecated and will be removed in a future version. "

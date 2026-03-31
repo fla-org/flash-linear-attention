@@ -85,7 +85,7 @@ def test_groupnorm(B: int, T: int, D: int, G: int, is_rms_norm: bool):
 @pytest.mark.parametrize("B", [2])
 @pytest.mark.parametrize("H", [2])
 @pytest.mark.parametrize("T", [512])
-@pytest.mark.parametrize("D", [50, 64, 128])
+@pytest.mark.parametrize("D", [50, 64, 128, 256])
 def test_rmsnorm(B: int, H: int, T: int, D: int):
     x = torch.randn(B, H, T, D).to(device).requires_grad_(True)
     ref = LlamaRMSNorm(D, eps=0).to(device)
@@ -215,3 +215,111 @@ def test_rmsnorm_linear(N: int, D: int):
     assert_close(' dw', ref_dw, tri_dw, 1e-3)
     assert_close('dlw', ref_dlw, tri_dlw, 1e-3)
     assert_close('dlb', ref_dlb, tri_dlb, 1e-3)
+
+
+# ============================================================
+# Regression tests: layer_norm_bwd_kernel with few tokens
+# ============================================================
+#
+# On GPUs with many SMs (e.g., Blackwell B200 with 160+ SMs),
+# when T (total tokens) is small relative to the SM count,
+# some Triton programs in layer_norm_bwd_kernel have no work
+# (i_sg * BS >= T // G). Without an early-exit guard, these
+# idle programs access invalid memory via make_block_ptr,
+# causing "CUDA error: illegal memory access."
+#
+# The bug triggers when:
+#   NS = cdiv(SM_count, G) * G > T
+# i.e., more programs launched than tokens to process.
+#
+# These tests use small T values to ensure the backward kernel
+# handles idle programs correctly on any GPU.
+
+
+@pytest.mark.parametrize("T", [1, 2, 4, 8, 16, 32])
+@pytest.mark.parametrize("D", [128, 256, 512])
+def test_rmsnorm_small_t(T: int, D: int):
+    """RMSNorm backward must handle T < SM_count without illegal memory access."""
+    x = torch.randn(T, D).to(device).requires_grad_(True)
+    ref = LlamaRMSNorm(D, eps=0).to(device)
+    tri = RMSNorm(D, eps=0).to(device)
+    nn.init.normal_(ref.weight)
+    tri.weight.data.copy_(ref.weight.data)
+
+    ref_y = ref(x)
+    tri_y = tri(x)
+    assert_close(' y', ref_y, tri_y, 1e-3)
+
+    ref_dx = torch.autograd.grad(ref(x).sum(), x)[0]
+    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
+
+    ref_dw = torch.autograd.grad(ref(x).sum(), ref.weight)[0]
+    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
+    assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+
+@pytest.mark.parametrize("T", [1, 2, 4, 8, 16, 32])
+@pytest.mark.parametrize("D", [128, 256, 512])
+def test_layernorm_small_t(T: int, D: int):
+    """LayerNorm backward must handle T < SM_count without illegal memory access."""
+    x = torch.randn(T, D).to(device).requires_grad_(True)
+    ref = nn.LayerNorm(D, elementwise_affine=True, bias=True).to(device)
+    tri = LayerNorm(D, elementwise_affine=True, bias=True).to(device)
+    nn.init.normal_(ref.weight)
+    nn.init.normal_(ref.bias)
+    tri.weight.data.copy_(ref.weight.data)
+    tri.bias.data.copy_(ref.bias.data)
+
+    ref_y = ref(x)
+    tri_y = tri(x)
+    assert_close(' y', ref_y, tri_y, 1e-3)
+
+    ref_dx = torch.autograd.grad(ref(x).sum(), x)[0]
+    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
+
+    ref_dw = torch.autograd.grad(ref(x).sum(), ref.weight)[0]
+    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
+    assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+    ref_db = torch.autograd.grad(ref(x).sum(), ref.bias)[0]
+    tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0]
+    assert_close('db', ref_db, tri_db, 1e-3)
+
+
+@pytest.mark.parametrize("T", [1, 4, 16])
+@pytest.mark.parametrize("D", [128, 256])
+@pytest.mark.parametrize("G", [1, 4])
+@pytest.mark.parametrize("is_rms_norm", [True, False])
+def test_groupnorm_small_t(T: int, D: int, G: int, is_rms_norm: bool):
+    """GroupNorm backward must handle T < SM_count without illegal memory access."""
+    torch.manual_seed(42)
+    x = torch.randn(1, T, D).to(device).requires_grad_(True)
+    if is_rms_norm:
+        ref = GroupNormRef(num_groups=G, hidden_size=D, bias=True, is_rms_norm=True).to(device)
+    else:
+        ref = nn.GroupNorm(G, D).to(device)
+    tri = GroupNorm(G, D, bias=True, is_rms_norm=is_rms_norm).to(device)
+    nn.init.normal_(ref.weight)
+    nn.init.normal_(ref.bias)
+    tri.weight.data.copy_(ref.weight.data)
+    tri.bias.data.copy_(ref.bias.data)
+    ref = ref.to(dtype=torch.float32)
+
+    ref_x = x.reshape(T, D).to(dtype=torch.float32)
+    ref_y = ref(ref_x).reshape(1, T, D)
+    tri_y = tri(x)
+    assert_close(' y', ref_y, tri_y, 1e-3)
+
+    ref_dx = torch.autograd.grad(ref(ref_x).sum(), x)[0]
+    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
+
+    ref_dw = torch.autograd.grad(ref(ref_x).sum(), ref.weight)[0]
+    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
+    assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+    ref_db = torch.autograd.grad(ref(ref_x).sum(), ref.bias)[0]
+    tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0]
+    assert_close('db', ref_db, tri_db, 1e-3)
