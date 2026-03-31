@@ -156,8 +156,8 @@ class CachedAutotuner(Autotuner):
 
 
 def fla_cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=None, restore_value=None,
-                   pre_hook=None, post_hook=None, warmup=None, rep=None, use_cuda_graph=False,
-                   do_bench=None, cache_results=False):
+                       pre_hook=None, post_hook=None, warmup=None, rep=None, use_cuda_graph=False,
+                       do_bench=None, cache_results=False):
     """
     Decorator for auto-tuning a :code:`triton.jit`'d function with FLA config support.
 
