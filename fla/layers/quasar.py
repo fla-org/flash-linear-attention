@@ -234,9 +234,6 @@ class QuasarAttention(nn.Module):
         k = rearrange(k, "... (h d) -> ... h d", d=self.head_dim)
         v = rearrange(v, "... (h d) -> ... h d", d=self.head_dim)
 
-        if torch.isnan(q).any(): pass # print("!!! NAN IN Q (before RoPE)", flush=True)
-        if torch.isnan(v).any(): pass # print("!!! NAN IN V", flush=True)
-
         # Apply RoPE if provided
         cos = kwargs.get("cos")
         sin = kwargs.get("sin")
