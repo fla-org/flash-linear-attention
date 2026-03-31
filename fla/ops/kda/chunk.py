@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 # Related files are modified and supported by the Moonshot AI Team
 
 import torch
@@ -216,6 +216,13 @@ def chunk_kda(
             If True, returns intermediate state `h` for inference scenarios (e.g., vLLM).
             Must be used within `torch.inference_mode()` and will return a 3-tuple instead of 2-tuple.
             This is not intended for training as it bypasses autograd. Default: `False`.
+        cp_context (Optional[FLACPContext]):
+            Context parallel context for distributed training across multiple devices.
+            When provided, `initial_state` and `output_final_state` are not supported,
+            and `cu_seqlens` will be overridden by the context. Default: `None`.
+        transpose_state_layout (Optional[bool]):
+            Whether to use the transposed state layout for the hidden state.
+            Default: `False`.
 
     Returns:
         - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
@@ -231,7 +238,9 @@ def chunk_kda(
             h (torch.Tensor):
                 Intermediate states of shape `[B, NT, H, K, V]` and dtype `bfloat16` for caching or further processing.
                 - For equal-length sequences: `NT = #chunks_per_sequence` (typically `ceil(T / chunk_size)`)
-                - For variable-length sequences (cu_seqlens): B is always 1 (flattened), NT is the total number of chunks across all sequences, determined by `prepare_chunk_indices(cu_seqlens, chunk_size)`
+                - For variable-length sequences (cu_seqlens): B is always 1 (flattened),
+                  NT is the total number of chunks across all sequences,
+                  determined by `prepare_chunk_indices(cu_seqlens, chunk_size)`
 
     Examples::
         >>> import torch

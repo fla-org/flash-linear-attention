@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 import warnings
 
@@ -346,6 +346,13 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        cp_context (Optional[FLACPContext]):
+            Context parallel context for distributed training across multiple devices.
+            When provided, `initial_state` and `output_final_state` are not supported,
+            and `cu_seqlens` will be overridden by the context. Default: `None`.
+        transpose_state_layout (Optional[bool]):
+            Whether to use the transposed state layout for the hidden state.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
