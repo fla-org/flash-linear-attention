@@ -181,10 +181,10 @@ def config_preference_key(config: dict[str, object] | None) -> tuple[object, ...
     if not isinstance(config, dict):
         return ((3, float('inf')), float('inf'), float('inf'), (float('inf'),))
     return (
+        kwargs_preference_key(config.get("kwargs")),
         num_stages_preference_key(config.get("num_stages")),
         config.get("num_warps", float('inf')),
         config.get("num_ctas", float('inf')),
-        kwargs_preference_key(config.get("kwargs")),
     )
 
 
