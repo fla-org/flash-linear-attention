@@ -237,9 +237,6 @@ def chunk_quasar_bwd_kernel_wy_dqkb_fused(
 
         b_db += tl.sum(b_dkgb * b_k, 1)
 
-        p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-        b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_kdk = b_k * b_dk
         b_dk = b_dk + b_dkgb * b_beta[:, None]
 
         p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
