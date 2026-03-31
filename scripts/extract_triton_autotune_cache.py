@@ -12,6 +12,9 @@ Usage:
     # Generate cache for GDN
     python scripts/extract_triton_autotune_cache.py -g --op gdn
 
+    # Generate cache for both KDA and GDN
+    python scripts/extract_triton_autotune_cache.py -g --op both
+
     # Specify head_dim (affects autotune results)
     python scripts/extract_triton_autotune_cache.py -g -d 64
 
@@ -19,7 +22,7 @@ Usage:
     python scripts/extract_triton_autotune_cache.py -l
 
 The output files are saved to fla/configs/{GPU}/{kernel_name}.json
-Each file contains the best_config fields plus kernel_name and key for inspection.
+Each file contains the best_config fields plus kernel_name for inspection.
 """
 
 import argparse
@@ -275,7 +278,6 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
             output_data = {
                 **result["best_config"],
                 "kernel_name": kernel_name,
-                "key": result["cache_key"],
             }
             status, backup_file = save_extracted_config(output_file, output_data)
 
@@ -337,9 +339,9 @@ def main():
     )
     parser.add_argument(
         '--op',
-        choices=('kda', 'gdn'),
-        default='kda',
-        help='FLA op used to generate the Triton cache (default: kda)'
+        choices=('kda', 'gdn', 'both'),
+        default='both',
+        help='FLA op used to generate the Triton cache (default: both)'
     )
     parser.add_argument(
         '--head-dim', '-d',
@@ -413,7 +415,8 @@ def prepare_kernel_cache_tensors(head_dim: int, *, torch, device):
 
 
 def generate_kda_cache(head_dim: int, *, torch, device):
-    from fla.ops.kda import chunk_kda
+    from fla.ops.kda import chunk_kda, fused_recurrent_kda
+    from fla.ops.kda.gate import fused_kda_gate
     q, k, v, g, beta, h0, do, dht, A_log, dt_bias = prepare_kernel_cache_tensors(
         head_dim,
         torch=torch,
@@ -454,6 +457,18 @@ def generate_kda_cache(head_dim: int, *, torch, device):
         lower_bound=-5,
     )
     ((tri0 * do).sum() + (tri_ht0 * dht).sum()).backward()
+
+    g = fused_kda_gate(g=g.clone(), A_log=A_log.clone(), dt_bias=dt_bias.clone())
+    fused_recurrent_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g,
+        beta=beta.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
 
 
 def generate_gdn_cache(head_dim: int, *, torch, device):
@@ -518,11 +533,11 @@ def generate_fla_cache(op: str = 'kda', head_dim: int = 128, triton_cache_dir: s
 
     print(f"Using FLA Triton cache directory: {fla_triton_cache}")
 
-    if op == 'kda':
+    if op in ('kda', 'both'):
         generate_kda_cache(head_dim, torch=torch, device=device)
-    elif op == 'gdn':
+    if op in ('gdn', 'both'):
         generate_gdn_cache(head_dim, torch=torch, device=device)
-    else:
+    elif op != 'kda':
         raise ValueError(f"Unsupported op: {op}")
 
     generate_conv_cache(head_dim, torch=torch, device=device)

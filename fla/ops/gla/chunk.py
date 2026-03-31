@@ -6,6 +6,7 @@ import triton.language as tl
 
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.cumsum import chunk_local_cumsum
 from fla.ops.utils.op import exp, exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
@@ -293,7 +294,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_merge(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64]
