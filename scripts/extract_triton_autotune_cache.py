@@ -35,7 +35,6 @@ import argparse
 import copy
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -643,10 +642,10 @@ def generate_fla_cache(
     # Store FLA autotune results under fla_triton_cache/ to keep them separate from other Triton kernels
     fla_triton_cache = get_triton_cache_dir(triton_cache_dir) / "fla_triton_cache"
 
-    # Clear and create the directory
-    if fla_triton_cache.exists():
-        shutil.rmtree(fla_triton_cache)
+    # Keep the cache directory and only clear extracted autotune records.
     fla_triton_cache.mkdir(parents=True, exist_ok=True)
+    for autotune_file in fla_triton_cache.rglob("*.autotune.json"):
+        autotune_file.unlink()
     os.environ["TRITON_CACHE_DIR"] = str(fla_triton_cache)
 
     print(f"Using FLA Triton cache directory: {fla_triton_cache}")
