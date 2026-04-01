@@ -566,7 +566,7 @@ def test_chunk_varlen(
     safe_gate: bool,
     disable_recompute: bool,
 ):
-    if os.getenv("FLA_DISABLE_CACHE") == "0" and D in (64, 256):
+    if os.getenv("FLA_CACHE_MODE", "disabled") != "disabled" and D in (64, 256):
         pytest.skip(reason="Skipping D=64/256 varlen KDA case when FLA cache is enabled")
     torch.manual_seed(42)
     # randomly split the sequence into N segments
@@ -684,7 +684,7 @@ def test_chunk_varlen_prefill(
     safe_gate: bool,
     disable_recompute: bool,
 ):
-    if os.getenv("FLA_DISABLE_CACHE") == "0" and D == 256:
+    if os.getenv("FLA_CACHE_MODE", "disabled") != "disabled" and D == 256:
         pytest.skip(reason="Skipping D=256 varlen KDA prefill case when FLA cache is enabled")
     torch.manual_seed(42)
     # randomly split the sequence into N segments

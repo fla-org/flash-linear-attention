@@ -15,411 +15,60 @@ Usage:
     # Generate cache for both KDA and GDN
     python scripts/extract_triton_autotune_cache.py -g --op both
 
-    # Specify head_dim (affects autotune results)
+    # Specify a single head_dim (affects autotune results)
     python scripts/extract_triton_autotune_cache.py -g -d 64
 
-    # Generate cache for the common head_dim set (64, 128, 256)
-    python scripts/extract_triton_autotune_cache.py -g --all-head-dims
+    # Generate cache for multiple head_dims in one run
+    python scripts/extract_triton_autotune_cache.py -g -d 64 128 256
 
-    # Generate cache for both ops across the pytest head_dim set (64, 128, 256)
-    python scripts/extract_triton_autotune_cache.py -g --all-head-dims --op both
+    # Generate cache for both ops across multiple head_dims
+    python scripts/extract_triton_autotune_cache.py -g --op both -d 64 128 256
 
     # List available cache files without extracting
     python scripts/extract_triton_autotune_cache.py -l
 
-The output files are saved to fla/configs/{GPU}/{kernel_name}.json
+The output files are saved to get_fla_config_dir()/{kernel_name}.json
 Each file contains one or more autotune entries keyed by Triton's runtime key.
 """
 
 import argparse
-import copy
-import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
-import triton
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-os.environ['FLA_DISABLE_CACHE'] = '1'
 
+os.environ['FLA_CACHE_MODE'] = 'disabled'
 
-def get_gpu_info() -> str:
-    from fla.ops.utils.cache import get_gpu_info as load_gpu_info
-    return load_gpu_info()
 
+def resolve_output_dir(output_dir: str | None, *, versioned: bool) -> Path:
+    if output_dir is not None:
+        return Path(output_dir)
 
-def get_fla_config_dir() -> Path:
-    from fla.ops.utils.cache import get_fla_config_dir as load_fla_config_dir
-    return load_fla_config_dir()
+    import triton
 
+    from fla.ops.utils.cache import get_fla_config_dir
 
-def get_triton_cache_dir(path: str | None = None) -> Path:
-    """Get Triton's cache directory via Triton's internal API."""
-    if path is not None:
-        return Path(path)
-    from triton.runtime.cache import knobs
-    return Path(knobs.cache.dir)
-
-
-def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
-    """
-    Process a single Triton autotune.json file and extract best config.
-
-    Returns:
-        Dictionary with kernel info and best config, or None if invalid
-    """
-    try:
-        with open(autotune_file) as f:
-            data = json.load(f)
-
-        if not isinstance(data, dict) or "configs_timings" not in data:
-            return None
-
-        # Extract kernel info from the file path or content
-        # Example path: ~/.triton/cache/a1b2c3d4/fused_recurrent_fwd_jit_functionn_12345.autotune.json
-        parts = autotune_file.stem.split('.')
-        if len(parts) >= 2:
-            kernel_name = parts[0]
-        else:
-            kernel_name = "unknown_kernel"
-
-        # Find the best config (minimum timing)
-        configs_timings = data["configs_timings"]
-        if not configs_timings:
-            return None
-
-        def timing_key(entry):
-            t = entry[1]
-            return (t,) if isinstance(t, (int, float)) else tuple(t)
-
-        # configs_timings is a list of [config_dict, timing]
-        best_entry = min(configs_timings, key=timing_key)
-        best_config_dict = best_entry[0]
-        best_timing = best_entry[1]
-
-        # Build output data structure
-        result = {
-            "kernel_name": kernel_name,
-            "source_file": str(autotune_file),
-            "cache_key": data.get("key", "unknown"),
-            "timestamp": data.get("timestamp", 0),
-            "best_config": best_config_dict,
-            "best_timing": best_timing,
-            "total_configs_tested": len(configs_timings),
-        }
-
-        return result
-
-    except Exception as e:
-        print(f"Error processing {autotune_file}: {e}")
-        return None
-
-
-def timing_value_key(value: object) -> tuple[float, ...]:
-    if isinstance(value, (int, float)):
-        return (float(value),)
-    if isinstance(value, (list, tuple)):
-        return tuple(float(v) for v in value)
-    return (float('inf'),)
-
-
-def normalize_autotune_key(value: object) -> object:
-    if isinstance(value, tuple):
-        return [normalize_autotune_key(v) for v in value]
-    if isinstance(value, list):
-        return [normalize_autotune_key(v) for v in value]
-    if isinstance(value, dict):
-        return {k: normalize_autotune_key(v) for k, v in value.items()}
-    return value
-
-
-def serialize_autotune_key(value: object) -> str:
-    return json.dumps(normalize_autotune_key(value), separators=(",", ":"), sort_keys=True)
-
-
-def build_autotune_entry(result: dict[str, Any]) -> dict[str, object]:
-    return {
-        "autotune_key": normalize_autotune_key(result["cache_key"]),
-        "config": result["best_config"],
-        "best_timing": result["best_timing"],
-    }
-
-
-def extract_default_config(config: object) -> dict[str, object] | None:
-    if not isinstance(config, dict):
-        return None
-    kwargs = config.get("kwargs")
-    if not isinstance(kwargs, dict):
-        return None
-    return {
-        "kwargs": copy.deepcopy(kwargs),
-        "num_warps": config.get("num_warps", 4),
-        "num_ctas": config.get("num_ctas", 1),
-        "num_stages": config.get("num_stages", 2),
-    }
-
-
-def update_default_config(output_data: dict[str, object]) -> None:
-    entries = output_data.get("autotune_entries")
-    if not isinstance(entries, list):
-        output_data.pop("default_config", None)
-        return
-
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        default_config = extract_default_config(entry.get("config"))
-        if default_config is not None:
-            output_data["default_config"] = default_config
-            return
-    output_data.pop("default_config", None)
-
-
-def normalize_output_data(existing_data: object, kernel_name: str) -> dict[str, object]:
-    if isinstance(existing_data, dict) and isinstance(existing_data.get("autotune_entries"), list):
-        normalized: dict[str, object] = {
-            "kernel_name": existing_data.get("kernel_name", kernel_name),
-            "triton_version": existing_data.get("triton_version", triton.__version__),
-            "autotune_entries": copy.deepcopy(existing_data["autotune_entries"]),
-        }
-        if isinstance(existing_data.get("default_config"), dict):
-            normalized["default_config"] = copy.deepcopy(existing_data["default_config"])
-        return normalized
-
-    normalized = {
-        "kernel_name": kernel_name,
-        "triton_version": triton.__version__,
-        "autotune_entries": [],
-    }
-    if isinstance(existing_data, dict):
-        normalized["kernel_name"] = existing_data.get("kernel_name", kernel_name)
-        normalized["triton_version"] = existing_data.get("triton_version", triton.__version__)
-        default_config = extract_default_config(existing_data)
-        if default_config is not None:
-            normalized["default_config"] = default_config
-    return normalized
-
-
-def merge_extracted_config(existing_data: object, result: dict[str, Any]) -> dict[str, object]:
-    merged = normalize_output_data(existing_data, result["kernel_name"])
-    merged["triton_version"] = triton.__version__
-    new_entry = build_autotune_entry(result)
-    new_key = serialize_autotune_key(new_entry["autotune_key"])
-    entries = merged["autotune_entries"]
-    assert isinstance(entries, list)
-
-    for idx, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            continue
-        if serialize_autotune_key(entry.get("autotune_key")) != new_key:
-            continue
-        if timing_value_key(new_entry["best_timing"]) < timing_value_key(entry.get("best_timing")):
-            entries[idx] = new_entry
-        break
-    else:
-        entries.append(new_entry)
-
-    entries.sort(key=lambda entry: serialize_autotune_key(entry.get("autotune_key")))
-    update_default_config(merged)
-    return merged
-
-
-def serialize_json_value(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
-
-
-def serialize_preserved_entry(entry: dict[str, object]) -> str:
-    return serialize_json_value({
-        "autotune_key": entry.get("autotune_key"),
-        "config": entry.get("config"),
-    })
-
-
-def find_backup_entries(existing_data: object, output_data: dict[str, object]) -> list[dict[str, object]]:
-    if not isinstance(existing_data, dict):
-        return []
-    if not isinstance(existing_data.get("autotune_entries"), list):
-        return []
-
-    output_entries = output_data.get("autotune_entries")
-    if not isinstance(output_entries, list):
-        return []
-
-    output_entries_by_key = {
-        serialize_autotune_key(entry.get("autotune_key")): entry
-        for entry in output_entries
-        if isinstance(entry, dict)
-    }
-
-    backup_entries: list[dict[str, object]] = []
-    for entry in existing_data["autotune_entries"]:
-        if not isinstance(entry, dict):
-            continue
-        entry_key = serialize_autotune_key(entry.get("autotune_key"))
-        output_entry = output_entries_by_key.get(entry_key)
-        if output_entry is None:
-            continue
-        if serialize_preserved_entry(entry) != serialize_preserved_entry(output_entry):
-            backup_entries.append(copy.deepcopy(entry))
-
-    backup_entries.sort(key=lambda entry: serialize_autotune_key(entry.get("autotune_key")))
-    return backup_entries
-
-
-def merge_backup_entries(existing_backup_data: object, kernel_name: str, backup_entries: list[dict[str, object]]) -> dict[str, object]:
-    merged_entries: dict[str, dict[str, object]] = {}
-
-    if isinstance(existing_backup_data, dict) and isinstance(existing_backup_data.get("autotune_entries"), list):
-        for entry in existing_backup_data["autotune_entries"]:
-            if isinstance(entry, dict):
-                merged_entries[serialize_autotune_key(entry.get("autotune_key"))] = copy.deepcopy(entry)
-
-    for entry in backup_entries:
-        merged_entries[serialize_autotune_key(entry.get("autotune_key"))] = copy.deepcopy(entry)
-
-    return {
-        "kernel_name": kernel_name,
-        "autotune_entries": [
-            merged_entries[key]
-            for key in sorted(merged_entries)
-        ],
-    }
-
-
-def backup_existing_entries(
-    output_file: Path,
-    kernel_name: str,
-    backup_entries: list[dict[str, object]],
-) -> Path | None:
-    if not backup_entries:
-        return None
-
-    backup_file = output_file.parent / f"{output_file.name}.bak"
-    if backup_file.exists():
-        try:
-            with open(backup_file) as f:
-                existing_backup_data = json.load(f)
-        except Exception:
-            existing_backup_data = None
-    else:
-        existing_backup_data = None
-
-    backup_data = merge_backup_entries(existing_backup_data, kernel_name, backup_entries)
-    with open(backup_file, 'w') as f:
-        json.dump(backup_data, f, indent=2)
-    return backup_file
-
-
-def save_extracted_config(output_file: Path, result: dict[str, Any]) -> tuple[str, Path | None]:
-    if output_file.exists():
-        try:
-            with open(output_file) as f:
-                existing_data = json.load(f)
-        except Exception:
-            existing_data = None
-
-        output_data = merge_extracted_config(existing_data, result)
-        if output_data != existing_data:
-            backup_entries = find_backup_entries(existing_data, output_data)
-            backup_file = backup_existing_entries(output_file, result["kernel_name"], backup_entries)
-            status = "updated"
-        else:
-            backup_file = None
-            status = "unchanged"
-    else:
-        output_data = merge_extracted_config(None, result)
-        backup_file = None
-        status = "created"
-
-    if status != "unchanged":
-        with open(output_file, 'w') as f:
-            json.dump(output_data, f, indent=2)
-
-    return status, backup_file
-
-
-def extract_configs(triton_cache_dir: Path, output_dir: Path):
-    """
-    Extract all autotune configs from Triton cache.
-
-    Args:
-        triton_cache_dir: Triton's cache directory
-        output_dir: Output directory for extracted configs
-    """
-    if not triton_cache_dir.exists():
-        print(f"Triton cache directory not found: {triton_cache_dir}. Exiting as there's nothing to extract.")
-        sys.exit(1)
-
-    # Find all .autotune.json files
-    autotune_files = list(triton_cache_dir.rglob("*.autotune.json"))
-
-    if not autotune_files:
-        print(f"No .autotune.json files found in {triton_cache_dir}")
-        return
-
-    print(f"Found {len(autotune_files)} autotune cache files")
-    print(f"GPU: {get_gpu_info()}")
-    print(f"Output directory: {output_dir}")
-    print("-" * 60)
-
-    # Process each file.
-    exported_count = 0
-    created_count = 0
-    overwritten_count = 0
-    backup_files = []
-    unchanged_count = 0
-    for autotune_file in autotune_files:
-        result = process_autotune_file(autotune_file)
-        if result is None:
-            continue
-
-        # Save to output directory
-        kernel_name = result["kernel_name"]
-        output_file = output_dir / f"{kernel_name}.json"
-
-        try:
-            status, backup_file = save_extracted_config(output_file, result)
-
-            exported_count += 1
-            if status == "created":
-                created_count += 1
-            else:
-                overwritten_count += 1
-                if status == "unchanged":
-                    unchanged_count += 1
-                elif status == "updated" and backup_file is not None:
-                    backup_files.append(backup_file)
-
-            print(f"\n[{exported_count}] {kernel_name}")
-            print(f"    Autotune key: {normalize_autotune_key(result['cache_key'])}")
-            print(f"    Output: {output_file}")
-            print(f"    Status: {status}")
-            if status == "updated" and backup_file is not None:
-                print(f"    Backup: {backup_file}")
-            print(f"    Best config: {result['best_config']}")
-            print(f"    Timing: {result['best_timing']}")
-
-        except Exception as e:
-            print(f"Error saving {output_file}: {e}")
-
-    print("\n" + "=" * 60)
-    print(f"Successfully exported {exported_count} configs to {output_dir}")
-    print(f"New files created: {created_count}")
-    print(f"Existing files overwritten: {overwritten_count}")
-    print(f"Existing files with identical content: {unchanged_count}")
-    print(f"Backups created for changed files: {len(backup_files)}")
-    for backup_file in backup_files:
-        print(f"  {backup_file}")
-    print("=" * 60)
+    resolved_output_dir = get_fla_config_dir()
+    if versioned and "FLA_CONFIG_DIR" not in os.environ:
+        return resolved_output_dir / triton.__version__
+    return resolved_output_dir
 
 
 def main():
+    import triton
+
+    from scripts.utils.autotune_export import extract_configs
+    from scripts.utils.autotune_generate import generate_fla_cache, get_triton_cache_dir
+
     parser = argparse.ArgumentParser(description='Extract Triton autotune configs')
     parser.add_argument(
         '--output-dir',
         type=str,
-        help='Output directory (default: fla/configs/autotune/{GPU})'
+        help='Output directory (default: $FLA_CONFIG_DIR or fla/configs/{GPU})'
     )
     parser.add_argument(
         '--triton-cache-dir',
@@ -445,14 +94,11 @@ def main():
     parser.add_argument(
         '--head-dim', '-d',
         type=int,
-        default=128,
-        help='Head dimension used when generating the Triton cache (default: 128). '
-             'Different head_dim values produce different autotune configs.'
-    )
-    parser.add_argument(
-        '--all-head-dims',
-        action='store_true',
-        help='Generate cache for the standard head_dim set: 64, 128, and 256.'
+        nargs='+',
+        default=[128],
+        metavar='D',
+        help='Head dimension(s) for cache generation (default: 128). '
+             'Pass multiple values to cover several configs, e.g. -d 64 128 256.'
     )
     parser.add_argument(
         '--versioned', '-v',
@@ -465,16 +111,12 @@ def main():
     # Determine directories
     if args.generate_cache:
         # Run FLA kernels to populate the fla_triton_cache subdirectory
-        head_dims = [64, 128, 256] if args.all_head_dims else [args.head_dim]
-        triton_cache_dir = Path(generate_fla_cache(args.op, head_dims, args.triton_cache_dir))
+        triton_cache_dir = Path(generate_fla_cache(args.op, args.head_dim, args.triton_cache_dir))
     else:
         triton_cache_dir = get_triton_cache_dir(args.triton_cache_dir)
 
-    output_dir = Path(args.output_dir) if args.output_dir else get_fla_config_dir()
-    # Only append the Triton version subdirectory when using the default output path.
-    # If the user explicitly provided --output-dir, respect it as-is without modification.
-    if not args.output_dir and args.versioned:
-        output_dir = output_dir / triton.__version__
+    # FLA_CONFIG_DIR already points at the final output directory when overridden.
+    output_dir = resolve_output_dir(args.output_dir, versioned=args.versioned)
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -493,218 +135,6 @@ def main():
 
     # Extract configs
     extract_configs(triton_cache_dir, output_dir)
-
-
-def prepare_kernel_cache_tensors(head_dim: int, *, torch, device, op_name: str):
-    # Generate cache by running the kernels
-    torch.manual_seed(42)
-    dtype = torch.bfloat16
-    B, T, H, D = 2, 1500, 4, head_dim
-    print(f"Generating {op_name} cache with head_dim={D}")
-
-    q = torch.rand(B, T, H, D, dtype=dtype)
-    k = torch.rand(B, T, H, D, dtype=dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
-    g = torch.randn(B, T, H, D, dtype=dtype)
-    A_log = torch.randn(H, dtype=torch.float)
-    dt_bias = torch.randn(H * D, dtype=torch.float)
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
-    A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
-    q, k, v, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, h0))
-    g = g.to(device).requires_grad_(True)
-
-    do = torch.randn_like(v)
-    dht = torch.randn_like(h0)
-    return q, k, v, g, beta, h0, do, dht, A_log, dt_bias
-
-
-def generate_kda_cache(head_dim: int, *, torch, device):
-    import torch.nn.functional as F
-
-    from fla.ops.kda import chunk_kda, fused_recurrent_kda
-    from fla.ops.kda.gate import fused_kda_gate
-    q, k, v, g, beta, h0, do, dht, A_log, dt_bias = prepare_kernel_cache_tensors(
-        head_dim,
-        torch=torch,
-        device=device,
-        op_name='kda',
-    )
-
-    g_nonsafe = F.logsigmoid(g.clone().float())
-    g_safe = -5 * torch.sigmoid(g.clone().float())
-
-    # Non-safe path: hits chunk_kda_fwd_kernel_intra_token_parallel.
-    tri, tri_ht = chunk_kda(
-        q=q.clone(),
-        k=k.clone(),
-        v=v.clone(),
-        g=g_nonsafe,
-        beta=beta.clone(),
-        A_log=A_log.clone(),
-        dt_bias=dt_bias.clone(),
-        scale=None,
-        initial_state=h0.clone(),
-        output_final_state=True,
-        use_qk_l2norm_in_kernel=True,
-        use_gate_in_kernel=False,
-        safe_gate=False,
-    )
-    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
-
-    tri0, tri_ht0 = chunk_kda(
-        q=q.clone(),
-        k=k.clone(),
-        v=v.clone(),
-        g=g.clone(),
-        beta=beta.clone(),
-        A_log=A_log.clone(),
-        dt_bias=dt_bias.clone(),
-        scale=None,
-        initial_state=h0.clone(),
-        output_final_state=True,
-        use_qk_l2norm_in_kernel=True,
-        use_gate_in_kernel=True,
-        safe_gate=False,
-        lower_bound=-5,
-    )
-    ((tri0 * do).sum() + (tri_ht0 * dht).sum()).backward(retain_graph=True)
-
-    # Safe path: hits chunk_kda_fwd_kernel_intra_sub_chunk.
-    tri1, tri_ht1 = chunk_kda(
-        q=q.clone(),
-        k=k.clone(),
-        v=v.clone(),
-        g=g_safe,
-        beta=beta.clone(),
-        A_log=A_log.clone(),
-        dt_bias=dt_bias.clone(),
-        scale=None,
-        initial_state=h0.clone(),
-        output_final_state=True,
-        use_qk_l2norm_in_kernel=True,
-        use_gate_in_kernel=False,
-        safe_gate=True,
-        lower_bound=-5,
-    )
-    ((tri1 * do).sum() + (tri_ht1 * dht).sum()).backward(retain_graph=True)
-
-    tri2, tri_ht2 = chunk_kda(
-        q=q.clone(),
-        k=k.clone(),
-        v=v.clone(),
-        g=g.clone(),
-        beta=beta.clone(),
-        A_log=A_log.clone(),
-        dt_bias=dt_bias.clone(),
-        scale=None,
-        initial_state=h0.clone(),
-        output_final_state=True,
-        use_qk_l2norm_in_kernel=True,
-        use_gate_in_kernel=True,
-        safe_gate=True,
-        lower_bound=-5,
-    )
-    ((tri2 * do).sum() + (tri_ht2 * dht).sum()).backward(retain_graph=True)
-
-    g = fused_kda_gate(g=g.clone(), A_log=A_log.clone(), dt_bias=dt_bias.clone())
-    fused_recurrent_kda(
-        q=q.clone(),
-        k=k.clone(),
-        v=v.clone(),
-        g=g,
-        beta=beta.clone(),
-        initial_state=h0.clone(),
-        output_final_state=True,
-        use_qk_l2norm_in_kernel=True,
-    )
-
-
-def generate_gdn_cache(head_dim: int, *, torch, device):
-    import torch.nn.functional as F
-
-    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-
-    q, k, v, g, beta, h0, do, dht, _, _ = prepare_kernel_cache_tensors(
-        head_dim,
-        torch=torch,
-        device=device,
-        op_name='gdn',
-    )
-    g = g[..., 0].float().detach().requires_grad_(True)
-
-    for use_qk_l2norm_in_kernel in (False, True):
-        tri, tri_ht = chunk_gated_delta_rule(
-            q=(F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone()),
-            k=(F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone()),
-            v=v.clone(),
-            g=g.clone(),
-            beta=beta.clone(),
-            scale=None,
-            initial_state=h0.clone(),
-            output_final_state=True,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        )
-        ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=not use_qk_l2norm_in_kernel)
-        q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
-
-
-def generate_conv_cache(head_dim: int, *, torch, device):
-    torch.manual_seed(42)
-    dtype = torch.bfloat16
-    B, T, H, D = 1, 8192, 32, head_dim
-
-    W = 4
-    x = torch.randn(B, T, H * D).to(device, dtype).requires_grad_(True)
-    weight = torch.randn(H * D, W).to(device, dtype).requires_grad_(True)
-    bias = None
-
-    dy = torch.randn(B, T, H * D).to(device, dtype)
-
-    from fla.modules.convolution import causal_conv1d
-    tri, _ = causal_conv1d(x, weight, bias, residual=None, activation="silu")
-    tri.backward(dy)
-
-
-def generate_fla_cache(
-    op: str = 'kda',
-    head_dims: int | list[int] | tuple[int, ...] = 128,
-    triton_cache_dir: str | None = None,
-) -> str:
-    """Generate Triton cache with custom directory."""
-    import torch
-
-    from fla.utils import device
-
-    # Store FLA autotune results under fla_triton_cache/ to keep them separate from other Triton kernels
-    fla_triton_cache = get_triton_cache_dir(triton_cache_dir) / "fla_triton_cache"
-
-    # Keep the cache directory and only clear extracted autotune records.
-    fla_triton_cache.mkdir(parents=True, exist_ok=True)
-    for autotune_file in fla_triton_cache.rglob("*.autotune.json"):
-        autotune_file.unlink()
-    os.environ["TRITON_CACHE_DIR"] = str(fla_triton_cache)
-
-    print(f"Using FLA Triton cache directory: {fla_triton_cache}")
-
-    if isinstance(head_dims, int):
-        dims_to_generate = [head_dims]
-    else:
-        dims_to_generate = list(dict.fromkeys(head_dims))
-
-    print(f"Generating Triton cache for head_dim values: {dims_to_generate}")
-
-    for head_dim in dims_to_generate:
-        if op in ('kda', 'both'):
-            generate_kda_cache(head_dim, torch=torch, device=device)
-        if op in ('gdn', 'both'):
-            generate_gdn_cache(head_dim, torch=torch, device=device)
-        elif op != 'kda':
-            raise ValueError(f"Unsupported op: {op}")
-
-        generate_conv_cache(head_dim, torch=torch, device=device)
-
-    return str(fla_triton_cache)
 
 
 if __name__ == "__main__":
