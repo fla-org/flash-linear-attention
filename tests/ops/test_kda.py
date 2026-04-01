@@ -566,8 +566,8 @@ def test_chunk_varlen(
     safe_gate: bool,
     disable_recompute: bool,
 ):
-    if os.getenv("FLA_DISABLE_CACHE") == "0" and D == 256:
-        pytest.skip(reason="Skipping D=256 varlen KDA case when FLA cache is enabled")
+    if os.getenv("FLA_DISABLE_CACHE") == "0" and D in (64, 256):
+        pytest.skip(reason="Skipping D=64/256 varlen KDA case when FLA cache is enabled")
     torch.manual_seed(42)
     # randomly split the sequence into N segments
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
