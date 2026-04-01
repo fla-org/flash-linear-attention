@@ -18,6 +18,12 @@ Usage:
     # Specify head_dim (affects autotune results)
     python scripts/extract_triton_autotune_cache.py -g -d 64
 
+    # Generate cache for the common head_dim set (64, 128, 256)
+    python scripts/extract_triton_autotune_cache.py -g --all-head-dims
+
+    # Generate cache for both ops across the pytest head_dim set (64, 128, 256)
+    python scripts/extract_triton_autotune_cache.py -g --all-head-dims --op both
+
     # List available cache files without extracting
     python scripts/extract_triton_autotune_cache.py -l
 
@@ -408,6 +414,11 @@ def main():
              'Different head_dim values produce different autotune configs.'
     )
     parser.add_argument(
+        '--all-head-dims',
+        action='store_true',
+        help='Generate cache for the standard head_dim set: 64, 128, and 256.'
+    )
+    parser.add_argument(
         '--versioned', '-v',
         action='store_true',
         help=f'Include Triton version ({triton.__version__}) as a subdirectory in the output path'
@@ -418,7 +429,8 @@ def main():
     # Determine directories
     if args.generate_cache:
         # Run FLA kernels to populate the fla_triton_cache subdirectory
-        triton_cache_dir = Path(generate_fla_cache(args.op, args.head_dim, args.triton_cache_dir))
+        head_dims = [64, 128, 256] if args.all_head_dims else [args.head_dim]
+        triton_cache_dir = Path(generate_fla_cache(args.op, head_dims, args.triton_cache_dir))
     else:
         triton_cache_dir = get_triton_cache_dir(args.triton_cache_dir)
 
@@ -618,7 +630,11 @@ def generate_conv_cache(head_dim: int, *, torch, device):
     tri.backward(dy)
 
 
-def generate_fla_cache(op: str = 'kda', head_dim: int = 128, triton_cache_dir: str | None = None) -> str:
+def generate_fla_cache(
+    op: str = 'kda',
+    head_dims: int | list[int] | tuple[int, ...] = 128,
+    triton_cache_dir: str | None = None,
+) -> str:
     """Generate Triton cache with custom directory."""
     import torch
 
@@ -635,14 +651,22 @@ def generate_fla_cache(op: str = 'kda', head_dim: int = 128, triton_cache_dir: s
 
     print(f"Using FLA Triton cache directory: {fla_triton_cache}")
 
-    if op in ('kda', 'both'):
-        generate_kda_cache(head_dim, torch=torch, device=device)
-    if op in ('gdn', 'both'):
-        generate_gdn_cache(head_dim, torch=torch, device=device)
-    elif op != 'kda':
-        raise ValueError(f"Unsupported op: {op}")
+    if isinstance(head_dims, int):
+        dims_to_generate = [head_dims]
+    else:
+        dims_to_generate = list(dict.fromkeys(head_dims))
 
-    generate_conv_cache(head_dim, torch=torch, device=device)
+    print(f"Generating Triton cache for head_dim values: {dims_to_generate}")
+
+    for head_dim in dims_to_generate:
+        if op in ('kda', 'both'):
+            generate_kda_cache(head_dim, torch=torch, device=device)
+        if op in ('gdn', 'both'):
+            generate_gdn_cache(head_dim, torch=torch, device=device)
+        elif op != 'kda':
+            raise ValueError(f"Unsupported op: {op}")
+
+        generate_conv_cache(head_dim, torch=torch, device=device)
 
     return str(fla_triton_cache)
 
