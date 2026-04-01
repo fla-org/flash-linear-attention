@@ -63,13 +63,62 @@ def get_fla_config_dir() -> Path:
     return config_dir
 
 
-def load_cached_config(kernel_name: str) -> dict[str, Any] | None:
+def _normalize_autotune_key_value(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_normalize_autotune_key_value(v) for v in value]
+    if isinstance(value, list):
+        return [_normalize_autotune_key_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_autotune_key_value(v) for k, v in value.items()}
+    return value
+
+
+def serialize_autotune_key(key: Any) -> str:
+    return json.dumps(_normalize_autotune_key_value(key), separators=(",", ":"), sort_keys=True)
+
+
+def build_autotune_key(
+    arg_names: list[str],
+    key_names: list[str],
+    positional_args: tuple[Any, ...],
+    runtime_kwargs: dict[str, Any],
+) -> tuple[Any, ...]:
+    named_args = dict(zip(arg_names, positional_args))
+    all_args = {**named_args, **runtime_kwargs}
+    tracked_args = {k: v for (k, v) in all_args.items() if k in arg_names}
+    tuning_key = [tracked_args[name] for name in key_names if name in tracked_args]
+    for arg in tracked_args.values():
+        if hasattr(arg, "dtype"):
+            tuning_key.append(str(arg.dtype))
+    return tuple(tuning_key)
+
+
+def _lookup_autotune_entry(config_data: dict[str, Any], autotune_key: Any) -> dict[str, Any] | None:
+    if not isinstance(config_data, dict):
+        return None
+    entries = config_data.get("autotune_entries")
+    if not isinstance(entries, list):
+        return None
+
+    serialized_key = serialize_autotune_key(autotune_key)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if serialize_autotune_key(entry.get("autotune_key")) == serialized_key:
+            return entry
+    return None
+
+
+def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dict[str, Any] | None:
     """
     Load cached best config for a kernel from FLA configs directory.
 
     This function loads the cached best configuration for a given kernel name
-    from fla/configs/{GPU}/{kernel_name}.json. The file should contain only the
-    best_config dictionary.
+    from fla/configs/{GPU}/{kernel_name}.json.
+
+    Newer cache files may contain multiple autotune entries keyed by Triton's
+    runtime tuning key. Older cache files store a single config dictionary at
+    the top level and are still supported as a fallback.
 
     If the config file is not found or cannot be loaded, a warning is printed
     and None is returned, allowing fallback to Triton's autotune.
@@ -78,6 +127,7 @@ def load_cached_config(kernel_name: str) -> dict[str, Any] | None:
 
     Args:
         kernel_name: Name of the kernel (e.g., "causal_conv1d_fwd_kernel")
+        autotune_key: Triton autotune key for the current invocation
 
     Returns:
         Best config dictionary or None if not found or disabled
@@ -95,6 +145,13 @@ def load_cached_config(kernel_name: str) -> dict[str, Any] | None:
     try:
         with open(config_file) as f:
             config = json.load(f)
+        entry = _lookup_autotune_entry(config, autotune_key)
+        if entry is not None:
+            return entry.get("config")
+        if isinstance(config, dict) and isinstance(config.get("fallback_config"), dict):
+            return config["fallback_config"]
+        if isinstance(config, dict) and isinstance(config.get("autotune_entries"), list):
+            return None
         return config
     except Exception as e:
         warnings.warn(f"Error reading config file {config_file}: {e}")
@@ -112,16 +169,16 @@ class CachedAutotuner(Autotuner):
     def __init__(self, fn, arg_names, configs, key, reset_to_zero, restore_value, **kwargs):
         super().__init__(fn, arg_names, configs, key, reset_to_zero, restore_value, **kwargs)
         self.kernel_name = fn.fn.__name__ if hasattr(fn, 'fn') else fn.__name__
-        self._fla_cache_checked = bool(FLA_DISABLE_CACHE)
+        self._warned_missing_keys: set[tuple[Any, ...]] = set()
 
     def run(self, *args, **kwargs):
-        if not self._fla_cache_checked:
-            self.first_run_hook()
-            self._fla_cache_checked = bool(not FLA_ALWAYS_CHECK_CACHE)
+        tuning_key = build_autotune_key(self.arg_names, self.keys, args, kwargs)
+        if FLA_ALWAYS_CHECK_CACHE or tuning_key not in self.cache:
+            self.maybe_load_cached_config(tuning_key)
         return super().run(*args, **kwargs)
 
-    def first_run_hook(self):
-        best_config = load_cached_config(self.kernel_name)
+    def maybe_load_cached_config(self, tuning_key: tuple[Any, ...]):
+        best_config = load_cached_config(self.kernel_name, tuning_key)
 
         if best_config is not None:
             kw = best_config.get("kwargs", {})
@@ -145,11 +202,11 @@ class CachedAutotuner(Autotuner):
                     num_stages=num_stages,
                 )
 
-            self.configs = [cfg]
-        else:
-            # No cached config found.
+            self.cache[tuning_key] = cfg
+        elif tuning_key not in self._warned_missing_keys:
+            self._warned_missing_keys.add(tuning_key)
             warnings.warn(
-                f"No cached config found for kernel '{self.kernel_name}', "
+                f"No cached config found for kernel '{self.kernel_name}' and key {list(tuning_key)}, "
                 "falling back to Triton autotune",
                 stacklevel=2
             )

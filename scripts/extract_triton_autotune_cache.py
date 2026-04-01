@@ -22,10 +22,11 @@ Usage:
     python scripts/extract_triton_autotune_cache.py -l
 
 The output files are saved to fla/configs/{GPU}/{kernel_name}.json
-Each file contains the best_config fields plus kernel_name for inspection.
+Each file contains one or more autotune entries keyed by Triton's runtime key.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -76,15 +77,6 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         if not configs_timings:
             return None
 
-        # TODO: Add special handling for certain kernels if needed, e.g. prefer BK=64,BV=64 for chunk_kda_bwd_kernel_wy_dqkg_fused
-        if kernel_name == "chunk_kda_bwd_kernel_wy_dqkg_fused":
-            preferred_configs_timings = [
-                entry for entry in configs_timings
-                if entry[0].get("kwargs", {}).get("BK") == 64 and entry[0].get("kwargs", {}).get("BV") == 64
-            ]
-            if preferred_configs_timings:
-                configs_timings = preferred_configs_timings
-
         def timing_key(entry):
             t = entry[1]
             return (t,) if isinstance(t, (int, float)) else tuple(t)
@@ -112,35 +104,6 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         return None
 
 
-def num_stages_preference_key(value: object) -> tuple[int, object]:
-    if value == 3:
-        return (0, value)
-    if isinstance(value, (int, float)):
-        if value == 2:
-            return (2, value)
-        return (1, value)
-    return (3, float('inf'))
-
-
-def config_preference_key(config: dict[str, object] | None) -> tuple[object, ...]:
-    if not isinstance(config, dict):
-        return ((3, float('inf')), float('inf'), float('inf'))
-    return (
-        num_stages_preference_key(config.get("num_stages")),
-        config.get("num_warps", float('inf')),
-        config.get("num_ctas", float('inf')),
-    )
-
-
-def choose_preferred_config(
-    existing_data: dict[str, object] | None,
-    output_data: dict[str, object],
-) -> dict[str, object]:
-    existing_key = config_preference_key(existing_data)
-    output_key = config_preference_key(output_data)
-    return output_data if output_key < existing_key else existing_data
-
-
 def backup_existing_file(output_file: Path) -> Path:
     backup_dir = output_file.parent / "bak"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -152,20 +115,80 @@ def backup_existing_file(output_file: Path) -> Path:
     return backup_file
 
 
-def backup_config_data(output_file: Path, config_data: dict[str, object]) -> Path:
-    backup_dir = output_file.parent / "bak"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    raw_bytes = json.dumps(config_data, indent=2, sort_keys=True).encode("utf-8")
-    digest = hashlib.sha256(raw_bytes).hexdigest()[:16]
-    backup_file = backup_dir / f"{output_file.stem}.{digest}{output_file.suffix}"
-    if not backup_file.exists():
-        backup_file.write_bytes(raw_bytes)
-    return backup_file
+def timing_value_key(value: object) -> tuple[float, ...]:
+    if isinstance(value, (int, float)):
+        return (float(value),)
+    if isinstance(value, (list, tuple)):
+        return tuple(float(v) for v in value)
+    return (float('inf'),)
 
 
-def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> tuple[str, Path | None]:
-    backup_file = None
+def normalize_autotune_key(value: object) -> object:
+    if isinstance(value, tuple):
+        return [normalize_autotune_key(v) for v in value]
+    if isinstance(value, list):
+        return [normalize_autotune_key(v) for v in value]
+    if isinstance(value, dict):
+        return {k: normalize_autotune_key(v) for k, v in value.items()}
+    return value
 
+
+def serialize_autotune_key(value: object) -> str:
+    return json.dumps(normalize_autotune_key(value), separators=(",", ":"), sort_keys=True)
+
+
+def build_autotune_entry(result: dict[str, Any]) -> dict[str, object]:
+    return {
+        "autotune_key": normalize_autotune_key(result["cache_key"]),
+        "config": result["best_config"],
+        "best_timing": result["best_timing"],
+        "source_file": result["source_file"],
+    }
+
+
+def normalize_output_data(existing_data: object, kernel_name: str) -> dict[str, object]:
+    if isinstance(existing_data, dict) and isinstance(existing_data.get("autotune_entries"), list):
+        normalized: dict[str, object] = {
+            "kernel_name": existing_data.get("kernel_name", kernel_name),
+            "autotune_entries": copy.deepcopy(existing_data["autotune_entries"]),
+        }
+        if isinstance(existing_data.get("fallback_config"), dict):
+            normalized["fallback_config"] = copy.deepcopy(existing_data["fallback_config"])
+        return normalized
+
+    normalized = {
+        "kernel_name": kernel_name,
+        "autotune_entries": [],
+    }
+    if isinstance(existing_data, dict):
+        normalized["kernel_name"] = existing_data.get("kernel_name", kernel_name)
+        normalized["fallback_config"] = copy.deepcopy(existing_data)
+    return normalized
+
+
+def merge_extracted_config(existing_data: object, result: dict[str, Any]) -> dict[str, object]:
+    merged = normalize_output_data(existing_data, result["kernel_name"])
+    new_entry = build_autotune_entry(result)
+    new_key = serialize_autotune_key(new_entry["autotune_key"])
+    entries = merged["autotune_entries"]
+    assert isinstance(entries, list)
+
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        if serialize_autotune_key(entry.get("autotune_key")) != new_key:
+            continue
+        if timing_value_key(new_entry["best_timing"]) < timing_value_key(entry.get("best_timing")):
+            entries[idx] = new_entry
+        break
+    else:
+        entries.append(new_entry)
+
+    entries.sort(key=lambda entry: serialize_autotune_key(entry.get("autotune_key")))
+    return merged
+
+
+def save_extracted_config(output_file: Path, result: dict[str, Any]) -> tuple[str, Path | None]:
     if output_file.exists():
         try:
             with open(output_file) as f:
@@ -173,18 +196,16 @@ def save_extracted_config(output_file: Path, output_data: dict[str, object]) -> 
         except Exception:
             existing_data = None
 
-        if existing_data != output_data:
-            chosen_data = choose_preferred_config(existing_data, output_data)
-            if chosen_data != existing_data:
-                backup_file = backup_existing_file(output_file)
-                status = "updated"
-            else:
-                backup_file = backup_config_data(output_file, output_data)
-                status = "unchanged"
-            output_data = chosen_data
+        output_data = merge_extracted_config(existing_data, result)
+        if output_data != existing_data:
+            backup_file = backup_existing_file(output_file)
+            status = "updated"
         else:
+            backup_file = None
             status = "unchanged"
     else:
+        output_data = merge_extracted_config(None, result)
+        backup_file = None
         status = "created"
 
     with open(output_file, 'w') as f:
@@ -233,12 +254,7 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
         output_file = output_dir / f"{kernel_name}.json"
 
         try:
-            # Keep config fields at top level for cache lookup, plus kernel name for inspection.
-            output_data = {
-                **result["best_config"],
-                "kernel_name": kernel_name,
-            }
-            status, backup_file = save_extracted_config(output_file, output_data)
+            status, backup_file = save_extracted_config(output_file, result)
 
             exported_count += 1
             if status == "created":
