@@ -182,7 +182,7 @@ class CachedAutotuner(Autotuner):
 
     def run(self, *args, **kwargs):
         tuning_key = build_autotune_key(self.arg_names, self.keys, args, kwargs)
-        if FLA_ALWAYS_CHECK_CACHE or tuning_key not in self.cache:
+        if not FLA_DISABLE_CACHE and (FLA_ALWAYS_CHECK_CACHE or tuning_key not in self.cache):
             self.maybe_load_cached_config(tuning_key)
         return super().run(*args, **kwargs)
 
@@ -213,13 +213,19 @@ class CachedAutotuner(Autotuner):
 
             self.cache[tuning_key] = cfg
         else:
-            logger.debug(
-                "No cached config found for kernel %s and key %s; using first configured Triton config",
-                self.kernel_name,
-                list(tuning_key),
-            )
             if self.configs:
+                logger.debug(
+                    "No cached config found for kernel %s and key %s; using first configured Triton config",
+                    self.kernel_name,
+                    list(tuning_key),
+                )
                 self.cache[tuning_key] = self.configs[0]
+            else:
+                logger.debug(
+                    "No cached config found for kernel %s and key %s; falling back to Triton autotune",
+                    self.kernel_name,
+                    list(tuning_key),
+                )
 
 
 def fla_cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=None, restore_value=None,
