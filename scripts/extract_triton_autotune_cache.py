@@ -27,7 +27,6 @@ Each file contains one or more autotune entries keyed by Triton's runtime key.
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 import shutil
@@ -37,9 +36,17 @@ from typing import Any
 
 import triton
 
-from fla.ops.utils.cache import get_fla_config_dir, get_gpu_info
-
 os.environ['FLA_DISABLE_CACHE'] = '1'
+
+
+def get_gpu_info() -> str:
+    from fla.ops.utils.cache import get_gpu_info as load_gpu_info
+    return load_gpu_info()
+
+
+def get_fla_config_dir() -> Path:
+    from fla.ops.utils.cache import get_fla_config_dir as load_fla_config_dir
+    return load_fla_config_dir()
 
 
 def get_triton_cache_dir(path: str | None = None) -> Path:
@@ -105,13 +112,8 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
 
 
 def backup_existing_file(output_file: Path) -> Path:
-    backup_dir = output_file.parent / "bak"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    raw_bytes = output_file.read_bytes()
-    digest = hashlib.sha256(raw_bytes).hexdigest()[:16]
-    backup_file = backup_dir / f"{output_file.stem}.{digest}{output_file.suffix}"
-    if not backup_file.exists():
-        backup_file.write_bytes(raw_bytes)
+    backup_file = output_file.parent / f"{output_file.name}.bak"
+    backup_file.write_bytes(output_file.read_bytes())
     return backup_file
 
 
@@ -142,7 +144,6 @@ def build_autotune_entry(result: dict[str, Any]) -> dict[str, object]:
         "autotune_key": normalize_autotune_key(result["cache_key"]),
         "config": result["best_config"],
         "best_timing": result["best_timing"],
-        "source_file": result["source_file"],
     }
 
 
@@ -188,6 +189,39 @@ def merge_extracted_config(existing_data: object, result: dict[str, Any]) -> dic
     return merged
 
 
+def serialize_json_value(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def serialize_preserved_entry(entry: dict[str, object]) -> str:
+    return serialize_json_value({
+        "autotune_key": entry.get("autotune_key"),
+        "config": entry.get("config"),
+    })
+
+
+def existing_data_is_preserved(existing_data: object, output_data: dict[str, object]) -> bool:
+    if not isinstance(existing_data, dict):
+        return False
+
+    if not isinstance(existing_data.get("autotune_entries"), list):
+        return output_data.get("fallback_config") == existing_data
+
+    output_entries = output_data.get("autotune_entries")
+    if not isinstance(output_entries, list):
+        return False
+
+    existing_entries = existing_data["autotune_entries"]
+    preserved_entries = {serialize_preserved_entry(entry) for entry in output_entries if isinstance(entry, dict)}
+    for entry in existing_entries:
+        if not isinstance(entry, dict):
+            return False
+        if serialize_preserved_entry(entry) not in preserved_entries:
+            return False
+
+    return "fallback_config" not in existing_data or output_data.get("fallback_config") == existing_data.get("fallback_config")
+
+
 def save_extracted_config(output_file: Path, result: dict[str, Any]) -> tuple[str, Path | None]:
     if output_file.exists():
         try:
@@ -198,7 +232,9 @@ def save_extracted_config(output_file: Path, result: dict[str, Any]) -> tuple[st
 
         output_data = merge_extracted_config(existing_data, result)
         if output_data != existing_data:
-            backup_file = backup_existing_file(output_file)
+            backup_file = None
+            if not existing_data_is_preserved(existing_data, output_data):
+                backup_file = backup_existing_file(output_file)
             status = "updated"
         else:
             backup_file = None
@@ -208,8 +244,9 @@ def save_extracted_config(output_file: Path, result: dict[str, Any]) -> tuple[st
         backup_file = None
         status = "created"
 
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
+    if status != "unchanged":
+        with open(output_file, 'w') as f:
+            json.dump(output_data, f, indent=2)
 
     return status, backup_file
 
@@ -238,7 +275,7 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
     print(f"Output directory: {output_dir}")
     print("-" * 60)
 
-    # Process each file
+    # Process each file.
     exported_count = 0
     created_count = 0
     overwritten_count = 0
@@ -263,14 +300,14 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path):
                 overwritten_count += 1
                 if status == "unchanged":
                     unchanged_count += 1
-                elif status == "updated":
+                elif status == "updated" and backup_file is not None:
                     backup_files.append(backup_file)
 
             print(f"\n[{exported_count}] {kernel_name}")
-            print(f"    Source: {autotune_file}")
+            print(f"    Autotune key: {normalize_autotune_key(result['cache_key'])}")
             print(f"    Output: {output_file}")
             print(f"    Status: {status}")
-            if status == "updated":
+            if status == "updated" and backup_file is not None:
                 print(f"    Backup: {backup_file}")
             print(f"    Best config: {result['best_config']}")
             print(f"    Timing: {result['best_timing']}")

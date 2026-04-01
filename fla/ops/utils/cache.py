@@ -1,6 +1,7 @@
 import json
+import logging
 import os
-import warnings
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,13 @@ TRITON_ABOVE_3_5_1 = version.parse(triton.__version__) >= version.parse("3.5.1")
 TRITON_ABOVE_3_4_0 = version.parse(triton.__version__) >= version.parse("3.4.0")
 FLA_ALWAYS_CHECK_CACHE = os.environ.get("FLA_ALWAYS_CHECK_CACHE") == "1"
 FLA_DISABLE_CACHE = os.environ.get("FLA_DISABLE_CACHE", "1") == "1"
+logger = logging.getLogger(__name__)
+
+
+def sanitize_gpu_name(gpu_name: str) -> str:
+    sanitized = re.sub(r"[^0-9A-Za-z]+", "_", gpu_name)
+    sanitized = sanitized.strip("_")
+    return sanitized or "unknown_gpu"
 
 
 @lru_cache(maxsize=1)
@@ -37,7 +45,7 @@ def get_gpu_info():
         gpu_name = torch.xpu.get_device_name(0)
 
     if gpu_name:
-        return gpu_name.replace(" ", "_").replace("(", "_").replace(")", "_").replace("-", "_")
+        return sanitize_gpu_name(gpu_name)
 
     # Default to CPU if no GPU available
     return "cpu"
@@ -63,18 +71,18 @@ def get_fla_config_dir() -> Path:
     return config_dir
 
 
-def _normalize_autotune_key_value(value: Any) -> Any:
+def normalize_autotune_key_value(value: Any) -> Any:
     if isinstance(value, tuple):
-        return [_normalize_autotune_key_value(v) for v in value]
+        return [normalize_autotune_key_value(v) for v in value]
     if isinstance(value, list):
-        return [_normalize_autotune_key_value(v) for v in value]
+        return [normalize_autotune_key_value(v) for v in value]
     if isinstance(value, dict):
-        return {k: _normalize_autotune_key_value(v) for k, v in value.items()}
+        return {k: normalize_autotune_key_value(v) for k, v in value.items()}
     return value
 
 
 def serialize_autotune_key(key: Any) -> str:
-    return json.dumps(_normalize_autotune_key_value(key), separators=(",", ":"), sort_keys=True)
+    return json.dumps(normalize_autotune_key_value(key), separators=(",", ":"), sort_keys=True)
 
 
 def build_autotune_key(
@@ -93,7 +101,7 @@ def build_autotune_key(
     return tuple(tuning_key)
 
 
-def _lookup_autotune_entry(config_data: dict[str, Any], autotune_key: Any) -> dict[str, Any] | None:
+def lookup_autotune_entry(config_data: dict[str, Any], autotune_key: Any) -> dict[str, Any] | None:
     if not isinstance(config_data, dict):
         return None
     entries = config_data.get("autotune_entries")
@@ -145,7 +153,7 @@ def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dic
     try:
         with open(config_file) as f:
             config = json.load(f)
-        entry = _lookup_autotune_entry(config, autotune_key)
+        entry = lookup_autotune_entry(config, autotune_key)
         if entry is not None:
             return entry.get("config")
         if isinstance(config, dict) and isinstance(config.get("fallback_config"), dict):
@@ -154,7 +162,7 @@ def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dic
             return None
         return config
     except Exception as e:
-        warnings.warn(f"Error reading config file {config_file}: {e}")
+        logger.warning("Error reading config file %s: %s", config_file, e)
         return None
 
 
@@ -169,7 +177,6 @@ class CachedAutotuner(Autotuner):
     def __init__(self, fn, arg_names, configs, key, reset_to_zero, restore_value, **kwargs):
         super().__init__(fn, arg_names, configs, key, reset_to_zero, restore_value, **kwargs)
         self.kernel_name = fn.fn.__name__ if hasattr(fn, 'fn') else fn.__name__
-        self._warned_missing_keys: set[tuple[Any, ...]] = set()
 
     def run(self, *args, **kwargs):
         tuning_key = build_autotune_key(self.arg_names, self.keys, args, kwargs)
@@ -203,12 +210,11 @@ class CachedAutotuner(Autotuner):
                 )
 
             self.cache[tuning_key] = cfg
-        elif tuning_key not in self._warned_missing_keys:
-            self._warned_missing_keys.add(tuning_key)
-            warnings.warn(
-                f"No cached config found for kernel '{self.kernel_name}' and key {list(tuning_key)}, "
-                "falling back to Triton autotune",
-                stacklevel=2
+        else:
+            logger.debug(
+                "No cached config found for kernel %s and key %s; falling back to Triton autotune",
+                self.kernel_name,
+                list(tuning_key),
             )
 
 
@@ -282,7 +288,7 @@ def fla_cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=N
 
 def configure_fla_fla_cache_autotune():
     triton.autotune = fla_cache_autotune
-    warnings.warn(
+    logger.info(
         "configure_fla_fla_cache_autotune() is enabling FLA fla_cache_autotune; "
         "triton.autotune will be replaced with fla_cache_autotune."
     )
@@ -291,7 +297,7 @@ def configure_fla_fla_cache_autotune():
 def restore_autotune_backend():
     from triton.runtime.autotuner import autotune as original_autotune
     triton.autotune = original_autotune
-    warnings.warn(
+    logger.info(
         "restore_autotune_backend() is restoring Triton's original autotune; "
         "triton.autotune will be replaced with triton.runtime.autotuner.autotune."
     )
