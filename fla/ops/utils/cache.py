@@ -85,6 +85,28 @@ def serialize_autotune_key(key: Any) -> str:
     return json.dumps(normalize_autotune_key_value(key), separators=(",", ":"), sort_keys=True)
 
 
+def is_numeric_autotune_key_value(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def autotune_key_values_compatible(cached_value: Any, requested_value: Any) -> bool:
+    if is_numeric_autotune_key_value(cached_value) and is_numeric_autotune_key_value(requested_value):
+        return True
+    if isinstance(cached_value, (list, tuple)) and isinstance(requested_value, (list, tuple)):
+        return len(cached_value) == len(requested_value) and all(
+            autotune_key_values_compatible(cached_item, requested_item)
+            for cached_item, requested_item in zip(cached_value, requested_value)
+        )
+    if isinstance(cached_value, dict) and isinstance(requested_value, dict):
+        if cached_value.keys() != requested_value.keys():
+            return False
+        return all(
+            autotune_key_values_compatible(cached_value[key], requested_value[key])
+            for key in cached_value
+        )
+    return cached_value == requested_value
+
+
 def build_autotune_key(
     arg_names: list[str],
     key_names: list[str],
@@ -113,6 +135,30 @@ def lookup_autotune_entry(config_data: dict[str, Any], autotune_key: Any) -> dic
         if not isinstance(entry, dict):
             continue
         if serialize_autotune_key(entry.get("autotune_key")) == serialized_key:
+            return entry
+    return None
+
+
+def lookup_compatible_autotune_entry(config_data: dict[str, Any], autotune_key: Any) -> dict[str, Any] | None:
+    if autotune_key is None or not isinstance(config_data, dict):
+        return None
+    entries = config_data.get("autotune_entries")
+    if not isinstance(entries, list):
+        return None
+
+    requested_key = normalize_autotune_key_value(autotune_key)
+    if not isinstance(requested_key, list):
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_key = normalize_autotune_key_value(entry.get("autotune_key"))
+        if not isinstance(entry_key, list):
+            continue
+        if len(entry_key) != len(requested_key):
+            continue
+        if autotune_key_values_compatible(entry_key, requested_key):
             return entry
     return None
 
@@ -157,6 +203,9 @@ def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dic
         if entry is not None:
             return entry.get("config")
         if autotune_key is not None:
+            compatible_entry = lookup_compatible_autotune_entry(config, autotune_key)
+            if compatible_entry is not None:
+                return compatible_entry.get("config")
             return None
         if isinstance(config, dict) and isinstance(config.get("fallback_config"), dict):
             return config["fallback_config"]
@@ -213,19 +262,11 @@ class CachedAutotuner(Autotuner):
 
             self.cache[tuning_key] = cfg
         else:
-            if self.configs:
-                logger.debug(
-                    "No cached config found for kernel %s and key %s; using first configured Triton config",
-                    self.kernel_name,
-                    list(tuning_key),
-                )
-                self.cache[tuning_key] = self.configs[0]
-            else:
-                logger.debug(
-                    "No cached config found for kernel %s and key %s; falling back to Triton autotune",
-                    self.kernel_name,
-                    list(tuning_key),
-                )
+            logger.debug(
+                "No cached config found for kernel %s and key %s; falling back to Triton autotune",
+                self.kernel_name,
+                list(tuning_key),
+            )
 
 
 def fla_cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=None, restore_value=None,
