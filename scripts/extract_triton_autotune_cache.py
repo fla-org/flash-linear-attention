@@ -63,10 +63,26 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         if not isinstance(data, dict) or "configs_timings" not in data:
             return None
 
+        # Extract kernel info from the file path or content
+        # Example path: ~/.triton/cache/a1b2c3d4/fused_recurrent_fwd_jit_functionn_12345.autotune.json
+        parts = autotune_file.stem.split('.')
+        if len(parts) >= 2:
+            kernel_name = parts[0]
+        else:
+            kernel_name = "unknown_kernel"
+
         # Find the best config (minimum timing)
         configs_timings = data["configs_timings"]
         if not configs_timings:
             return None
+
+        if kernel_name == "chunk_kda_bwd_kernel_wy_dqkg_fused":
+            preferred_configs_timings = [
+                entry for entry in configs_timings
+                if entry[0].get("kwargs", {}).get("BK") == 64 and entry[0].get("kwargs", {}).get("BV") == 64
+            ]
+            if preferred_configs_timings:
+                configs_timings = preferred_configs_timings
 
         def timing_key(entry):
             t = entry[1]
@@ -76,14 +92,6 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         best_entry = min(configs_timings, key=timing_key)
         best_config_dict = best_entry[0]
         best_timing = best_entry[1]
-
-        # Extract kernel info from the file path or content
-        # Example path: ~/.triton/cache/a1b2c3d4/fused_recurrent_fwd_jit_functionn_12345.autotune.json
-        parts = autotune_file.stem.split('.')
-        if len(parts) >= 2:
-            kernel_name = parts[0]
-        else:
-            kernel_name = "unknown_kernel"
 
         # Build output data structure
         result = {
