@@ -111,12 +111,6 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         return None
 
 
-def backup_existing_file(output_file: Path) -> Path:
-    backup_file = output_file.parent / f"{output_file.name}.bak"
-    backup_file.write_bytes(output_file.read_bytes())
-    return backup_file
-
-
 def timing_value_key(value: object) -> tuple[float, ...]:
     if isinstance(value, (int, float)):
         return (float(value),)
@@ -200,26 +194,79 @@ def serialize_preserved_entry(entry: dict[str, object]) -> str:
     })
 
 
-def existing_data_is_preserved(existing_data: object, output_data: dict[str, object]) -> bool:
+def find_backup_entries(existing_data: object, output_data: dict[str, object]) -> list[dict[str, object]]:
     if not isinstance(existing_data, dict):
-        return False
-
+        return []
     if not isinstance(existing_data.get("autotune_entries"), list):
-        return output_data.get("fallback_config") == existing_data
+        return []
 
     output_entries = output_data.get("autotune_entries")
     if not isinstance(output_entries, list):
-        return False
+        return []
 
-    existing_entries = existing_data["autotune_entries"]
-    preserved_entries = {serialize_preserved_entry(entry) for entry in output_entries if isinstance(entry, dict)}
-    for entry in existing_entries:
+    output_entries_by_key = {
+        serialize_autotune_key(entry.get("autotune_key")): entry
+        for entry in output_entries
+        if isinstance(entry, dict)
+    }
+
+    backup_entries: list[dict[str, object]] = []
+    for entry in existing_data["autotune_entries"]:
         if not isinstance(entry, dict):
-            return False
-        if serialize_preserved_entry(entry) not in preserved_entries:
-            return False
+            continue
+        entry_key = serialize_autotune_key(entry.get("autotune_key"))
+        output_entry = output_entries_by_key.get(entry_key)
+        if output_entry is None:
+            continue
+        if serialize_preserved_entry(entry) != serialize_preserved_entry(output_entry):
+            backup_entries.append(copy.deepcopy(entry))
 
-    return "fallback_config" not in existing_data or output_data.get("fallback_config") == existing_data.get("fallback_config")
+    backup_entries.sort(key=lambda entry: serialize_autotune_key(entry.get("autotune_key")))
+    return backup_entries
+
+
+def merge_backup_entries(existing_backup_data: object, kernel_name: str, backup_entries: list[dict[str, object]]) -> dict[str, object]:
+    merged_entries: dict[str, dict[str, object]] = {}
+
+    if isinstance(existing_backup_data, dict) and isinstance(existing_backup_data.get("autotune_entries"), list):
+        for entry in existing_backup_data["autotune_entries"]:
+            if isinstance(entry, dict):
+                merged_entries[serialize_autotune_key(entry.get("autotune_key"))] = copy.deepcopy(entry)
+
+    for entry in backup_entries:
+        merged_entries[serialize_autotune_key(entry.get("autotune_key"))] = copy.deepcopy(entry)
+
+    return {
+        "kernel_name": kernel_name,
+        "autotune_entries": [
+            merged_entries[key]
+            for key in sorted(merged_entries)
+        ],
+    }
+
+
+def backup_existing_entries(
+    output_file: Path,
+    kernel_name: str,
+    backup_entries: list[dict[str, object]],
+) -> Path | None:
+    if not backup_entries:
+        return None
+
+    backup_file = output_file.parent / f"{output_file.name}.bak"
+    if backup_file.exists():
+        try:
+            with open(backup_file) as f:
+                existing_backup_data = json.load(f)
+        except Exception:
+            existing_backup_data = None
+    else:
+        existing_backup_data = None
+
+    backup_data = merge_backup_entries(existing_backup_data, kernel_name, backup_entries)
+    with open(backup_file, 'w') as f:
+        json.dump(backup_data, f, indent=2)
+    return backup_file
 
 
 def save_extracted_config(output_file: Path, result: dict[str, Any]) -> tuple[str, Path | None]:
@@ -232,9 +279,8 @@ def save_extracted_config(output_file: Path, result: dict[str, Any]) -> tuple[st
 
         output_data = merge_extracted_config(existing_data, result)
         if output_data != existing_data:
-            backup_file = None
-            if not existing_data_is_preserved(existing_data, output_data):
-                backup_file = backup_existing_file(output_file)
+            backup_entries = find_backup_entries(existing_data, output_data)
+            backup_file = backup_existing_entries(output_file, result["kernel_name"], backup_entries)
             status = "updated"
         else:
             backup_file = None
