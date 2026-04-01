@@ -146,28 +146,64 @@ def build_autotune_entry(result: dict[str, Any]) -> dict[str, object]:
     }
 
 
+def extract_default_config(config: object) -> dict[str, object] | None:
+    if not isinstance(config, dict):
+        return None
+    kwargs = config.get("kwargs")
+    if not isinstance(kwargs, dict):
+        return None
+    return {
+        "kwargs": copy.deepcopy(kwargs),
+        "num_warps": config.get("num_warps", 4),
+        "num_ctas": config.get("num_ctas", 1),
+        "num_stages": config.get("num_stages", 2),
+    }
+
+
+def update_default_config(output_data: dict[str, object]) -> None:
+    entries = output_data.get("autotune_entries")
+    if not isinstance(entries, list):
+        output_data.pop("default_config", None)
+        return
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        default_config = extract_default_config(entry.get("config"))
+        if default_config is not None:
+            output_data["default_config"] = default_config
+            return
+    output_data.pop("default_config", None)
+
+
 def normalize_output_data(existing_data: object, kernel_name: str) -> dict[str, object]:
     if isinstance(existing_data, dict) and isinstance(existing_data.get("autotune_entries"), list):
         normalized: dict[str, object] = {
             "kernel_name": existing_data.get("kernel_name", kernel_name),
+            "triton_version": existing_data.get("triton_version", triton.__version__),
             "autotune_entries": copy.deepcopy(existing_data["autotune_entries"]),
         }
-        if isinstance(existing_data.get("fallback_config"), dict):
-            normalized["fallback_config"] = copy.deepcopy(existing_data["fallback_config"])
+        if isinstance(existing_data.get("default_config"), dict):
+            normalized["default_config"] = copy.deepcopy(existing_data["default_config"])
         return normalized
 
     normalized = {
         "kernel_name": kernel_name,
+        "triton_version": triton.__version__,
         "autotune_entries": [],
     }
     if isinstance(existing_data, dict):
         normalized["kernel_name"] = existing_data.get("kernel_name", kernel_name)
-        normalized["fallback_config"] = copy.deepcopy(existing_data)
+        normalized["triton_version"] = existing_data.get("triton_version", triton.__version__)
+        default_config = extract_default_config(existing_data)
+        if default_config is not None:
+            normalized["default_config"] = default_config
     return normalized
 
 
 def merge_extracted_config(existing_data: object, result: dict[str, Any]) -> dict[str, object]:
     merged = normalize_output_data(existing_data, result["kernel_name"])
+    merged["triton_version"] = triton.__version__
     new_entry = build_autotune_entry(result)
     new_key = serialize_autotune_key(new_entry["autotune_key"])
     entries = merged["autotune_entries"]
@@ -185,6 +221,7 @@ def merge_extracted_config(existing_data: object, result: dict[str, Any]) -> dic
         entries.append(new_entry)
 
     entries.sort(key=lambda entry: serialize_autotune_key(entry.get("autotune_key")))
+    update_default_config(merged)
     return merged
 
 

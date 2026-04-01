@@ -163,15 +163,12 @@ def lookup_compatible_autotune_entry(config_data: dict[str, Any], autotune_key: 
     return None
 
 
-def lookup_first_autotune_entry(config_data: dict[str, Any]) -> dict[str, Any] | None:
+def lookup_default_config(config_data: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(config_data, dict):
         return None
-    entries = config_data.get("autotune_entries")
-    if not isinstance(entries, list):
-        return None
-    for entry in entries:
-        if isinstance(entry, dict):
-            return entry
+    default_config = config_data.get("default_config")
+    if isinstance(default_config, dict):
+        return default_config
     return None
 
 
@@ -182,9 +179,8 @@ def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dic
     This function loads the cached best configuration for a given kernel name
     from fla/configs/{GPU}/{kernel_name}.json.
 
-    Newer cache files may contain multiple autotune entries keyed by Triton's
-    runtime tuning key. Older cache files store a single config dictionary at
-    the top level and are still supported as a fallback.
+    Cache files may contain multiple autotune entries keyed by Triton's
+    runtime tuning key plus a top-level default config.
 
     If the config file is not found or cannot be loaded, a warning is printed
     and None is returned, allowing fallback to Triton's autotune.
@@ -218,12 +214,9 @@ def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dic
             compatible_entry = lookup_compatible_autotune_entry(config, autotune_key)
             if compatible_entry is not None:
                 return compatible_entry.get("config")
-            first_entry = lookup_first_autotune_entry(config)
-            if first_entry is not None:
-                return first_entry.get("config")
-            return None
-        if isinstance(config, dict) and isinstance(config.get("fallback_config"), dict):
-            return config["fallback_config"]
+        default_config = lookup_default_config(config)
+        if default_config is not None:
+            return default_config
         if isinstance(config, dict) and isinstance(config.get("autotune_entries"), list):
             return None
         return config
