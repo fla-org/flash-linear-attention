@@ -116,6 +116,7 @@ def chunk_kda_bwd_kernel_dAv(
         for BV in BV_LIST
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
+        if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
     ],
     key=['BT', 'TRANSPOSE_STATE'],
     **autotune_cache_kwargs,
