@@ -181,6 +181,7 @@ def prepare_wy_repr_fwd(
     v: torch.Tensor,
     beta: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
@@ -188,10 +189,12 @@ def prepare_wy_repr_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=64,
         output_dtype=torch.float32,
+        chunk_indices=chunk_indices,
     )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
         output_dtype=k.dtype,
     )
     w, u = recompute_w_u_fwd(
@@ -200,6 +203,7 @@ def prepare_wy_repr_fwd(
         beta=beta,
         A=A,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     return w, u, A
 
@@ -210,6 +214,7 @@ def recompute_w_u_fwd(
     beta: torch.Tensor,
     A: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = 64
@@ -217,7 +222,8 @@ def recompute_w_u_fwd(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     u = torch.empty_like(v)
@@ -250,6 +256,7 @@ def prepare_wy_repr_bwd(
     dw: torch.Tensor,
     du: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
@@ -257,7 +264,8 @@ def prepare_wy_repr_bwd(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     dk = torch.empty_like(k)

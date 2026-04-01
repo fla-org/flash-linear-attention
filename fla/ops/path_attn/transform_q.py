@@ -48,7 +48,7 @@ def transform_q_fwd_kernel(
 
     if BS == BT:
         if (i_t * BT) % S == 0:
-            p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (i_t * BT // S)) * HQ + i_hq) * K,
+            p_q_new = tl.make_block_ptr(q_new + ((bos.to(tl.int64) * NUM_BLOCKS + (i_t * BT // S)) * HQ + i_hq) * K,
                                         (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
             tl.store(p_q_new, b_q.to(q_new.dtype.element_ty), boundary_check=(0, 1))
 
@@ -63,7 +63,7 @@ def transform_q_fwd_kernel(
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
 
         if offset % S == 0:
-            p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (offset // S)) * HQ + i_hq) * K,
+            p_q_new = tl.make_block_ptr(q_new + ((bos.to(tl.int64) * NUM_BLOCKS + (offset // S)) * HQ + i_hq) * K,
                                         (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
             tl.store(p_q_new, b_q.to(q_new.dtype.element_ty), boundary_check=(0, 1))
 
@@ -76,11 +76,14 @@ def transform_q_fwd_fn(
     BT,
     BS,
     S,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K = q.shape
     H = w1.shape[-2]
     G = HQ // H
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
 
     num_blocks = triton.cdiv(T, S) if cu_seqlens is None else get_max_num_splits(cu_seqlens, S)

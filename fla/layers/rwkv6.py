@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import GroupNorm
 from fla.modules.activations import ACT2FN
 from fla.modules.token_shift import token_shift
@@ -126,12 +127,10 @@ class RWKV6Attention(nn.Module):
         # launching the triton kernel for just one token will actually be slower
         mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         if attention_mask is not None:
-            hidden_states = hidden_states.mul_(attention_mask[:, -hidden_states.shape[-2]:, None])
+            hidden_states = hidden_states.mul(attention_mask[:, -hidden_states.shape[-2]:, None])
 
         if hidden_states.shape[1] == 1 and last_state is not None:
             shifted = last_state['conv_state'].unsqueeze(1)
@@ -155,7 +154,7 @@ class RWKV6Attention(nn.Module):
 
         # dealing with left-padding
         if attention_mask is not None:
-            v = v.mul_(attention_mask[:, -v.shape[-2]:, None])
+            v = v.mul(attention_mask[:, -v.shape[-2]:, None])
         r, w, k = map(lambda x: rearrange(x, 'b t (h d) -> b t h d', d=self.head_k_dim), (r, w, k))
         v = rearrange(v, 'b t (h d) -> b t h d', d=self.head_v_dim)
         w = -torch.exp(w)
@@ -190,13 +189,13 @@ class RWKV6Attention(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=hidden_states[:, -1],
-                layer_idx=self.layer_idx,
-                offset=r.shape[2],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=hidden_states[:, -1],
+            offset=seq_len,
+        )
 
         o = self.g_norm(rearrange(o, '... h d -> ... (h d)')) * self.gate_fn(g)
         o = self.o_proj(o)

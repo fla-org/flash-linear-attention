@@ -7,6 +7,8 @@ import torch
 from fla.models import Mamba2Config, Mamba2ForCausalLM
 from fla.utils import device
 
+from .test_modeling_base import run_test_generation
+
 
 # ===================================================================================
 # Test for Modeling (Forward/Backward Pass)
@@ -69,3 +71,40 @@ def test_modeling(
     # Backward pass
     y.logits.sum().backward()
     print(f"Test test_modeling passed with H={H}, D={D}, backend={conv_backend}.")
+
+
+# ===================================================================================
+# Test for Generation
+# ===================================================================================
+@pytest.mark.parametrize(
+    ['L', 'B', 'T', 'H', 'D', 'dtype', 'conv_backend'],
+    [
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}-conv-{}".format(*test))
+        for test in [
+            (2, 4, 2000, 8, 64, torch.float16, 'cuda'),
+        ]
+    ],
+)
+def test_generation(
+    L: int,
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+    conv_backend: str,
+):
+    os.environ['FLA_CONV_BACKEND'] = conv_backend
+    expand = 2
+    hidden_size = H * D // expand
+
+    config = Mamba2Config(
+        num_hidden_layers=L,
+        hidden_size=hidden_size,
+        expand=expand,
+        num_heads=H,
+        head_dim=D,
+        vocab_size=1000,
+    )
+    model = Mamba2ForCausalLM(config).to(device=device, dtype=dtype)
+    run_test_generation(L, B, T, H, D, Mamba2Config, dtype, model=model, config=config)

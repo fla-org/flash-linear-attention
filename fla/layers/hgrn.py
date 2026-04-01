@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.modules.activations import swiglu
 from fla.ops.hgrn import chunk_hgrn, fused_recurrent_hgrn
@@ -95,9 +96,7 @@ class HGRNAttention(nn.Module):
         # launching the triton kernel for just one token will actually be slower
         mode = 'fused_recurrent' if not self.training and hidden_states.shape[1] <= 64 else self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if self.use_short_conv:
@@ -154,13 +153,13 @@ class HGRNAttention(nn.Module):
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_i, conv_state_f) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=i.shape[2],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_i, conv_state_f) if self.use_short_conv else None,
+            offset=i.shape[1],
+        )
 
         o = self.g_norm(o, self.g_proj(hidden_states))
         o = self.o_proj(o)

@@ -485,6 +485,7 @@ def parallel_simple_gla_fwd(
     output_attentions: bool = False,
     chunk_size: int = 128,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT, BS = chunk_size, 32
@@ -502,12 +503,13 @@ def parallel_simple_gla_fwd(
     NV = triton.cdiv(V, BV)
     assert BT % BS == 0
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     # local cumulative decay in log space
     if g is not None:
-        g = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
+        g = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     grid = (NK * NV, NT, B * H)
     o = torch.empty(NK, *v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     attn = q.new_zeros(NK, B, H, T, T) if output_attentions else None
@@ -548,6 +550,7 @@ def parallel_simple_gla_bwd(
     scale: float,
     chunk_size: int = 128,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT, BS = chunk_size, 32
@@ -573,7 +576,8 @@ def parallel_simple_gla_bwd(
     dv = torch.empty(NK, * v.shape, dtype=v.dtype if NK == 1 else torch.float, device=q.device)
     dg = torch.empty(NK*NV, *g.shape, dtype=torch.float, device=q.device) if g is not None else None
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     grid = (NK * NV, NT, B * H)
@@ -612,9 +616,12 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, g, scale, output_attentions, cu_seqlens):
+    def forward(ctx, q, k, v, g, scale, output_attentions, cu_seqlens, cu_seqlens_cpu):
         chunk_size = 128
         ctx.dtype = q.dtype
+
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
 
         o, g, attn = parallel_simple_gla_fwd(
             q=q,
@@ -625,8 +632,9 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
             output_attentions=output_attentions,
             chunk_size=chunk_size,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, k, v, g, cu_seqlens)
+        ctx.save_for_backward(q, k, v, g, cu_seqlens, chunk_indices)
         ctx.scale = scale
         ctx.chunk_size = chunk_size
         return o.to(q.dtype), attn
@@ -635,7 +643,7 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, da=None):
-        q, k, v, g, cu_seqlens = ctx.saved_tensors
+        q, k, v, g, cu_seqlens, chunk_indices = ctx.saved_tensors
         dq, dk, dv, dg = parallel_simple_gla_bwd(
             q=q,
             k=k,
@@ -645,8 +653,9 @@ class ParallelSimpleGLAFunction(torch.autograd.Function):
             scale=ctx.scale,
             chunk_size=ctx.chunk_size,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.dtype) if dg is not None else None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(ctx.dtype) if dg is not None else None, None, None, None, None
 
 
 def parallel_simple_gla(
@@ -657,6 +666,7 @@ def parallel_simple_gla(
     scale: float | None = None,
     output_attentions: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     head_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -719,5 +729,6 @@ def parallel_simple_gla(
         scale,
         output_attentions,
         cu_seqlens,
+        cu_seqlens_cpu,
     )
     return o, attn

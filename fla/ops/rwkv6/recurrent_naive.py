@@ -39,7 +39,6 @@ def naive_recurrent_rwkv6(
 
 
 @torch.no_grad
-@torch.jit.script
 def naive_recurrent_rwkv6_bwd(
     q: torch.Tensor,
     k: torch.Tensor,

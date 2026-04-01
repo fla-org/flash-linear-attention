@@ -10,7 +10,6 @@ from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, i
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
-@torch.jit.script
 def k_update_ref(k: torch.Tensor, a: torch.Tensor, ka: torch.Tensor) -> torch.Tensor:
     return k.addcmul(k * (a - 1), ka)
 
@@ -213,6 +212,7 @@ def k_update_fwd(
     a: torch.Tensor,
     ka: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, D = k.shape
     out = torch.empty_like(k)
@@ -236,7 +236,7 @@ def k_update_fwd(
             triton.cdiv(max(16, B * T), get_multiprocessor_count(k.device.index)),
         ))
         if cu_seqlens is not None:
-            chunk_idx = prepare_chunk_indices(cu_seqlens, BT)
+            chunk_idx = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
             NT = len(chunk_idx)
             N = len(cu_seqlens) - 1
         else:
@@ -268,6 +268,7 @@ def k_update_bwd(
     use_short: bool,
     N: int,
     T: int,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
 ):
     B, _, D = grad_out.shape
     dk = torch.empty_like(k)
@@ -289,7 +290,7 @@ def k_update_bwd(
             triton.cdiv(max(16, B * T), get_multiprocessor_count(grad_out.device.index)),
         ))
         if cu_seqlens is not None:
-            chunk_idx = prepare_chunk_indices(cu_seqlens, BT)
+            chunk_idx = prepare_chunk_indices(cu_seqlens, BT, cu_seqlens_cpu=cu_seqlens_cpu)
             NT = len(chunk_idx)
         else:
             chunk_idx = None
@@ -319,13 +320,14 @@ def k_update_bwd(
 class KUpdateFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
-    def forward(ctx, k, a, ka, cu_seqlens=None):
-        out, use_short, N, T = k_update_fwd(k, a, ka, cu_seqlens)
+    def forward(ctx, k, a, ka, cu_seqlens=None, cu_seqlens_cpu=None):
+        out, use_short, N, T = k_update_fwd(k, a, ka, cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu)
         ctx.save_for_backward(k, a, ka)
         ctx.use_short = use_short
         ctx.N = N
         ctx.T = T
         ctx.cu_seqlens = cu_seqlens
+        ctx.cu_seqlens_cpu = cu_seqlens_cpu
         return out
 
     @staticmethod
@@ -338,11 +340,12 @@ class KUpdateFunction(torch.autograd.Function):
             ctx.use_short,
             ctx.N,
             ctx.T,
+            cu_seqlens_cpu=ctx.cu_seqlens_cpu,
         )
-        return dk, da, dka, None
+        return dk, da, dka, None, None
 
 
-def fused_k_rwkv7(k, a, ka, cu_seqlens=None):
+def fused_k_rwkv7(k, a, ka, cu_seqlens=None, cu_seqlens_cpu=None):
     if k.shape[1] == 1:
         return k_update_ref(k, a, ka)
-    return KUpdateFunction.apply(k, a, ka, cu_seqlens)
+    return KUpdateFunction.apply(k, a, ka, cu_seqlens, cu_seqlens_cpu)

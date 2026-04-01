@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding, ShortConvolution
 from fla.modules.activations import swiglu, swish
 from fla.ops.abc.chunk import chunk_abc
@@ -146,9 +147,7 @@ class ABCAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if cu_seqlens is not None:
@@ -210,13 +209,13 @@ class ABCAttention(nn.Module):
             initial_state=recurrent_state,
             output_final_state=use_cache,
         )
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q.shape[1],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q.shape[1],
+        )
 
         if self.use_norm and not self.use_output_gate:
             o = self.g_norm(o)

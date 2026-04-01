@@ -4,6 +4,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+  pull-requests: write
+
 on:
   pull_request:
     branches: [ '*' ]
@@ -23,3 +27,13 @@ jobs:
       conda_env_name: 'pytorch_2_7'
       pytorch_version: '2.7.0'
       skip_gpu_check: false
+
+  benchmark-a100:
+    name: Benchmark A100 (PyTorch 2.7)
+    needs: test-a100-pytorch-2-7
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/reusable-ci-benchmarks.yml
+    with:
+      runner: 'nvidia-a100'
+      conda_env_name: 'pytorch_2_7'
+      base_ref: origin/${{ github.event.pull_request.base.ref }}

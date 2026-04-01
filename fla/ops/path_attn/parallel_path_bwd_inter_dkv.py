@@ -103,7 +103,7 @@ def parallel_path_bwd_dkv_kernel(
         b_delta = tl.load(p_delta, boundary_check=(0, ))
         b_l = tl.load(p_l, boundary_check=(0, ))
 
-        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j) * HQ + i_hq) * K, (T, K),
+        p_q = tl.make_block_ptr(q + ((bos.to(tl.int64) * NUM_BLOCKS + idx_j) * HQ + i_hq) * K, (T, K),
                                 (HQ*K*NUM_BLOCKS, 1), (offset, 0), (BS, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_A = tl.dot(b_k, tl.trans(b_q).to(b_k.dtype))
@@ -141,13 +141,16 @@ def parallel_path_bwd_dkv_fn(
     hc_whole, scale, L, D,
     cu_seqlens,
     S, BT, BS,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, num_blocks, HQ, K = q.shape
     V = v.shape[-1]
     H = k.shape[-2]
     G = HQ // H
 
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
 

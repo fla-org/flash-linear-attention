@@ -1,12 +1,11 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp, exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
@@ -41,6 +40,7 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_EXP2: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -70,7 +70,10 @@ def chunk_scaled_dot_comba_pkt_fwd_kernel(
         p_g = tl.make_block_ptr(g + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g0 = tl.load(p_g0, boundary_check=(0,))
         b_g = tl.load(p_g, boundary_check=(0,))
-        b_A = b_A * exp(b_g0[:, None] - b_g[None, :])
+        if USE_EXP2:
+            b_A = b_A * exp2(b_g0[:, None] - b_g[None, :])
+        else:
+            b_A = b_A * exp(b_g0[:, None] - b_g[None, :])
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
     b_A = tl.where(m_A, b_A, 0)
@@ -87,6 +90,8 @@ def chunk_scaled_dot_comba_pkt_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
+    chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
 ) -> torch.Tensor:
     r"""
     Compute beta \mathcal{A}(i-1/j) * P * K^T.
@@ -117,7 +122,8 @@ def chunk_scaled_dot_comba_pkt_fwd(
     """
     B, T, H, K = k.shape
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_comba_pkt_fwd_kernel[(NT, B * H)](
@@ -133,6 +139,7 @@ def chunk_scaled_dot_comba_pkt_fwd(
         H=H,
         K=K,
         BT=BT,
+        USE_EXP2=use_exp2,
     )
     return A
 
@@ -176,6 +183,7 @@ def prepare_wy_repr_bwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_EXP2: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -194,7 +202,10 @@ def prepare_wy_repr_bwd_kernel(
     b_A = tl.load(p_A, boundary_check=(0, 1))
     b_beta = tl.load(p_beta, boundary_check=(0,))
     b_g0 = tl.load(p_g0, boundary_check=(0,))
-    b_g0_exp = tl.exp(b_g0)
+    if USE_EXP2:
+        b_g0_exp = exp2(b_g0)
+    else:
+        b_g0_exp = tl.exp(b_g0)
     b_g = tl.load(p_g, boundary_check=(0,))
 
     b_dbeta = tl.zeros([BT], dtype=tl.float32)
@@ -234,7 +245,10 @@ def prepare_wy_repr_bwd_kernel(
     b_dA = tl.where(m_A, b_dA, 0)
     b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
     b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
-    b_dA = tl.where(m_A, -b_dA * exp(b_g0[:, None] - b_g[None, :]), 0).to(k.dtype.element_ty)
+    if USE_EXP2:
+        b_dA = tl.where(m_A, -b_dA * exp2(b_g0[:, None] - b_g[None, :]), 0).to(k.dtype.element_ty)
+    else:
+        b_dA = tl.where(m_A, -b_dA * exp(b_g0[:, None] - b_g[None, :]), 0).to(k.dtype.element_ty)
     b_dA = b_dA.to(k.dtype.element_ty)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
 
@@ -297,6 +311,7 @@ def recompute_w_u_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_EXP2: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -311,7 +326,10 @@ def recompute_w_u_fwd_kernel(
     p_A = tl.make_block_ptr(A + (bos*H + i_h) * BT, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     b_beta = tl.load(p_beta, boundary_check=(0,))
     b_A = tl.load(p_A, boundary_check=(0, 1))
-    b_g = tl.exp(tl.load(p_g, boundary_check=(0,)))
+    if USE_EXP2:
+        b_g = exp2(tl.load(p_g, boundary_check=(0,)))
+    else:
+        b_g = tl.exp(tl.load(p_g, boundary_check=(0,)))
 
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v + (bos*H + i_h) * V, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
@@ -337,11 +355,14 @@ def recompute_w_u_fwd(
     g_cumsum: torch.Tensor,
     A: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = A.shape[-1]
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = 64
     BV = 64
@@ -365,6 +386,7 @@ def recompute_w_u_fwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_EXP2=use_exp2,
     )
     return w, u
 
@@ -380,10 +402,13 @@ def prepare_wy_repr_bwd(
     dw: torch.Tensor,
     du: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
+    chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = 64
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
@@ -420,5 +445,6 @@ def prepare_wy_repr_bwd(
         BT=BT,
         BK=BK,
         BV=BV,
+        USE_EXP2=use_exp2,
     )
     return dk, dv, dp, dbeta, dg0, dg

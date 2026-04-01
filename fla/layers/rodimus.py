@@ -12,7 +12,15 @@ import torch.utils.checkpoint
 from einops import rearrange, repeat
 from transformers.utils import logging
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input, unpad_input
+from fla.layers.utils import (
+    get_layer_cache,
+    get_unpad_data,
+    index_first_axis,
+    pad_input,
+    require_cache_layer_idx,
+    unpad_input,
+    update_layer_cache,
+)
 from fla.modules import RMSNorm, RotaryEmbedding, ShortConvolution
 from fla.modules.layernorm_gated import RMSNormGated
 from fla.ops.gla import chunk_gla, fused_chunk_gla, fused_recurrent_gla
@@ -133,9 +141,7 @@ class RodimusAttention(nn.Module):
         # mode = 'fused_recurrent' if hidden_states.shape[1] <= 64 else self.mode
         mode = 'fused_recurrent' if hidden_states.shape[1] == 1 else self.mode
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if attention_mask is not None:
@@ -215,10 +221,11 @@ class RodimusAttention(nn.Module):
         rodimus_caches = None
         if past_key_values is not None:
             if self.block_type == 'rodimus':
-                past_key_values.update(
+                update_layer_cache(
+                    self,
+                    past_key_values,
                     recurrent_state=recurrent_state,
                     conv_state=conv_state if self.use_short_conv else None,
-                    layer_idx=self.layer_idx,
                     offset=q_len,
                 )
             else:
@@ -305,9 +312,10 @@ class SlidingWindowSharedKeyAttention(nn.Module):
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens')
 
+        layer_idx = require_cache_layer_idx(self, past_key_values)
         seqlen_offset, max_seqlen = 0, q.shape[1]
         if past_key_values is not None:
-            seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
+            seqlen_offset = past_key_values.get_seq_length(layer_idx)
             max_seqlen = q.shape[1] + seqlen_offset
 
             if attention_mask is not None:
@@ -325,12 +333,12 @@ class SlidingWindowSharedKeyAttention(nn.Module):
             else:
                 recurrent_state, conv_state = None, None
 
-            cache_has_content = past_key_values.get_seq_length(self.layer_idx) > 0
+            cache_has_content = past_key_values.get_seq_length(layer_idx) > 0
             k_cached, v_cached = past_key_values.update(
                 recurrent_state=recurrent_state,
                 conv_state=conv_state,
                 attn_state=[k.flatten(-2, -1), v.flatten(-2, -1)],
-                layer_idx=self.layer_idx,
+                layer_idx=layer_idx,
                 offset=q_len,
                 cache_kwargs=dict(window_size=self.window_size),
             )['attn_state']

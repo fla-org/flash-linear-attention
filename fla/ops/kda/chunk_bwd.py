@@ -4,9 +4,23 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.cp import FLACPContext
+from fla.ops.cp.chunk_delta_h import (
+    chunk_gated_delta_rule_bwd_dhu_pre_process,
+    expand_h0,
+)
+from fla.ops.kda.chunk_intra import chunk_kda_bwd_intra
+from fla.ops.kda.gate import kda_gate_bwd, kda_gate_chunk_cumsum
+from fla.ops.kda.wy_fast import recompute_w_u_fwd
+from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import (
+    IS_NVIDIA_HOPPER,
+    autotune_cache_kwargs,
+    check_shared_mem,
+)
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -103,7 +117,7 @@ def chunk_kda_bwd_kernel_dAv(
         for num_stages in [2, 3, 4]
         if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
     ],
-    key=['BT'],
+    key=['BT', 'TRANSPOSE_STATE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -135,21 +149,22 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_tg = i_t
+        i_tg = i_t.to(tl.int64)
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos, eos = i_b * T, i_b * T + T
+        i_tg = (i_b * NT + i_t).to(tl.int64)
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
@@ -191,7 +206,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
 
-        p_gn = g + (min(T, i_t * BT + BT) - 1) * H*K + o_k
+        p_gn = g + (min(T, i_t * BT + BT) - 1).to(tl.int64) * H*K + o_k
         b_gn = tl.load(p_gn, mask=m_k, other=0).to(tl.float32)
 
         b_dq = tl.zeros([BT, BK], dtype=tl.float32)
@@ -202,8 +217,12 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         for i_v in range(tl.cdiv(V, BV)):
             p_v_new = tl.make_block_ptr(v_new, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-            p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+            if TRANSPOSE_STATE:
+                p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+                p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+            else:
+                p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+                p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
             p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             # [BT, BV]
             b_v_new = tl.load(p_v_new, boundary_check=(0, 1))
@@ -340,6 +359,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    transpose_state_layout: bool = False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -382,6 +402,183 @@ def chunk_kda_bwd_wy_dqkg_fused(
         K=K,
         V=V,
         BT=BT,
+        TRANSPOSE_STATE=transpose_state_layout,
     )
     dv = dv2
     return dq, dk, dv, db, dg, dA
+
+
+def chunk_kda_bwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    Aqk: torch.Tensor,
+    Akk: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    do: torch.Tensor,
+    dht: torch.Tensor,
+    g: torch.Tensor | None = None,
+    g_org: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    safe_gate: bool = False,
+    lower_bound: float | None = None,
+    use_gate_in_kernel: bool = False,
+    A_log: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
+    disable_recompute: bool = False,
+    cp_context: FLACPContext | None = None,
+    transpose_state_layout: bool = False,
+    **kwargs,
+):
+    if disable_recompute is False:
+        if use_gate_in_kernel:
+            g = kda_gate_chunk_cumsum(
+                g=g_org,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                scale=RCP_LN2,
+                chunk_size=chunk_size,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                lower_bound=lower_bound
+            )
+        w, u, qg, kg = recompute_w_u_fwd(
+            q=q,
+            k=k,
+            v=v,
+            beta=beta,
+            A=Akk,
+            gk=g,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+        if cp_context is not None:
+            # Restore the full initial_state tensor from the compressed version.
+            # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
+            initial_state = expand_h0(initial_state, context=cp_context)
+        h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+            k=kg,
+            w=w,
+            u=u,
+            gk=g,
+            initial_state=initial_state,
+            output_final_state=False,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            use_exp2=True,
+            transpose_state_layout=transpose_state_layout,
+        )
+    else:
+        w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
+        if cp_context is not None:
+            # Restore the full initial_state tensor from the compressed version.
+            # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
+            initial_state = expand_h0(initial_state, context=cp_context)
+
+    # dAqk = do @ v.T
+    # dv = A @ do
+    dAqk, dv = chunk_kda_bwd_dAv(
+        q=q,
+        k=k,
+        v=v_new,
+        do=do,
+        A=Aqk,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    )
+
+    if cp_context is not None:
+        # initial_state is None in the CP mode
+        # We only need to compute dht of current rank and pass it to the backward kernel
+        dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
+            q=qg,
+            k=kg,
+            w=w,
+            do=do,
+            dv=dv,
+            gk=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            dht=dht,
+            initial_state=initial_state,
+            use_exp2=True,
+            context=cp_context,
+            transpose_state_layout=transpose_state_layout,
+        )
+
+    dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
+        q=qg,
+        k=kg,
+        w=w,
+        gk=g,
+        h0=initial_state,
+        dht=dht,
+        do=do,
+        dv=dv,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_exp2=True,
+        transpose_state_layout=transpose_state_layout,
+    )
+
+    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
+        q=q,
+        k=k,
+        v=v,
+        v_new=v_new,
+        g=g,
+        beta=beta,
+        A=Akk,
+        h=h,
+        do=do,
+        dh=dh,
+        dv=dv,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+        transpose_state_layout=transpose_state_layout,
+    )
+
+    dq, dk, db, dg = chunk_kda_bwd_intra(
+        q=q,
+        k=k,
+        g=g,
+        beta=beta,
+        dAqk=dAqk,
+        dAkk=dAkk,
+        dq=dq,
+        dk=dk,
+        db=db,
+        dg=dg,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+        safe_gate=safe_gate
+    )
+
+    dA, dbias = None, None
+    dg = chunk_local_cumsum(
+        dg,
+        chunk_size=chunk_size,
+        reverse=True,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
+    if use_gate_in_kernel:
+        dg, dA, dbias = kda_gate_bwd(
+            g=g_org,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            dyg=dg,
+            lower_bound=lower_bound
+        )
+
+    return dq, dk, dv, db, dg, dh0, dA, dbias

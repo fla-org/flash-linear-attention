@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from fla.models.utils import Cache
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input, unpad_input
+from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, unpad_input, update_layer_cache
 
 
 def _upad_input(
@@ -441,10 +441,8 @@ class MomAttention(nn.Module):
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
-        last_state = None
+        last_state = get_layer_cache(self, past_key_values)
         # _, q_len = hidden_states.shape[0], hidden_states.shape[1]
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
 
         # 🔍 topk gating
         router_logits = self.gate(hidden_states)  # (bsz, q_len, num_memories)
@@ -628,13 +626,13 @@ class MomAttention(nn.Module):
                                      use_cache, conv_state_q, conv_state_k, conv_state_v)
             o += shared_o
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q.shape[2],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q.shape[2],
+        )
 
         if self.use_output_gate:
             g = rearrange(self.g_proj(shared_hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)

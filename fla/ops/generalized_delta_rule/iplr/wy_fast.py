@@ -219,11 +219,13 @@ def prepare_wy_repr_fwd(
     k: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
     chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K = a.shape
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
     BK = min(max(triton.next_power_of_2(K), 16), 64)
@@ -251,6 +253,7 @@ def prepare_wy_repr_fwd(
         A=A,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return w, u, A
 
@@ -262,11 +265,13 @@ def wu_fwd(
     A: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
     chunk_size: int,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *a.shape, v.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)

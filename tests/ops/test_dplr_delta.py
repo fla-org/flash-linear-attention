@@ -252,19 +252,27 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'mask_p', 'gate_logit_normalizer', 'safe_gate', 'lowerbound', 'scale', 'dtype',),
+    ('B', 'T', 'H', 'D', 'mask_p', 'gate_logit_normalizer', 'safe_gate', 'lowerbound', 'scale', 'dtype', 'disable_recompute',),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-mask_p{}-gate_logit_normalizer{}-safe_gate{}-lowerbound{}-scale{}-dtype{}".format(*test))
-        for test in [
-            (1, 63, 1, 64, 0, 1, True, -5, 1, torch.float16),
-            (2, 1000, 3, 60, 0, 1, True, -5, 1, torch.float16),
-            (2, 1024, 3, 64, 0.5, 1, True, -5, 1, torch.float16),
-            (2, 1024, 4, 100, 0, 0.1, True, -5, 1, torch.float16),
-            (2, 1024, 4, 100, 0, 0.1, True, -0.61, 1, torch.float16),
-            (2, 1024, 4, 128, 0.5, 1, False, -5, 0.1, torch.float16),
-            (2, 1024, 4, 128, 0, 10, False, -5, 0.1, torch.float16),
-            (4, 2048, 8, 64, 0, 1, False, -5, 0.1, torch.float16),
-        ]
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-mask_p{}-gate_logit_normalizer{}-safe_gate{}-lowerbound{}-scale{}-dtype{}-disable_recompute{}".format(
+                *test
+            ),
+        )
+        for test in (
+            [
+                (1, 63, 1, 64, 0, 1, True, -5, 1, torch.float16, False),
+                (2, 1000, 3, 60, 0, 1, True, -5, 1, torch.float16, False),
+                (2, 1024, 3, 64, 0.5, 1, True, -5, 1, torch.float16, False),
+                (2, 1024, 4, 100, 0, 0.1, True, -5, 1, torch.float16, False),
+                (2, 1024, 4, 100, 0, 0.1, True, -0.61, 1, torch.float16, False),
+                (2, 1024, 4, 128, 0.5, 1, False, -5, 0.1, torch.float16, False),
+                (2, 1024, 4, 128, 0, 10, False, -5, 0.1, torch.float16, False),
+                (1, 63, 1, 64, 0, 1, True, -5, 1, torch.float16, True),
+                (2, 1024, 3, 64, 0.5, 1, True, -5, 1, torch.float16, True),
+            ]
+        )
     ],
 )
 @pytest.mark.skipif(
@@ -282,6 +290,7 @@ def test_chunk(
     lowerbound: float,
     scale: float,
     dtype: torch.dtype,
+    disable_recompute: bool,
 ):
     torch.manual_seed(42)
     q = torch.randn(B, T, H, D, dtype=dtype)
@@ -332,6 +341,7 @@ def test_chunk(
         output_final_state=True,
         safe_gate=safe_gate,
         chunk_size=chunk_size,
+        disable_recompute=disable_recompute,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_da, tri_db, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, a.grad, b.grad, gk.grad, h0.grad

@@ -10,7 +10,7 @@ from fla.ops.mesa_net.chunk_cg_solver_fwd import chunk_mesa_cg_fwd
 from fla.ops.mesa_net.chunk_h_fwd import chunk_mesa_fwd_h
 from fla.ops.mesa_net.chunk_h_kk_intra_bwd import chunk_mesa_net_h_kk_bwd_intra_fn
 from fla.ops.mesa_net.chunk_h_kv_intra_bwd import chunk_mesa_net_h_kv_bwd_intra_fn
-from fla.ops.utils import chunk_local_cumsum
+from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -27,6 +27,7 @@ def chunk_fwd_mesa_net_fwd(
     h_kk_init: torch.Tensor | None = None,
     h_kv_init: torch.Tensor | None = None,
     output_final_state: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
 
     g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens) if g is not None else None
@@ -54,6 +55,7 @@ def chunk_fwd_mesa_net_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         max_CG_iteration=max_CG_iteration,
+        chunk_indices=chunk_indices,
     )
     return g, q_star, o, (h_kk_final, h_kv_final)
 
@@ -74,6 +76,7 @@ def chunk_fwd_mesa_net_bwd(
     h_kv_init: torch.Tensor | None = None,
     dh_kv_final: torch.Tensor | None = None,
     dh_kk_final: torch.Tensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     # recompute the hidden states, which is quite cheap
     h_kk, h_kv, _, _ = chunk_mesa_fwd_h(
@@ -114,6 +117,7 @@ def chunk_fwd_mesa_net_bwd(
         do=do,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     dq = chunk_mesa_cg_bwd(
         dq=dq,
@@ -126,6 +130,7 @@ def chunk_fwd_mesa_net_bwd(
         chunk_size=chunk_size,
         max_CG_iteration=max_CG_iteration,
         output_dtype=torch.float16,
+        chunk_indices=chunk_indices,
     )
     dh_kk, dh0_kk = chunk_bwd_dh(
         q=dq,
@@ -153,6 +158,7 @@ def chunk_fwd_mesa_net_bwd(
         dq=dq,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     dg.add_(dg2)
     dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens).to(g)
@@ -172,6 +178,7 @@ class ChunkMesaNetFunction(torch.autograd.Function):
         beta,
         lamb,
         cu_seqlens,
+        cu_seqlens_cpu,
         max_CG_iteration,
         h_kk_init,
         h_kv_init,
@@ -179,6 +186,8 @@ class ChunkMesaNetFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel,
     ):
         chunk_size = 64
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
 
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q, output_dtype=torch.float16)
@@ -201,19 +210,20 @@ class ChunkMesaNetFunction(torch.autograd.Function):
             h_kk_init=h_kk_init,
             h_kv_init=h_kv_init,
             output_final_state=output_final_state,
+            chunk_indices=chunk_indices,
         )
         ctx.max_CG_iteration = max_CG_iteration
         ctx.chunk_size = chunk_size
         ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g_cumsum, beta, lamb, h_kk_init, h_kv_init, q_star, o)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g_cumsum, beta, lamb, h_kk_init, h_kv_init, q_star, o, chunk_indices)
         return o, h_kk_final, h_kv_final
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dh_kk_final=None, dh_kv_final=None):
-        q, q_rstd, k, k_rstd, v, g, beta, lamb, h_kk_init, h_kv_init, q_star, o = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, g, beta, lamb, h_kk_init, h_kv_init, q_star, o, chunk_indices = ctx.saved_tensors
 
         max_CG_iteration = ctx.max_CG_iteration
         chunk_size = ctx.chunk_size
@@ -222,11 +232,12 @@ class ChunkMesaNetFunction(torch.autograd.Function):
             q=q, k=k, v=v, g=g, beta=beta, lamb=lamb, q_star=q_star, do=do,
             cu_seqlens=cu_seqlens, max_CG_iteration=max_CG_iteration, chunk_size=chunk_size,
             h_kk_init=h_kk_init, h_kv_init=h_kv_init, dh_kv_final=dh_kv_final, dh_kk_final=dh_kk_final,
+            chunk_indices=chunk_indices,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq, dk, dv.to(v), dg.to(g), dbeta.to(beta), dlamb.to(lamb), None, None, dh0_kk, dh0_kv, None, None
+        return dq, dk, dv.to(v), dg.to(g), dbeta.to(beta), dlamb.to(lamb), None, None, None, dh0_kk, dh0_kv, None, None
 
 
 @torch.compiler.disable
@@ -243,6 +254,7 @@ def chunk_mesa_net(
     max_CG_iteration: int = 30,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
 ):
     r"""
     Args:
@@ -360,6 +372,7 @@ def chunk_mesa_net(
         beta,
         lamb,
         cu_seqlens,
+        cu_seqlens_cpu,
         max_CG_iteration,
         h_kk_init,
         h_kv_init,

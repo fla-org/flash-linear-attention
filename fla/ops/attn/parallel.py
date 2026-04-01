@@ -223,7 +223,7 @@ def parallel_attn_bwd_kernel_dq(
     # [BT, BK]
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     if USE_G:
-        b_dg = tl.zeros([BT ], dtype=tl.float32)
+        b_dg = tl.zeros([BT], dtype=tl.float32)
         p_gq = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_t * BT,), (BT,), (0,))
         b_gq = tl.load(p_gq, boundary_check=(0,)).to(tl.float32)
     else:
@@ -445,6 +445,7 @@ def parallel_attn_fwd(
     g_cumsum: torch.Tensor,
     scale: float,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -468,7 +469,8 @@ def parallel_attn_fwd(
     NK = triton.cdiv(K, BK)
     NV = triton.cdiv(V, BV)
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     assert NK == 1, "The key dimension can not be larger than 256"
 
@@ -528,6 +530,7 @@ def parallel_attn_bwd(
     scale: float = None,
     chunk_size: int = 128,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
@@ -551,7 +554,8 @@ def parallel_attn_bwd(
         BV = min(max(triton.next_power_of_2(V), 16), 64)
         num_warps = 2
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NV = triton.cdiv(V, BV)
 
@@ -633,7 +637,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @staticmethod
     @contiguous
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, g, scale, cu_seqlens):
+    def forward(ctx, q, k, v, g, scale, cu_seqlens, chunk_indices=None):
         ctx.dtype = q.dtype
 
         RCP_LN2: float = 1.4426950216
@@ -645,6 +649,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
             g_cumsum=g_cumsum,
             scale=scale,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
         ctx.save_for_backward(q, k, v, o, g_cumsum, lse)
         ctx.cu_seqlens = cu_seqlens
@@ -670,7 +675,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
         if dg is not None:
             dg = chunk_global_cumsum(dg, cu_seqlens=ctx.cu_seqlens, reverse=True)
 
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, None
 
 
 def parallel_attn(
@@ -681,6 +686,7 @@ def parallel_attn(
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     head_first: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     r"""
     Args:
@@ -724,5 +730,5 @@ def parallel_attn(
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
 
-    o = ParallelAttentionFunction.apply(q, k, v, g, scale, cu_seqlens)
+    o = ParallelAttentionFunction.apply(q, k, v, g, scale, cu_seqlens, chunk_indices)
     return o

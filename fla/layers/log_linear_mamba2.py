@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import math
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -8,11 +10,12 @@ from transformers.activations import ACT2FN
 from transformers.utils import logging
 
 from fla.layers.mamba2 import apply_mask_to_padding_states, causal_conv1d_fn, causal_conv1d_update, is_fast_path_available
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules.layernorm_gated import RMSNormGated, rmsnorm_fn
 from fla.ops.log_linear_attn.chunk import LogLinearAttentionState, chunk_log_linear_attn
 
 if TYPE_CHECKING:
-    from fla.models.log_linear_mamba2.modeling_log_linear_mamba2 import LogLinearMamba2Cache
+    from fla.models.utils import Cache
 
 logger = logging.get_logger(__name__)
 
@@ -119,6 +122,8 @@ def hmamba_split_conv1d_scan_combined(
     headdim: int | None = None,
     ngroups: int = 1,
     norm_before_gate: bool = True,
+    conv1d_fn=None,
+    conv_backend: str = "cuda",
 ) -> torch.Tensor:
     """
     Argument:
@@ -186,16 +191,17 @@ def hmamba_split_conv1d_scan_combined(
     zxBCdtl_splits = [dim, dim + 2 * ngroups * dstate, nheads, nheads * dlambda]
     xBC_splits = [dim, ngroups * dstate, ngroups * dstate]
     z, xBC, dt, dl = torch.split(zxbcdtdl, zxBCdtl_splits, dim=-1)
-    xBC = rearrange(
-        causal_conv1d_fn(
-            rearrange(xBC, "b s d -> b d s"),
-            conv1d_weight,
-            bias=conv1d_bias,
-            activation=activation,
-            seq_idx=seq_idx,
-        ),
-        "b d s -> b s d",
+    _conv_fn = conv1d_fn if conv1d_fn is not None else causal_conv1d_fn
+    _conv_out = _conv_fn(
+        rearrange(xBC, "b s d -> b d s"),
+        conv1d_weight,
+        bias=conv1d_bias,
+        activation=activation,
+        seq_idx=seq_idx,
     )
+    if conv_backend == 'triton':
+        _conv_out = _conv_out[0]
+    xBC = rearrange(_conv_out, "b d s -> b s d")
     x, B, C = torch.split(xBC, xBC_splits, dim=-1)
     x = rearrange(x, "b l (h p) -> b l h p", h=nheads, p=headdim)
     B = rearrange(B, "b l (g n) -> b l g n", g=ngroups, n=dstate)
@@ -263,6 +269,7 @@ class LogLinearMamba2(nn.Module):
         use_bias: bool = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
+        backend: str = "cuda",
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -347,25 +354,47 @@ class LogLinearMamba2(nn.Module):
                 "To install follow https://github.com/state-spaces/mamba/#installation and"
                 "https://github.com/Dao-AILab/causal-conv1d",
             )
+        import os
+        backend = os.environ.get('FLA_CONV_BACKEND', backend)
+        assert backend in ['cuda', 'triton'], f"Unsupported backend: {backend}"
+        if backend == 'cuda' and causal_conv1d_fn is None:
+            logger.warning_once(
+                "The CUDA backend is not available because `causal_conv1d` is None. "
+                "Falling back to the Triton backend. "
+                "To install follow https://github.com/Dao-AILab/causal-conv1d",
+            )
+            backend = 'triton'
+        if backend == 'triton':
+            from fla.modules.convolution import causal_conv1d as causal_conv1d_triton
+            from fla.modules.convolution import causal_conv1d_update as causal_conv1d_update_triton
+            self.causal_conv1d_fn = causal_conv1d_triton
+            self.causal_conv1d_update = causal_conv1d_update_triton
+            logger.warning(
+                "LogLinearMamba2 does not recommend using Triton's conv1d backend, "
+                "as it is untested and may contain bugs.",
+            )
+        else:
+            self.causal_conv1d_fn = causal_conv1d_fn
+            self.causal_conv1d_update = causal_conv1d_update
+        self.backend = backend
 
     def cuda_kernels_forward(
         self,
         hidden_states: torch.Tensor,
-        cache_params: Optional["LogLinearMamba2Cache"] = None,
-        cache_position: torch.LongTensor | None = None,
+        last_state: dict | None = None,
+        use_cache: bool = False,
         attention_mask: torch.Tensor | None = None,
     ):
-        if attention_mask is not None:
-            # only supporting this in decoding
-            if cache_params is None:
-                raise NotImplementedError
         if self.activation not in ["silu", "swish"]:
             raise ValueError
 
         # 1. Gated MLP's linear projection
+        # Only apply padding mask during prefill (last_state is None).
+        # During decode, attention_mask has shape (B, accumulated_len) which
+        # mismatches hidden_states (B, 1, D).
         hidden_states = apply_mask_to_padding_states(
             hidden_states=hidden_states,
-            attention_mask=attention_mask,
+            attention_mask=attention_mask if last_state is None else None,
         )
         projected_states = self.in_proj(hidden_states)
 
@@ -382,13 +411,9 @@ class LogLinearMamba2(nn.Module):
             raise ValueError
 
         # Single step calculations via cache
-        if (
-            cache_params is not None
-            and cache_position is not None
-            and cache_position[0] > 0
-        ):
+        if last_state is not None:
             if hidden_states.shape[1] != 1:
-                raise ValueError
+                raise ValueError("LogLinearMamba2 cached decoding only supports a single new token per step.")
 
             gate, xBC, dt, dl = torch.split(
                 projected_states.squeeze(1),
@@ -402,9 +427,10 @@ class LogLinearMamba2(nn.Module):
             )
 
             # 2. Convolution sequence transformation
-            xBC = causal_conv1d_update(
+            conv_state = last_state['conv_state']
+            xBC = self.causal_conv1d_update(
                 xBC,
-                cache_params.conv_states[self.layer_idx],
+                conv_state,
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
                 self.conv1d.bias,
                 self.activation,
@@ -462,12 +488,8 @@ class LogLinearMamba2(nn.Module):
                 z=None,
                 dt_bias=self.dt_bias,
                 dt_softplus=True,
-                initial_states=cache_params.hssm_states[self.layer_idx],
+                initial_states=last_state['recurrent_state'],
                 return_final_states=True,
-            )
-            cache_params.update_hssm_state(
-                layer_idx=self.layer_idx,
-                new_hssm_state=hssm_state,
             )
             y = rearrange(
                 y,
@@ -480,6 +502,7 @@ class LogLinearMamba2(nn.Module):
 
             # 4. Final linear projection
             out = self.out_proj(y)[:, None, ...]
+            return out, conv_state, hssm_state
 
         # Fused calculations or step by step if no initialized cache is found
         else:
@@ -493,7 +516,7 @@ class LogLinearMamba2(nn.Module):
             )
 
             # 2-4. Fused kernel for conv1d, SSM, and the final projection
-            if self.training and cache_params is None:
+            if self.training and not use_cache:
                 out = torch.utils.checkpoint.checkpoint(
                     hmamba_split_conv1d_scan_combined,
                     use_reentrant=False,
@@ -506,6 +529,8 @@ class LogLinearMamba2(nn.Module):
                     L=self.L,
                     D=self.D,
                     chunk_size=self.chunk_size,
+                    conv1d_fn=self.causal_conv1d_fn,
+                    conv_backend=self.backend,
                     seq_idx=None,  # was seq_idx
                     activation=self.activation,
                     rmsnorm_weight=self.norm.weight,
@@ -518,6 +543,7 @@ class LogLinearMamba2(nn.Module):
                     return_final_states=False,
                     **dt_limit_kwargs,
                 )
+                return out, None, None
 
             else:
                 gate, xBC, dt, dl = torch.split(
@@ -533,24 +559,27 @@ class LogLinearMamba2(nn.Module):
 
                 # 2. Convolution sequence transformation
                 # Init cache
-                if cache_params is not None:
-                    xBC_t = rearrange(xBC, "b l d -> b d l")
-                    conv_states = torch.nn.functional.pad(
+                masked_xBC = apply_mask_to_padding_states(xBC, attention_mask)
+                new_conv_state = None
+                if use_cache:
+                    xBC_t = rearrange(masked_xBC, "b l d -> b d l")
+                    new_conv_state = torch.nn.functional.pad(
                         xBC_t,
-                        (cache_params.conv_kernel_size - xBC_t.shape[-1], 0),
-                    )
-                    cache_params.update_conv_state(
-                        layer_idx=self.layer_idx,
-                        new_conv_state=conv_states,
-                        cache_init=True,
+                        (self.conv_kernel_size - xBC_t.shape[-1], 0),
                     )
 
-                xBC = causal_conv1d_fn(
+                _conv1d_output = self.causal_conv1d_fn(
                     x=xBC.transpose(1, 2),
                     weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
                     activation=self.activation,
-                ).transpose(1, 2)
+                )
+                if self.backend == 'cuda':
+                    xBC = _conv1d_output.transpose(1, 2)
+                elif self.backend == 'triton':
+                    xBC = _conv1d_output[0].transpose(1, 2).contiguous()
+                else:
+                    raise ValueError(f"Unsupported backend: {self.backend}")
 
                 xBC = apply_mask_to_padding_states(
                     hidden_states=xBC,
@@ -610,13 +639,6 @@ class LogLinearMamba2(nn.Module):
                     **dt_limit_kwargs,
                 )
 
-                # Init cache
-                if hssm_state is not None and cache_params is not None:
-                    cache_params.update_hssm_state(
-                        layer_idx=self.layer_idx,
-                        new_hssm_state=hssm_state,
-                    )
-
                 y = rearrange(
                     y,
                     "b l h p -> b l (h p)",
@@ -631,20 +653,32 @@ class LogLinearMamba2(nn.Module):
                 # 4. Final linear projection
                 out = self.out_proj(y)
 
-        return out
+                return out, new_conv_state, hssm_state
 
     def forward(
         self,
-        hidden_states,
-        cache_params: Optional["LogLinearMamba2Cache"] = None,
-        cache_position: torch.LongTensor | None = None,
+        hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-    ):
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
+        last_state = get_layer_cache(self, past_key_values)
+
         if "cuda" in self.in_proj.weight.device.type:
-            return self.cuda_kernels_forward(
-                hidden_states=hidden_states,
-                cache_params=cache_params,
-                cache_position=cache_position,
-                attention_mask=attention_mask,
+            output, conv_state, hssm_state = self.cuda_kernels_forward(
+                hidden_states, last_state, use_cache, attention_mask
             )
-        raise NotImplementedError
+        else:
+            raise NotImplementedError
+
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=hssm_state,
+            conv_state=conv_state,
+            offset=hidden_states.shape[1],
+        )
+
+        return output, None, past_key_values

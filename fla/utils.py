@@ -42,18 +42,24 @@ def check_environments():
     """
     # Check Operating System
     if sys.platform == 'win32':
-        logger.warning(
-            "Detected Windows operating system. Triton does not have an official Windows release, "
-            "thus FLA will not be adapted for Windows, and any potential errors will not be fixed. "
-            "Please consider using a Linux environment for compatibility.",
-        )
+        # Check if triton-windows is installed
+        try:
+            from importlib.metadata import PackageNotFoundError, metadata
+            metadata('triton-windows')
+            # triton-windows is installed, no warning needed
+        except PackageNotFoundError:
+            logger.warning(
+                "Detected Windows operating system. Consider installing triton-windows "
+                "(https://github.com/triton-lang/triton-windows) for better compatibility. "
+                "Without it, some features may not work correctly.",
+            )
 
     triton_version = version.parse(triton.__version__)
-    required_triton_version = version.parse("3.2.0")
+    required_triton_version = version.parse("3.3.0")
 
     if triton_version < required_triton_version:
         logger.warning(
-            f"Current Triton version {triton_version} is below the recommended 3.2.0 version. "
+            f"Current Triton version {triton_version} is below the recommended 3.3.0 version. "
             "Errors may occur and these issues will not be fixed. "
             "Please consider upgrading Triton.",
         )
@@ -91,6 +97,8 @@ def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
     error_rate = get_err_ratio(ref, tri)
     if abs_atol <= err_atol:
         return
+    assert not torch.isnan(ref).any(), f"{prefix}: NaN detected in ref"
+    assert not torch.isnan(tri).any(), f"{prefix}: NaN detected in tri"
     if warning or (FLA_CI_ENV and (error_rate < 0.01 or abs_atol <= 0.3)):
         if error_rate > ratio:
             warnings.warn(msg)

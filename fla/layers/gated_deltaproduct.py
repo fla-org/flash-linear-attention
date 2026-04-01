@@ -11,7 +11,7 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from torch.nn import functional as F
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_product import chunk_gated_delta_product
 from fla.ops.gated_delta_rule import fused_recurrent_gated_delta_rule
@@ -178,9 +178,7 @@ class GatedDeltaProduct(nn.Module):
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if attention_mask is not None:
@@ -268,13 +266,13 @@ class GatedDeltaProduct(nn.Module):
             )
             o = rearrange(o, '... (t n) h d -> ... t n h d', n=self.num_householder)[..., -1, :, :].contiguous()
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q_len,
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q_len,
+        )
 
         if self.use_output_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)

@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import ModelOutput, logging
+from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.mamba import Mamba
-from fla.models.mamba.modeling_mamba import MambaCache
 from fla.models.samba.configuration_samba import SambaConfig
-from fla.models.utils import FLAGenerationMixin
+from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as SambaMLP
 from fla.modules.l2warp import l2_warp
@@ -72,16 +71,22 @@ class SambaBlock(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cache_params: tuple[torch.Tensor] | None = None,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
         **kwargs: Unpack[dict],
-    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
-
+    ):
         residual = hidden_states
         hidden_states = self.mixer_norm(hidden_states)
-        if isinstance(self.mixer, Mamba):
-            hidden_states = self.mixer(hidden_states, cache_params=cache_params, **kwargs)
-        else:
-            hidden_states, _, cache_params = self.mixer(hidden_states=hidden_states, past_key_values=cache_params, **kwargs)
+        hidden_states, attentions, past_key_values = self.mixer(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            **kwargs,
+        )
         if self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
@@ -90,7 +95,7 @@ class SambaBlock(GradientCheckpointingLayer):
             hidden_states = self.mlp_norm(hidden_states)
         hidden_states = self.mlp(hidden_states, **kwargs)
         hidden_states = residual + hidden_states
-        return hidden_states
+        return hidden_states, attentions, past_key_values
 
 
 class SambaPreTrainedModel(PreTrainedModel):
@@ -154,61 +159,6 @@ class SambaPreTrainedModel(PreTrainedModel):
                         p /= math.sqrt(self.config.num_layers)
 
 
-@dataclass
-class SambaOutput(ModelOutput):
-    """
-    Class for the Samba model outputs.
-
-    Args:
-        last_hidden_state (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
-            Sequence of hidden-states at the output of the last layer of the model.
-        cache_params (`MambaCache`):
-            The state of the model at the last time step. Can be used in a forward method with the next `input_ids` to
-            avoid providing the old `input_ids`.
-
-            Includes both the State space model state matrices after the selective scan, and the Convolutional states
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*,
-            returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
-            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
-    """
-
-    last_hidden_state: torch.FloatTensor | None = None
-    cache_params: MambaCache | None = None
-    hidden_states: tuple[torch.FloatTensor] | None = None
-
-
-@dataclass
-class SambaCausalLMOutput(ModelOutput):
-    """
-    Base class for causal language model (or autoregressive) outputs.
-
-    Args:
-        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-            Language modeling loss (for next-token prediction).
-        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-        cache_params (`MambaCache`):
-            The state of the model at the last time step. Can be used in a forward method with the next `input_ids` to
-            avoid providing the old `input_ids`.
-
-            Includes both the State space model state matrices after the selective scan, and the Convolutional states
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*,
-            returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
-            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
-    """
-
-    loss: torch.FloatTensor | None = None
-    logits: torch.FloatTensor | None = None
-    cache_params: MambaCache | None = None
-    hidden_states: tuple[torch.FloatTensor] | None = None
-
-
 class SambaModel(SambaPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
@@ -230,20 +180,25 @@ class SambaModel(SambaPreTrainedModel):
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
         inputs_embeds: torch.LongTensor | None = None,
-        cache_params: MambaCache | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = None,
+        output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
         **kwargs: Unpack[dict],
-    ) -> tuple | SambaOutput:
+    ) -> tuple | BaseModelOutputWithPast:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        output_attentions = (
+            output_attentions if output_attentions is not None else self.config.output_attentions
         )
         use_cache = use_cache if use_cache is not None else (self.config.use_cache if not self.training else False)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if (input_ids is None) ^ (inputs_embeds is not None):  # ^ is python for xor
+        if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one",
             )
@@ -251,25 +206,27 @@ class SambaModel(SambaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embeddings(input_ids)
 
-        if cache_params is None and use_cache:
-            cache_params = MambaCache(
-                self.config, inputs_embeds.size(0), device=inputs_embeds.device, dtype=inputs_embeds.dtype,
-            )
+        if use_cache and not isinstance(past_key_values, Cache):
+            past_key_values = Cache.from_legacy_cache(past_key_values)
 
         hidden_states = inputs_embeds
         all_hidden_states = () if output_hidden_states else None
+        all_attns = () if output_attentions else None
         for mixer_block in self.layers:
-            hidden_states = mixer_block(
-                hidden_states,
-                cache_params=cache_params,
-                **kwargs,
-            )
-
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-        if use_cache:
-            cache_params.seqlen_offset += inputs_embeds.shape[1]
+            hidden_states, attentions, past_key_values = mixer_block(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
+
+            if output_attentions and attentions is not None:
+                all_attns = all_attns + (attentions,)
 
         hidden_states = self.norm_f(hidden_states)
 
@@ -277,12 +234,13 @@ class SambaModel(SambaPreTrainedModel):
             all_hidden_states = all_hidden_states + (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, cache_params, all_hidden_states] if v is not None)
+            return tuple(i for i in [hidden_states, past_key_values, all_hidden_states, all_attns] if i is not None)
 
-        return SambaOutput(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            cache_params=cache_params if use_cache else None,
+            past_key_values=past_key_values,
             hidden_states=all_hidden_states,
+            attentions=all_attns if all_attns else None,
         )
 
 
@@ -311,41 +269,32 @@ class SambaForCausalLM(SambaPreTrainedModel, FLAGenerationMixin):
     def set_input_embeddings(self, new_embeddings):
         return self.backbone.set_input_embeddings(new_embeddings)
 
-    def _update_model_kwargs_for_generation(
-        self, outputs: ModelOutput, model_kwargs: dict[str, Any], **kwargs,
-    ) -> dict[str, Any]:
-        model_kwargs["cache_params"] = outputs.get("cache_params", None)
-        return model_kwargs
-
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
-        attention_mask: Optional[torch.Tensor] = None,  # noqa
+        attention_mask: torch.Tensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
-        cache_params: MambaCache | None = None,
+        past_key_values: Cache | list[torch.FloatTensor] | None = None,
         labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        use_cache: bool | None = None,
         logits_to_keep: int | None = 0,
         **kwargs: Unpack[dict],
-    ) -> tuple | SambaCausalLMOutput:
-        r"""
-        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
-            `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
-            are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
-        """
+    ) -> tuple | CausalLMOutputWithPast:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.backbone(
             input_ids,
-            cache_params=cache_params,
+            attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            use_cache=use_cache,
             **kwargs,
         )
         hidden_states = outputs[0]
@@ -375,9 +324,10 @@ class SambaForCausalLM(SambaPreTrainedModel, FLAGenerationMixin):
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        return SambaCausalLMOutput(
+        return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
-            cache_params=outputs.cache_params,
+            past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
