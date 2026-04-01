@@ -163,6 +163,18 @@ def lookup_compatible_autotune_entry(config_data: dict[str, Any], autotune_key: 
     return None
 
 
+def lookup_first_autotune_entry(config_data: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(config_data, dict):
+        return None
+    entries = config_data.get("autotune_entries")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if isinstance(entry, dict):
+            return entry
+    return None
+
+
 def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dict[str, Any] | None:
     """
     Load cached best config for a kernel from FLA configs directory.
@@ -206,6 +218,9 @@ def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dic
             compatible_entry = lookup_compatible_autotune_entry(config, autotune_key)
             if compatible_entry is not None:
                 return compatible_entry.get("config")
+            first_entry = lookup_first_autotune_entry(config)
+            if first_entry is not None:
+                return first_entry.get("config")
             return None
         if isinstance(config, dict) and isinstance(config.get("fallback_config"), dict):
             return config["fallback_config"]
