@@ -156,6 +156,8 @@ def load_cached_config(kernel_name: str, autotune_key: Any | None = None) -> dic
         entry = lookup_autotune_entry(config, autotune_key)
         if entry is not None:
             return entry.get("config")
+        if autotune_key is not None:
+            return None
         if isinstance(config, dict) and isinstance(config.get("fallback_config"), dict):
             return config["fallback_config"]
         if isinstance(config, dict) and isinstance(config.get("autotune_entries"), list):
@@ -212,10 +214,12 @@ class CachedAutotuner(Autotuner):
             self.cache[tuning_key] = cfg
         else:
             logger.debug(
-                "No cached config found for kernel %s and key %s; falling back to Triton autotune",
+                "No cached config found for kernel %s and key %s; using first configured Triton config",
                 self.kernel_name,
                 list(tuning_key),
             )
+            if self.configs:
+                self.cache[tuning_key] = self.configs[0]
 
 
 def fla_cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=None, restore_value=None,
