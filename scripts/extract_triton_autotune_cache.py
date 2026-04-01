@@ -76,6 +76,7 @@ def process_autotune_file(autotune_file: Path) -> dict[str, Any]:
         if not configs_timings:
             return None
 
+        # TODO: Add special handling for certain kernels if needed, e.g. prefer BK=64,BV=64 for chunk_kda_bwd_kernel_wy_dqkg_fused
         if kernel_name == "chunk_kda_bwd_kernel_wy_dqkg_fused":
             preferred_configs_timings = [
                 entry for entry in configs_timings
