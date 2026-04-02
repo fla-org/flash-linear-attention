@@ -9,7 +9,7 @@ from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.fused_recurrent import fused_recurrent_kda_fwd
 from fla.ops.kda.gate import fused_kda_gate, naive_kda_gate, naive_kda_lowerbound_gate
 from fla.ops.kda.naive import naive_chunk_kda, naive_recurrent_kda
-from fla.ops.utils.cache import FLA_CACHE_MODE, FlaCacheMode
+from fla.ops.utils.cache import FLA_CACHE_MODE
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
@@ -565,7 +565,7 @@ def test_chunk_varlen(
     safe_gate: bool,
     disable_recompute: bool,
 ):
-    if FLA_CACHE_MODE in (FlaCacheMode.FULL, FlaCacheMode.DEFAULT) and D in (64, 256):
+    if FLA_CACHE_MODE.uses_default_config() and D in (64, 256):
         pytest.skip(reason="Skipping D=64/256 varlen KDA case with default_config")
     torch.manual_seed(42)
     # randomly split the sequence into N segments
@@ -683,7 +683,7 @@ def test_chunk_varlen_prefill(
     safe_gate: bool,
     disable_recompute: bool,
 ):
-    if FLA_CACHE_MODE in (FlaCacheMode.FULL, FlaCacheMode.DEFAULT) and D == 256:
+    if FLA_CACHE_MODE.uses_default_config() and D == 256:
         pytest.skip(reason="Skipping D=256 varlen KDA prefill case with default_config")
     torch.manual_seed(42)
     # randomly split the sequence into N segments

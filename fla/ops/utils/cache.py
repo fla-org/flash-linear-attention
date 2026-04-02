@@ -21,19 +21,24 @@ class FlaCacheMode(enum.Enum):
     """Controls how FLA loads kernel configs from its config cache (FLA_CACHE_MODE env var).
 
     DISABLED    — skip all cache lookups, always fall back to Triton autotune (default when FLA_CACHE_MODE is unset)
+    STRICT      — exact key match only; falls back to Triton autotune if no match
+    FUZZY       — exact key match → fuzzy key match; falls back to Triton autotune if no match
     FULL        — exact key match → fuzzy key match → default_config fallback
     DEFAULT     — use only the top-level default_config field, skip key-based lookup
-    EXACT       — exact key match only, no fuzzy match, no default_config fallback
-    MATCH       — exact key match → fuzzy key match, no default_config fallback
-    ALWAYS      — like FULL, but re-reads config files and re-injects into Triton's cache on
-                  every kernel call; useful when editing config files without restarting the process
+    ALWAYS      — like DEFAULT, but re-reads config files on every kernel call;
+                  useful for debugging: edit default_config in a JSON file and the next
+                  kernel call picks it up without restarting the process
     """
     DISABLED = "disabled"
+    STRICT = "strict"
+    FUZZY = "fuzzy"
     FULL = "full"
     DEFAULT = "default"
-    EXACT = "exact"
-    MATCH = "match"
     ALWAYS = "always"
+
+    def uses_default_config(self) -> bool:
+        """Return True for modes that may fall back to default_config (FULL, DEFAULT, ALWAYS)."""
+        return self in (FlaCacheMode.FULL, FlaCacheMode.DEFAULT, FlaCacheMode.ALWAYS)
 
     @classmethod
     def from_env(cls) -> "FlaCacheMode":
@@ -294,24 +299,24 @@ def load_cached_config(kernel_name: str, autotune_key: AutotuneKey | None = None
     if config is None:
         return None
 
-    if FLA_CACHE_MODE is FlaCacheMode.DEFAULT:
+    if FLA_CACHE_MODE is FlaCacheMode.DEFAULT or FLA_CACHE_MODE is FlaCacheMode.ALWAYS:
         return config.default_config
 
-    # EXACT mode: exact match only, no fuzzy fallback
-    if FLA_CACHE_MODE is FlaCacheMode.EXACT:
+    # STRICT mode: exact match only, no fuzzy fallback
+    if FLA_CACHE_MODE is FlaCacheMode.STRICT:
         if autotune_key is not None:
             entry = config.lookup_exact(autotune_key)
             if entry is not None:
                 return entry["config"]
         return None
 
-    # FULL and MATCH modes: try exact key match first, then fuzzy match
+    # FULL and FUZZY modes: try exact key match first, then fuzzy match
     if autotune_key is not None:
         entry = config.lookup_exact(autotune_key) or config.lookup_fuzzy(autotune_key)
         if entry is not None:
             return entry["config"]
 
-    if FLA_CACHE_MODE is FlaCacheMode.MATCH:
+    if FLA_CACHE_MODE is FlaCacheMode.FUZZY:
         return None
 
     # FULL mode: fall back to default_config, then legacy raw config (no autotune_entries)
