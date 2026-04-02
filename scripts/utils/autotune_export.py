@@ -94,6 +94,7 @@ class KernelConfigFileWriter:
 
     def __init__(self, kernel_name: str, existing: KernelConfigFile | None = None):
         self._data = self.normalize(existing, kernel_name)
+        self.rejected_entries: list[dict[str, object]] = []
 
     @staticmethod
     def normalize(existing: KernelConfigFile | None, kernel_name: str) -> dict[str, object]:
@@ -145,6 +146,8 @@ class KernelConfigFileWriter:
                 return (cfg["num_stages"], cfg["num_warps"], cfg["num_ctas"])
             if resource_key(new_entry["config"]) < resource_key(entry.get("config", {})):
                 entries[idx] = new_entry
+            else:
+                self.rejected_entries.append(copy.deepcopy(new_entry))
             break
         else:
             entries.append(new_entry)
@@ -209,7 +212,7 @@ class KernelConfigFileWriter:
         if existing is not None:
             new_entries = self._data.get("autotune_entries", [])
             old_entries = existing.autotune_entries or []
-            backup_entries = self.find_changed_entries(existing)
+            backup_entries = self.find_changed_entries(existing) + self.rejected_entries
             if len(new_entries) == len(old_entries) and not backup_entries:
                 return "unchanged", None
             backup_file: Path | None = None
