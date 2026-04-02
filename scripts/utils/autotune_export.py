@@ -85,6 +85,23 @@ def serialize_preserved_entry(entry: dict[str, object]) -> str:
     )
 
 
+def load_kernel_config_file_uncached(config_file: Path) -> KernelConfigFile | None:
+    """Read a kernel config file directly from disk.
+
+    Extract runs in the same process as optional cache generation. During generation,
+    FLA may cache a missing config file as ``None`` via ``fla.ops.utils.cache.load_config_file``.
+    If extract then reuses that cached result, the first run incorrectly behaves as if the
+    existing file does not exist and skips backup creation. Reading from disk here avoids
+    that stale negative cache.
+    """
+    try:
+        with open(config_file) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    return KernelConfigFile.from_dict(config_file, data)
+
+
 class KernelConfigFileWriter:
     """Mutable builder for a {kernel_name}.json config file.
 
@@ -131,9 +148,12 @@ class KernelConfigFileWriter:
             return (cfg["num_stages"], cfg["num_warps"], cfg["num_ctas"])
 
         if new_key in entries:
-            if resource_key(new_entry["config"]) < resource_key(entries[new_key]["config"]):
+            existing_entry = entries[new_key]
+            if resource_key(new_entry["config"]) < resource_key(existing_entry["config"]):
+                if new_entry["config"] != existing_entry["config"]:
+                    self.rejected_entries.append(copy.deepcopy(existing_entry))
                 entries[new_key] = new_entry
-            elif new_entry["config"] != entries[new_key]["config"]:
+            elif new_entry["config"] != existing_entry["config"]:
                 self.rejected_entries.append(copy.deepcopy(new_entry))
         else:
             entries[new_key] = new_entry
@@ -190,20 +210,21 @@ class KernelConfigFileWriter:
             json.dump(backup_data, f, indent=2)
 
     def save(self, output_file: Path, kernel_name: str, existing: KernelConfigFile | None) -> tuple[str, Path | None]:
+        backup_entries = list(self.rejected_entries)
         if existing is not None:
             new_entries: dict = self._data.get("autotune_entries", {})
             old_entries = existing.autotune_entries or {}
-            backup_entries = self.find_changed_entries(existing) + self.rejected_entries
+            backup_entries = self.find_changed_entries(existing) + backup_entries
             if len(new_entries) == len(old_entries) and not backup_entries:
                 return "unchanged", None
-            backup_file: Path | None = None
-            if backup_entries:
-                backup_file = output_file.parent / f"{output_file.name}.bak"
-                self.write_backup(backup_file, kernel_name, backup_entries)
             status = "updated"
         else:
-            backup_file = None
             status = "created"
+
+        backup_file: Path | None = None
+        if backup_entries:
+            backup_file = output_file.parent / f"{output_file.name}.bak"
+            self.write_backup(backup_file, kernel_name, backup_entries)
 
         with open(output_file, 'w') as f:
             json.dump(self._data, f, indent=2)
@@ -226,43 +247,51 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path) -> None:
     print(f"Output directory: {output_dir}")
     print("-" * 60)
 
+    # Group results by kernel name so each kernel's file is read once, merged all at once, and written once.
+    # Processing file-by-file would re-read the same cached (stale) KernelConfigFile on every pass
+    # for the same kernel, causing later writes to silently overwrite entries added by earlier ones.
+    from collections import defaultdict
+    results_by_kernel: dict[str, list[AutotuneResult]] = defaultdict(list)
+    for autotune_file in autotune_files:
+        result = AutotuneResult.from_file(autotune_file)
+        if result is not None:
+            results_by_kernel[result.kernel_name].append(result)
+
     exported_count = 0
     created_count = 0
     updated_count = 0
     unchanged_count = 0
     backup_files: set[Path] = set()
 
-    for autotune_file in autotune_files:
-        result = AutotuneResult.from_file(autotune_file)
-        if result is None:
-            continue
-
-        output_file = output_dir / f"{result.kernel_name}.json"
-        existing = KernelConfigFile.from_file(output_file) if output_file.exists() else None
+    for kernel_name, results in results_by_kernel.items():
+        output_file = output_dir / f"{kernel_name}.json"
+        existing = load_kernel_config_file_uncached(output_file) if output_file.exists() else None
 
         try:
-            writer = KernelConfigFileWriter(result.kernel_name, existing)
-            writer.merge(result)
-            status, backup_file = writer.save(output_file, result.kernel_name, existing)
+            writer = KernelConfigFileWriter(kernel_name, existing)
+            for result in results:
+                writer.merge(result)
+            status, backup_file = writer.save(output_file, kernel_name, existing)
 
-            exported_count += 1
+            for result in results:
+                exported_count += 1
+                print(f"\n[{exported_count}] {kernel_name}")
+                print(f"    Autotune key: {AutotuneKey.normalize_autotune_key(result.cache_key)}")
+                print(f"    Output: {output_file}")
+                print(f"    Best config: {result.best_config}")
+                print(f"    Timing: {result.best_timing}")
+
+            print(f"    Status: {status}")
+            if backup_file is not None:
+                print(f"    Backup: {backup_file}")
+                backup_files.add(backup_file)
+
             if status == "created":
                 created_count += 1
             elif status == "updated":
                 updated_count += 1
-                if backup_file is not None:
-                    backup_files.add(backup_file)
             else:
                 unchanged_count += 1
-
-            print(f"\n[{exported_count}] {result.kernel_name}")
-            print(f"    Autotune key: {AutotuneKey.normalize_autotune_key(result.cache_key)}")
-            print(f"    Output: {output_file}")
-            print(f"    Status: {status}")
-            if backup_file is not None:
-                print(f"    Backup: {backup_file}")
-            print(f"    Best config: {result.best_config}")
-            print(f"    Timing: {result.best_timing}")
 
         except Exception as e:
             print(f"Error saving {output_file}: {e}")
