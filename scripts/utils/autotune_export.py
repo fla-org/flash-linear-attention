@@ -140,7 +140,10 @@ class KernelConfigFileWriter:
                 continue
             if AutotuneKey.serialize(entry.get("autotune_key")) != new_key:
                 continue
-            if timing_value_key(new_entry["best_timing"]) < timing_value_key(entry.get("best_timing")):
+
+            def resource_key(cfg: dict) -> tuple:
+                return (cfg["num_stages"], cfg["num_warps"], cfg["num_ctas"])
+            if resource_key(new_entry["config"]) < resource_key(entry.get("config", {})):
                 entries[idx] = new_entry
             break
         else:

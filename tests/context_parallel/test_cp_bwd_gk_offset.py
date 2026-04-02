@@ -39,8 +39,6 @@ from fla.ops.cp.chunk_delta_h import pre_process_bwd_kernel_merged
 from fla.ops.kda import chunk_kda
 from fla.utils import assert_close, device
 
-os.environ["FLA_ALWAYS_CHECK_CACHE"] = "1"
-
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 

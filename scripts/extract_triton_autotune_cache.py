@@ -24,6 +24,9 @@ Usage:
     # Generate cache for both ops across multiple head_dims
     python scripts/extract_triton_autotune_cache.py -g --op both -d 64 128 256
 
+    # Extract from a custom Triton cache directory
+    python scripts/extract_triton_autotune_cache.py --triton-cache-dir ~/triton/.cache
+
     # List available cache files without extracting
     python scripts/extract_triton_autotune_cache.py -l
 
@@ -40,8 +43,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-
-os.environ['FLA_CACHE_MODE'] = 'disabled'
+os.environ.setdefault('FLA_CACHE_MODE', 'disabled')
 
 
 def list_autotune_cache_files(triton_cache_dir: Path) -> None:
@@ -117,8 +119,11 @@ def main():
         action='store_true',
         help=f'Include Triton version ({triton.__version__}) as a subdirectory in the output path'
     )
-
     args = parser.parse_args()
+
+    # FLA_CONFIG_DIR already points at the final output directory when overridden.
+    output_dir = resolve_output_dir(args.output_dir, versioned=args.versioned)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine directories
     if args.generate_cache:
@@ -126,11 +131,6 @@ def main():
         triton_cache_dir = Path(generate_fla_cache(args.op, args.head_dim, args.triton_cache_dir))
     else:
         triton_cache_dir = get_triton_cache_dir(args.triton_cache_dir)
-
-    # FLA_CONFIG_DIR already points at the final output directory when overridden.
-    output_dir = resolve_output_dir(args.output_dir, versioned=args.versioned)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.list_only:
         list_autotune_cache_files(triton_cache_dir)
