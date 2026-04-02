@@ -98,81 +98,65 @@ class KernelConfigFileWriter:
 
     @staticmethod
     def normalize(existing: KernelConfigFile | None, kernel_name: str) -> dict[str, object]:
-        if existing is not None and existing.autotune_entries is not None:
-            normalized: dict[str, object] = {
-                "kernel_name": existing.kernel_name or kernel_name,
-                "triton_version": existing.triton_version or triton.__version__,
-            }
-            if existing.default_config is not None:
-                normalized["default_config"] = copy.deepcopy(existing.default_config)
-            normalized["autotune_entries"] = copy.deepcopy(existing.autotune_entries)
-            return normalized
-
-        normalized = {
+        normalized: dict[str, object] = {
             "kernel_name": (existing.kernel_name if existing else None) or kernel_name,
             "triton_version": (existing.triton_version if existing else None) or triton.__version__,
         }
-        normalized["autotune_entries"] = []
+        if existing is not None and existing.default_config is not None:
+            normalized["default_config"] = copy.deepcopy(existing.default_config)
+        entries: dict[str, dict] = {}
+        if existing is not None and existing.autotune_entries is not None:
+            for e in existing.autotune_entries:
+                if isinstance(e, dict):
+                    entries[AutotuneKey.serialize(e.get("autotune_key"))] = copy.deepcopy(e)
+        normalized["autotune_entries"] = entries
         return normalized
 
     def update_default_config(self) -> None:
         # Rewrite default_config in-place, keeping it ordered before autotune_entries in the output JSON.
-        entries = self._data.pop("autotune_entries", None)
+        entries: dict = self._data.pop("autotune_entries", {})
         self._data.pop("default_config", None)
-        if isinstance(entries, list):
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                default_config = extract_default_config(entry.get("config"))
-                if default_config is not None:
-                    self._data["default_config"] = default_config
-                    break
-        if entries is not None:
-            self._data["autotune_entries"] = entries
+        for key in sorted(entries):
+            default_config = extract_default_config(entries[key].get("config"))
+            if default_config is not None:
+                self._data["default_config"] = default_config
+                break
+        self._data["autotune_entries"] = entries
 
     def merge(self, result: AutotuneResult) -> None:
         self._data["triton_version"] = triton.__version__
         new_entry = result.to_entry()
         new_key = AutotuneKey.serialize(new_entry["autotune_key"])
-        entries: list = self._data["autotune_entries"]
+        entries: dict[str, dict] = self._data["autotune_entries"]
 
-        for idx, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
-            if AutotuneKey.serialize(entry.get("autotune_key")) != new_key:
-                continue
+        def resource_key(cfg: dict) -> tuple:
+            return (cfg["num_stages"], cfg["num_warps"], cfg["num_ctas"])
 
-            def resource_key(cfg: dict) -> tuple:
-                return (cfg["num_stages"], cfg["num_warps"], cfg["num_ctas"])
-            if resource_key(new_entry["config"]) < resource_key(entry.get("config", {})):
-                entries[idx] = new_entry
+        if new_key in entries:
+            if resource_key(new_entry["config"]) < resource_key(entries[new_key]["config"]):
+                entries[new_key] = new_entry
             else:
                 self.rejected_entries.append(copy.deepcopy(new_entry))
-            break
         else:
-            entries.append(new_entry)
+            entries[new_key] = new_entry
 
-        entries.sort(key=lambda e: AutotuneKey.serialize(e.get("autotune_key")))
         self.update_default_config()
 
     def to_dict(self) -> dict[str, object]:
-        return self._data
+        data = dict(self._data)
+        entries: dict = data.get("autotune_entries", {})
+        data["autotune_entries"] = [entries[k] for k in sorted(entries)]
+        return data
 
     def find_changed_entries(self, existing: KernelConfigFile | None) -> list[dict[str, object]]:
         """Return entries from existing whose key+config differs from self (for backup)."""
         if existing is None or not existing.autotune_entries:
             return []
-        output_entries = self._data.get("autotune_entries")
-        if not isinstance(output_entries, list):
-            return []
-
-        output_by_key = {
-            AutotuneKey.serialize(e.get("autotune_key")): e
-            for e in output_entries if isinstance(e, dict)
-        }
+        output_entries: dict = self._data.get("autotune_entries", {})
         backup_entries = []
         for entry in existing.autotune_entries:
-            output_entry = output_by_key.get(AutotuneKey.serialize(entry.get("autotune_key")))
+            key = AutotuneKey.serialize(entry.get("autotune_key"))
+            output_entry = output_entries.get(key)
             if output_entry is None:
                 continue
             if serialize_preserved_entry(entry) != serialize_preserved_entry(output_entry):
@@ -210,7 +194,7 @@ class KernelConfigFileWriter:
 
     def save(self, output_file: Path, kernel_name: str, existing: KernelConfigFile | None) -> tuple[str, Path | None]:
         if existing is not None:
-            new_entries = self._data.get("autotune_entries", [])
+            new_entries: dict = self._data.get("autotune_entries", {})
             old_entries = existing.autotune_entries or []
             backup_entries = self.find_changed_entries(existing) + self.rejected_entries
             if len(new_entries) == len(old_entries) and not backup_entries:
