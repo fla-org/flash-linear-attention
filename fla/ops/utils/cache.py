@@ -21,15 +21,17 @@ class FlaCacheMode(enum.Enum):
     """Controls how FLA loads kernel configs from its config cache (FLA_CACHE_MODE env var).
 
     DISABLED    — skip all cache lookups, always fall back to Triton autotune (default when FLA_CACHE_MODE is unset)
-    FULL        — exact key match → fuzzy/compatible key match → default_config fallback
+    FULL        — exact key match → fuzzy key match → default_config fallback
     DEFAULT     — use only the top-level default_config field, skip key-based lookup
-    MATCH       — exact key match → fuzzy/compatible key match, no default_config fallback
+    EXACT       — exact key match only, no fuzzy match, no default_config fallback
+    MATCH       — exact key match → fuzzy key match, no default_config fallback
     ALWAYS      — like FULL, but re-reads config files and re-injects into Triton's cache on
                   every kernel call; useful when editing config files without restarting the process
     """
     DISABLED = "disabled"
     FULL = "full"
     DEFAULT = "default"
+    EXACT = "exact"
     MATCH = "match"
     ALWAYS = "always"
 
@@ -116,11 +118,16 @@ class AutotuneKey:
         return json.dumps(AutotuneKey.normalize_autotune_key(key), separators=(",", ":"), sort_keys=True)
 
     @staticmethod
+    def key_hash(key: Any) -> str:
+        import hashlib
+        return hashlib.md5(AutotuneKey.serialize(key).encode()).hexdigest()
+
+    @staticmethod
     def is_numeric(value: Any) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
     @staticmethod
-    def keys_compatible(cached_key: Any, requested_key: Any) -> bool:
+    def keys_fuzzy_match(cached_key: Any, requested_key: Any) -> bool:
         # Fuzzy match: numeric leaves are compatible regardless of their actual numeric values
         # (e.g. a config tuned for seq_len=1024 can apply to seq_len=2048).
         # Structure (type, length, dict keys) must still match exactly.
@@ -128,11 +135,11 @@ class AutotuneKey:
             return True
         if isinstance(cached_key, (list, tuple)) and isinstance(requested_key, (list, tuple)):
             return len(cached_key) == len(requested_key) and all(
-                AutotuneKey.keys_compatible(c, r) for c, r in zip(cached_key, requested_key)
+                AutotuneKey.keys_fuzzy_match(c, r) for c, r in zip(cached_key, requested_key)
             )
         if isinstance(cached_key, dict) and isinstance(requested_key, dict):
             return cached_key.keys() == requested_key.keys() and all(
-                AutotuneKey.keys_compatible(cached_key[k], requested_key[k]) for k in cached_key
+                AutotuneKey.keys_fuzzy_match(cached_key[k], requested_key[k]) for k in cached_key
             )
         return cached_key == requested_key
 
@@ -163,7 +170,7 @@ class AutotuneKey:
             isinstance(self_normalized, list)
             and isinstance(entry_normalized, list)
             and len(self_normalized) == len(entry_normalized)
-            and AutotuneKey.keys_compatible(self_normalized, entry_normalized)
+            and AutotuneKey.keys_fuzzy_match(self_normalized, entry_normalized)
         )
 
 
@@ -172,7 +179,7 @@ class KernelConfigFile:
     """Validated in-memory representation of a {kernel_name}.json config file."""
     kernel_name: str | None
     triton_version: str | None
-    autotune_entries: list[dict[str, Any]] | None
+    autotune_entries: dict[str, dict[str, Any]] | None
     default_config: dict[str, Any] | None
 
     @classmethod
@@ -185,16 +192,19 @@ class KernelConfigFile:
         try:
             if not isinstance(data, dict):
                 fail("Malformed config %s: root is %s, expected dict", config_file, type(data).__name__)
-            entries = data.get("autotune_entries")
-            if entries is not None:
-                if not isinstance(entries, list):
-                    fail("Malformed config %s: 'autotune_entries' is %s, expected list", config_file, type(entries).__name__)
-                for i, entry in enumerate(entries):
+            raw_entries = data.get("autotune_entries")
+            entries: dict[str, dict[str, Any]] | None = None
+            if raw_entries is not None:
+                if not isinstance(raw_entries, dict):
+                    fail("Malformed config %s: 'autotune_entries' is %s, expected dict",
+                         config_file, type(raw_entries).__name__)
+                for h, entry in raw_entries.items():
                     if not isinstance(entry, dict):
-                        fail("Malformed config %s: autotune_entries[%d] is %s, expected dict",
-                             config_file, i, type(entry).__name__)
+                        fail("Malformed config %s: autotune_entries[%r] is %s, expected dict",
+                             config_file, h, type(entry).__name__)
                     if not isinstance(entry.get("config"), dict):
-                        fail("Malformed config %s: autotune_entries[%d] missing valid 'config' field", config_file, i)
+                        fail("Malformed config %s: autotune_entries[%r] missing valid 'config' field", config_file, h)
+                entries = raw_entries
             default_config = data.get("default_config")
             if default_config is not None and not isinstance(default_config, dict):
                 fail("Malformed config %s: 'default_config' is %s, expected dict", config_file, type(default_config).__name__)
@@ -216,17 +226,14 @@ class KernelConfigFile:
         return cls.from_dict(config_file, config_data)
 
     def lookup_exact(self, key: AutotuneKey) -> dict[str, Any] | None:
-        if not self.autotune_entries:
+        if self.autotune_entries is None:
             return None
-        for entry in self.autotune_entries:
-            if key.exact_matches(entry.get("autotune_key")):
-                return entry
-        return None
+        return self.autotune_entries.get(AutotuneKey.key_hash(key.autotune_key))
 
-    def lookup_compatible(self, key: AutotuneKey) -> dict[str, Any] | None:
-        if not self.autotune_entries:
+    def lookup_fuzzy(self, key: AutotuneKey) -> dict[str, Any] | None:
+        if self.autotune_entries is None:
             return None
-        for entry in self.autotune_entries:
+        for entry in self.autotune_entries.values():
             if key.fuzzy_matches(entry.get("autotune_key")):
                 return entry
         return None
@@ -290,9 +297,17 @@ def load_cached_config(kernel_name: str, autotune_key: AutotuneKey | None = None
     if FLA_CACHE_MODE is FlaCacheMode.DEFAULT:
         return config.default_config
 
-    # FULL and MATCH modes: try exact key match first, then fuzzy/compatible match
+    # EXACT mode: exact match only, no fuzzy fallback
+    if FLA_CACHE_MODE is FlaCacheMode.EXACT:
+        if autotune_key is not None:
+            entry = config.lookup_exact(autotune_key)
+            if entry is not None:
+                return entry["config"]
+        return None
+
+    # FULL and MATCH modes: try exact key match first, then fuzzy match
     if autotune_key is not None:
-        entry = config.lookup_exact(autotune_key) or config.lookup_compatible(autotune_key)
+        entry = config.lookup_exact(autotune_key) or config.lookup_fuzzy(autotune_key)
         if entry is not None:
             return entry["config"]
 

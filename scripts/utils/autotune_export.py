@@ -106,9 +106,7 @@ class KernelConfigFileWriter:
             normalized["default_config"] = copy.deepcopy(existing.default_config)
         entries: dict[str, dict] = {}
         if existing is not None and existing.autotune_entries is not None:
-            for e in existing.autotune_entries:
-                if isinstance(e, dict):
-                    entries[AutotuneKey.serialize(e.get("autotune_key"))] = copy.deepcopy(e)
+            entries = copy.deepcopy(existing.autotune_entries)
         normalized["autotune_entries"] = entries
         return normalized
 
@@ -126,7 +124,7 @@ class KernelConfigFileWriter:
     def merge(self, result: AutotuneResult) -> None:
         self._data["triton_version"] = triton.__version__
         new_entry = result.to_entry()
-        new_key = AutotuneKey.serialize(new_entry["autotune_key"])
+        new_key = AutotuneKey.key_hash(new_entry["autotune_key"])
         entries: dict[str, dict] = self._data["autotune_entries"]
 
         def resource_key(cfg: dict) -> tuple:
@@ -135,7 +133,7 @@ class KernelConfigFileWriter:
         if new_key in entries:
             if resource_key(new_entry["config"]) < resource_key(entries[new_key]["config"]):
                 entries[new_key] = new_entry
-            else:
+            elif new_entry["config"] != entries[new_key]["config"]:
                 self.rejected_entries.append(copy.deepcopy(new_entry))
         else:
             entries[new_key] = new_entry
@@ -145,23 +143,22 @@ class KernelConfigFileWriter:
     def to_dict(self) -> dict[str, object]:
         data = dict(self._data)
         entries: dict = data.get("autotune_entries", {})
-        data["autotune_entries"] = [entries[k] for k in sorted(entries)]
+        data["autotune_entries"] = {k: entries[k] for k in sorted(entries)}
         return data
 
     def find_changed_entries(self, existing: KernelConfigFile | None) -> list[dict[str, object]]:
         """Return entries from existing whose key+config differs from self (for backup)."""
-        if existing is None or not existing.autotune_entries:
+        if existing is None or existing.autotune_entries is None:
             return []
         output_entries: dict = self._data.get("autotune_entries", {})
         backup_entries = []
-        for entry in existing.autotune_entries:
-            key = AutotuneKey.serialize(entry.get("autotune_key"))
-            output_entry = output_entries.get(key)
+        for h, entry in existing.autotune_entries.items():
+            output_entry = output_entries.get(h)
             if output_entry is None:
                 continue
             if serialize_preserved_entry(entry) != serialize_preserved_entry(output_entry):
                 backup_entries.append(copy.deepcopy(entry))
-        backup_entries.sort(key=lambda e: AutotuneKey.serialize(e.get("autotune_key")))
+        backup_entries.sort(key=lambda e: AutotuneKey.key_hash(e.get("autotune_key")))
         return backup_entries
 
     @staticmethod
@@ -175,19 +172,19 @@ class KernelConfigFileWriter:
             try:
                 with open(backup_file) as f:
                     existing_data = json.load(f)
-                if isinstance(existing_data, dict) and isinstance(existing_data.get("autotune_entries"), list):
-                    for entry in existing_data["autotune_entries"]:
+                if isinstance(existing_data, dict) and isinstance(existing_data.get("autotune_entries"), dict):
+                    for h, entry in existing_data["autotune_entries"].items():
                         if isinstance(entry, dict):
-                            existing_backup[AutotuneKey.serialize(entry.get("autotune_key"))] = copy.deepcopy(entry)
+                            existing_backup[h] = copy.deepcopy(entry)
             except Exception:
                 pass
 
         for entry in backup_entries:
-            existing_backup[AutotuneKey.serialize(entry.get("autotune_key"))] = copy.deepcopy(entry)
+            existing_backup[AutotuneKey.key_hash(entry.get("autotune_key"))] = copy.deepcopy(entry)
 
         backup_data = {
             "kernel_name": kernel_name,
-            "autotune_entries": [existing_backup[k] for k in sorted(existing_backup)],
+            "autotune_entries": {k: existing_backup[k] for k in sorted(existing_backup)},
         }
         with open(backup_file, 'w') as f:
             json.dump(backup_data, f, indent=2)
@@ -195,7 +192,7 @@ class KernelConfigFileWriter:
     def save(self, output_file: Path, kernel_name: str, existing: KernelConfigFile | None) -> tuple[str, Path | None]:
         if existing is not None:
             new_entries: dict = self._data.get("autotune_entries", {})
-            old_entries = existing.autotune_entries or []
+            old_entries = existing.autotune_entries or {}
             backup_entries = self.find_changed_entries(existing) + self.rejected_entries
             if len(new_entries) == len(old_entries) and not backup_entries:
                 return "unchanged", None
@@ -233,7 +230,7 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path) -> None:
     created_count = 0
     updated_count = 0
     unchanged_count = 0
-    backup_files = []
+    backup_files: set[Path] = set()
 
     for autotune_file in autotune_files:
         result = AutotuneResult.from_file(autotune_file)
@@ -254,7 +251,7 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path) -> None:
             elif status == "updated":
                 updated_count += 1
                 if backup_file is not None:
-                    backup_files.append(backup_file)
+                    backup_files.add(backup_file)
             else:
                 unchanged_count += 1
 
@@ -276,6 +273,6 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path) -> None:
     print(f"Existing files updated: {updated_count}")
     print(f"Existing files unchanged: {unchanged_count}")
     print(f"Backups created: {len(backup_files)}")
-    for backup_file in backup_files:
+    for backup_file in sorted(backup_files):
         print(f"  {backup_file}")
     print("=" * 60)

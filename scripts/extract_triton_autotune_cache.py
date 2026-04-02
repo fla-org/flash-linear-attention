@@ -25,7 +25,7 @@ Usage:
     python scripts/extract_triton_autotune_cache.py -g --op both -d 64 128 256
 
     # Extract from a custom Triton cache directory
-    python scripts/extract_triton_autotune_cache.py --triton-cache-dir ~/triton/.cache
+    python scripts/extract_triton_autotune_cache.py --triton-cache-dir ~/.triton/cache
 
     # List available cache files without extracting
     python scripts/extract_triton_autotune_cache.py -l
