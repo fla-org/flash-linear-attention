@@ -58,7 +58,7 @@ class AutotuneResult:
 
     def to_entry(self) -> dict[str, Any]:
         return {
-            "autotune_key": AutotuneKey.normalize_value(self.cache_key),
+            "autotune_key": AutotuneKey.normalize_autotune_key(self.cache_key),
             "config": self.best_config,
             "best_timing": self.best_timing,
         }
@@ -269,7 +269,7 @@ def extract_configs(triton_cache_dir: Path, output_dir: Path) -> None:
                 unchanged_count += 1
 
             print(f"\n[{exported_count}] {result.kernel_name}")
-            print(f"    Autotune key: {AutotuneKey.normalize_value(result.cache_key)}")
+            print(f"    Autotune key: {AutotuneKey.normalize_autotune_key(result.cache_key)}")
             print(f"    Output: {output_file}")
             print(f"    Status: {status}")
             if backup_file is not None:
