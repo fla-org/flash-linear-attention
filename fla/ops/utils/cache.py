@@ -35,13 +35,13 @@ class FlaCacheMode(enum.Enum):
 
     @classmethod
     def from_env(cls) -> "FlaCacheMode":
-        raw = os.environ.get("FLA_CACHE_MODE", cls.DISABLED.value)
+        mode_str = os.environ.get("FLA_CACHE_MODE", cls.DISABLED.value)
         try:
-            return cls(raw)
+            return cls(mode_str)
         except ValueError:
             valid = [m.value for m in cls]
             raise ValueError(
-                f"Invalid FLA_CACHE_MODE={raw!r}. Valid values: {valid}"
+                f"Invalid FLA_CACHE_MODE={mode_str!r}. Valid values: {valid}"
             ) from None
 
 
@@ -101,40 +101,40 @@ def get_fla_config_dir() -> Path:
 @dataclasses.dataclass(frozen=True)
 class AutotuneKey:
     """Autotune key with exact/fuzzy matching, serialization, and construction helpers."""
-    raw: tuple[Any, ...]
+    autotune_key: tuple[Any, ...]
 
     @staticmethod
-    def normalize_value(value: Any) -> Any:
+    def normalize_autotune_key(value: Any) -> Any:
         if isinstance(value, (list, tuple)):
-            return [AutotuneKey.normalize_value(v) for v in value]
+            return [AutotuneKey.normalize_autotune_key(v) for v in value]
         if isinstance(value, dict):
-            return {k: AutotuneKey.normalize_value(v) for k, v in value.items()}
+            return {k: AutotuneKey.normalize_autotune_key(v) for k, v in value.items()}
         return value
 
     @staticmethod
     def serialize(key: Any) -> str:
-        return json.dumps(AutotuneKey.normalize_value(key), separators=(",", ":"), sort_keys=True)
+        return json.dumps(AutotuneKey.normalize_autotune_key(key), separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def is_numeric(value: Any) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
     @staticmethod
-    def values_compatible(cached_value: Any, requested_value: Any) -> bool:
-        # Fuzzy match: numeric leaves are compatible regardless of their actual values
+    def keys_compatible(cached_key: Any, requested_key: Any) -> bool:
+        # Fuzzy match: numeric leaves are compatible regardless of their actual numeric values
         # (e.g. a config tuned for seq_len=1024 can apply to seq_len=2048).
         # Structure (type, length, dict keys) must still match exactly.
-        if AutotuneKey.is_numeric(cached_value) and AutotuneKey.is_numeric(requested_value):
+        if AutotuneKey.is_numeric(cached_key) and AutotuneKey.is_numeric(requested_key):
             return True
-        if isinstance(cached_value, (list, tuple)) and isinstance(requested_value, (list, tuple)):
-            return len(cached_value) == len(requested_value) and all(
-                AutotuneKey.values_compatible(c, r) for c, r in zip(cached_value, requested_value)
+        if isinstance(cached_key, (list, tuple)) and isinstance(requested_key, (list, tuple)):
+            return len(cached_key) == len(requested_key) and all(
+                AutotuneKey.keys_compatible(c, r) for c, r in zip(cached_key, requested_key)
             )
-        if isinstance(cached_value, dict) and isinstance(requested_value, dict):
-            return cached_value.keys() == requested_value.keys() and all(
-                AutotuneKey.values_compatible(cached_value[k], requested_value[k]) for k in cached_value
+        if isinstance(cached_key, dict) and isinstance(requested_key, dict):
+            return cached_key.keys() == requested_key.keys() and all(
+                AutotuneKey.keys_compatible(cached_key[k], requested_key[k]) for k in cached_key
             )
-        return cached_value == requested_value
+        return cached_key == requested_key
 
     @classmethod
     def build(
@@ -151,19 +151,19 @@ class AutotuneKey:
         for arg in tracked_args.values():
             if hasattr(arg, "dtype"):
                 tuning_key.append(str(arg.dtype))
-        return cls(raw=tuple(tuning_key))
+        return cls(autotune_key=tuple(tuning_key))
 
     def exact_matches(self, entry_key: Any) -> bool:
-        return self.serialize(self.raw) == self.serialize(entry_key)
+        return self.serialize(self.autotune_key) == self.serialize(entry_key)
 
     def fuzzy_matches(self, entry_key: Any) -> bool:
-        self_normalized = self.normalize_value(self.raw)
-        entry_normalized = self.normalize_value(entry_key)
+        self_normalized = self.normalize_autotune_key(self.autotune_key)
+        entry_normalized = self.normalize_autotune_key(entry_key)
         return (
             isinstance(self_normalized, list)
             and isinstance(entry_normalized, list)
             and len(self_normalized) == len(entry_normalized)
-            and self.raws_compatible(self_normalized, entry_normalized)
+            and AutotuneKey.keys_compatible(self_normalized, entry_normalized)
         )
 
 
@@ -210,10 +210,10 @@ class KernelConfigFile:
     @classmethod
     def from_file(cls, config_file: Path) -> "KernelConfigFile | None":
         """Read and validate a config file. Returns None if the file is missing or malformed."""
-        raw = read_config_file(config_file)
-        if raw is None:
+        config_data = read_config_file(config_file)
+        if config_data is None:
             return None
-        return cls.from_dict(config_file, raw)
+        return cls.from_dict(config_file, config_data)
 
     def lookup_exact(self, key: AutotuneKey) -> dict[str, Any] | None:
         if not self.autotune_entries:
@@ -280,10 +280,10 @@ def load_cached_config(kernel_name: str, autotune_key: AutotuneKey | None = None
     if not config_file.exists():
         return None
 
-    raw = read_config_file(config_file)
-    if raw is None:
+    config_data = read_config_file(config_file)
+    if config_data is None:
         return None
-    config = KernelConfigFile.from_dict(config_file, raw)
+    config = KernelConfigFile.from_dict(config_file, config_data)
     if config is None:
         return None
 
@@ -304,7 +304,7 @@ def load_cached_config(kernel_name: str, autotune_key: AutotuneKey | None = None
         return config.default_config
     if config.autotune_entries is not None:
         return None
-    return raw
+    return config_data
 
 
 class CachedAutotuner(Autotuner):
@@ -324,7 +324,7 @@ class CachedAutotuner(Autotuner):
             return False
         if FLA_CACHE_MODE is FlaCacheMode.ALWAYS:
             return True
-        return key.raw not in self.cache
+        return key.autotune_key not in self.cache
 
     def run(self, *args, **kwargs):
         key = AutotuneKey.build(self.arg_names, self.keys, args, kwargs)
@@ -348,12 +348,12 @@ class CachedAutotuner(Autotuner):
             } if TRITON_ABOVE_3_5_1 else {}
             cfg = triton.Config(kw, num_warps=num_warps, num_stages=num_stages, **extra)
 
-            self.cache[key.raw] = cfg
+            self.cache[key.autotune_key] = cfg
         else:
             logger.debug(
                 "No cached config found for kernel %s and key %s; falling back to Triton autotune",
                 self.kernel_name,
-                list(key.raw),
+                list(key.autotune_key),
             )
 
 

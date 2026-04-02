@@ -44,6 +44,18 @@ if str(ROOT_DIR) not in sys.path:
 os.environ['FLA_CACHE_MODE'] = 'disabled'
 
 
+def list_autotune_cache_files(triton_cache_dir: Path) -> None:
+    if not triton_cache_dir.exists():
+        print(f"Triton cache directory not found: {triton_cache_dir}")
+        return
+
+    autotune_files = list(triton_cache_dir.rglob("*.autotune.json"))
+    print(f"Found {len(autotune_files)} .autotune.json files in {triton_cache_dir}:\n")
+
+    for i, file in enumerate(autotune_files, 1):
+        print(f"{i}. {file}")
+
+
 def resolve_output_dir(output_dir: str | None, *, versioned: bool) -> Path:
     if output_dir is not None:
         return Path(output_dir)
@@ -121,16 +133,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.list_only:
-        # Just list the files
-        if not triton_cache_dir.exists():
-            print(f"Triton cache directory not found: {triton_cache_dir}")
-            return
-
-        autotune_files = list(triton_cache_dir.rglob("*.autotune.json"))
-        print(f"Found {len(autotune_files)} .autotune.json files in {triton_cache_dir}:\n")
-
-        for i, file in enumerate(autotune_files, 1):
-            print(f"{i}. {file}")
+        list_autotune_cache_files(triton_cache_dir)
         return
 
     # Extract configs
