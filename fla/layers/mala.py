@@ -68,7 +68,7 @@ class MalaAttention(nn.Module):
         use_lepe: bool = True,
         lepe_kernel_size: int = 5,
         layer_idx: int | None = None,
-    ) -> MalaAttention:
+    ) -> None:
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -76,6 +76,7 @@ class MalaAttention(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        assert self.num_heads % self.num_kv_heads == 0, f"num_heads must be divisible by num_kv_heads, got {self.num_heads} and {self.num_kv_heads}"
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.use_lepe = use_lepe
         self.lepe_kernel_size = lepe_kernel_size
