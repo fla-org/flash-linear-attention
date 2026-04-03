@@ -56,7 +56,7 @@ def naive_mala_attn(
     """
     dtype = q.dtype
     q, k, v = map(lambda x: x.float(), (q, k, v))
-    B, T, H, K, V = *q.shape, v.shape[-1]
+    _, T, _, K, _ = *q.shape, v.shape[-1]
     
     if scale is None:
         scale = K ** -0.5
