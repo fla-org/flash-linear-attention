@@ -9,7 +9,6 @@ from transformers import PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 
 from fla.layers import MalaAttention
-from fla.models.utils import cache_to_cpu, recycle_cache
 
 """
 MALA (Magnitude-Aware Linear Attention) model implementation.
@@ -87,13 +86,13 @@ class MalaModel(MalaPreTrainedModel):
         hidden_states = self.embed_tokens(input_ids)
 
         # Process layers
-        all_hidden_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-        next_decoder_cache = () if use_cache else None
+        all_hidden_states = [] if output_hidden_states else None
+        all_attentions = [] if output_attentions else None
+        next_decoder_cache = [] if use_cache else None
 
         for i, layer in enumerate(self.layers):
             if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
+                all_hidden_states.append(hidden_states)
 
             layer_past = past_key_values[i] if past_key_values is not None else None
 
@@ -108,16 +107,23 @@ class MalaModel(MalaPreTrainedModel):
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache += (layer_outputs[2],)
+                next_decoder_cache.append(layer_outputs[2])
 
             if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
+                all_attentions.append(layer_outputs[1])
 
         # Apply final layer norm
         hidden_states = self.norm(hidden_states)
 
         if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)
+            all_hidden_states.append(hidden_states)
+            all_hidden_states = tuple(all_hidden_states)
+
+        if use_cache:
+            next_decoder_cache = tuple(next_decoder_cache)
+
+        if output_attentions:
+            all_attentions = tuple(all_attentions)
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_decoder_cache, all_hidden_states, all_attentions] if v is not None)
