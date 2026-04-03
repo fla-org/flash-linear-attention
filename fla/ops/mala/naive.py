@@ -61,6 +61,11 @@ def naive_mala_attn(
     if scale is None:
         scale = K ** -0.5
     
+    # Apply RoPE if provided (before computing normalization factor)
+    if sin is not None and cos is not None:
+        q = theta_shift(q, sin, cos)
+        k = theta_shift(k, sin, cos)
+    
     # Apply ELU activation and add 1
     q = F.elu(q) + 1
     k = F.elu(k) + 1
@@ -68,13 +73,8 @@ def naive_mala_attn(
     # Compute normalization factor
     z = q @ k.mean(dim=1, keepdim=True).transpose(-1, -2) * scale
     
-    # Apply RoPE if provided
-    if sin is not None and cos is not None:
-        q = theta_shift(q, sin, cos)
-        k = theta_shift(k, sin, cos)
-    
-    # Compute key-value product
-    kv = (k.transpose(-2, -1) * (scale / T ** 0.5)) @ (v * (scale / T ** 0.5))
+    # Compute key-value product (sum over sequence dimension)
+    kv = (k.transpose(-2, -1) @ v) * (scale ** 2 / T)
     
     # Compute attention output
     res = q @ kv * (1 + 1/(z + 1e-6)) - z * v.mean(dim=1, keepdim=True)
