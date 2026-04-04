@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 import os
 
@@ -17,6 +17,8 @@ if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     def log(x): return tldevice.fast_logf(x.to(tl.float32))
     @triton.jit
     def log2(x): return tldevice.fast_log2f(x.to(tl.float32))
+    @triton.jit
+    def tanh(x): return tldevice.fast_tanhf(x.to(tl.float32))
 else:
     @triton.jit
     def exp(x): return tl.exp(x.to(tl.float32))
@@ -26,6 +28,8 @@ else:
     def log(x): return tl.log(x.to(tl.float32))
     @triton.jit
     def log2(x): return tl.log2(x.to(tl.float32))
+    @triton.jit
+    def tanh(x): return tldevice.tanh(x.to(tl.float32))
 
 
 if not IS_GATHER_SUPPORTED:
