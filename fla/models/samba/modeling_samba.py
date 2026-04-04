@@ -1,3 +1,5 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
+
 from __future__ import annotations
 
 import math

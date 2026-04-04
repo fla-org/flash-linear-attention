@@ -1,4 +1,3 @@
-
 import os
 import types
 
@@ -298,7 +297,19 @@ def _official_mamba2_step_fixed_d_has_hdim(self, hidden_states, conv_state, ssm_
         ]
     ],
 )
-def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
+def test_mamba2_layer_vs_official_inference(
+    B: int,
+    T: int,
+    d_model: int,
+    d_state: int,
+    headdim: int,
+    expand: int,
+    D_has_hdim: bool,
+    rmsnorm: bool,
+    norm_before_gate: bool,
+    dtype: torch.dtype,
+    atol: float
+):
     """
     Step-by-step decode: FLA cached forward vs ``mamba_ssm.Mamba2.step`` with rolling
     ``(conv_state, ssm_state)``. When ``D_has_hdim`` is True, the reference step is
@@ -357,7 +368,19 @@ def test_mamba2_layer_vs_official_inference(B, T, d_model, d_state, headdim, exp
         ]
     ],
 )
-def test_mamba2_layer_vs_official_train(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
+def test_mamba2_layer_vs_official_train(
+    B: int,
+    T: int,
+    d_model: int,
+    d_state: int,
+    headdim: int,
+    expand: int,
+    D_has_hdim: bool,
+    rmsnorm: bool,
+    norm_before_gate: bool,
+    dtype: torch.dtype,
+    atol: float
+):
     """Training-mode output of custom Mamba2 must match official mamba_ssm.Mamba2.
 
     Both should use mamba_split_conv1d_scan_combined (the fused kernel) in this mode.
@@ -394,7 +417,19 @@ def test_mamba2_layer_vs_official_train(B, T, d_model, d_state, headdim, expand,
         ]
     ],
 )
-def test_mamba2_layer_vs_official_eval(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
+def test_mamba2_layer_vs_official_eval(
+    B: int,
+    T: int,
+    d_model: int,
+    d_state: int,
+    headdim: int,
+    expand: int,
+    D_has_hdim: bool,
+    rmsnorm: bool,
+    norm_before_gate: bool,
+    dtype: torch.dtype,
+    atol: float
+):
     """Eval-mode output of custom Mamba2 must match official mamba_ssm.Mamba2.
 
     Both use the non-fused path: causal_conv1d_fn + mamba_chunk_scan_combined.
@@ -437,7 +472,19 @@ def test_mamba2_layer_vs_official_eval(B, T, d_model, d_state, headdim, expand, 
         ]
     ],
 )
-def test_mamba2_layer_gradient_vs_official(B, T, d_model, d_state, headdim, expand, D_has_hdim, rmsnorm, norm_before_gate, dtype, atol):
+def test_mamba2_layer_gradient_vs_official(
+    B: int,
+    T: int,
+    d_model: int,
+    d_state: int,
+    headdim: int,
+    expand: int,
+    D_has_hdim: bool,
+    rmsnorm: bool,
+    norm_before_gate: bool,
+    dtype: torch.dtype,
+    atol: float
+):
     """Gradients of custom Mamba2 (train) must match official mamba_ssm.Mamba2.
 
     Both use the fused mamba_split_conv1d_scan_combined kernel in train mode,

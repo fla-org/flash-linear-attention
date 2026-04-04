@@ -1,3 +1,5 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
+
 # Copyright 2024 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
