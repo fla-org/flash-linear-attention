@@ -402,3 +402,406 @@ def chunk_gated_delta_rule_fwd_intra(
         use_exp2=use_exp2,
     )
     return w, u, A
+
+
+def chunk_gated_delta_rule_fwd_kkt_solve(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+    use_exp2: bool = False,
+) -> torch.Tensor:
+    r"""
+    Fused kkt + solve_tril only (no WY step). Returns just the solved A matrix.
+
+    Used by the tricked path to avoid wastefully computing w,u in the
+    original (gated) WY kernel before recomputing them in the tricked WY.
+    """
+    B, T, H, K = k.shape
+    BT = chunk_size
+    BC = 16
+
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+
+    A = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
+    chunk_gated_delta_rule_fwd_kkt_solve_kernel[(NT, B * H)](
+        k=k,
+        g=g,
+        beta=beta,
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        H=H,
+        K=K,
+        BT=BT,
+        BC=BC,
+        USE_EXP2=use_exp2,
+    )
+    return A
+
+
+# ============================================================================
+# Fusemaxxed kernel: KKT + Solve + WY all in one (inference path)
+# ============================================================================
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({'BK': BK}, num_warps=num_warps)
+        for BK in [32, 64]
+        for num_warps in [2, 4, 8]
+    ],
+    key=['H', 'K', 'V', 'BC'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def tricked_fusemaxxed_kernel(
+    k,
+    v,
+    beta,
+    g,
+    w,
+    u,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BC: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_EXP2: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    """
+    Fused ungated kkt + solve_tril + tricked WY.
+
+    Computes (I+A)^{-1} entirely in registers (A never hits HBM),
+    then immediately uses it to compute w and u with G/G_inv scaling.
+    """
+    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_b, i_h = i_bh // H, i_bh % H
+
+    if IS_VARLEN:
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
+    else:
+        bos, eos = i_b * T, i_b * T + T
+
+    if i_t * BT >= T:
+        return
+
+    i_tc0 = i_t * BT
+    i_tc1 = i_t * BT + BC
+    i_tc2 = i_t * BT + 2 * BC
+    i_tc3 = i_t * BT + 3 * BC
+
+    k += (bos * H + i_h) * K
+    v += (bos * H + i_h) * V
+    w += (bos * H + i_h) * K
+    u += (bos * H + i_h) * V
+
+    o_i = tl.arange(0, BC)
+    m_tc0 = (i_tc0 + o_i) < T
+    m_tc1 = (i_tc1 + o_i) < T
+    m_tc2 = (i_tc2 + o_i) < T
+    m_tc3 = (i_tc3 + o_i) < T
+
+    p_b0 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc0,), (BC,), (0,))
+    p_b1 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc1,), (BC,), (0,))
+    p_b2 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc2,), (BC,), (0,))
+    p_b3 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc3,), (BC,), (0,))
+    b_b0 = tl.load(p_b0, boundary_check=(0,)).to(tl.float32)
+    b_b1 = tl.load(p_b1, boundary_check=(0,)).to(tl.float32)
+    b_b2 = tl.load(p_b2, boundary_check=(0,)).to(tl.float32)
+    b_b3 = tl.load(p_b3, boundary_check=(0,)).to(tl.float32)
+
+    # Phase 1: Compute 10 lower-triangular [BC, BC] blocks of K @ K^T
+    b_A00 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A11 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A22 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A33 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A10 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A20 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A21 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A30 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A31 = tl.zeros([BC, BC], dtype=tl.float32)
+    b_A32 = tl.zeros([BC, BC], dtype=tl.float32)
+
+    for i_k in range(tl.cdiv(K, BK)):
+        p_k0 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0))
+        b_k0 = tl.load(p_k0, boundary_check=(0, 1))
+        b_A00 += tl.dot(b_k0, tl.trans(b_k0))
+
+        if i_tc1 < T:
+            p_k1 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0))
+            b_k1 = tl.load(p_k1, boundary_check=(0, 1))
+            b_A11 += tl.dot(b_k1, tl.trans(b_k1))
+            b_A10 += tl.dot(b_k1, tl.trans(b_k0))
+
+            if i_tc2 < T:
+                p_k2 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0))
+                b_k2 = tl.load(p_k2, boundary_check=(0, 1))
+                b_A22 += tl.dot(b_k2, tl.trans(b_k2))
+                b_A20 += tl.dot(b_k2, tl.trans(b_k0))
+                b_A21 += tl.dot(b_k2, tl.trans(b_k1))
+
+                if i_tc3 < T:
+                    p_k3 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0))
+                    b_k3 = tl.load(p_k3, boundary_check=(0, 1))
+                    b_A33 += tl.dot(b_k3, tl.trans(b_k3))
+                    b_A30 += tl.dot(b_k3, tl.trans(b_k0))
+                    b_A31 += tl.dot(b_k3, tl.trans(b_k1))
+                    b_A32 += tl.dot(b_k3, tl.trans(b_k2))
+
+    # Phase 2: Apply beta + mask (NO gating)
+    m_d = o_i[:, None] > o_i[None, :]
+    m_I = o_i[:, None] == o_i[None, :]
+
+    b_A00 = tl.where(m_d & (m_tc0[:, None] & m_tc0[None, :]), b_A00, 0.) * b_b0[:, None]
+    b_A11 = tl.where(m_d & (m_tc1[:, None] & m_tc1[None, :]), b_A11, 0.) * b_b1[:, None]
+    b_A22 = tl.where(m_d & (m_tc2[:, None] & m_tc2[None, :]), b_A22, 0.) * b_b2[:, None]
+    b_A33 = tl.where(m_d & (m_tc3[:, None] & m_tc3[None, :]), b_A33, 0.) * b_b3[:, None]
+
+    b_A10 = b_A10 * b_b1[:, None]
+    b_A20 = b_A20 * b_b2[:, None]
+    b_A21 = b_A21 * b_b2[:, None]
+    b_A30 = b_A30 * b_b3[:, None]
+    b_A31 = b_A31 * b_b3[:, None]
+    b_A32 = b_A32 * b_b3[:, None]
+
+    # Phase 3: Forward substitution on diagonal blocks
+    b_Ai00 = -b_A00
+    b_Ai11 = -b_A11
+    b_Ai22 = -b_A22
+    b_Ai33 = -b_A33
+
+    for i in range(2, min(BC, T - i_tc0)):
+        b_a = tl.sum(tl.where((o_i == i)[:, None], -b_A00, 0.), 0)
+        b_a = tl.where(o_i < i, b_a, 0.)
+        b_a = b_a + tl.sum(b_a[:, None] * b_Ai00, 0)
+        b_Ai00 = tl.where((o_i == i)[:, None], b_a, b_Ai00)
+    for i in range(2, min(BC, T - i_tc1)):
+        b_a = tl.sum(tl.where((o_i == i)[:, None], -b_A11, 0.), 0)
+        b_a = tl.where(o_i < i, b_a, 0.)
+        b_a = b_a + tl.sum(b_a[:, None] * b_Ai11, 0)
+        b_Ai11 = tl.where((o_i == i)[:, None], b_a, b_Ai11)
+    for i in range(2, min(BC, T - i_tc2)):
+        b_a = tl.sum(tl.where((o_i == i)[:, None], -b_A22, 0.), 0)
+        b_a = tl.where(o_i < i, b_a, 0.)
+        b_a = b_a + tl.sum(b_a[:, None] * b_Ai22, 0)
+        b_Ai22 = tl.where((o_i == i)[:, None], b_a, b_Ai22)
+    for i in range(2, min(BC, T - i_tc3)):
+        b_a = tl.sum(tl.where((o_i == i)[:, None], -b_A33, 0.), 0)
+        b_a = tl.where(o_i < i, b_a, 0.)
+        b_a = b_a + tl.sum(b_a[:, None] * b_Ai33, 0)
+        b_Ai33 = tl.where((o_i == i)[:, None], b_a, b_Ai33)
+
+    b_Ai00 += m_I
+    b_Ai11 += m_I
+    b_Ai22 += m_I
+    b_Ai33 += m_I
+
+    # Phase 4: Block merge -> full (I + A)^{-1}
+    b_Ai10 = -tl.dot(
+        tl.dot(b_Ai11, b_A10, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        b_Ai00, input_precision=SOLVE_TRIL_DOT_PRECISION)
+    b_Ai21 = -tl.dot(
+        tl.dot(b_Ai22, b_A21, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        b_Ai11, input_precision=SOLVE_TRIL_DOT_PRECISION)
+    b_Ai32 = -tl.dot(
+        tl.dot(b_Ai33, b_A32, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        b_Ai22, input_precision=SOLVE_TRIL_DOT_PRECISION)
+
+    b_Ai20 = -tl.dot(
+        b_Ai22,
+        tl.dot(b_A20, b_Ai00, input_precision=SOLVE_TRIL_DOT_PRECISION) +
+        tl.dot(b_A21, b_Ai10, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        input_precision=SOLVE_TRIL_DOT_PRECISION)
+    b_Ai31 = -tl.dot(
+        b_Ai33,
+        tl.dot(b_A31, b_Ai11, input_precision=SOLVE_TRIL_DOT_PRECISION) +
+        tl.dot(b_A32, b_Ai21, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        input_precision=SOLVE_TRIL_DOT_PRECISION)
+    b_Ai30 = -tl.dot(
+        b_Ai33,
+        tl.dot(b_A30, b_Ai00, input_precision=SOLVE_TRIL_DOT_PRECISION) +
+        tl.dot(b_A31, b_Ai10, input_precision=SOLVE_TRIL_DOT_PRECISION) +
+        tl.dot(b_A32, b_Ai20, input_precision=SOLVE_TRIL_DOT_PRECISION),
+        input_precision=SOLVE_TRIL_DOT_PRECISION)
+
+    # Phase 5: Load gating, cast Ai blocks for WY matmuls
+    p_g0 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc0,), (BC,), (0,))
+    p_g1 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc1,), (BC,), (0,))
+    p_g2 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc2,), (BC,), (0,))
+    p_g3 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc3,), (BC,), (0,))
+    b_g0 = tl.load(p_g0, boundary_check=(0,)).to(tl.float32)
+    b_g1 = tl.load(p_g1, boundary_check=(0,)).to(tl.float32)
+    b_g2 = tl.load(p_g2, boundary_check=(0,)).to(tl.float32)
+    b_g3 = tl.load(p_g3, boundary_check=(0,)).to(tl.float32)
+
+    # Normalize g by subtracting max across all sub-chunks to prevent exp overflow
+    b_g_max = tl.max(tl.maximum(tl.maximum(b_g0, b_g1), tl.maximum(b_g2, b_g3)), 0)
+    b_g0 = b_g0 - b_g_max
+    b_g1 = b_g1 - b_g_max
+    b_g2 = b_g2 - b_g_max
+    b_g3 = b_g3 - b_g_max
+
+    if USE_EXP2:
+        b_G0 = exp2(b_g0)
+        b_Ginv0 = exp2(-b_g0)
+        b_G1 = exp2(b_g1)
+        b_Ginv1 = exp2(-b_g1)
+        b_G2 = exp2(b_g2)
+        b_Ginv2 = exp2(-b_g2)
+        b_G3 = exp2(b_g3)
+        b_Ginv3 = exp2(-b_g3)
+        b_Gw0 = b_G0 * exp2(b_g_max)
+        b_Gw1 = b_G1 * exp2(b_g_max)
+        b_Gw2 = b_G2 * exp2(b_g_max)
+        b_Gw3 = b_G3 * exp2(b_g_max)
+    else:
+        b_G0 = exp(b_g0)
+        b_Ginv0 = exp(-b_g0)
+        b_G1 = exp(b_g1)
+        b_Ginv1 = exp(-b_g1)
+        b_G2 = exp(b_g2)
+        b_Ginv2 = exp(-b_g2)
+        b_G3 = exp(b_g3)
+        b_Ginv3 = exp(-b_g3)
+        b_Gw0 = b_G0 * exp(b_g_max)
+        b_Gw1 = b_G1 * exp(b_g_max)
+        b_Gw2 = b_G2 * exp(b_g_max)
+        b_Gw3 = b_G3 * exp(b_g_max)
+
+    b_Ai00 = b_Ai00.to(k.dtype.element_ty)
+    b_Ai11 = b_Ai11.to(k.dtype.element_ty)
+    b_Ai22 = b_Ai22.to(k.dtype.element_ty)
+    b_Ai33 = b_Ai33.to(k.dtype.element_ty)
+    b_Ai10 = b_Ai10.to(k.dtype.element_ty)
+    b_Ai20 = b_Ai20.to(k.dtype.element_ty)
+    b_Ai21 = b_Ai21.to(k.dtype.element_ty)
+    b_Ai30 = b_Ai30.to(k.dtype.element_ty)
+    b_Ai31 = b_Ai31.to(k.dtype.element_ty)
+    b_Ai32 = b_Ai32.to(k.dtype.element_ty)
+
+    # Phase 6: Compute w = G · ((I+A)^{-1} @ (k·β))
+    for i_k in range(tl.cdiv(K, BK)):
+        off_k = i_k * BK
+
+        p_k0 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc0, off_k), (BC, BK), (1, 0))
+        b_k0 = tl.load(p_k0, boundary_check=(0, 1))
+        b_kb0 = (b_k0 * b_b0[:, None]).to(b_k0.dtype)
+
+        b_w0 = tl.dot(b_Ai00, b_kb0) * b_Gw0[:, None]
+        p_w0 = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_tc0, off_k), (BC, BK), (1, 0))
+        tl.store(p_w0, b_w0.to(w.dtype.element_ty), boundary_check=(0, 1))
+
+        if i_tc1 < T:
+            p_k1 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc1, off_k), (BC, BK), (1, 0))
+            b_k1 = tl.load(p_k1, boundary_check=(0, 1))
+            b_kb1 = (b_k1 * b_b1[:, None]).to(b_k1.dtype)
+
+            b_w1 = (tl.dot(b_Ai10, b_kb0) + tl.dot(b_Ai11, b_kb1)) * b_Gw1[:, None]
+            p_w1 = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_tc1, off_k), (BC, BK), (1, 0))
+            tl.store(p_w1, b_w1.to(w.dtype.element_ty), boundary_check=(0, 1))
+
+            if i_tc2 < T:
+                p_k2 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc2, off_k), (BC, BK), (1, 0))
+                b_k2 = tl.load(p_k2, boundary_check=(0, 1))
+                b_kb2 = (b_k2 * b_b2[:, None]).to(b_k2.dtype)
+
+                b_w2 = (tl.dot(b_Ai20, b_kb0) + tl.dot(b_Ai21, b_kb1) + tl.dot(b_Ai22, b_kb2)) * b_Gw2[:, None]
+                p_w2 = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_tc2, off_k), (BC, BK), (1, 0))
+                tl.store(p_w2, b_w2.to(w.dtype.element_ty), boundary_check=(0, 1))
+
+                if i_tc3 < T:
+                    p_k3 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc3, off_k), (BC, BK), (1, 0))
+                    b_k3 = tl.load(p_k3, boundary_check=(0, 1))
+                    b_kb3 = (b_k3 * b_b3[:, None]).to(b_k3.dtype)
+
+                    b_w3 = (tl.dot(b_Ai30, b_kb0) + tl.dot(b_Ai31, b_kb1) +
+                            tl.dot(b_Ai32, b_kb2) + tl.dot(b_Ai33, b_kb3)) * b_Gw3[:, None]
+                    p_w3 = tl.make_block_ptr(w, (T, K), (H*K, 1), (i_tc3, off_k), (BC, BK), (1, 0))
+                    tl.store(p_w3, b_w3.to(w.dtype.element_ty), boundary_check=(0, 1))
+
+    # Phase 7: Compute u = G · ((I+A)^{-1} @ (G_inv·v·β))
+    for i_v in range(tl.cdiv(V, BV)):
+        off_v = i_v * BV
+
+        p_v0 = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_tc0, off_v), (BC, BV), (1, 0))
+        b_v0 = tl.load(p_v0, boundary_check=(0, 1))
+        b_vb0 = (b_v0 * (b_b0 * b_Ginv0)[:, None]).to(b_v0.dtype)
+
+        b_u0 = tl.dot(b_Ai00, b_vb0, allow_tf32=False) * b_G0[:, None]
+        p_u0 = tl.make_block_ptr(u, (T, V), (H*V, 1), (i_tc0, off_v), (BC, BV), (1, 0))
+        tl.store(p_u0, b_u0.to(u.dtype.element_ty), boundary_check=(0, 1))
+
+        if i_tc1 < T:
+            p_v1 = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_tc1, off_v), (BC, BV), (1, 0))
+            b_v1 = tl.load(p_v1, boundary_check=(0, 1))
+            b_vb1 = (b_v1 * (b_b1 * b_Ginv1)[:, None]).to(b_v1.dtype)
+
+            b_u1 = (tl.dot(b_Ai10, b_vb0, allow_tf32=False) +
+                    tl.dot(b_Ai11, b_vb1, allow_tf32=False)) * b_G1[:, None]
+            p_u1 = tl.make_block_ptr(u, (T, V), (H*V, 1), (i_tc1, off_v), (BC, BV), (1, 0))
+            tl.store(p_u1, b_u1.to(u.dtype.element_ty), boundary_check=(0, 1))
+
+            if i_tc2 < T:
+                p_v2 = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_tc2, off_v), (BC, BV), (1, 0))
+                b_v2 = tl.load(p_v2, boundary_check=(0, 1))
+                b_vb2 = (b_v2 * (b_b2 * b_Ginv2)[:, None]).to(b_v2.dtype)
+
+                b_u2 = (tl.dot(b_Ai20, b_vb0, allow_tf32=False) +
+                        tl.dot(b_Ai21, b_vb1, allow_tf32=False) +
+                        tl.dot(b_Ai22, b_vb2, allow_tf32=False)) * b_G2[:, None]
+                p_u2 = tl.make_block_ptr(u, (T, V), (H*V, 1), (i_tc2, off_v), (BC, BV), (1, 0))
+                tl.store(p_u2, b_u2.to(u.dtype.element_ty), boundary_check=(0, 1))
+
+                if i_tc3 < T:
+                    p_v3 = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_tc3, off_v), (BC, BV), (1, 0))
+                    b_v3 = tl.load(p_v3, boundary_check=(0, 1))
+                    b_vb3 = (b_v3 * (b_b3 * b_Ginv3)[:, None]).to(b_v3.dtype)
+
+                    b_u3 = (tl.dot(b_Ai30, b_vb0, allow_tf32=False) +
+                            tl.dot(b_Ai31, b_vb1, allow_tf32=False) +
+                            tl.dot(b_Ai32, b_vb2, allow_tf32=False) +
+                            tl.dot(b_Ai33, b_vb3, allow_tf32=False)) * b_G3[:, None]
+                    p_u3 = tl.make_block_ptr(u, (T, V), (H*V, 1), (i_tc3, off_v), (BC, BV), (1, 0))
+                    tl.store(p_u3, b_u3.to(u.dtype.element_ty), boundary_check=(0, 1))
+
+
+def tricked_fused_infer_fwd(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g_cum: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None = None,
+    use_exp2: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused ungated kkt + solve + tricked WY. Returns w, u directly (no A allocation)."""
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    BT = 64
+    BC = 16
+    BV = min(max(triton.next_power_of_2(V), 16), 64)
+    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    w, u = torch.empty_like(k), torch.empty_like(v)
+    tricked_fusemaxxed_kernel[(NT, B * H)](
+        k=k, v=v, beta=beta, g=g_cum, w=w, u=u,
+        cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+        T=T, H=H, K=K, V=V, BT=BT, BC=BC, BV=BV,
+        USE_EXP2=use_exp2,
+    )
+    return w, u
