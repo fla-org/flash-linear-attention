@@ -1,3 +1,5 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
+
 from __future__ import annotations
 
 import math
@@ -60,6 +62,8 @@ class KDABlock(GradientCheckpointingLayer):
                 num_v_heads=config.num_v_heads,
                 use_short_conv=config.use_short_conv,
                 allow_neg_eigval=config.allow_neg_eigval,
+                safe_gate=config.safe_gate,
+                lower_bound=config.lower_bound,
                 conv_size=config.conv_size,
                 norm_eps=config.norm_eps,
                 layer_idx=layer_idx,
@@ -125,7 +129,10 @@ class KDAPreTrainedModel(PreTrainedModel):
         if isinstance(module, KimiDeltaAttention) and next(module.parameters()).device.type != "meta":
             with torch.no_grad():
                 if not getattr(module.A_log, '_is_hf_initialized', False):
-                    module.A_log.copy_(nn.init.uniform_(module.A_log, a=1, b=16).log())
+                    if module.safe_gate:
+                        module.A_log.zero_()
+                    else:
+                        module.A_log.copy_(nn.init.uniform_(module.A_log, a=1, b=16).log())
                 if not getattr(module.dt_bias, '_is_hf_initialized', False):
                     dt = torch.exp(
                         nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
