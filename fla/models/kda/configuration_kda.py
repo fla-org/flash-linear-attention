@@ -1,4 +1,4 @@
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -14,6 +14,8 @@ class KDAConfig(PretrainedConfig):
         expand_v: float = 1.0,
         use_short_conv: bool = True,
         allow_neg_eigval: bool = False,
+        safe_gate: bool = False,
+        lower_bound: float | None = None,
         conv_size: int = 4,
         head_dim: int = 128,
         num_heads: int = 16,
@@ -63,6 +65,10 @@ class KDAConfig(PretrainedConfig):
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
         self.allow_neg_eigval = allow_neg_eigval
+        self.safe_gate = safe_gate
+        self.lower_bound = lower_bound
+        if safe_gate and lower_bound is None:
+            raise ValueError("`lower_bound` must be specified when `safe_gate=True` (recommended: -5).")
 
         if attn is not None:
             if not isinstance(attn, dict):
