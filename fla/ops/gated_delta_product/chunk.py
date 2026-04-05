@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 import torch
 from einops import rearrange
@@ -174,7 +174,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         # call the gated deltanet kernel for now.
         # TODO: optimize the backward pass like the forward pass.
         if g is not None:
-            dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
+            dq, dk, dv, db, dg, dh0, _, _ = chunk_gated_delta_rule_bwd(
                 q=q,
                 k=k,
                 v=v,
