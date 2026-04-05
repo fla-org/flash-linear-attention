@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 import torch
 import triton
@@ -25,7 +25,7 @@ else:
         for BK in [32, 64]
         for num_warps in [1, 2, 4]
     ],
-    key=['H', 'K', 'BC'],
+    key=['H', 'HV', 'K', 'BC'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -38,7 +38,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     chunk_indices,
     T,
     H: tl.constexpr,
-    Hq: tl.constexpr,
+    HV: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr,
     BC: tl.constexpr,
@@ -61,7 +61,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     5. Write result to A (output)
     """
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
-    i_b, i_h = i_bh // H, i_bh % H
+    i_b, i_h = i_bh // HV, i_bh % HV
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -78,8 +78,8 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     i_tc2 = i_t * BT + 2 * BC
     i_tc3 = i_t * BT + 3 * BC
 
-    k += (bos * Hq + i_h // (H // Hq)) * K
-    A += (bos * H + i_h) * BT
+    k += (bos * H + i_h // (HV // H)) * K
+    A += (bos * HV + i_h) * BT
 
     o_i = tl.arange(0, BC)
     m_tc0 = (i_tc0 + o_i) < T
@@ -88,10 +88,10 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     m_tc3 = (i_tc3 + o_i) < T
 
     # load beta for each sub-chunk
-    p_b0 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc0,), (BC,), (0,))
-    p_b1 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc1,), (BC,), (0,))
-    p_b2 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc2,), (BC,), (0,))
-    p_b3 = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_tc3,), (BC,), (0,))
+    p_b0 = tl.make_block_ptr(beta + bos * HV + i_h, (T,), (HV,), (i_tc0,), (BC,), (0,))
+    p_b1 = tl.make_block_ptr(beta + bos * HV + i_h, (T,), (HV,), (i_tc1,), (BC,), (0,))
+    p_b2 = tl.make_block_ptr(beta + bos * HV + i_h, (T,), (HV,), (i_tc2,), (BC,), (0,))
+    p_b3 = tl.make_block_ptr(beta + bos * HV + i_h, (T,), (HV,), (i_tc3,), (BC,), (0,))
     b_b0 = tl.load(p_b0, boundary_check=(0,)).to(tl.float32)
     b_b1 = tl.load(p_b1, boundary_check=(0,)).to(tl.float32)
     b_b2 = tl.load(p_b2, boundary_check=(0,)).to(tl.float32)
@@ -99,10 +99,10 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
 
     # load gate if used
     if USE_G:
-        p_g0 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc0,), (BC,), (0,))
-        p_g1 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc1,), (BC,), (0,))
-        p_g2 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc2,), (BC,), (0,))
-        p_g3 = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_tc3,), (BC,), (0,))
+        p_g0 = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_tc0,), (BC,), (0,))
+        p_g1 = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_tc1,), (BC,), (0,))
+        p_g2 = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_tc2,), (BC,), (0,))
+        p_g3 = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_tc3,), (BC,), (0,))
 
         b_g0 = tl.load(p_g0, boundary_check=(0,)).to(tl.float32)
         b_g1 = tl.load(p_g1, boundary_check=(0,)).to(tl.float32)
@@ -128,13 +128,13 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     b_A32 = tl.zeros([BC, BC], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_k0 = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0))
+        p_k0 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc0, i_k * BK), (BC, BK), (1, 0))
         b_k0 = tl.load(p_k0, boundary_check=(0, 1))
         # diagonal block 0
         b_A00 += tl.dot(b_k0, tl.trans(b_k0))
 
         if i_tc1 < T:
-            p_k1 = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0))
+            p_k1 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc1, i_k * BK), (BC, BK), (1, 0))
             b_k1 = tl.load(p_k1, boundary_check=(0, 1))
             # diagonal block 1
             b_A11 += tl.dot(b_k1, tl.trans(b_k1))
@@ -142,7 +142,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
             b_A10 += tl.dot(b_k1, tl.trans(b_k0))
 
             if i_tc2 < T:
-                p_k2 = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0))
+                p_k2 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc2, i_k * BK), (BC, BK), (1, 0))
                 b_k2 = tl.load(p_k2, boundary_check=(0, 1))
                 # diagonal block 2
                 b_A22 += tl.dot(b_k2, tl.trans(b_k2))
@@ -151,7 +151,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
                 b_A21 += tl.dot(b_k2, tl.trans(b_k1))
 
                 if i_tc3 < T:
-                    p_k3 = tl.make_block_ptr(k, (T, K), (Hq*K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0))
+                    p_k3 = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_tc3, i_k * BK), (BC, BK), (1, 0))
                     b_k3 = tl.load(p_k3, boundary_check=(0, 1))
                     # diagonal block 3
                     b_A33 += tl.dot(b_k3, tl.trans(b_k3))
@@ -299,16 +299,16 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     # Step 5: store full (I + A)^{-1} to output A
     ############################################################################
 
-    p_A00 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc0, 0), (BC, BC), (1, 0))
-    p_A10 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
-    p_A11 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc1, BC), (BC, BC), (1, 0))
-    p_A20 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
-    p_A21 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
-    p_A22 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc2, 2*BC), (BC, BC), (1, 0))
-    p_A30 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
-    p_A31 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
-    p_A32 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc3, 2*BC), (BC, BC), (1, 0))
-    p_A33 = tl.make_block_ptr(A, (T, BT), (H*BT, 1), (i_tc3, 3*BC), (BC, BC), (1, 0))
+    p_A00 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc0, 0), (BC, BC), (1, 0))
+    p_A10 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc1, 0), (BC, BC), (1, 0))
+    p_A11 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc1, BC), (BC, BC), (1, 0))
+    p_A20 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc2, 0), (BC, BC), (1, 0))
+    p_A21 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc2, BC), (BC, BC), (1, 0))
+    p_A22 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc2, 2*BC), (BC, BC), (1, 0))
+    p_A30 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc3, 0), (BC, BC), (1, 0))
+    p_A31 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc3, BC), (BC, BC), (1, 0))
+    p_A32 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc3, 2*BC), (BC, BC), (1, 0))
+    p_A33 = tl.make_block_ptr(A, (T, BT), (HV*BT, 1), (i_tc3, 3*BC), (BC, BC), (1, 0))
 
     tl.store(p_A00, b_Ai00.to(A.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_A10, b_Ai10.to(A.dtype.element_ty), boundary_check=(0, 1))
@@ -347,11 +347,11 @@ def chunk_gated_delta_rule_fwd_intra(
         k (torch.Tensor):
             The key tensor of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            The value tensor of shape `[B, T, H, V]`.
+            The value tensor of shape `[B, T, HV, V]`.
         g (torch.Tensor):
-            The cumulative sum of the gate tensor of shape `[B, T, H]`. Default: `None`.
+            The cumulative sum of the gate tensor of shape `[B, T, HV]`. Default: `None`.
         beta (torch.Tensor):
-            The beta tensor of shape `[B, T, H]`.
+            The beta tensor of shape `[B, T, HV]`.
         cu_seqlens (torch.LongTensor):
             The cumulative sequence lengths. Default: `None`.
         chunk_size (int):
@@ -360,12 +360,11 @@ def chunk_gated_delta_rule_fwd_intra(
             Precomputed chunk indices. Default: `None`.
 
     Returns:
-        w (torch.Tensor): shape `[B, T, H, K]`
-        u (torch.Tensor): shape `[B, T, H, V]`
-        A (torch.Tensor): shape `[B, T, H, BT]`, the solved (I+A)^{-1} matrix
+        w (torch.Tensor): shape `[B, T, HV, K]`
+        u (torch.Tensor): shape `[B, T, HV, V]`
+        A (torch.Tensor): shape `[B, T, HV, BT]`, the solved (I+A)^{-1} matrix
     """
-    B, T, Hq, K = k.shape
-    H = beta.shape[2]
+    B, T, H, K, HV = *k.shape, beta.shape[2]
     BT = chunk_size
     BC = 16
 
@@ -374,8 +373,8 @@ def chunk_gated_delta_rule_fwd_intra(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     # Step 1: fused kkt + solve_tril
-    A = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
-    chunk_gated_delta_rule_fwd_kkt_solve_kernel[(NT, B * H)](
+    A = torch.zeros(B, T, HV, BT, device=k.device, dtype=k.dtype)
+    chunk_gated_delta_rule_fwd_kkt_solve_kernel[(NT, B * HV)](
         k=k,
         g=g,
         beta=beta,
@@ -384,7 +383,7 @@ def chunk_gated_delta_rule_fwd_intra(
         chunk_indices=chunk_indices,
         T=T,
         H=H,
-        Hq=Hq,
+        HV=HV,
         K=K,
         BT=BT,
         BC=BC,
