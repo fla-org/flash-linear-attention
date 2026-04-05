@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 import torch
 import triton
@@ -36,30 +36,25 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
+    key=['H', 'V', 'BT', 'BV'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_kda_bwd_kernel_dAv(
-    q,
-    k,
-    v,
-    A,
+def chunk_kda_bwd_kernel_dv(
+    Aqk,
     do,
     dv,
-    dA,
     cu_seqlens,
     chunk_indices,
-    scale,
     T,
     H: tl.constexpr,
-    K: tl.constexpr,
     V: tl.constexpr,
     BT: tl.constexpr,
-    BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
+    # dv = Aqk^T @ do
+    # dAqk is fused into chunk_kda_bwd_kernel_inter.
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
@@ -70,39 +65,23 @@ def chunk_kda_bwd_kernel_dAv(
         bos, eos = i_b * T, i_b * T + T
 
     # offset calculation
-    q += (bos * H + i_h) * K
-    k += (bos * H + i_h) * K
-    v += (bos * H + i_h) * V
     do += (bos * H + i_h) * V
     dv += (bos * H + i_h) * V
-    dA += (bos * H + i_h) * BT
 
-    p_A = tl.make_block_ptr(A + (bos * H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    p_Aqk = tl.make_block_ptr(Aqk + (bos * H + i_h) * BT, (BT, T), (1, H*BT), (0, i_t * BT), (BT, BT), (0, 1))
+    b_Aqk = tl.load(p_Aqk, boundary_check=(0, 1))
 
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     m_A = (o_t[:, None] <= o_t[None, :]) & (m_t[:, None] & m_t)
-    b_A = tl.where(m_A, b_A, 0).to(do.dtype.element_ty)
+    b_Aqk = tl.where(m_A, b_Aqk, 0).to(do.dtype.element_ty)
 
-    b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     for i_v in range(tl.cdiv(V, BV)):
-        p_v = tl.make_block_ptr(v, (V, T), (1, H*V), (i_v * BV, i_t * BT), (BV, BT), (0, 1))
         p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        # [BV, BT]
-        b_v = tl.load(p_v, boundary_check=(0, 1))
-        # [BT, BV]
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        # [BT, BT]
-        b_dA += tl.dot(b_do, b_v)
-        # [BT, BV]
-        b_dv = tl.dot(b_A.to(b_do.dtype), b_do)
+        b_dv = tl.dot(b_Aqk.to(b_do.dtype), b_do)
         tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-
-    p_dA = tl.make_block_ptr(dA, (T, BT), (H*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    b_dA = tl.where(o_t[:, None] >= o_t, b_dA * scale, 0.)
-    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
 
 
 @triton.heuristics({
@@ -121,14 +100,14 @@ def chunk_kda_bwd_kernel_dAv(
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def chunk_kda_bwd_kernel_wy_dqkg_fused(
+def chunk_kda_bwd_kernel_inter(
     q,
     k,
     v,
     v_new,
     g,
     beta,
-    A,
+    Akk,
     h,
     do,
     dh,
@@ -138,7 +117,8 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     dv2,
     dg,
     db,
-    dA,
+    dAqk,
+    dAkk,
     cu_seqlens,
     chunk_indices,
     scale,
@@ -176,7 +156,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     v_new += (bos * H + i_h) * V
     g += (bos * H + i_h) * K
     beta += bos * H + i_h
-    A += (bos * H + i_h) * BT
+    Akk += (bos * H + i_h) * BT
     h += (i_tg * H + i_h) * K*V
     do += (bos * H + i_h) * V
     dh += (i_tg * H + i_h) * K*V
@@ -186,15 +166,17 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     dv2 += (bos * H + i_h) * V
     dg += (bos * H + i_h) * K
     db += bos * H + i_h
-    dA += (bos * H + i_h) * BT
+    dAqk += (bos * H + i_h) * BT
+    dAkk += (bos * H + i_h) * BT
 
     p_beta = tl.make_block_ptr(beta, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_beta = tl.load(p_beta, boundary_check=(0,))
 
-    p_A = tl.make_block_ptr(A, (BT, T), (1, H * BT), (0, i_t * BT), (BT, BT), (0, 1))
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    p_Akk = tl.make_block_ptr(Akk, (BT, T), (1, H * BT), (0, i_t * BT), (BT, BT), (0, 1))
+    b_Akk = tl.load(p_Akk, boundary_check=(0, 1))
 
-    b_dA = tl.zeros([BT, BT], dtype=tl.float32)
+    b_dAqk = tl.zeros([BT, BT], dtype=tl.float32)
+    b_dAkk = tl.zeros([BT, BT], dtype=tl.float32)
     b_db = tl.zeros([BT], dtype=tl.float32)
 
     for i_k in range(tl.cdiv(K, BK)):
@@ -244,9 +226,11 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
                 b_v = tl.load(p_v, boundary_check=(0, 1))
 
-                b_dA += tl.dot(b_dv, tl.trans(b_v))
+                # fused from the former separate dAv kernel to avoid redundant do/v_new loads
+                b_dAqk += tl.dot(b_do, tl.trans(b_v_new))
+                b_dAkk += tl.dot(b_dv, tl.trans(b_v))
 
-                b_dvb = tl.dot(b_A, b_dv)
+                b_dvb = tl.dot(b_Akk, b_dv)
                 b_dv2 = b_dvb * b_beta[:, None]
                 b_db += tl.sum(b_dvb * b_v, 1)
 
@@ -260,16 +244,17 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
 
         b_kg = b_k * b_gk_exp
 
-        b_dw = -b_dw.to(b_A.dtype)
-        b_dA += tl.dot(b_dw, tl.trans(b_kg.to(b_A.dtype)))
+        b_dw = -b_dw.to(b_Akk.dtype)
+        b_dAkk += tl.dot(b_dw, tl.trans(b_kg.to(b_Akk.dtype)))
 
-        b_dkgb = tl.dot(b_A, b_dw)
+        b_dkgb = tl.dot(b_Akk, b_dw)
         b_db += tl.sum(b_dkgb * b_kg, 1)
 
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_kdk = b_k * b_dk
         b_dgk += tl.sum(b_kdk, axis=0)
+        # dg: product rule from exp2(g) on q/k + boundary cumsum correction + WY term
         b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + b_kg * b_dkgb * b_beta[:, None]
         b_dk = b_dk + b_dkgb * b_gb
 
@@ -280,77 +265,70 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
 
-    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
-    b_dA = tl.where(m_A, b_dA * b_beta[None, :], 0)
-    b_dA = tl.dot(b_dA.to(b_A.dtype), b_A)
-    b_dA = tl.dot(b_A, b_dA.to(b_A.dtype))
-    b_dA = tl.where(m_A, -b_dA, 0)
+    # dAqk = scale * lower_tri(do @ v_new^T), fused here to reuse do/v_new from V-block loop
+    b_dAqk = tl.where(o_t[:, None] >= o_t[None, :], b_dAqk * scale, 0.)
+    p_dAqk = tl.make_block_ptr(dAqk, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    tl.store(p_dAqk, b_dAqk.to(p_dAqk.dtype.element_ty), boundary_check=(0, 1))
 
-    p_dA = tl.make_block_ptr(dA, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+    # dAkk inverse gradient: d(A^{-1}) = -A^{-1} @ dA @ A^{-1}
+    m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
+    b_dAkk = tl.where(m_A, b_dAkk * b_beta[None, :], 0)
+    b_dAkk = tl.dot(b_dAkk.to(b_Akk.dtype), b_Akk)
+    b_dAkk = tl.dot(b_Akk, b_dAkk.to(b_Akk.dtype))
+    b_dAkk = tl.where(m_A, -b_dAkk, 0)
+
+    p_dAkk = tl.make_block_ptr(dAkk, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     p_db = tl.make_block_ptr(db, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_dA, b_dA.to(p_dA.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dAkk, b_dAkk.to(p_dAkk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_db, b_db.to(p_db.dtype.element_ty), boundary_check=(0,))
 
 
-def chunk_kda_bwd_dAv(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
+def chunk_kda_bwd_dv(
     do: torch.Tensor,
-    A: torch.Tensor | None = None,
-    scale: float = None,
+    Aqk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K, V = *k.shape, do.shape[-1]
+) -> torch.Tensor:
+    B, T, H, V = do.shape
     BT = chunk_size
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     # H100 can have larger block size
-    if check_shared_mem('hopper', k.device.index):
+    if check_shared_mem('hopper', do.device.index):
         CONST_TILING = 128
     elif check_shared_mem:
         CONST_TILING = 64
     else:
         CONST_TILING = 32
-    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dA = v.new_empty(B, T, H, BT, dtype=torch.float)
     dv = torch.empty_like(do)
     grid = (NT, B * H)
-    chunk_kda_bwd_kernel_dAv[grid](
-        q=q,
-        k=k,
-        v=v,
-        A=A,
+    chunk_kda_bwd_kernel_dv[grid](
+        Aqk=Aqk,
         do=do,
         dv=dv,
-        dA=dA,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        scale=scale,
         T=T,
         H=H,
-        K=K,
         V=V,
         BT=BT,
-        BK=BK,
         BV=BV,
     )
-    return dA, dv
+    return dv
 
 
-def chunk_kda_bwd_wy_dqkg_fused(
+def chunk_kda_bwd_inter(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     v_new: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    A: torch.Tensor,
+    Akk: torch.Tensor,
     h: torch.Tensor,
     do: torch.Tensor,
     dh: torch.Tensor,
@@ -373,17 +351,18 @@ def chunk_kda_bwd_wy_dqkg_fused(
     dv2 = torch.empty_like(v)
     dg = torch.empty_like(g, dtype=torch.float)
     db = torch.empty_like(beta, dtype=torch.float)
-    dA = torch.empty_like(A, dtype=torch.float)
+    dAqk = torch.empty_like(Akk, dtype=torch.float)
+    dAkk = torch.empty_like(Akk, dtype=torch.float)
 
     grid = (NT, B * H)
-    chunk_kda_bwd_kernel_wy_dqkg_fused[grid](
+    chunk_kda_bwd_kernel_inter[grid](
         q=q,
         k=k,
         v=v,
         v_new=v_new,
         g=g,
         beta=beta,
-        A=A,
+        Akk=Akk,
         h=h,
         do=do,
         dh=dh,
@@ -393,7 +372,8 @@ def chunk_kda_bwd_wy_dqkg_fused(
         dv2=dv2,
         dg=dg,
         db=db,
-        dA=dA,
+        dAqk=dAqk,
+        dAkk=dAkk,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
@@ -405,7 +385,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
         TRANSPOSE_STATE=transpose_state_layout,
     )
     dv = dv2
-    return dq, dk, dv, db, dg, dA
+    return dq, dk, dv, db, dg, dAqk, dAkk
 
 
 def chunk_kda_bwd(
@@ -479,15 +459,10 @@ def chunk_kda_bwd(
             # Only the first sequence's state is non-zero as it's the only one that could be cross-rank.
             initial_state = expand_h0(initial_state, context=cp_context)
 
-    # dAqk = do @ v.T
-    # dv = A @ do
-    dAqk, dv = chunk_kda_bwd_dAv(
-        q=q,
-        k=k,
-        v=v_new,
+    # dv = Aqk^T @ do
+    dv = chunk_kda_bwd_dv(
         do=do,
-        A=Aqk,
-        scale=scale,
+        Aqk=Aqk,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
@@ -528,14 +503,14 @@ def chunk_kda_bwd(
         transpose_state_layout=transpose_state_layout,
     )
 
-    dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
+    dq, dk, dv, db, dg, dAqk, dAkk = chunk_kda_bwd_inter(
         q=q,
         k=k,
         v=v,
         v_new=v_new,
         g=g,
         beta=beta,
-        A=Akk,
+        Akk=Akk,
         h=h,
         do=do,
         dh=dh,
