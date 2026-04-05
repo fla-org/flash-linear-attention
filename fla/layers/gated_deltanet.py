@@ -1,4 +1,4 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
@@ -61,7 +61,10 @@ class GatedDeltaNet(nn.Module):
             The number of heads. Default: 4.
         num_v_heads (int, Optional):
             The number of heads for the value projection, equal to `num_heads` if `None`.
-            GVA is applied if `num_v_heads` > `num_heads`. Default: `None`.
+            GVA (Grouped Value Attention) is applied if `num_v_heads` > `num_heads`,
+            where `num_v_heads` must be divisible by `num_heads`.
+            The kernels natively support GVA by mapping multiple value heads to each query/key head.
+            Default: `None`.
         mode (str, Optional):
             Which Gated DeltaNet kernel to use.
             Currently available: `chunk` and `fused_recurrent`.
@@ -257,9 +260,6 @@ class GatedDeltaNet(nn.Module):
 
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
-
-        if self.num_v_heads > self.num_heads:
-            q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
 
         beta = self.b_proj(hidden_states).sigmoid()
         if self.allow_neg_eigval:

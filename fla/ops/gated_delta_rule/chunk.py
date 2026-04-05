@@ -322,25 +322,25 @@ def chunk_gated_delta_rule(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, Hq, K]` where `Hq` is the number of query/key heads.
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, Hq, K]` where `Hq` is the number of query/key heads.
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` where `H` is the number of value/output heads.
-            For standard attention, `Hq == H`. For GQA, `H % Hq == 0`.
+            values of shape `[B, T, HV, V]`.
+            GVA (Grouped Value Attention) is applied if `HV > H`, where `HV` must be divisible by `H`.
         g (torch.Tensor):
-            (forget) gating tensor (in log space!) of shape `[B, T, H]`.
+            (forget) gating tensor (in log space!) of shape `[B, T, HV]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]`.
+            betas of shape `[B, T, HV]`.
         scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            Initial state of shape `[N, HV, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q/k tensor internally. Default: `False`.
         cu_seqlens (torch.LongTensor):
@@ -356,9 +356,9 @@ def chunk_gated_delta_rule(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]`.
+            Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state of shape `[N, HV, K, V]` if `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch
@@ -366,13 +366,13 @@ def chunk_gated_delta_rule(
         >>> from einops import rearrange
         >>> from fla.ops.gated_delta_rule import chunk_gated_delta_rule
         # inputs with equal lengths
-        >>> B, T, H, K, V = 4, 2048, 4, 512, 512
+        >>> B, T, H, HV, K, V = 4, 2048, 4, 8, 512, 512
         >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> k = F.normalize(torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda'), p=2, dim=-1)
-        >>> v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device='cuda')
-        >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
-        >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
-        >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
+        >>> v = torch.randn(B, T, HV, V, dtype=torch.bfloat16, device='cuda')
+        >>> beta = torch.rand(B, T, HV, dtype=torch.bfloat16, device='cuda').sigmoid()
+        >>> g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.bfloat16, device='cuda'))
+        >>> h0 = torch.randn(B, HV, K, V, dtype=torch.bfloat16, device='cuda')
         >>> o, ht = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
@@ -389,12 +389,17 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
-    # Validate GQA head divisibility
-    Hq, H = q.shape[2], v.shape[2]
-    if H % Hq != 0:
+    # Validate head dimensions
+    if q.shape[2] != k.shape[2]:
         raise ValueError(
-            f"For GQA, num_heads (H={H}) must be evenly divisible by "
-            f"num_kv_heads (Hq={Hq}), but got H % Hq = {H % Hq}"
+            f"q and k must have the same number of heads, "
+            f"but got q.shape[2]={q.shape[2]} and k.shape[2]={k.shape[2]}"
+        )
+    H, HV = q.shape[2], v.shape[2]
+    if HV % H != 0:
+        raise ValueError(
+            f"For GVA, num_v_heads (HV={HV}) must be evenly divisible by "
+            f"num_heads (H={H}), but got HV % H = {HV % H}"
         )
 
     if 'head_first' in kwargs:
