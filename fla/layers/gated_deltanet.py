@@ -55,7 +55,9 @@ class GatedDeltaNet(nn.Module):
         num_v_heads (int, Optional):
             The number of heads for the value projection, equal to `num_heads` if `None`.
             GVA (Grouped Value Attention) is applied if `num_v_heads` > `num_heads`,
-            where `num_v_heads` must be divisible by `num_heads`. Default: `None`.
+            where `num_v_heads` must be divisible by `num_heads`.
+            The kernels natively support GVA by mapping multiple value heads to each query/key head.
+            Default: `None`.
         mode (str, Optional):
             Which Gated DeltaNet kernel to use.
             Currently available: `chunk` and `fused_recurrent`.
