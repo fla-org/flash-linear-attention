@@ -5,7 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-#!/usr/bin/env python
 """
 Compare benchmark results between two git commits using the unified runner.
 
