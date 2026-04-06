@@ -150,40 +150,60 @@ jobs:
             }
 
             const data = JSON.parse(fs.readFileSync(path, 'utf8'));
-            const { base_sha, head_sha, machine_info, regressions, speedups, has_regression, has_speedup } = data;
+            const { base_sha, head_sha, machine_info, base_results, head_results, regressions, speedups, has_regression } = data;
 
             const gpuName = machine_info?.gpu_name || 'Unknown';
             const cudaVersion = machine_info?.cuda_version || 'Unknown';
             const pytorchVersion = machine_info?.pytorch_version || 'Unknown';
             const runnerName = '${{ inputs.runner }}';
+            const threshold = parseFloat('${{ inputs.threshold }}');
 
-            // Format the summary table
-            let summary = '';
-            if (has_regression || has_speedup) {
-              summary = '| Op | Mode | B | T | H | D | Base (ms) | Head (ms) | Change |\n';
-              summary += '|:---|:---:|---:|---:|---:|---:|---:|---:|---:|\n';
+            // Build a map of base results keyed by (op, mode, B, T, H, D)
+            const makeKey = (r) => `${r.op}|${r.mode}|${r.B}|${r.T}|${r.H}|${r.D}`;
+            const baseMap = {};
+            for (const r of (base_results || [])) baseMap[makeKey(r)] = r;
+            const headMap = {};
+            for (const r of (head_results || [])) headMap[makeKey(r)] = r;
 
-              // Add regressions
-              if (regressions && regressions.length > 0) {
-                for (const r of regressions) {
-                  const change = `+${r.change_pct.toFixed(1)}% 🔴`;
-                  summary += `| ${r.op} | ${r.mode} | ${r.B} | ${r.T} | ${r.H} | ${r.D} | ${r.base_ms.toFixed(3)} | ${r.head_ms.toFixed(3)} | ${change} |\n`;
-                }
-              }
+            // Merge all keys and sort by mode (fwd first), then op, then params
+            const allKeys = [...new Set([...Object.keys(baseMap), ...Object.keys(headMap)])];
+            allKeys.sort((a, b) => {
+              const [aOp, aMode] = a.split('|');
+              const [bOp, bMode] = b.split('|');
+              if (aMode !== bMode) return aMode === 'fwd' ? -1 : 1;
+              return a.localeCompare(b);
+            });
 
-              // Add speedups
-              if (speedups && speedups.length > 0) {
-                for (const s of speedups) {
-                  const change = `${s.change_pct.toFixed(1)}% 🟢`;
-                  summary += `| ${s.op} | ${s.mode} | ${s.B} | ${s.T} | ${s.H} | ${s.D} | ${s.base_ms.toFixed(3)} | ${s.head_ms.toFixed(3)} | ${change} |\n`;
-                }
+            // Format results table with all entries
+            let table = '| Op | Mode | B | T | H | D | Base (ms) | Head (ms) | Speedup | Change |\n';
+            table += '|:---|:---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+
+            for (const key of allKeys) {
+              const b = baseMap[key];
+              const h = headMap[key];
+              const [op, mode, B, T, H, D] = key.split('|');
+
+              if (b && h) {
+                const changePct = (h.median_ms - b.median_ms) / b.median_ms * 100;
+                const speedup = b.median_ms / h.median_ms;
+                const sign = changePct > 0 ? '+' : '';
+                let marker = '';
+                if (changePct > threshold) marker = ' 🔴';
+                else if (changePct < -threshold) marker = ' 🟢';
+                table += `| ${op} | ${mode} | ${B} | ${T} | ${H} | ${D} | ${b.median_ms.toFixed(3)} | ${h.median_ms.toFixed(3)} | ${speedup.toFixed(2)}x | ${sign}${changePct.toFixed(1)}%${marker} |\n`;
+              } else if (h) {
+                table += `| ${op} | ${mode} | ${B} | ${T} | ${H} | ${D} | - | ${h.median_ms.toFixed(3)} | - | new |\n`;
+              } else if (b) {
+                table += `| ${op} | ${mode} | ${B} | ${T} | ${H} | ${D} | ${b.median_ms.toFixed(3)} | - | - | removed |\n`;
               }
             }
 
             // Build the comment body
             const statusEmoji = has_regression ? '⚠️' : '✅';
+            const nReg = (regressions || []).length;
+            const nSpd = (speedups || []).length;
             const statusText = has_regression
-              ? `${regressions.length} regression(s) detected`
+              ? `${nReg} regression(s) detected`
               : 'No significant performance regressions detected';
 
             let body = `## ${statusEmoji} Benchmark Results (${runnerName.toUpperCase()})\n\n`;
@@ -197,13 +217,7 @@ jobs:
             body += `| **Head** | \`${head_sha}\` |\n`;
             body += `| **Threshold** | ${{ inputs.threshold }}% |\n\n`;
 
-            if (has_regression || has_speedup) {
-              body += `<details>\n<summary>📊 View Details (${(regressions?.length || 0) + (speedups?.length || 0)} significant changes)</summary>\n\n`;
-              body += summary;
-              body += '\n</details>\n';
-            } else {
-              body += '> All benchmarked operations are within the performance threshold.\n';
-            }
+            body += table;
 
             body += '\n---\n';
             body += '*This comment is automatically updated with the latest benchmark results.*';
