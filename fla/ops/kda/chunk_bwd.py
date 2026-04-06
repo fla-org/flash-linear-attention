@@ -231,7 +231,6 @@ def chunk_kda_bwd_kernel_inter(
 
                 b_v = tl.load(p_v, boundary_check=(0, 1))
 
-                # fused from the former separate dAv kernel to avoid redundant do/v_new loads
                 b_dAqk += tl.dot(b_do, tl.trans(b_v_new))
                 b_dAkk += tl.dot(b_dv, tl.trans(b_v))
 
@@ -240,6 +239,12 @@ def chunk_kda_bwd_kernel_inter(
                 b_db += tl.sum(b_dvb * b_v, 1)
 
                 tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
+
+        # Store dAqk immediately after i_k==0 to free registers for remaining K iterations
+        if i_k == 0:
+            b_dAqk = tl.where(o_t[:, None] >= o_t[None, :], b_dAqk * scale, 0.)
+            p_dAqk = tl.make_block_ptr(dAqk, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
+            tl.store(p_dAqk, b_dAqk.to(p_dAqk.dtype.element_ty), boundary_check=(0, 1))
 
         b_gk_exp = exp2(b_g)
         b_gb = b_gk_exp * b_beta[:, None]
@@ -269,11 +274,6 @@ def chunk_kda_bwd_kernel_inter(
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
-
-    # dAqk = scale * lower_tri(do @ v_new^T), fused here to reuse do/v_new from V-block loop
-    b_dAqk = tl.where(o_t[:, None] >= o_t[None, :], b_dAqk * scale, 0.)
-    p_dAqk = tl.make_block_ptr(dAqk, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
-    tl.store(p_dAqk, b_dAqk.to(p_dAqk.dtype.element_ty), boundary_check=(0, 1))
 
     # dAkk inverse gradient: d(A^{-1}) = -A^{-1} @ dA @ A^{-1}
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
