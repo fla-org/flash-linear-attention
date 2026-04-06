@@ -274,9 +274,9 @@ def print_comparison(base_results: list[dict], head_results: list[dict],
             sign = '+' if change_pct > 0 else ''
             marker = ''
             if change_pct > threshold:
-                marker = ' <<< REGRESSION'
+                marker = ' 🔴'
             elif change_pct < -threshold:
-                marker = ' <<< SPEEDUP'
+                marker = ' 🟢'
             else:
                 marker = ''
             print(f"{prefix}  {base_ms:>{col_w}.3f} {head_ms:>{col_w}.3f} {speedup:>7.2f}x "
