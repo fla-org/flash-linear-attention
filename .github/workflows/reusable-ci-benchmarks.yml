@@ -201,7 +201,6 @@ jobs:
             // Build the comment body
             const statusEmoji = has_regression ? '⚠️' : '✅';
             const nReg = (regressions || []).length;
-            const nSpd = (speedups || []).length;
             const statusText = has_regression
               ? `${nReg} regression(s) detected`
               : 'No significant performance regressions detected';
