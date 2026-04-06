@@ -1,5 +1,10 @@
-# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+#
 # Copyright (c) 2023, Tri Dao
 # https://github.com/state-spaces/mamba/blob/fb7b5310fa865dbd62aa059b1e26f2b431363e2a/mamba_ssm/ops/triton/layernorm.py
 # Implement residual + layer_norm / rms_norm.

@@ -1,5 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -120,7 +124,6 @@ def chunk_local_cumsum_vector_kernel(
     if HAS_SCALE:
         b_o *= scale
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
-
 
 
 @triton.heuristics({
