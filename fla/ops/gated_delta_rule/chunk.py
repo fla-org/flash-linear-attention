@@ -15,6 +15,7 @@ from fla.ops.cp.chunk_delta_h import (
     expand_h0,
 )
 from fla.ops.gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
+from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
@@ -36,14 +37,29 @@ def chunk_gated_delta_rule_fwd(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = True,
     transpose_state_layout: bool = False,
+    use_gate_in_kernel: bool = False,
+    A_log: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
 ):
-    g = chunk_local_cumsum(
-        g,
-        chunk_size=64,
-        scale=RCP_LN2 if use_exp2 else None,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-    )
+    g_input = g if use_gate_in_kernel else None
+    if use_gate_in_kernel:
+        g = gdn_gate_chunk_cumsum(
+            g=g,
+            A_log=A_log,
+            chunk_size=64,
+            scale=RCP_LN2 if use_exp2 else None,
+            dt_bias=dt_bias,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+    else:
+        g = chunk_local_cumsum(
+            g,
+            chunk_size=64,
+            scale=RCP_LN2 if use_exp2 else None,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
     # obtain WY representation. u is actually the new v.
     # fused kkt + solve_tril + recompute_w_u
     w, u, A = chunk_gated_delta_rule_fwd_intra(
@@ -97,7 +113,7 @@ def chunk_gated_delta_rule_fwd(
         use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
-    return g, o, A, final_state, initial_state
+    return g, o, A, final_state, initial_state, g_input
 
 
 def chunk_gated_delta_rule_bwd(
@@ -116,6 +132,10 @@ def chunk_gated_delta_rule_bwd(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = True,
     transpose_state_layout: bool = False,
+    use_gate_in_kernel: bool = False,
+    g_input: torch.Tensor | None = None,
+    A_log: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
 ):
     w, u = recompute_w_u_fwd(
         k=k,
@@ -219,7 +239,10 @@ def chunk_gated_delta_rule_bwd(
     dk.add_(dk2)
     dg.add_(dg2)
     dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
-    return dq, dk, dv, db, dg, dh0
+    dA_log, ddt_bias = None, None
+    if use_gate_in_kernel:
+        dg, dA_log, ddt_bias = gdn_gate_bwd(g=g_input, A_log=A_log, dt_bias=dt_bias, dyg=dg)
+    return dq, dk, dv, db, dg, dh0, dA_log, ddt_bias
 
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
@@ -242,6 +265,9 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         cp_context: FLACPContext | None = None,
         transpose_state_layout: bool = False,
+        use_gate_in_kernel: bool = False,
+        A_log: torch.Tensor | None = None,
+        dt_bias: torch.Tensor | None = None,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -250,7 +276,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
-        g, o, A, final_state, initial_state = chunk_gated_delta_rule_fwd(
+        g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -263,12 +289,20 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cp_context=cp_context,
             chunk_indices=chunk_indices,
             transpose_state_layout=transpose_state_layout,
+            use_gate_in_kernel=use_gate_in_kernel,
+            A_log=A_log,
+            dt_bias=dt_bias,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens, chunk_indices)
+        ctx.save_for_backward(
+            q, q_rstd, k, k_rstd, v, g, beta, A,
+            initial_state, cu_seqlens, chunk_indices,
+            g_input, A_log, dt_bias,
+        )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.cp_context = cp_context
         ctx.transpose_state_layout = transpose_state_layout
+        ctx.use_gate_in_kernel = use_gate_in_kernel
         return o.to(q.dtype), final_state
 
     @staticmethod
@@ -279,8 +313,10 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens, chunk_indices = ctx.saved_tensors
-        dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
+        (q, q_rstd, k, k_rstd, v, g, beta, A,
+         initial_state, cu_seqlens, chunk_indices,
+         g_input, A_log, dt_bias) = ctx.saved_tensors
+        dq, dk, dv, db, dg, dh0, dA_log, ddt_bias = chunk_gated_delta_rule_bwd(
             q=q,
             k=k,
             v=v,
@@ -295,11 +331,19 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cp_context=ctx.cp_context,
             chunk_indices=chunk_indices,
             transpose_state_layout=ctx.transpose_state_layout,
+            use_gate_in_kernel=ctx.use_gate_in_kernel,
+            g_input=g_input,
+            A_log=A_log,
+            dt_bias=dt_bias,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None, None, None
+        return (
+            dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta),
+            None, dh0, None, None, None, None, None, None,
+            None, dA_log, ddt_bias,
+        )
 
 
 @torch.compiler.disable
@@ -329,7 +373,10 @@ def chunk_gated_delta_rule(
             values of shape `[B, T, HV, V]`.
             GVA (Grouped Value Attention) is applied if `HV > H`, where `HV` must be divisible by `H`.
         g (torch.Tensor):
-            (forget) gating tensor (in log space!) of shape `[B, T, HV]`.
+            (forget) gating tensor of shape `[B, T, HV]`.
+            When `use_gate_in_kernel=False` (default), `g` should be in log space (pre-computed decay).
+            When `use_gate_in_kernel=True`, `g` is the raw input before gate activation;
+            the kernel fuses `-exp(A_log) * softplus(g + dt_bias)` + chunk cumsum internally.
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
         scale (Optional[float]):
@@ -353,6 +400,16 @@ def chunk_gated_delta_rule(
         transpose_state_layout (Optional[bool]):
             Whether to use the transposed state layout for the hidden state.
             Default: `False`.
+        use_gate_in_kernel (bool):
+            Whether to compute the log-space GDN decay internally.
+            When `True`, the passed `g` is the raw input, and `A_log` must be provided.
+            The kernel fuses gate activation + chunk cumsum in a single pass.
+            Default: `False`.
+        A_log (Optional[torch.Tensor]):
+            Decay parameter of shape `[HV]`. Required when `use_gate_in_kernel=True`.
+        dt_bias (Optional[torch.Tensor]):
+            Bias added to `g` before activation, of shape `[HV]`.
+            Only used when `use_gate_in_kernel=True`.
 
     Returns:
         o (torch.Tensor):
@@ -427,6 +484,12 @@ def chunk_gated_delta_rule(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
+    use_gate_in_kernel = kwargs.get('use_gate_in_kernel', False)
+    A_log = kwargs.get('A_log')
+    dt_bias = kwargs.get('dt_bias')
+    if use_gate_in_kernel:
+        assert A_log is not None, "A_log must be provided when use_gate_in_kernel=True."
+
     if scale is None:
         scale = k.shape[-1] ** -0.5
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
@@ -443,6 +506,9 @@ def chunk_gated_delta_rule(
         use_qk_l2norm_in_kernel,
         cp_context,
         transpose_state_layout,
+        use_gate_in_kernel,
+        A_log,
+        dt_bias,
     )
     return o, final_state
 
