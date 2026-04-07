@@ -57,7 +57,12 @@ jobs:
       - name: Check skip keyword in LATEST commit
         id: check_skip
         run: |
-          COMMIT_MSG=$(git log --no-merges -1 --pretty=%s)
+          if [ -n "$GITHUB_HEAD_REF" ]; then
+            git fetch origin "$GITHUB_HEAD_REF" --depth=1
+            COMMIT_MSG=$(git log -1 --pretty=%s FETCH_HEAD)
+          else
+            COMMIT_MSG=$(git log -1 --pretty=%s HEAD)
+          fi
           echo "Latest commit message: $COMMIT_MSG"
           if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
             echo "::notice::Tests skipped by commit message"
@@ -223,7 +228,12 @@ jobs:
       - name: Check skip keyword in LATEST commit
         id: check_skip
         run: |
-          COMMIT_MSG=$(git log --no-merges -1 --pretty=%s)
+          if [ -n "$GITHUB_HEAD_REF" ]; then
+            git fetch origin "$GITHUB_HEAD_REF" --depth=1
+            COMMIT_MSG=$(git log -1 --pretty=%s FETCH_HEAD)
+          else
+            COMMIT_MSG=$(git log -1 --pretty=%s HEAD)
+          fi
           echo "Latest commit message: $COMMIT_MSG"
           if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
             echo "::notice::Tests skipped by commit message"

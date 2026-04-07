@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -307,7 +312,7 @@ def fused_recurrent_gated_delta_rule(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, HV, V]`.
-            GVA is applied if `HV > H`.
+            GVA (Grouped Value Attention) is applied if `HV > H`, where `HV` must be divisible by `H`.
         g (torch.Tensor):
             g (decays) of shape `[B, T, HV]`. Default: `None`.
         gk (torch.Tensor):

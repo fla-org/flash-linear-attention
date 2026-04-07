@@ -1,4 +1,10 @@
-# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # Related files are modified and supported by the Moonshot AI Team
 
 import torch
@@ -201,13 +207,19 @@ def chunk_kda(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         safe_gate (bool):
-            Whether the kernel can assume the input gate values `g` are in a safe range.
-            When `True`, the kernel can use M=16 TensorCore acceleration.
-            The safe range is approximately [-5, 0). Default: `False`.
+            Whether the kernel can assume the gate values (in log space) are in a safe range
+            and use M=16 TensorCore acceleration for higher throughput.
+            The safe range is ``[lower_bound, 0)``. With the default ``lower_bound=-5``,
+            the per-step decay factor ``exp(g)`` is bounded in ``[exp(-5), 1) ≈ [0.0067, 1)``,
+            meaning each step retains at least ~0.67% of the state — a negligible loss that
+            has minimal impact on model quality while enabling significant speedup.
+            Requires ``lower_bound`` to be set. Default: ``False``.
         lower_bound (Optional[float]):
-            Lower bound for the forget gate activation function when `use_gate_in_kernel=True`.
-            This parameter modifies the internal forget gate activation and is recommended
-            to be set to `-5` when `safe_gate` is enabled. Default: `None`.
+            Lower bound for the forget gate (in log space) when ``use_gate_in_kernel=True``.
+            Changes the gate activation from ``-exp(A_log) * softplus(g + dt_bias)``
+            to ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
+            which naturally clamps the output to ``[lower_bound, 0)``.
+            Recommended value: ``-5`` (i.e., ``exp(-5) ≈ 0.0067``). Default: ``None``.
         disable_recompute (bool):
             Whether to disable gradient recomputation in the kernel. When `True`, the kernel
             will save all intermediate activations for backward pass, which is beneficial

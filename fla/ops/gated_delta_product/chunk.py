@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 from einops import rearrange
@@ -174,7 +179,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         # call the gated deltanet kernel for now.
         # TODO: optimize the backward pass like the forward pass.
         if g is not None:
-            dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
+            dq, dk, dv, db, dg, dh0, _, _ = chunk_gated_delta_rule_bwd(
                 q=q,
                 k=k,
                 v=v,

@@ -1,4 +1,12 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+#
 # Copyright (c) 2024, Tri Dao.
+#
 # Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
 # For the backward pass, we keep weight_grad and bias_grad in registers and accumulate.
 # This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.

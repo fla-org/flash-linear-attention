@@ -1,5 +1,9 @@
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 from einops import reduce
@@ -273,5 +277,6 @@ def parallel_path_attn(
     assert q.shape[-2] % k.shape[-2] == 0, 'the number of query heads should be divisible by the number of key heads'
     o, k_cache = ParallelPATHAttentionFunction.apply(q, k, v, w, beta, g, scale, cu_seqlens, use_cache)
     return o, k_cache
+
 
 parallel_path_attention = parallel_path_attn
