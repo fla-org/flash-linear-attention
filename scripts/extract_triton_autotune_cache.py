@@ -82,7 +82,7 @@ def main():
     parser.add_argument(
         '--output-dir',
         type=str,
-        help='Output directory (default: $FLA_CONFIG_DIR or fla/configs/{GPU})'
+        help='Output directory (default: $FLA_CONFIG_DIR or $FLA_CACHE/configs/{GPU})'
     )
     parser.add_argument(
         '--triton-cache-dir',

@@ -89,20 +89,26 @@ def get_gpu_info():
     return "cpu"
 
 
+def get_fla_cache_dir() -> Path:
+    """Get FLA's base cache directory.
+
+    Controlled by the FLA_CACHE environment variable.
+    Defaults to ~/.cache/fla.
+    """
+    return Path(os.environ.get("FLA_CACHE", Path.home() / ".cache" / "fla"))
+
+
 def get_fla_config_dir() -> Path:
     """Get FLA's configs directory.
 
     The directory can be overridden by setting the FLA_CONFIG_DIR environment variable.
     If set, configs will be loaded directly from $FLA_CONFIG_DIR/. Otherwise FLA
-    falls back to the default fla/configs/{GPU}/ directory in the project.
+    falls back to $FLA_CACHE/configs/{GPU}/ (where FLA_CACHE defaults to ~/.cache/fla).
     """
-    # Check if custom config dir is set via environment variable
     if "FLA_CONFIG_DIR" in os.environ:
         return Path(os.environ["FLA_CONFIG_DIR"])
 
-    # Default: project_dir/fla/configs/{GPU}/
-    project_dir = Path(__file__).parent.parent.parent
-    return project_dir / "configs" / get_gpu_info()
+    return get_fla_cache_dir() / "configs" / get_gpu_info()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -384,7 +390,7 @@ def fla_cache_autotune(configs, key=None, prune_configs_by=None, reset_to_zero=N
     Decorator for auto-tuning a :code:`triton.jit`'d function with FLA config support.
 
     Extends Triton's autotune to load best configurations from FLA's config directory
-    (default: fla/configs/{GPU}/, or FLA_CONFIG_DIR/ when overridden), keyed by kernel
+    (default: $FLA_CACHE/configs/{GPU}/, or FLA_CONFIG_DIR/ when overridden), keyed by kernel
     name from {kernel_name}.json. Lookup behaviour is controlled by FLA_CACHE_MODE.
     Falls back to normal Triton autotuning when no cached config is found.
     """
