@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 from __future__ import annotations
 
 import math
@@ -52,8 +59,6 @@ def hmamba_chunk_scan_combined(
     dt_limit: tuple[float, float] = (0.0, float("inf")),
     return_final_states: bool = False,
 ):
-    if z is not None:
-        raise NotImplementedError
     if seq_idx is not None:
         raise NotImplementedError
     if cu_seqlens is not None:
@@ -67,11 +72,26 @@ def hmamba_chunk_scan_combined(
     if not B.shape == C.shape:
         raise ValueError("B and C must have the same shape")
 
+    squeeze_seqlen = x.dim() == 3
+    if squeeze_seqlen:
+        x = rearrange(x, "b h p -> b 1 h p")
+        dt = rearrange(dt, "b h -> b 1 h")
+        B = rearrange(B, "b g n -> b 1 g n")
+        C = rearrange(C, "b g n -> b 1 g n")
+        dl = rearrange(dl, "b h ell -> b 1 h ell")
+        if z is not None:
+            z = rearrange(z, "b h p -> b 1 h p")
+
     if D is not None:
-        if D.dim() != 1:
-            raise ValueError
-        D = rearrange(D, "h -> 1 1 h 1")
-        D_residual = x * D
+        if D.dim() == 1:
+            D = rearrange(D, "h -> 1 1 h 1")
+            D_residual = x * D
+        elif D.dim() == 2:
+            if D.shape != x.shape[-2:]:
+                raise ValueError("2D D must have shape (nheads, headdim)")
+            D_residual = x * rearrange(D, "h p -> 1 1 h p")
+        else:
+            raise ValueError("D must be 1D or 2D")
 
     if dt_bias is not None:
         dt = dt + rearrange(dt_bias, "h -> 1 1 h")
@@ -97,6 +117,12 @@ def hmamba_chunk_scan_combined(
 
     if D is not None:
         y = y + D_residual
+    if z is not None:
+        if z.shape != x.shape:
+            raise ValueError("z must match x shape")
+        y = y * torch.nn.functional.silu(z)
+    if squeeze_seqlen:
+        y = rearrange(y, "b 1 h p -> b h p")
 
     return y, state
 
@@ -152,23 +178,26 @@ def hmamba_split_conv1d_scan_combined(
         raise NotImplementedError
     if return_final_states is not False:
         raise NotImplementedError
-    if norm_before_gate is not False:
-        raise NotImplementedError
-    if rmsnorm_weight is None:
-        raise NotImplementedError
     if activation not in ["silu", "swish"]:
         raise NotImplementedError
 
     batch, seqlen, _ = zxbcdtdl.shape
     dlambda = L.shape[-1]
-    (nheads,) = D.shape
+    if D.dim() == 1:
+        nheads = D.shape[0]
+        if headdim is None:
+            raise ValueError
+    elif D.dim() == 2:
+        nheads, d_headdim = D.shape
+        if headdim is None:
+            headdim = d_headdim
+        elif headdim != d_headdim:
+            raise ValueError("headdim must match D.shape[1] when D is 2D")
+    else:
+        raise ValueError("D must be 1D or 2D")
     dim = nheads * headdim
     dstate = (zxbcdtdl.shape[-1] - 2 * dim - nheads - nheads * dlambda) // ngroups // 2
 
-    if D.dim() != 1:
-        raise ValueError
-    if headdim is None:
-        raise ValueError
     if nheads % ngroups != 0:
         raise ValueError
     if zxbcdtdl.shape != (
@@ -183,11 +212,10 @@ def hmamba_split_conv1d_scan_combined(
         raise ValueError
     if L.shape != (nheads, dlambda):
         raise ValueError
-    if D.shape != (nheads,):
+    if D.dim() == 1 and D.shape != (nheads,):
         raise ValueError
-    if rmsnorm_weight is None:
+    if D.dim() == 2 and D.shape != (nheads, headdim):
         raise ValueError
-
     zxBCdtl_splits = [dim, dim + 2 * ngroups * dstate, nheads, nheads * dlambda]
     xBC_splits = [dim, ngroups * dstate, ngroups * dstate]
     z, xBC, dt, dl = torch.split(zxbcdtdl, zxBCdtl_splits, dim=-1)
@@ -217,7 +245,7 @@ def hmamba_split_conv1d_scan_combined(
         L=L,
         chunk_size=chunk_size,
         D=D,
-        z=z if rmsnorm_weight is None else None,
+        z=rearrange(z, "b l (h p) -> b l h p", h=nheads, p=headdim) if rmsnorm_weight is None else None,
         dt_bias=dt_bias,
         dt_softplus=True,
         seq_idx=seq_idx,
@@ -234,8 +262,8 @@ def hmamba_split_conv1d_scan_combined(
             bias=None,
             z=z,
             eps=rmsnorm_eps,
-            group_size=None,
-            norm_before_gate=False,
+            group_size=dim // ngroups,
+            norm_before_gate=norm_before_gate,
         )
     out = torch.nn.functional.linear(y, outproj_weight, outproj_bias)
     return out
@@ -258,14 +286,17 @@ class LogLinearMamba2(nn.Module):
         expand: int = 2,
         n_groups: int = 1,
         conv_kernel: int = 4,
+        conv_init: float | None = None,
         use_conv_bias: bool = False,
         hidden_act: str = "silu",
-        rms_norm: bool = True,
+        rmsnorm: bool = True,
+        D_has_hdim: bool = False,
+        norm_before_gate: bool = False,
         chunk_size: int = 64,
-        time_step_rank: float = 256,
-        time_step_limit: tuple[float, float] = (0.0, float("inf")),
-        time_step_min: float = 0.001,
-        time_step_max: float = 0.1,
+        dt_limit: tuple[float, float] = (0.0, float("inf")),
+        dt_min: float = 0.001,
+        dt_max: float = 0.1,
+        dt_init_floor: float = 1e-4,
         use_bias: bool = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
@@ -276,23 +307,27 @@ class LogLinearMamba2(nn.Module):
         self.hidden_size = hidden_size
         self.ssm_state_size = state_size
         self.conv_kernel_size = conv_kernel
+        self.conv_init = conv_init
         self.intermediate_size = int(expand * self.hidden_size)
-        self.time_step_rank = int(time_step_rank)
         self.layer_idx = layer_idx
         self.use_conv_bias = use_conv_bias
         self.activation = hidden_act
         self.act = ACT2FN[hidden_act]
 
         self.layer_norm_epsilon = norm_eps
-        self.rms_norm = rms_norm
+        self.rmsnorm = rmsnorm
+        self.D_has_hdim = D_has_hdim
+        self.norm_before_gate = norm_before_gate
 
         self.n_groups = n_groups
         self.head_dim = head_dim
         self.chunk_size = chunk_size
 
-        self.time_step_limit = time_step_limit
-        self.time_step_min = time_step_min
-        self.time_step_max = time_step_max
+        self.dt_limit = dt_limit
+        if tuple(dt_limit) != (0.0, float("inf")):
+            raise NotImplementedError("Non-default `dt_limit` is not implemented for `LogLinearMamba2` yet.")
+        self.dt_min = dt_min
+        self.dt_max = dt_max
 
         self.conv_dim = self.intermediate_size + 2 * self.n_groups * self.ssm_state_size
         self.conv1d = nn.Conv1d(
@@ -303,6 +338,8 @@ class LogLinearMamba2(nn.Module):
             groups=self.conv_dim,
             padding=conv_kernel - 1,
         )
+        if self.conv_init is not None:
+            nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
 
         self.num_lambda_dims = MAX_NUM_LEVELS
         self.lambda_level_module = None
@@ -322,7 +359,16 @@ class LogLinearMamba2(nn.Module):
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
-        self.dt_bias = nn.Parameter(torch.ones(self.num_heads))
+        dt = torch.exp(
+            torch.rand(self.num_heads) * (
+                math.log(self.dt_max) - math.log(self.dt_min)
+            ) + math.log(self.dt_min)
+        )
+        dt = torch.clamp(dt, min=dt_init_floor)
+        # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+        inv_dt = dt + torch.log(-torch.expm1(-dt))
+        self.dt_bias = nn.Parameter(inv_dt)
+        self.dt_bias._no_weight_decay = True
 
         # S4D real initialization. These are not discretized!
         # The core is to load them, compute the discrete states, then write the updated state. Keeps the memory bounded
@@ -335,10 +381,17 @@ class LogLinearMamba2(nn.Module):
         self.L = nn.Parameter(L)
         self.L._no_weight_decay = True
 
-        self.norm = RMSNormGated(
-            self.intermediate_size, eps=self.layer_norm_epsilon, norm_before_gate=False,
+        self.norm = None
+        if self.rmsnorm:
+            self.norm = RMSNormGated(
+                self.intermediate_size,
+                eps=self.layer_norm_epsilon,
+                norm_before_gate=self.norm_before_gate,
+                group_size=self.intermediate_size // self.n_groups,
+            )
+        self.D = nn.Parameter(
+            torch.ones(self.intermediate_size if self.D_has_hdim else self.num_heads),
         )
-        self.D = nn.Parameter(torch.ones(self.num_heads))
         self.D._no_weight_decay = True
 
         self.out_proj = nn.Linear(
@@ -377,6 +430,11 @@ class LogLinearMamba2(nn.Module):
             self.causal_conv1d_fn = causal_conv1d_fn
             self.causal_conv1d_update = causal_conv1d_update
         self.backend = backend
+
+    def _get_D(self) -> torch.Tensor:
+        if self.D_has_hdim:
+            return rearrange(self.D, "(h p) -> h p", p=self.head_dim)
+        return self.D
 
     def cuda_kernels_forward(
         self,
@@ -484,7 +542,7 @@ class LogLinearMamba2(nn.Module):
                 C=C,
                 dl=dl_reshaped,
                 L=self.L,
-                D=self.D,
+                D=self._get_D(),
                 z=None,
                 dt_bias=self.dt_bias,
                 dt_softplus=True,
@@ -498,7 +556,10 @@ class LogLinearMamba2(nn.Module):
                 h=self.num_heads,
                 p=self.head_dim,
             )
-            y = self.norm(y, gate)
+            if self.rmsnorm:
+                y = self.norm(y, gate)
+            else:
+                y = y * self.act(gate)
 
             # 4. Final linear projection
             out = self.out_proj(y)[:, None, ...]
@@ -511,8 +572,8 @@ class LogLinearMamba2(nn.Module):
             )  # (num_heads) or (intermediate_size, state_size)
             dt_limit_kwargs = (
                 {}
-                if self.time_step_limit == (0.0, float("inf"))
-                else {"dt_limit": self.time_step_limit}
+                if self.dt_limit == (0.0, float("inf"))
+                else {"dt_limit": self.dt_limit}
             )
 
             # 2-4. Fused kernel for conv1d, SSM, and the final projection
@@ -527,19 +588,19 @@ class LogLinearMamba2(nn.Module):
                     dt_bias=self.dt_bias,
                     A=A,
                     L=self.L,
-                    D=self.D,
+                    D=self._get_D(),
                     chunk_size=self.chunk_size,
                     conv1d_fn=self.causal_conv1d_fn,
                     conv_backend=self.backend,
                     seq_idx=None,  # was seq_idx
                     activation=self.activation,
-                    rmsnorm_weight=self.norm.weight,
-                    rmsnorm_eps=self.norm.eps,
+                    rmsnorm_weight=self.norm.weight if self.rmsnorm else None,
+                    rmsnorm_eps=self.norm.eps if self.rmsnorm else 1e-6,
                     outproj_weight=self.out_proj.weight,
                     outproj_bias=self.out_proj.bias,
-                    headdim=self.head_dim,
+                    headdim=None if self.D_has_hdim else self.head_dim,
                     ngroups=self.n_groups,
-                    norm_before_gate=False,
+                    norm_before_gate=self.norm_before_gate,
                     return_final_states=False,
                     **dt_limit_kwargs,
                 )
@@ -630,8 +691,8 @@ class LogLinearMamba2(nn.Module):
                     ),
                     L=self.L,
                     chunk_size=self.chunk_size,
-                    D=self.D,
-                    z=None,
+                    D=self._get_D(),
+                    z=None if self.rmsnorm else rearrange(gate, "b l (h p) -> b l h p", h=self.num_heads, p=self.head_dim),
                     seq_idx=None,
                     return_final_states=True,
                     dt_bias=self.dt_bias,
@@ -648,7 +709,8 @@ class LogLinearMamba2(nn.Module):
                     p=self.head_dim,
                 )
                 # Multiply "gate" branch and apply extra normalization layer
-                y = self.norm(y, gate)
+                if self.rmsnorm:
+                    y = self.norm(y, gate)
 
                 # 4. Final linear projection
                 out = self.out_proj(y)

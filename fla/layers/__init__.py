@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from .abc import ABCAttention
 from .attn import Attention
@@ -37,14 +42,15 @@ __all__ = [
     'BasedLinearAttention',
     'BitAttention',
     'Comba',
+    'DeltaFormerAttention',
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
     'GatedDeltaProduct',
     'GatedLinearAttention',
     'GatedSlotAttention',
-    'HGRNAttention',
     'HGRN2Attention',
+    'HGRNAttention',
     'KimiDeltaAttention',
     'LightNetAttention',
     'LinearAttention',
@@ -53,14 +59,13 @@ __all__ = [
     'Mamba2',
     'MesaNet',
     'MomAttention',
-    'MultiheadLatentAttention',
     'MultiScaleRetention',
+    'MultiheadLatentAttention',
     'NativeSparseAttention',
     'PaTHAttention',
-    'ReBasedLinearAttention',
-    'RodimusAttention',
     'RWKV6Attention',
     'RWKV7Attention',
+    'ReBasedLinearAttention',
+    'RodimusAttention',
     'SlidingWindowSharedKeyAttention',
-    'DeltaFormerAttention',
 ]

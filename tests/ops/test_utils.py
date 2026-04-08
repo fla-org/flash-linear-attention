@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -89,7 +95,7 @@ def test_global_cumsum_varlen(
     ref = torch.cat([
         s[:, start:end].float().cumsum(1)
         for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
-        ], 1).to(dtype)
+    ], 1).to(dtype)
     tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     assert_close('global_cumsum', ref, tri, 1e-3)
 
