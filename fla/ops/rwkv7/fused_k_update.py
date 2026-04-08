@@ -40,15 +40,15 @@ def k_update_fwd_kernel_short(
     i_b, i_t = tl.program_id(0), tl.program_id(1)
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_b).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_b).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int64)
         g_t = bos + i_t
         if g_t >= eos:
             return
         offset = g_t * D
     else:
         g_t = i_t
-        offset = i_b * T * D + g_t * D
+        offset = tl.cast(i_b, tl.int64) * T * D + g_t * D
 
     o_d = tl.arange(0, BD)
     m_d = o_d < D
@@ -85,12 +85,12 @@ def k_update_fwd_kernel_long(
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
             tl.load(chunk_indices + i_t_blk * 2 + 1).to(tl.int32)
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:
-        bos = i_b * T
+        bos = tl.cast(i_b, tl.int64) * T
         eos = (i_b + 1) * T
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, T)
@@ -132,11 +132,11 @@ def k_update_bwd_kernel_short(
     i_b, i_t_base = tl.program_id(0), tl.program_id(1) * BT
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_b).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_b).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_b + 1).to(tl.int64)
         seq_len = eos - bos
     else:
-        bos = i_b * T
+        bos = tl.cast(i_b, tl.int64) * T
         eos = (i_b + 1) * T
         seq_len = T
 
@@ -185,12 +185,12 @@ def k_update_bwd_kernel_long(
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
             tl.load(chunk_indices + i_t_blk * 2 + 1).to(tl.int32)
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:
-        bos = i_b * T
+        bos = tl.cast(i_b, tl.int64) * T
         eos = (i_b + 1) * T
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, T)

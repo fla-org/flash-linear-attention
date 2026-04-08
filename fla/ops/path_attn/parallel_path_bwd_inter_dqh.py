@@ -56,11 +56,11 @@ def parallel_path_bwd_dq_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        boh_large = tl.load(split_offsets + i_n).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        boh_large = tl.load(split_offsets + i_n).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
         boh_large = i_n * tl.cdiv(T, S)
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T

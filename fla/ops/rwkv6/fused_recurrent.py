@@ -57,9 +57,9 @@ def fused_recurrent_rwkv6_fwd_kernel(
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
         all = B * T
 
     o_k = i_k * BK + tl.arange(0, BK)
@@ -143,9 +143,9 @@ def fused_recurrent_rwkv6_bwd_kernel_dq(
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
         all = B * T
 
     o_k = i_k * BK + tl.arange(0, BK)
@@ -235,9 +235,9 @@ def fused_recurrent_rwkv6_bwd_kernel_dkv(
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
         all = B * T
 
     o_k = i_k * BK + tl.arange(0, BK)
@@ -323,10 +323,10 @@ def fused_recurrent_rwkv6_bwd_kernel_dw(
     i_k, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
-        bos, eos = i_n * T, i_n * T + T
-    T = eos - bos
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
+    T = (eos - bos).to(tl.int32)
     NT = tl.cdiv(T, BT)
 
     o_i = tl.arange(0, BT)

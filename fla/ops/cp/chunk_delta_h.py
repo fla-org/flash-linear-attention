@@ -327,9 +327,9 @@ def merge_fwd_bwd_kernel(
             return
 
         # Load offsets for this sequence
-        ss_start = tl.load(seq_offsets + i_seq).to(tl.int32)
-        ss_end = tl.load(seq_offsets + i_seq + 1).to(tl.int32)
-        init_base = tl.load(init_offsets + i_seq).to(tl.int32)
+        ss_start = tl.load(seq_offsets + i_seq).to(tl.int64)
+        ss_end = tl.load(seq_offsets + i_seq + 1).to(tl.int64)
+        init_base = tl.load(init_offsets + i_seq).to(tl.int64)
         num_subseqs = ss_end - ss_start
 
         stride_hm_s = HV * K * (V + K)

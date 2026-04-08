@@ -55,9 +55,9 @@ def fused_recurrent_fwd_kernel(
 
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
 
     p_q = q + (bos * H + i_h) * K + tl.arange(0, BK)
     p_k = k + (bos * H + i_h) * K + tl.arange(0, BK)
@@ -160,9 +160,9 @@ def fused_recurrent_bwd_kernel(
     da += i_v * B * H * K * T
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
     mask_k = tl.arange(0, BK) < K
     mask_v = (tl.arange(0, BV) + i_v * BV) < V
 

@@ -99,7 +99,7 @@ def matmul_kernel(
     # `p_a` is a block of [BM, BK] pointers
     # `p_b` is a block of [BK, BN] pointers
     # See above `Pointer Arithmetic` section for details
-    a_batch_ptr = a + i_b * stride_ab
+    a_batch_ptr = a + tl.cast(i_b, tl.int64) * stride_ab
     o_am = (i_m * BM + tl.arange(0, BM)) % M
     o_bn = (i_n * BN + tl.arange(0, BN)) % N
     o_k = tl.arange(0, BK)
@@ -148,7 +148,7 @@ def matmul_kernel(
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
-    c_batch_ptr = c + i_b * stride_cb
+    c_batch_ptr = c + tl.cast(i_b, tl.int64) * stride_cb
     p_c = c_batch_ptr + stride_cm * o_cm[:, None] + stride_cn * o_cn[None, :]
     tl.store(p_c, b_c.to(c.dtype.element_ty), mask=mask)
 
