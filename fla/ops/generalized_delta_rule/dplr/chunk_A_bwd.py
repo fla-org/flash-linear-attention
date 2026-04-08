@@ -70,7 +70,7 @@ def chunk_dplr_bwd_kernel_intra(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
 
     if i_t * BT >= T:
         return
@@ -276,7 +276,7 @@ def chunk_dplr_bwd_kernel_intra_tensorcore(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T_len = eos - bos
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
         T_len = T
 
     if i_t * BT >= T_len:
@@ -430,7 +430,7 @@ def chunk_dplr_bwd_dgk_kernel(
     else:
         NT = tl.cdiv(T, BT)
         i_tg = (i_b * NT + i_t).to(tl.int32)
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
 
     stride_qk = H * K
     dgk += (bos * H + i_h) * K
