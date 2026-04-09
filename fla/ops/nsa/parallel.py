@@ -290,7 +290,8 @@ def parallel_nsa_kernel_mask(
         b_m = b_i * BS <= i_t
 
     if b_i < NS and b_i >= 0:
-        tl.store(block_mask + tl.cast(i_b, tl.int64) * T * H * NS + i_t * H * NS + i_h * NS + b_i, b_m.to(block_mask.dtype.element_ty))
+        tl.store(block_mask + tl.cast(i_b, tl.int64) * T * H * NS + i_t *
+                 H * NS + i_h * NS + b_i, b_m.to(block_mask.dtype.element_ty))
 
 
 @triton.heuristics({

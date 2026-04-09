@@ -197,7 +197,8 @@ def chunk_hgrn_bwd_kernel_o(
     for i_t in range(tl.cdiv(T, BT) - 1, -1, -1):
         p_g = tl.make_block_ptr(g + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
         p_gc = tl.make_block_ptr(gc + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_o = tl.make_block_ptr(o + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT - 1, i_d * BD), (BT, BD), (1, 0))
+        p_o = tl.make_block_ptr(o + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d),
+                                (i_t * BT - 1, i_d * BD), (BT, BD), (1, 0))
         p_dx = tl.make_block_ptr(dx + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
         p_dg = tl.make_block_ptr(dg + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
 
