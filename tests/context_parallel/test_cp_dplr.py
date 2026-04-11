@@ -300,13 +300,21 @@ def run_cp_dplr_test_worker(
                 ("dgk", ref_dgk, dgk_cp_global),
             ]
 
-            try:
-                for name, ref, cp in tensors_to_verify:
-                    assert_close(name, ref, cp, ratio=2.5e-2, warning=False)
-                print(f"✅ [{test_name}] Test Passed!\n")
-            except AssertionError as e:
-                print(f"❌ [{test_name}] Test Failed: {e}\n")
+            ratio_threshold = 8e-3
+            failures = []
+            for name, ref, cp in tensors_to_verify:
+                try:
+                    assert_close(name, ref, cp, ratio=ratio_threshold, warning=False)
+                except AssertionError as e:
+                    failures.append((name, str(e).strip()))
+            if failures:
+                print(f"❌ [{test_name}] Test Failed on: {[f[0] for f in failures]}")
+                for name, msg in failures:
+                    print(f"   - {msg}")
+                print()
                 test_passed = False
+            else:
+                print(f"✅ [{test_name}] Test Passed!\n")
 
         dist.barrier()
         cleanup_distributed()

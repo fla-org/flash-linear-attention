@@ -118,9 +118,9 @@ def chunk_dplr_fwd(
     )
 
     if disable_recompute:
-        return o, final_state, (gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv, initial_state)
+        return o, final_state, initial_state, (gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv)
     else:
-        return o, final_state, None
+        return o, final_state, initial_state, None
 
 
 class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
@@ -165,7 +165,10 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
 
-        o, final_state, cache = chunk_dplr_fwd(
+        # chunk_dplr_fwd returns the possibly CP-merged + compressed initial_state;
+        # for CP this is the [1, HV, K, V] state we must save for backward so the
+        # forward recomputation can rebuild the correct per-rank h.
+        o, final_state, initial_state, cache = chunk_dplr_fwd(
             q=q,
             k=k,
             v=v,
@@ -184,7 +187,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         )
 
         if disable_recompute:
-            gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv, initial_state = cache
+            gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv = cache
             ctx.save_for_backward(q, k, v, a, b, gk, initial_state, gi, ge, A_qk,
                                   A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv)
         else:
@@ -217,6 +220,13 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens = ctx.cu_seqlens
         scale = ctx.scale
         cp_context = ctx.cp_context
+
+        # When CP compressed the saved initial_state to a single [1, HV, K, V] entry
+        # (for the first local sequence only), expand it back to [N_local, HV, K, V]
+        # BEFORE the forward recomputation. Otherwise chunk_dplr_fwd_h indexes past
+        # the buffer for the non-first sequences on this rank and reads garbage.
+        if cp_context is not None and initial_state is not None and initial_state.shape[0] == 1:
+            initial_state = expand_h0(initial_state, context=cp_context)
 
         if not ctx.disable_recompute:
             # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
@@ -274,8 +284,6 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
         )
 
         if cp_context is not None:
-            if initial_state is not None and initial_state.shape[0] == 1:
-                initial_state = expand_h0(initial_state, context=cp_context)
             dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
                 q=qg,
                 k=kg,
