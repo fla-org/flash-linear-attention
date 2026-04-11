@@ -84,11 +84,12 @@ def pre_process_fwd_kernel_merged(
     # i_col is in range [0, cdiv(V + K, BLOCK_SIZE))
     # Columns [0, V) are for h, columns [V, V+K) are for m
     is_h_part = i_col * BLOCK_SIZE < V
-    # For DPLR (USE_BG), w shares the same head dim H as k/ag.
+    # For DPLR (USE_BG), w and bg share the same head dim H as k/ag.
     # For GDN/KDA, w has head dim HV (same as v).
     k += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     if USE_BG:
         w += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
+        bg += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     else:
         w += ((bos * HV + i_h) * K).to(tl.int64)
     stride_k = H * K
@@ -99,9 +100,6 @@ def pre_process_fwd_kernel_merged(
         v += ((bos * HV + i_h) * V).to(tl.int64)
         stride_v = HV * V
         i_v = i_col
-        if USE_BG:
-            # Pre-offset bg pointer for DPLR mode
-            bg += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
 
         # Initialize h accumulators
         b_h1 = tl.zeros([64, BLOCK_SIZE], dtype=tl.float32)
@@ -274,8 +272,8 @@ def pre_process_fwd_kernel_merged(
             # Load k and w with full BK1 rows
             if USE_BG:
                 # DPLR mode: use bg for transition matrix
-                p_k = tl.make_block_ptr(bg + ((bos * H + i_h // (HV // H)) * K).to(tl.int64),
-                                        (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
+                # bg was already offset at the beginning of the kernel
+                p_k = tl.make_block_ptr(bg, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
             else:
                 p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -832,8 +830,8 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if not context.is_last_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
-        # For DPLR, u_dplr=v replaces the regular u in WY representation
-        # The kernel needs u (for DPLR: u=v) to be a valid pointer
+        # For DPLR, u_dplr=v provides the original v for computing h contributions,
+        # while u remains the WY-processed values (A_ab @ A_ak @ v) for v_new = w @ h + u.
         pre_process_fwd_kernel_merged[grid](
             k=k,
             v=u if u_dplr is None else u_dplr,
@@ -841,7 +839,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             g=g,
             gk=gk,
             bg=bg,
-            u=u if u_dplr is None else u_dplr,
+            u=u,
             hm=hm,
             cu_seqlens=cu_seqlens[-2:],
             T=T,
