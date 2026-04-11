@@ -81,7 +81,7 @@ def chunk_dplr_fwd(
             u=u,
             gk=gi,
             bg=bg,
-            u_dplr=v,
+            v=v,
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,
             context=cp_context,

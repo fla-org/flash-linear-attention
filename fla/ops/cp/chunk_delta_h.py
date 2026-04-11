@@ -798,7 +798,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     g: torch.Tensor | None = None,
     gk: torch.Tensor | None = None,
     bg: torch.Tensor | None = None,
-    u_dplr: torch.Tensor | None = None,
+    v: torch.Tensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     cu_seqlens: torch.LongTensor | None = None,
     use_exp2: bool = False,
@@ -830,11 +830,11 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if not context.is_last_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
-        # For DPLR, u_dplr=v provides the original v for computing h contributions,
+        # For DPLR, v provides the original v for computing h contributions,
         # while u remains the WY-processed values (A_ab @ A_ak @ v) for v_new = w @ h + u.
         pre_process_fwd_kernel_merged[grid](
             k=k,
-            v=u if u_dplr is None else u_dplr,
+            v=u if v is None else v,
             w=w,
             g=g,
             gk=gk,
