@@ -274,7 +274,6 @@ def chunk_bwd_kernel_dqkwg(
     m_t = o_t < T
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
     if USE_G:
-        b_dg = tl.zeros([BT], dtype=tl.float32)
         g += bos * HV + i_h
         dg += bos * HV + i_h
         p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
@@ -286,27 +285,27 @@ def chunk_bwd_kernel_dqkwg(
         else:
             b_dg_last *= exp(b_g_last)
             b_dq = b_dq * exp(b_g)[:, None] * scale
-        b_dg += tl.sum(b_dq * b_q, axis=1)
 
         if USE_EXP2:
             b_dk = b_dk * tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
         else:
             b_dk = b_dk * tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None]
-        b_dg -= tl.sum(b_k * b_dk, axis=1)
         b_dg_last += tl.sum(b_dk * b_k)
 
         if USE_EXP2:
             b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
         else:
             b_ds = tl.where(m_A, b_ds * exp(b_g[:, None] - b_g[None, :]), 0) * scale
-        b_ds2 = b_ds * tl.dot(b_q, tl.trans(b_k))
-        b_dg += tl.sum(b_ds2, axis=1)
-        b_dg -= tl.sum(b_ds2, axis=0)
 
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
         b_dk += tl.dot(tl.trans(b_ds), b_q)
+
+        b_dg = tl.zeros([BT], dtype=tl.float32)
+        b_dg += tl.sum(b_dq * b_q, axis=1)
+        b_dg -= tl.sum(b_dk * b_k, axis=1)
+
         p_dg = tl.make_block_ptr(dg, (T,), (HV,), (i_t * BT,), (BT,), (0,))
         # (SY 09/21) revcumsum in a separate kernel due to strange triton compiler issue
         # b_dg = tl.dot(tl.where(o_t[:, None] <= o_t[None, :], 1., 0.), b_dg, allow_tf32=False) + b_dg_last)
