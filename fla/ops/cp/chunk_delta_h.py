@@ -98,6 +98,10 @@ def pre_process_fwd_kernel_merged(
     if is_h_part:
         # ====== Stage 1: Compute h (K x V) ======
         v += ((bos * HV + i_h) * V).to(tl.int64)
+        if USE_BG:
+            # DPLR keeps u and v as separate tensors; both need the per-head offset.
+            # For GDN/KDA, u is aliased to v at the Python wrapper level.
+            u += ((bos * HV + i_h) * V).to(tl.int64)
         stride_v = HV * V
         i_v = i_col
 
@@ -479,7 +483,6 @@ def merge_fwd_bwd_kernel(
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_GK': lambda args: args['gk'] is not None,
-    'USE_BG': lambda args: args['USE_BG'],
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(

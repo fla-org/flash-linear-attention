@@ -40,6 +40,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn.functional as F
 
 from fla.ops.cp import build_cp_context
 from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
@@ -111,17 +112,19 @@ def run_cp_dplr_test_worker(
 
         if rank == 0:
             torch.manual_seed(42)
-            # Scale down inputs to avoid numerical explosion in reference recurrence
-            input_scale = 0.1
-            q_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * input_scale)
-            k_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * input_scale)
-            v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * input_scale)
-            a_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * input_scale)
-            b_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype) * input_scale)
-            # Use stronger decay to ensure numerical stability in reference recurrence
-            # gk range [-2.0, -0.1] gives exp(gk) in [0.135, 0.905], strong enough decay
-            gk_global.copy_(torch.randn(B, T, H, D, device=device, dtype=torch.float) * 0.5 - 1.0)
-            gk_global.clamp_(min=-2.0, max=-0.1)
+            # Mirror fla/layers/rwkv7.py:
+            #   q/k are l2-normalized over head_dim,
+            #   a = -kk where kk = l2norm(...),
+            #   b = kk * sigmoid(...),
+            #   gk (w in rwkv7) = -0.6065306597126334 * sigmoid(...)  → range [-0.6065, 0]
+            q_global.copy_(F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), dim=-1, p=2.0))
+            k_global.copy_(F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), dim=-1, p=2.0))
+            v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
+            kk = F.normalize(torch.randn(B, T, H, D, device=device, dtype=dtype), dim=-1, p=2.0)
+            a_sigmoid = torch.randn(B, T, H, D, device=device, dtype=dtype).sigmoid()
+            a_global.copy_(-kk)
+            b_global.copy_(kk * a_sigmoid)
+            gk_global.copy_(-0.6065306597126334 * torch.randn(B, T, H, D, device=device, dtype=torch.float).sigmoid())
             do_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
 
         # Broadcast to ensure all ranks have same data
@@ -248,7 +251,7 @@ def run_cp_dplr_test_worker(
             gk=gk_local,
             cp_context=context,
             safe_gate=True,
-            chunk_size=16,
+            chunk_size=64,
         )
 
         # CP Backward
@@ -299,7 +302,7 @@ def run_cp_dplr_test_worker(
 
             try:
                 for name, ref, cp in tensors_to_verify:
-                    assert_close(name, ref, cp, ratio=2.5e-1, warning=False)
+                    assert_close(name, ref, cp, ratio=2.5e-2, warning=False)
                 print(f"✅ [{test_name}] Test Passed!\n")
             except AssertionError as e:
                 print(f"❌ [{test_name}] Test Failed: {e}\n")
