@@ -14,6 +14,7 @@ def naive_parallel_attn(
     k: torch.Tensor,
     v: torch.Tensor,
     scale: float | None = None,
+    window_size: int | None = None,
     causal: bool = True,
 ):
     """
@@ -24,6 +25,8 @@ def naive_parallel_attn(
         k: [B, T, H, D]
         v: [B, T, H, D]
         scale: float, optional. If None, defaults to 1 / sqrt(D)
+        window_size: int, optional. If provided, each query at position i only attends to
+            keys in [i - window_size + 1, i]. If None, full causal attention is used.
         causal: bool, default True
 
     Returns:
@@ -54,8 +57,14 @@ def naive_parallel_attn(
 
     # Apply causal mask
     if causal:
-        causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=q.device), diagonal=1)
-        scores = scores.masked_fill(causal_mask.unsqueeze(0), float('-inf'))
+        row_idx = torch.arange(T, device=q.device).unsqueeze(1)
+        col_idx = torch.arange(T, device=q.device).unsqueeze(0)
+        # Causal: mask out future positions
+        mask = col_idx > row_idx
+        # Sliding window: additionally mask out positions outside the window
+        if window_size is not None:
+            mask = mask | (row_idx - col_idx >= window_size)
+        scores = scores.masked_fill(mask.unsqueeze(0), float('-inf'))
 
     # Compute max_logits (max over key dimension): [B*H*G, T]
     max_logits_flat = scores.max(dim=-1).values
