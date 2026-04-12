@@ -41,6 +41,7 @@ def _build_kernel(
 
     @tilelang.jit(pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
     def make_kernel(
         _B=B, _T=T_val, _H=H, _K=K, _V=V,
