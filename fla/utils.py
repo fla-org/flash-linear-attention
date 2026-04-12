@@ -479,8 +479,10 @@ if IS_NVIDIA and not IS_TF32_SUPPORTED:
     # This is a workaround for old nvidia card.
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
+
 def _default_alloc_fn(size: int, alignment: int, stream: int | None):
     return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
+
 
 if IS_TMA_SUPPORTED:
     logger.info('TMA is supported, using TMA by default.')
