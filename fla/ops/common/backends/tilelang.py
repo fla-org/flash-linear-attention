@@ -24,7 +24,7 @@ class TileLangBackend(BaseBackend):
     backend_type = "tilelang"
     package_name = "tilelang"
     env_var = "FLA_TILELANG"
-    default_enable = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0
+    default_enable = True  # verifier gates on shape/hw; env FLA_TILELANG=0 to force off
     priority = 1  # higher priority than default Triton path
 
     @classmethod
@@ -57,6 +57,10 @@ class TileLangBackend(BaseBackend):
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
             return False, "TileLang backend does not support g_gamma"
+        # On Hopper with Triton >= 3.4.0, always prefer TileLang (workaround for #640).
+        # Otherwise, only use TileLang when it's faster than Triton (D >= 128).
+        if not (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0) and q.shape[-1] <= 64:
+            return False, "TileLang is slower than Triton for D < 128 on non-Hopper"
         return True, None
 
     def chunk_bwd_dqkwg(
