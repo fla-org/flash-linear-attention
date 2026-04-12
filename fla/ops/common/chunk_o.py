@@ -286,6 +286,7 @@ def chunk_bwd_kernel_dqkwg(
     if IS_NVIDIA_HOPPER_CONSTEXPR:
         scratch_off = (i_k.to(tl.int64) * tl.num_programs(1) * (B * HV) +
                        i_prog_t.to(tl.int64) * (B * HV) + i_bh.to(tl.int64)) * (BT * BT)
+        p_scr = tl.make_block_ptr(scratch + scratch_off, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
 
     if USE_G:
         b_dg = tl.zeros([BT], dtype=tl.float32)
@@ -321,12 +322,9 @@ def chunk_bwd_kernel_dqkwg(
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
         if IS_NVIDIA_HOPPER_CONSTEXPR:
-            p_scr = tl.make_block_ptr(scratch + scratch_off, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
             tl.store(p_scr, b_ds)
-            b_ds_r = tl.load(p_scr)
-            b_dk += tl.dot(tl.trans(b_ds_r), b_q)
-        else:
-            b_dk += tl.dot(tl.trans(b_ds), b_q)
+            b_ds = tl.load(p_scr)
+        b_dk += tl.dot(tl.trans(b_ds), b_q)
         p_dg = tl.make_block_ptr(dg, (T,), (HV,), (i_t * BT,), (BT,), (0,))
         # (SY 09/21) revcumsum in a separate kernel due to strange triton compiler issue
         # b_dg = tl.dot(tl.where(o_t[:, None] <= o_t[None, :], 1., 0.), b_dg, allow_tf32=False) + b_dg_last)
@@ -348,12 +346,9 @@ def chunk_bwd_kernel_dqkwg(
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
         if IS_NVIDIA_HOPPER_CONSTEXPR:
-            p_scr = tl.make_block_ptr(scratch + scratch_off, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
             tl.store(p_scr, b_ds)
-            b_ds_r = tl.load(p_scr)
-            b_dk += tl.dot(tl.trans(b_ds_r), b_q)
-        else:
-            b_dk += tl.dot(tl.trans(b_ds), b_q)
+            b_ds = tl.load(p_scr)
+        b_dk += tl.dot(tl.trans(b_ds), b_q)
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
@@ -362,12 +357,9 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = b_ds.to(b_k.dtype)
         b_dq += tl.dot(b_ds, b_k)
         if IS_NVIDIA_HOPPER_CONSTEXPR:
-            p_scr = tl.make_block_ptr(scratch + scratch_off, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
             tl.store(p_scr, b_ds)
-            b_ds_r = tl.load(p_scr)
-            b_dk += tl.dot(tl.trans(b_ds_r), b_q) * scale
-        else:
-            b_dk += tl.dot(tl.trans(b_ds), b_q) * scale
+            b_ds = tl.load(p_scr)
+        b_dk += tl.dot(tl.trans(b_ds), b_q) * scale
         b_dq *= scale
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -767,7 +759,7 @@ def chunk_bwd_dqkwg(
     dw = torch.empty_like(w) if w is not None else None
 
     scratch = (
-        torch.empty(NK * NT * B * HV * BT * BT, dtype=torch.float16, device=q.device)
+        torch.empty(NK * NT * B * HV * BT * BT, dtype=q.dtype, device=q.device)
         if IS_NVIDIA_HOPPER else None
     )
 
