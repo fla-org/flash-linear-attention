@@ -16,6 +16,11 @@ from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
+# On Hopper (SM90) with Triton 3.4+, ttg.local_alloc for a #linear tensor (from
+# tt.trans #mma) incorrectly emits stmatrix instead of st.shared.b32
+# (Triton JIT disallows plain Python globals; constexpr-wrapped values are allowed)
+IS_NVIDIA_HOPPER_CONSTEXPR = tl.constexpr(IS_NVIDIA_HOPPER)
+
 
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
@@ -168,6 +173,7 @@ def chunk_bwd_kernel_dqkwg(
     dw,
     dv,
     dg,
+    scratch,
     cu_seqlens,
     chunk_indices,
     scale,
@@ -189,6 +195,9 @@ def chunk_bwd_kernel_dqkwg(
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // HV, i_bh % HV
+
+    if IS_NVIDIA_HOPPER_CONSTEXPR:
+        i_prog_t = i_t
 
     all = B * T
     if IS_VARLEN:
@@ -273,6 +282,11 @@ def chunk_bwd_kernel_dqkwg(
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
+
+    if IS_NVIDIA_HOPPER_CONSTEXPR:
+        scratch_off = (i_k.to(tl.int64) * tl.num_programs(1) * (B * HV) +
+                       i_prog_t.to(tl.int64) * (B * HV) + i_bh.to(tl.int64)) * (BT * BT)
+
     if USE_G:
         b_dg = tl.zeros([BT], dtype=tl.float32)
         g += bos * HV + i_h
@@ -306,7 +320,13 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
-        b_dk += tl.dot(tl.trans(b_ds), b_q)
+        if IS_NVIDIA_HOPPER_CONSTEXPR:
+            p_scr = tl.make_block_ptr(scratch + scratch_off, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
+            tl.store(p_scr, b_ds)
+            b_ds_r = tl.load(p_scr)
+            b_dk += tl.dot(tl.trans(b_ds_r), b_q)
+        else:
+            b_dk += tl.dot(tl.trans(b_ds), b_q)
         p_dg = tl.make_block_ptr(dg, (T,), (HV,), (i_t * BT,), (BT,), (0,))
         # (SY 09/21) revcumsum in a separate kernel due to strange triton compiler issue
         # b_dg = tl.dot(tl.where(o_t[:, None] <= o_t[None, :], 1., 0.), b_dg, allow_tf32=False) + b_dg_last)
@@ -327,7 +347,13 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
-        b_dk += tl.dot(tl.trans(b_ds), b_q)
+        if IS_NVIDIA_HOPPER_CONSTEXPR:
+            p_scr = tl.make_block_ptr(scratch + scratch_off, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
+            tl.store(p_scr, b_ds)
+            b_ds_r = tl.load(p_scr)
+            b_dk += tl.dot(tl.trans(b_ds_r), b_q)
+        else:
+            b_dk += tl.dot(tl.trans(b_ds), b_q)
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
@@ -335,7 +361,13 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = tl.where(m_A, b_ds, 0)
         b_ds = b_ds.to(b_k.dtype)
         b_dq += tl.dot(b_ds, b_k)
-        b_dk += tl.dot(tl.trans(b_ds), b_q) * scale
+        if IS_NVIDIA_HOPPER_CONSTEXPR:
+            p_scr = tl.make_block_ptr(scratch + scratch_off, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
+            tl.store(p_scr, b_ds)
+            b_ds_r = tl.load(p_scr)
+            b_dk += tl.dot(tl.trans(b_ds_r), b_q) * scale
+        else:
+            b_dk += tl.dot(tl.trans(b_ds), b_q) * scale
         b_dq *= scale
         tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -734,6 +766,11 @@ def chunk_bwd_dqkwg(
     dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
     dw = torch.empty_like(w) if w is not None else None
 
+    scratch = (
+        torch.empty(NK * NT * B * HV * BT * BT, dtype=torch.float16, device=q.device)
+        if IS_NVIDIA_HOPPER else None
+    )
+
     grid = (NK, NT, B * HV)
     chunk_bwd_kernel_dqkwg[grid](
         q=q,
@@ -749,6 +786,7 @@ def chunk_bwd_dqkwg(
         dk=dk,
         dv=dv,
         dg=dg,
+        scratch=scratch,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
