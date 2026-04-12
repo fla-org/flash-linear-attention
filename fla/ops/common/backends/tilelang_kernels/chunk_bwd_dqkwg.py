@@ -357,24 +357,11 @@ def chunk_bwd_dqkwg_tilelang(
     USE_G = g is not None
     USE_DW = w is not None
 
-    # Varlen: pack to (1, total_tokens, H, D) so the same 4D kernel works.
-    if IS_VARLEN:
-        total_tokens = B * T
-        q = q.reshape(1, total_tokens, H, K)
-        k = k.reshape(1, total_tokens, H, K)
-        v = v.reshape(1, total_tokens, H, V)
-        do = do.reshape(1, total_tokens, H, V)
-        if USE_DW:
-            dv = dv.reshape(1, total_tokens, H, V)
-        B_kern, T_kern = 1, total_tokens
-    else:
-        B_kern, T_kern = B, T
-
     # Outputs — kernel writes directly
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
     dw_out = torch.empty_like(w) if USE_DW else None
-    dg = torch.zeros(NK, B_kern, T_kern, H, dtype=torch.float32, device=q.device) if USE_G else None
+    dg = torch.zeros(NK, B, T, H, dtype=torch.float32, device=q.device) if USE_G else None
 
     h_flat = h.reshape(-1, h.shape[-2], h.shape[-1])
     dh_flat = dh.reshape(-1, dh.shape[-2], dh.shape[-1])
@@ -383,17 +370,16 @@ def chunk_bwd_dqkwg_tilelang(
     dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}[q.dtype]
 
     kernel = _build_kernel(
-        B_kern, T_kern, H, K, V, NT, BT, BK, BV, NK,
+        B, T, H, K, V, NT, BT, BK, BV, NK,
         total_h, hD1, hD2, dtype_str,
         USE_G, USE_DW, transpose_state_layout, IS_VARLEN,
     )
 
-    # g/dw/dv dummy tensors for unused optional params (shape must match)
-    g_kern = g.reshape(1, B * T, H) if (USE_G and IS_VARLEN) else (g if USE_G else q.new_empty(B_kern, T_kern, H))
-    dw_kern = dw_out.reshape(
-        1, B * T, H, K) if (USE_DW and IS_VARLEN) else (dw_out if USE_DW else q.new_empty(B_kern, T_kern, H, K))
-    dv_kern = dv if USE_DW else q.new_empty(B_kern, T_kern, H, V)
-    dg_kern = dg if USE_G else q.new_empty(NK, B_kern, T_kern, H).float()
+    # Unused optional params still need shape-matching tensors for TileLang
+    g_kern = g if USE_G else q.new_empty(B, T, H)
+    dw_kern = dw_out if USE_DW else q.new_empty(B, T, H, K)
+    dv_kern = dv if USE_DW else q.new_empty(B, T, H, V)
+    dg_kern = dg if USE_G else q.new_empty(NK, B, T, H).float()
 
     if IS_VARLEN:
         kernel(q, k, v, g_kern, h_flat, do, dh_flat, dq, dk, dw_kern, dv_kern, dg_kern,
@@ -401,15 +387,6 @@ def chunk_bwd_dqkwg_tilelang(
     else:
         kernel(q, k, v, g_kern, h_flat, do, dh_flat, dq, dk, dw_kern, dv_kern, dg_kern, scale)
 
-    # Reshape varlen outputs back
-    if IS_VARLEN:
-        dq = dq.reshape(B, T, H, K)
-        dk = dk.reshape(B, T, H, K)
-        if dw_out is not None:
-            dw_out.copy_(dw_kern.reshape(B, T, H, K))
-
     if dg is not None:
         dg = dg.sum(0)
-        if IS_VARLEN:
-            dg = dg.reshape(B, T, H)
     return dq, dk, dw_out, dg
