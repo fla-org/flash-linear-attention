@@ -87,6 +87,12 @@ def parallel_attn_fwd_kernel(
     # the earliest key position any query in this block needs: max(0, i_t*BT - W + 1)
     i_start = max(0, (i_t * BT - W + 1) // BS * BS) if USE_WINDOW else 0
 
+    # per-query window start: the earliest key position within its sliding window.
+    # used to detect when a query has not yet encountered any valid key,
+    # avoiding -inf - (-inf) = NaN in the online softmax rescaling.
+    if USE_WINDOW:
+        o_w = tl.maximum(o_q - W + 1, 0)
+
     for i_s in range(i_start, i_t * BT, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
@@ -108,9 +114,11 @@ def parallel_attn_fwd_kernel(
 
         # [BT, BS]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        b_r = exp2(b_mp - b_m)
-        # [BT, BS]
-        b_p = exp2(b_s - b_m[:, None])
+        # when the key block is entirely before a query's window, b_m is still -inf.
+        # replace with 0 so that exp2(-inf - 0) = 0 instead of exp2(-inf - (-inf)) = NaN
+        b_mw = tl.where((i_s + BS - 1) < o_w, 0., b_m) if USE_WINDOW else b_m
+        b_r = exp2(b_mp - b_mw)
+        b_p = exp2(b_s - b_mw[:, None])
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [BT, BV]
@@ -143,9 +151,9 @@ def parallel_attn_fwd_kernel(
 
         # [BT]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        b_r = exp2(b_mp - b_m)
-        # [BT, BS]
-        b_p = exp2(b_s - b_m[:, None])
+        b_mw = tl.where((i_s + BS - 1) < o_w, 0., b_m) if USE_WINDOW else b_m
+        b_r = exp2(b_mp - b_mw)
+        b_p = exp2(b_s - b_mw[:, None])
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [BT, BV]

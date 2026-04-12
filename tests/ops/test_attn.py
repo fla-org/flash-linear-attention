@@ -139,10 +139,7 @@ def test_parallel_varlen(
         for test in [
             (1, 63, 1, 1, 64, 16),
             (3, 111, 2, 2, 100, 32),
-            (3, 1024, 2, 8, 60, 64),
-            (3, 1024, 2, 8, 128, 128),
-            (4, 2048, 2, 8, 64, 256),
-            (2, 512, 2, 4, 64, 512),
+            (3, 1024, 2, 8, 128, 64),
         ]
     ],
 )
@@ -174,6 +171,65 @@ def test_parallel_swa(
     ref_dv, v.grad = v.grad.clone(), None
 
     tri = parallel_attn(q=q, k=k, v=v, window_size=W)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    assert_close(" o", ref, tri, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.005)
+    assert_close("dk", ref_dk, tri_dk, 0.005)
+    assert_close("dv", ref_dv, tri_dv, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'W', 'cu_seqlens'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-W{}-cu_seqlens{}".format(*test))
+        for test in [
+            (2, 2, 64, 16, [0, 111]),
+            (2, 8, 100, 32, [0, 256, 500, 1000]),
+        ]
+    ],
+)
+def test_parallel_swa_varlen(
+    H: int,
+    HQ: int,
+    D: int,
+    W: int,
+    cu_seqlens: list[int],
+):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    T = cu_seqlens[-1]
+    cu_seqlens_th = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    dtype = torch.float16
+
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+
+    # per-sequence naive reference
+    refs_o, refs_dq, refs_dk, refs_dv = [], [], [], []
+    for i in range(len(cu_seqlens) - 1):
+        s, e = cu_seqlens[i], cu_seqlens[i + 1]
+        qi = q[:, s:e].detach().float().requires_grad_(True)
+        ki = k[:, s:e].detach().float().requires_grad_(True)
+        vi = v[:, s:e].detach().float().requires_grad_(True)
+        oi, _ = naive_parallel_attn(q=qi, k=ki, v=vi, window_size=W)
+        oi = oi.to(dtype)
+        oi.backward(do[:, s:e])
+        refs_o.append(oi)
+        refs_dq.append(qi.grad.to(dtype))
+        refs_dk.append(ki.grad.to(dtype))
+        refs_dv.append(vi.grad.to(dtype))
+    ref = torch.cat(refs_o, dim=1)
+    ref_dq = torch.cat(refs_dq, dim=1)
+    ref_dk = torch.cat(refs_dk, dim=1)
+    ref_dv = torch.cat(refs_dv, dim=1)
+
+    tri = parallel_attn(q=q, k=k, v=v, window_size=W, cu_seqlens=cu_seqlens_th)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None

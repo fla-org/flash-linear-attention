@@ -40,39 +40,27 @@ def naive_parallel_attn(
     if scale is None:
         scale = D ** -0.5
 
-    # Reshape q to separate heads and groups
-    q = q.reshape(B, T, H, G, D)  # [B, T, H, G, D]
+    # reshape q to separate groups: [B, T, HQ, D] -> [B, T, H, G, D]
+    q = q.reshape(B, T, H, G, D)
 
-    # Repeat k and v to match groups: [B, T, H, D] -> [B, T, H, G, D]
-    k = k.unsqueeze(3).expand(B, T, H, G, D)  # Expand along group dimension
-    v = v.unsqueeze(3).expand(B, T, H, G, D)
+    # compute attention scores via einsum: [B, H, G, T, T]
+    # k is [B, T, H, D] — no group dim, so each group shares the same k
+    scores = torch.einsum('bqhgd,bkhd->bhgqk', q, k) * scale
 
-    # Reshape to treat each (B, H, G,) as a separate head
-    q_flat = q.reshape(B * H * G, T, D)  # [B*H*G, T, D]
-    k_flat = k.reshape(B * H * G, T, D)  # [B*H*G, T, D]
-    v_flat = v.reshape(B * H * G, T, D)  # [B*H*G, T, D]
-
-    # Compute attention scores: [B*H*G, T, T]
-    scores = torch.bmm(q_flat, k_flat.transpose(1, 2)) * scale
-
-    # Apply causal mask
+    # apply causal mask
     if causal:
         row_idx = torch.arange(T, device=q.device).unsqueeze(1)
         col_idx = torch.arange(T, device=q.device).unsqueeze(0)
-        # Causal: mask out future positions
         mask = col_idx > row_idx
-        # Sliding window: additionally mask out positions outside the window
         if window_size is not None:
             mask = mask | (row_idx - col_idx >= window_size)
-        scores = scores.masked_fill(mask.unsqueeze(0), float('-inf'))
+        scores = scores.masked_fill(mask, float('-inf'))
 
-    # Compute max_logits (max over key dimension): [B*H*G, T]
-    max_logits_flat = scores.max(dim=-1).values
-    max_logits = max_logits_flat.reshape(B, T, HQ)  # [B, T, HQ]
+    # max_logits: [B, H, G, T] -> [B, T, HQ]
+    max_logits = scores.max(dim=-1).values.permute(0, 3, 1, 2).reshape(B, T, HQ)
 
-    # Compute attention weights and output
-    attn_weights = F.softmax(scores, dim=-1)  # [B*H*G, T, T]
-    output_flat = torch.bmm(attn_weights, v_flat)  # [B*H*G, T, D]
-    output = output_flat.reshape(B, T, HQ, D)  # [B, T, HQ, D]
+    # compute output via einsum: [B, H, G, T, T] x [B, T, H, D] -> [B, T, H, G, D]
+    attn_weights = F.softmax(scores, dim=-1)
+    output = torch.einsum('bhgqk,bkhd->bqhgd', attn_weights, v).reshape(B, T, HQ, D)
 
     return output, max_logits
