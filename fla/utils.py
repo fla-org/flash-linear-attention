@@ -487,7 +487,7 @@ def _default_alloc_fn(size: int, alignment: int, stream: int | None):
 if IS_TMA_SUPPORTED:
     logger.info('TMA is supported, using TMA by default.')
     triton.set_allocator(_default_alloc_fn)
-elif IS_NVIDIA and torch.cuda.get_device_capability(0)[0] >= 10:
+elif IS_NVIDIA and torch.cuda.get_device_capability()[0] >= 10:
     # Blackwell (SM 10.0+): Triton compiler may emit global_scratch for
     # autotuned kernels even without TMA. Register a default allocator to
     # prevent NullAllocator crashes. See triton-lang/triton#10002.
