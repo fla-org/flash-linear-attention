@@ -100,7 +100,7 @@ def _build_kernel(
                     T.sync_threads()
 
                 # ========== V-loop ==========
-                for i_v_py in T.Pipelined(_NV, num_stages=1):
+                for i_v_py in T.Pipelined(_NV, num_stages=2):
                     v_off_c = i_v_py * _BV
 
                     T.copy(v[i_b, t_s:t_s + _BT, i_h, v_off_c:v_off_c + _BV], s_v)
