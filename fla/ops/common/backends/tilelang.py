@@ -53,6 +53,7 @@ class TileLangBackend(BaseBackend):
         chunk_indices: torch.LongTensor | None = None,
         transpose_state_layout: bool = False,
     ) -> tuple[bool, str | None]:
+        print("sdfsf")
         if g is None:
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
@@ -60,6 +61,7 @@ class TileLangBackend(BaseBackend):
         # On Hopper with Triton >= 3.4.0, always prefer TileLang (workaround for #640).
         # Otherwise, only use TileLang when it's faster than Triton (D >= 128).
         if not (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0) and q.shape[-1] <= 64:
+            print("1111")
             return False, "TileLang is slower than Triton for D <= 64 on non-Hopper"
         return True, None
 

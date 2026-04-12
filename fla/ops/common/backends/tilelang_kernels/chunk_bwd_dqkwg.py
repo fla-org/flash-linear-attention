@@ -41,7 +41,6 @@ def _build_kernel(
 
     @tilelang.jit(pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
     def make_kernel(
         _B=B, _T=T_val, _H=H, _K=K, _V=V,
@@ -379,7 +378,7 @@ def chunk_bwd_dqkwg_tilelang(
     g_kern = g if USE_G else q.new_empty(B, T, H)
     dw_kern = dw_out if USE_DW else q.new_empty(B, T, H, K)
     dv_kern = dv if USE_DW else q.new_empty(B, T, H, V)
-    dg_kern = dg if USE_G else q.new_empty(NK, B, T, H).float()
+    dg_kern = dg if USE_G else q.new_empty(NK, B, T, H, dtype=torch.float32)
 
     if IS_VARLEN:
         kernel(q, k, v, g_kern, h_flat, do, dh_flat, dq, dk, dw_kern, dv_kern, dg_kern,
