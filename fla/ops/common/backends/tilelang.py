@@ -16,7 +16,6 @@ from __future__ import annotations
 import torch
 
 from fla.ops.backends import BaseBackend
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
 
 
 class TileLangBackend(BaseBackend):
@@ -56,10 +55,6 @@ class TileLangBackend(BaseBackend):
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
             return False, "TileLang backend does not support g_gamma"
-        # On Hopper (sm90) with Triton >= 3.4.0, always prefer TileLang (workaround for #640).
-        # Otherwise, only use TileLang when it's faster than Triton (D > 64).
-        if not (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0) and q.shape[-1] <= 64:
-            return False, "TileLang is slower than Triton for D <= 64 on non-Hopper"
         return True, None
 
     def chunk_bwd_dqkwg(
