@@ -121,6 +121,13 @@ def _build_kernel(
                 s_h = T.alloc_shared((_thD1, _thD2), _dtype)
                 s_dh = T.alloc_shared((_thD1, _thD2), _dtype)
 
+                # dg_last accumulator (shared scalar, accumulated across V-loop)
+                if _USE_G:
+                    s_dg_last_acc = T.alloc_shared((1,), T.float32)
+                    for _i in T.Parallel(1):
+                        s_dg_last_acc[0] = 0.0
+                    T.sync_threads()
+
                 # ========== V-loop: Python-unrolled (NV is compile-time) ==========
                 for i_v_py in range(NV):
                     v_off_c = i_v_py * _BV
@@ -152,6 +159,24 @@ def _build_kernel(
                         else:
                             T.gemm(s_dv, s_h, b_dw, transpose_B=True)
 
+                    # dg_last: h*dh sum merged into V-loop (avoids re-reading h/dh)
+                    if _USE_G:
+                        for _i, _j in T.Parallel(_thD1, _thD2):
+                            s_h[_i, _j] = s_h[_i, _j] * s_dh[_i, _j]
+                        T.sync_threads()
+                        # reduce h*dh to scalar via fragment reduce
+                        f_hdh = T.alloc_fragment((_thD1, _thD2), T.float32)
+                        T.copy(s_h, f_hdh)
+                        f_hdh_row = T.alloc_fragment((_thD1,), T.float32)
+                        T.reduce_sum(f_hdh, f_hdh_row, dim=1)
+                        red_hdh = T.alloc_reducer((1,), T.float32, op="sum", replication="all")
+                        T.fill(red_hdh, 0.0)
+                        for _i in T.Parallel(_thD1):
+                            red_hdh[0] = red_hdh[0] + f_hdh_row[_i]
+                        T.finalize_reducer(red_hdh)
+                        s_dg_last_acc[0] = s_dg_last_acc[0] + red_hdh[0]
+                        T.sync_threads()
+
                 # ========== store dw (negated) ==========
                 if _USE_DW:
                     f_dw = T.alloc_fragment((_BT, _BK), _dtype)
@@ -159,37 +184,12 @@ def _build_kernel(
                         f_dw[_i, _j] = T.cast(-b_dw[_i, _j], _dtype)
                     T.copy(f_dw, dw[t_off:t_off + _BT, i_h, k_off:k_off + _BK])
 
-                # ========== dg_last: separate loop re-reading h/dh ==========
+                # dg_last reducer result
                 if _USE_G:
-                    dg_last_acc = T.alloc_fragment((1,), T.float32)
-                    T.clear(dg_last_acc)
-                    for i_v_py2 in range(NV):
-                        v_off = i_v_py2 * _BV
-                        if _TS:
-                            T.copy(h[h_idx, v_off:v_off + _BV, k_off:k_off + _BK], s_h)
-                            T.copy(dh[h_idx, v_off:v_off + _BV, k_off:k_off + _BK], s_dh)
-                        else:
-                            T.copy(h[h_idx, k_off:k_off + _BK, v_off:v_off + _BV], s_h)
-                            T.copy(dh[h_idx, k_off:k_off + _BK, v_off:v_off + _BV], s_dh)
-                        # element-wise h*dh, write product to shared directly
-                        for _i, _j in T.Parallel(_thD1, _thD2):
-                            s_h[_i, _j] = s_h[_i, _j] * s_dh[_i, _j]
-                        # sum all elements via serial (single thread + broadcast)
-                        s_hdh_sum = T.alloc_shared((1,), T.float32)
-                        for _i in T.Parallel(1):
-                            acc_hdh = T.alloc_local((1,), T.float32)
-                            acc_hdh[0] = 0.0
-                            for _r in T.serial(_thD1):
-                                for _c in T.serial(_thD2):
-                                    acc_hdh[0] = acc_hdh[0] + s_h[_r, _c]
-                            s_hdh_sum[0] = acc_hdh[0]
-                        T.sync_threads()
-                        dg_last_acc[0] = dg_last_acc[0] + s_hdh_sum[0]
-                    # dg_last_acc[0] now has the scalar sum
                     red = T.alloc_reducer((1,), T.float32, op="sum", replication="all")
                     T.fill(red, 0.0)
                     for _i in T.Parallel(1):
-                        red[0] = red[0] + dg_last_acc[_i]
+                        red[0] = red[0] + s_dg_last_acc[0]
                     T.finalize_reducer(red)
 
                 # ========== load q, k ==========
@@ -305,13 +305,20 @@ def _build_kernel(
                     for _i in T.Parallel(_BT):
                         s_dg[_i] = s_dg[_i] + s_row[_i]
                     T.sync_threads()
-                    # col_sum(ds2) via serial (transposed access, keep serial)
+                    # col_sum(ds2): transpose in shared, then T.reduce_sum
+                    # Reuse s_qk_f32 for the transposed ds2
+                    for _i, _j in T.Parallel(_BT, _BT):
+                        s_qk_f32[_i, _j] = s_ds_f32[_j, _i]
+                    T.sync_threads()
+                    f_ds2t = T.alloc_fragment((_BT, _BT), T.float32)
+                    T.copy(s_qk_f32, f_ds2t)
+                    f_col_sum = T.alloc_fragment((_BT,), T.float32)
+                    T.reduce_sum(f_ds2t, f_col_sum, dim=1)
+                    s_col = T.alloc_shared((_BT,), T.float32)
+                    T.copy(f_col_sum, s_col)
+                    T.sync_threads()
                     for _i in T.Parallel(_BT):
-                        col_acc = T.alloc_local((1,), T.float32)
-                        col_acc[0] = 0.0
-                        for _j in T.serial(_BT):
-                            col_acc[0] = col_acc[0] + s_ds_f32[_j, _i]
-                        s_dg[_i] = s_dg[_i] - col_acc[0]
+                        s_dg[_i] = s_dg[_i] - s_col[_i]
                     T.sync_threads()
 
                     # cast ds for final gemms
