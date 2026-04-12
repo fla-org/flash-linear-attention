@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, exp2
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
@@ -695,6 +696,7 @@ def chunk_bwd_dv_local(
     return dv
 
 
+@dispatch('common')
 def chunk_bwd_dqkwg(
     q: torch.Tensor,
     k: torch.Tensor,
