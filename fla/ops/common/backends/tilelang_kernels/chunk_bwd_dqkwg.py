@@ -26,7 +26,7 @@ def _build_kernel(
     total_h,
     dtype_str,
     USE_G, USE_G_GAMMA, USE_DW, TRANSPOSE_STATE, IS_VARLEN,
-    num_warps=2,
+    num_warps=4,
 ):
     dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
     dtype = dtype_map[dtype_str]
