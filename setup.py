@@ -47,6 +47,7 @@ setup(
         'torch>=2.7.0',
         'transformers',
         'einops',
+        'tilelang',
     ],
     extras_require={
         'conv1d': ['causal-conv1d>=1.4.0'],
