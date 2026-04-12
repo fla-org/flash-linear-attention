@@ -99,8 +99,8 @@ def _build_kernel(
                         s_dg_last_acc[0] = 0.0
                     T.sync_threads()
 
-                # ========== V-loop: Python-unrolled (NV is compile-time) ==========
-                for i_v_py in range(NV):
+                # ========== V-loop ==========
+                for i_v_py in T.Pipelined(_NV, num_stages=1):
                     v_off_c = i_v_py * _BV
 
                     T.copy(v[i_b, t_s:t_s + _BT, i_h, v_off_c:v_off_c + _BV], s_v)
@@ -131,13 +131,14 @@ def _build_kernel(
                             T.gemm(s_dv, s_h, b_dw, transpose_B=True)
 
                     # dg_last: h*dh sum merged into V-loop (avoids re-reading h/dh)
+                    # Use separate s_hdh buffer (not s_h) to avoid write conflict in pipeline
                     if _USE_G:
+                        s_hdh = T.alloc_shared((_thD1, _thD2), _dtype)
                         for _i, _j in T.Parallel(_thD1, _thD2):
-                            s_h[_i, _j] = s_h[_i, _j] * s_dh[_i, _j]
+                            s_hdh[_i, _j] = s_h[_i, _j] * s_dh[_i, _j]
                         T.sync_threads()
-                        # reduce h*dh to scalar via fragment reduce
                         f_hdh = T.alloc_fragment((_thD1, _thD2), T.float32)
-                        T.copy(s_h, f_hdh)
+                        T.copy(s_hdh, f_hdh)
                         f_hdh_row = T.alloc_fragment((_thD1,), T.float32)
                         T.reduce_sum(f_hdh, f_hdh_row, dim=1)
                         red_hdh = T.alloc_reducer((1,), T.float32, op="sum", replication="all")
@@ -169,18 +170,13 @@ def _build_kernel(
                 T.copy(q[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK], s_q)
                 T.copy(k[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK], s_k)
 
-                f_q = T.alloc_fragment((_BT, _BK), T.float32)
-                f_k = T.alloc_fragment((_BT, _BK), T.float32)
-                T.copy(s_q, f_q)
-                T.copy(s_k, f_k)
-
                 # ========== USE_G path ==========
                 if _USE_G:
                     # dg_last_acc already reduced to `red` scalar above
 
                     # g in shared memory (all threads can cross-read any element)
                     s_g = T.alloc_shared((_BT,), T.float32)
-                    T.copy(g[i_b, t_s:t_s + _BT, i_h], s_g)
+                    T.copy(g[i_b, t_s:t_s + _BT, i_h], s_g, disable_tma=True)
 
                     last_pos = T.min(_BT, _T - i_t * _BT) - 1
                     g_last = s_g[last_pos]
