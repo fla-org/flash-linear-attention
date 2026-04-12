@@ -53,12 +53,12 @@ class TileLangBackend(BaseBackend):
         chunk_indices: torch.LongTensor | None = None,
         transpose_state_layout: bool = False,
     ) -> tuple[bool, str | None]:
-        if not q.is_cuda:
-            return False, "TileLang backend only supports CUDA tensors"
         if g is None:
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
             return False, "TileLang backend does not support g_gamma"
+        if cu_seqlens is not None:
+            return False, "TileLang backend does not yet support varlen (cu_seqlens)"
         return True, None
 
     def chunk_bwd_dqkwg(
