@@ -24,8 +24,6 @@ class TileLangBackend(BaseBackend):
     backend_type = "tilelang"
     package_name = "tilelang"
     env_var = "FLA_TILELANG"
-    default_enable = True  # verifier gates on shape/hw; env FLA_TILELANG=0 to force off
-    priority = 1  # higher priority than default Triton path
 
     @classmethod
     def is_available(cls) -> bool:
@@ -51,17 +49,16 @@ class TileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
+        use_exp2: bool = False,
         transpose_state_layout: bool = False,
     ) -> tuple[bool, str | None]:
-        print("sdfsf")
         if g is None:
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
             return False, "TileLang backend does not support g_gamma"
-        # On Hopper with Triton >= 3.4.0, always prefer TileLang (workaround for #640).
-        # Otherwise, only use TileLang when it's faster than Triton (D >= 128).
+        # On Hopper (sm90) with Triton >= 3.4.0, always prefer TileLang (workaround for #640).
+        # Otherwise, only use TileLang when it's faster than Triton (D > 64).
         if not (IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0) and q.shape[-1] <= 64:
-            print("1111")
             return False, "TileLang is slower than Triton for D <= 64 on non-Hopper"
         return True, None
 
@@ -81,6 +78,7 @@ class TileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
+        use_exp2: bool = False,
         transpose_state_layout: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         from fla.ops.common.backends.tilelang_kernels.chunk_bwd_dqkwg import (
@@ -91,5 +89,5 @@ class TileLangBackend(BaseBackend):
             w=w, g=g, g_gamma=g_gamma, dv=dv,
             scale=scale, cu_seqlens=cu_seqlens,
             chunk_size=chunk_size, chunk_indices=chunk_indices,
-            transpose_state_layout=transpose_state_layout,
+            use_exp2=use_exp2, transpose_state_layout=transpose_state_layout,
         )

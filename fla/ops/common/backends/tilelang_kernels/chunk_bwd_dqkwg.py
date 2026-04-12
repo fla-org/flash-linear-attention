@@ -21,7 +21,7 @@ def _build_kernel(
     B, T_val, H, K, V, NT, BT, BK, BV, NK,
     total_h, hD1, hD2,
     dtype_str,
-    USE_G, USE_DW, TRANSPOSE_STATE, IS_VARLEN=False,
+    USE_G, USE_DW, USE_EXP2, TRANSPOSE_STATE, IS_VARLEN=False,
     num_warps=4,
 ):
     dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
@@ -48,7 +48,7 @@ def _build_kernel(
         _NT=NT, _BT=BT, _BK=BK, _BV=BV, _NK=NK,
         _NV=NV, _hD1=hD1, _hD2=hD2, _thD1=tile_hD1, _thD2=tile_hD2,
         _dtype=dtype, _threads=threads,
-        _USE_G=USE_G, _USE_DW=USE_DW, _TS=TRANSPOSE_STATE, _VAR=IS_VARLEN,
+        _USE_G=USE_G, _USE_DW=USE_DW, _USE_EXP2=USE_EXP2, _TS=TRANSPOSE_STATE, _VAR=IS_VARLEN,
     ):
         # Kernel body shared between varlen and non-varlen via @T.macro.
         # All compile-time constants (_BT, _BK, etc.) are captured from closure.
@@ -114,20 +114,28 @@ def _build_kernel(
                 # dg_last: h*dh sum merged into V-loop (avoids re-reading h/dh)
                 # Use separate s_hdh buffer (not s_h) to avoid write conflict in pipeline
                 if _USE_G:
-                    s_hdh = T.alloc_shared((_thD1, _thD2), _dtype)
+                    # Compute h*dh products in shared memory (float32 for precision)
+                    s_hdh = T.alloc_shared((_thD1, _thD2), T.float32)
                     for _i, _j in T.Parallel(_thD1, _thD2):
-                        s_hdh[_i, _j] = s_h[_i, _j] * s_dh[_i, _j]
+                        s_hdh[_i, _j] = T.cast(s_h[_i, _j], T.float32) * T.cast(s_dh[_i, _j], T.float32)
                     T.sync_threads()
+                    # Parallel row reduction via T.reduce_sum, then serial sum of row results
                     f_hdh = T.alloc_fragment((_thD1, _thD2), T.float32)
                     T.copy(s_hdh, f_hdh)
                     f_hdh_row = T.alloc_fragment((_thD1,), T.float32)
                     T.reduce_sum(f_hdh, f_hdh_row, dim=1)
-                    red_hdh = T.alloc_reducer((1,), T.float32, op="sum", replication="all")
-                    T.fill(red_hdh, 0.0)
-                    for _i in T.Parallel(_thD1):
-                        red_hdh[0] = red_hdh[0] + f_hdh_row[_i]
-                    T.finalize_reducer(red_hdh)
-                    s_dg_last_acc[0] = s_dg_last_acc[0] + red_hdh[0]
+                    s_hdh_row = T.alloc_shared((_thD1,), T.float32)
+                    T.copy(f_hdh_row, s_hdh_row)
+                    T.sync_threads()
+                    s_hdh_scalar = T.alloc_shared((1,), T.float32)
+                    for _i in T.Parallel(1):
+                        acc = T.alloc_local((1,), T.float32)
+                        acc[0] = 0.0
+                        for _j in T.serial(_thD1):
+                            acc[0] = acc[0] + s_hdh_row[_j]
+                        s_hdh_scalar[0] = acc[0]
+                    T.sync_threads()
+                    s_dg_last_acc[0] = s_dg_last_acc[0] + s_hdh_scalar[0]
                     T.sync_threads()
 
             # ========== store dw (negated) ==========
@@ -137,13 +145,7 @@ def _build_kernel(
                     f_dw[_i, _j] = T.cast(-b_dw[_i, _j], _dtype)
                 T.copy(f_dw, dw[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK])
 
-            # dg_last reducer result
-            if _USE_G:
-                red = T.alloc_reducer((1,), T.float32, op="sum", replication="all")
-                T.fill(red, 0.0)
-                for _i in T.Parallel(1):
-                    red[0] = red[0] + s_dg_last_acc[0]
-                T.finalize_reducer(red)
+            # dg_last is now in s_dg_last_acc[0] (shared memory, visible to all threads)
 
             # ========== load q, k ==========
             s_q = T.alloc_shared((_BT, _BK), _dtype)
@@ -162,15 +164,19 @@ def _build_kernel(
                 last_pos = T.min(_BT, T_seq - i_t_local * _BT) - 1
                 g_last = s_g[last_pos]
                 b_dg_last = T.alloc_var(T.float32)
-                b_dg_last = red[0] * T.exp(g_last)
+                b_dg_last = s_dg_last_acc[0] * (T.exp2(g_last) if _USE_EXP2 else T.exp(g_last))
 
                 # b_dq *= exp(g) * scale  (inline, no extra fragment)
                 for _i, _j in T.Parallel(_BT, _BK):
-                    b_dq[_i, _j] = b_dq[_i, _j] * T.exp(s_g[_i]) * scale
+                    b_dq[_i, _j] = b_dq[_i, _j] * (T.exp2(s_g[_i]) if _USE_EXP2 else T.exp(s_g[_i])) * scale
 
-                # Gate b_dk before dg reductions (doesn't depend on dq result)
+                # Gate b_dk with m_t mask: zero out OOB positions
                 for _i, _j in T.Parallel(_BT, _BK):
-                    b_dk[_i, _j] = b_dk[_i, _j] * T.exp(-s_g[_i] + g_last)
+                    m_t = (i_t_local * _BT + _i) < T_seq
+                    b_dk[_i, _j] = T.if_then_else(
+                        m_t,
+                        b_dk[_i, _j] * (T.exp2(-s_g[_i] + g_last) if _USE_EXP2 else T.exp(-s_g[_i] + g_last)),
+                        0.0)
 
                 # Batched dg reductions: write both b_dq and b_dk to shared
                 # in one round to reduce syncthreads count.
@@ -219,7 +225,7 @@ def _build_kernel(
                     causal = (_i >= _j) & ((i_t_local * _BT + _i) < T_seq) & ((i_t_local * _BT + _j) < T_seq)
                     b_ds[_i, _j] = T.if_then_else(
                         causal,
-                        b_ds[_i, _j] * T.exp(s_g[_i] - s_g[_j]) * scale,
+                        b_ds[_i, _j] * (T.exp2(s_g[_i] - s_g[_j]) if _USE_EXP2 else T.exp(s_g[_i] - s_g[_j])) * scale,
                         0.0)
 
                 # ds2 = ds * (q @ k^T);  dg += row_sum(ds2) - col_sum(ds2)
@@ -338,7 +344,7 @@ def chunk_bwd_dqkwg_tilelang(
     q, k, v, do, h, dh,
     w=None, g=None, g_gamma=None, dv=None,
     scale=None, cu_seqlens=None, chunk_size=64,
-    chunk_indices=None, transpose_state_layout=False,
+    chunk_indices=None, use_exp2=False, transpose_state_layout=False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -372,7 +378,7 @@ def chunk_bwd_dqkwg_tilelang(
     kernel = _build_kernel(
         B, T, H, K, V, NT, BT, BK, BV, NK,
         total_h, hD1, hD2, dtype_str,
-        USE_G, USE_DW, transpose_state_layout, IS_VARLEN,
+        USE_G, USE_DW, use_exp2, transpose_state_layout, IS_VARLEN,
     )
 
     # Unused optional params still need shape-matching tensors for TileLang
