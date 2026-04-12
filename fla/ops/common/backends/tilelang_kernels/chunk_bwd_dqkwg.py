@@ -34,6 +34,8 @@ def _build_kernel(
     threads = num_warps * 32
 
     hD1, hD2 = (V, K) if TRANSPOSE_STATE else (K, V)
+    # Tile dimensions for h/dh shared buffers (BK×BV or BV×BK)
+    tile_hD1, tile_hD2 = (BV, BK) if TRANSPOSE_STATE else (BK, BV)
 
     # All q/k/v/do/dv/dq/dk/dw are (BT_total, H, K_or_V) — flattened B*T
     qk_s = (BT_total, H, K)
@@ -54,7 +56,7 @@ def _build_kernel(
     def make_kernel(
         _B=B, _T=T_val, _H=H, _K=K, _V=V,
         _NT=NT, _BT=BT, _BK=BK, _BV=BV, _NK=NK,
-        _NV=NV, _hD1=hD1, _hD2=hD2,
+        _NV=NV, _hD1=hD1, _hD2=hD2, _thD1=tile_hD1, _thD2=tile_hD2,
         _dtype=dtype, _threads=threads,
         _USE_G=USE_G, _USE_G_GAMMA=USE_G_GAMMA,
         _USE_DW=USE_DW, _TS=TRANSPOSE_STATE, _VAR=IS_VARLEN,
@@ -116,8 +118,8 @@ def _build_kernel(
                 # -- shared tiles --
                 s_v = T.alloc_shared((_BT, _BV), _dtype)
                 s_do = T.alloc_shared((_BT, _BV), _dtype)
-                s_h = T.alloc_shared((_hD1, _hD2), _dtype)
-                s_dh = T.alloc_shared((_hD1, _hD2), _dtype)
+                s_h = T.alloc_shared((_thD1, _thD2), _dtype)
+                s_dh = T.alloc_shared((_thD1, _thD2), _dtype)
 
                 # ========== V-loop: Python-unrolled (NV is compile-time) ==========
                 for i_v_py in range(NV):
@@ -170,15 +172,15 @@ def _build_kernel(
                             T.copy(h[h_idx, k_off:k_off + _BK, v_off:v_off + _BV], s_h)
                             T.copy(dh[h_idx, k_off:k_off + _BK, v_off:v_off + _BV], s_dh)
                         # element-wise h*dh, write product to shared directly
-                        for _i, _j in T.Parallel(_hD1, _hD2):
+                        for _i, _j in T.Parallel(_thD1, _thD2):
                             s_h[_i, _j] = s_h[_i, _j] * s_dh[_i, _j]
                         # sum all elements via serial (single thread + broadcast)
                         s_hdh_sum = T.alloc_shared((1,), T.float32)
                         for _i in T.Parallel(1):
                             acc_hdh = T.alloc_local((1,), T.float32)
                             acc_hdh[0] = 0.0
-                            for _r in T.serial(_hD1):
-                                for _c in T.serial(_hD2):
+                            for _r in T.serial(_thD1):
+                                for _c in T.serial(_thD2):
                                     acc_hdh[0] = acc_hdh[0] + s_h[_r, _c]
                             s_hdh_sum[0] = acc_hdh[0]
                         T.sync_threads()
