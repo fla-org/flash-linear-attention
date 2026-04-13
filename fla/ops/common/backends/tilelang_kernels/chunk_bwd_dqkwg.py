@@ -43,7 +43,7 @@ def _build_kernel(
     ):
         # T, NT, total_h are dynamic (vary with sequence length, no recompilation).
         # B, H are compile-time (stable across batches, enables fast integer division).
-        T_d, NT_d, total_h_d = T.dynamic("T, NT, total_h")
+        T_d, NT_d, total_h_d, Ncu_d = T.dynamic("T, NT, total_h, Ncu")
 
         # 4D tensor shapes using dynamic T + compile-time B, H, K, V.
         qk_s = (_B, T_d, _H, _K)
@@ -138,12 +138,15 @@ def _build_kernel(
                     s_dg_last_acc[0] = s_dg_last_acc[0] + s_hdh_scalar[0]
                     T.sync_threads()
 
-            # ========== store dw (negated) ==========
+            # ========== store dw (negated, with varlen boundary mask) ==========
             if _USE_DW:
-                f_dw = T.alloc_fragment((_BT, _BK), _dtype)
+                s_dw_out = T.alloc_shared((_BT, _BK), _dtype)
                 for _i, _j in T.Parallel(_BT, _BK):
-                    f_dw[_i, _j] = T.cast(-b_dw[_i, _j], _dtype)
-                T.copy(f_dw, dw[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK])
+                    s_dw_out[_i, _j] = T.cast(-b_dw[_i, _j], _dtype)
+                T.sync_threads()
+                for _i, _j in T.Parallel(_BT, _BK):
+                    if (i_t_local * _BT + _i) < T_seq:
+                        dw[i_b, t_s + _i, i_h, k_off + _j] = s_dw_out[_i, _j]
 
             # dg_last is now in s_dg_last_acc[0] (shared memory, visible to all threads)
 
@@ -278,19 +281,29 @@ def _build_kernel(
                 T.gemm(s_ds, s_k, b_dq)               # dq += ds @ k
                 T.gemm(s_ds, s_q, b_dk, transpose_A=True)  # dk += ds^T @ q
 
-                # store dq, dk
+                # store dq, dk via shared (fragment has MMA layout, can't index directly)
                 f_out = T.alloc_fragment((_BT, _BK), _dtype)
+                s_out = T.alloc_shared((_BT, _BK), _dtype)
                 for _i, _j in T.Parallel(_BT, _BK):
                     f_out[_i, _j] = T.cast(b_dq[_i, _j], _dtype)
-                T.copy(f_out, dq[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK])
+                T.copy(f_out, s_out)
+                T.sync_threads()
+                for _i, _j in T.Parallel(_BT, _BK):
+                    if (i_t_local * _BT + _i) < T_seq:
+                        dq[i_b, t_s + _i, i_h, k_off + _j] = s_out[_i, _j]
                 for _i, _j in T.Parallel(_BT, _BK):
                     f_out[_i, _j] = T.cast(b_dk[_i, _j], _dtype)
-                T.copy(f_out, dk[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK])
+                T.copy(f_out, s_out)
+                T.sync_threads()
+                for _i, _j in T.Parallel(_BT, _BK):
+                    if (i_t_local * _BT + _i) < T_seq:
+                        dk[i_b, t_s + _i, i_h, k_off + _j] = s_out[_i, _j]
 
                 # store dg: merge dg_last into last valid position
                 for _i in T.Parallel(_BT):
-                    val = T.if_then_else(_i == last_pos, s_dg[_i] + b_dg_last, s_dg[_i])
-                    dg[i_k, i_b, t_s + _i, i_h] = val
+                    if (i_t_local * _BT + _i) < T_seq:
+                        val = T.if_then_else(_i == last_pos, s_dg[_i] + b_dg_last, s_dg[_i])
+                        dg[i_k, i_b, t_s + _i, i_h] = val
 
         if _VAR:
             @T.prim_func
@@ -301,7 +314,7 @@ def _build_kernel(
                 dh: T.Tensor(h_s, _dtype), dq: T.Tensor(qk_s, _dtype),
                 dk: T.Tensor(qk_s, _dtype), dw: T.Tensor(qk_s, _dtype),
                 dv: T.Tensor(v_s, _dtype), dg: T.Tensor(dg_s, T.float32),
-                cu_seqlens: T.Tensor((NT_d + 2,), T.int32),
+                cu_seqlens: T.Tensor((Ncu_d,), T.int32),
                 chunk_indices: T.Tensor((NT_d, 2), T.int32),
                 scale: T.float32,
             ):
