@@ -152,24 +152,26 @@ class Mamba2PreTrainedModel(PreTrainedModel):
         if isinstance(module, Mamba2) and next(module.parameters()).device.type != 'meta':
 
             # --- A_log ---
-            A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(*self.config.A_init_range)
-            with torch.no_grad():
-                A_log = torch.log(A)
-                if isinstance(module.A_log, DTensor):
-                    A_log = tensor_to_dtensor(
-                        tensor=A_log,
-                        device_mesh=module.A_log.device_mesh,
-                        current_placement=[Replicate()] * len(module.A_log.placements),
-                        desired_placement=module.A_log.placements,
-                        run_check=True,
-                    )
+            if not getattr(module.A_log, '_is_hf_initialized', False):
+                A = torch.empty(module.num_heads, dtype=torch.float32).uniform_(*self.config.A_init_range)
+                with torch.no_grad():
+                    A_log = torch.log(A)
+                    if isinstance(module.A_log, DTensor):
+                        A_log = tensor_to_dtensor(
+                            tensor=A_log,
+                            device_mesh=module.A_log.device_mesh,
+                            current_placement=[Replicate()] * len(module.A_log.placements),
+                            desired_placement=module.A_log.placements,
+                            run_check=True,
+                        )
 
-                module.A_log.copy_(A_log)
+                    module.A_log.copy_(A_log)
 
             module.A_log._no_weight_decay = True
 
             # --- D ---
-            nn.init.ones_(module.D)
+            if not getattr(module.D, '_is_hf_initialized', False):
+                nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
             # --- conv1d ---
@@ -178,25 +180,26 @@ class Mamba2PreTrainedModel(PreTrainedModel):
                 module.conv1d.weight._no_reinit = True
 
             # --- dt_bias ---
-            dt = torch.exp(
-                torch.rand(self.config.num_heads)
-                * (math.log(self.config.dt_max) - math.log(self.config.dt_min))
-                + math.log(self.config.dt_min),
-            ).clamp(min=self.config.dt_init_floor)
+            if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                dt = torch.exp(
+                    torch.rand(self.config.num_heads)
+                    * (math.log(self.config.dt_max) - math.log(self.config.dt_min))
+                    + math.log(self.config.dt_min),
+                ).clamp(min=self.config.dt_init_floor)
 
-            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-            inv_dt = dt + torch.log(-torch.expm1(-dt))
-            with torch.no_grad():
-                if isinstance(module.dt_bias, DTensor):
-                    inv_dt = tensor_to_dtensor(
-                        tensor=inv_dt,
-                        device_mesh=module.dt_bias.device_mesh,
-                        current_placement=[Replicate()] * len(module.dt_bias.placements),
-                        desired_placement=module.dt_bias.placements,
-                        run_check=True,
-                    )
+                # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                inv_dt = dt + torch.log(-torch.expm1(-dt))
+                with torch.no_grad():
+                    if isinstance(module.dt_bias, DTensor):
+                        inv_dt = tensor_to_dtensor(
+                            tensor=inv_dt,
+                            device_mesh=module.dt_bias.device_mesh,
+                            current_placement=[Replicate()] * len(module.dt_bias.placements),
+                            desired_placement=module.dt_bias.placements,
+                            run_check=True,
+                        )
 
-                module.dt_bias.copy_(inv_dt)
+                    module.dt_bias.copy_(inv_dt)
             module.dt_bias._no_reinit = True
             module.dt_bias._no_weight_decay = True
 
@@ -230,7 +233,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
                 p = module.out_proj.weight
             elif hasattr(module, 'down_proj'):
                 p = module.down_proj.weight
-            if p is not None:
+            if p is not None and not getattr(p, '_is_hf_initialized', False):
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                 # We need to reinit p since this code could be called multiple times

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 @triton.heuristics({
     'USE_G': lambda args: args['g'] is not None,
     'USE_GK': lambda args: args['gk'] is not None,
+    'USE_BG': lambda args: args['bg'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -44,6 +45,8 @@ def pre_process_fwd_kernel_merged(
     w,
     g,
     gk,
+    bg,
+    u,
     hm,
     cu_seqlens,
     T,
@@ -56,6 +59,7 @@ def pre_process_fwd_kernel_merged(
     BK1: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
+    USE_BG: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     MULTI_SEQS: tl.constexpr,
@@ -80,14 +84,24 @@ def pre_process_fwd_kernel_merged(
     # i_col is in range [0, cdiv(V + K, BLOCK_SIZE))
     # Columns [0, V) are for h, columns [V, V+K) are for m
     is_h_part = i_col * BLOCK_SIZE < V
+    # For DPLR (USE_BG), w and bg share the same head dim H as k/ag.
+    # For GDN/KDA, w has head dim HV (same as v).
     k += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
-    w += ((bos * HV + i_h) * K).to(tl.int64)
+    if USE_BG:
+        w += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
+        bg += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
+    else:
+        w += ((bos * HV + i_h) * K).to(tl.int64)
     stride_k = H * K
-    stride_w = HV * K
+    stride_w = H * K if USE_BG else HV * K
 
     if is_h_part:
         # ====== Stage 1: Compute h (K x V) ======
         v += ((bos * HV + i_h) * V).to(tl.int64)
+        if USE_BG:
+            # DPLR keeps u and v as separate tensors; both need the per-head offset.
+            # For GDN/KDA, u is aliased to v at the Python wrapper level.
+            u += ((bos * HV + i_h) * V).to(tl.int64)
         stride_v = HV * V
         i_v = i_col
 
@@ -120,7 +134,14 @@ def pre_process_fwd_kernel_merged(
                 b_v_decay += tl.dot(b_w, b_h4.to(b_w.dtype))
 
             p_v = tl.make_block_ptr(v, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
-            b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v_decay
+            if USE_BG:
+                # DPLR mode: v2 = w @ h + u, h += kg^T @ v + bg^T @ v2
+                b_v_orig = tl.load(p_v, boundary_check=(0, 1))
+                p_u = tl.make_block_ptr(u, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
+                b_v = b_v_decay + tl.load(p_u, boundary_check=(0, 1))
+            else:
+                # GDN/KDA mode: v_new = v - w @ h
+                b_v = tl.load(p_v, boundary_check=(0, 1)) - b_v_decay
 
             last_idx = min((i_t + 1) * BT, T) - 1
 
@@ -179,22 +200,47 @@ def pre_process_fwd_kernel_merged(
 
             b_v = b_v.to(k.dtype.element_ty)
 
-            # Update h: h += k^T @ v
+            # Update h
             p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
             b_k = tl.load(p_k, boundary_check=(0, 1))
-            b_h1 += tl.dot(b_k, b_v)
-            if K > 64:
-                p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
-                b_h2 += tl.dot(b_k, b_v)
-            if K > 128:
-                p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
-                b_h3 += tl.dot(b_k, b_v)
-            if K > 192:
-                p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
-                b_k = tl.load(p_k, boundary_check=(0, 1))
-                b_h4 += tl.dot(b_k, b_v)
+            if USE_BG:
+                # DPLR mode: h += kg^T @ v + bg^T @ v2
+                p_bg = tl.make_block_ptr(bg, (K, T), (1, stride_k), (0, i_t * BT), (64, BT), (0, 1))
+                b_bg = tl.load(p_bg, boundary_check=(0, 1))
+                b_h1 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
+                if K > 64:
+                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
+                    b_k = tl.load(p_k, boundary_check=(0, 1))
+                    p_bg = tl.make_block_ptr(bg, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
+                    b_bg = tl.load(p_bg, boundary_check=(0, 1))
+                    b_h2 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
+                if K > 128:
+                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
+                    b_k = tl.load(p_k, boundary_check=(0, 1))
+                    p_bg = tl.make_block_ptr(bg, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
+                    b_bg = tl.load(p_bg, boundary_check=(0, 1))
+                    b_h3 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
+                if K > 192:
+                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
+                    b_k = tl.load(p_k, boundary_check=(0, 1))
+                    p_bg = tl.make_block_ptr(bg, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
+                    b_bg = tl.load(p_bg, boundary_check=(0, 1))
+                    b_h4 += tl.dot(b_k, b_v_orig.to(b_k.dtype)) + tl.dot(b_bg, b_v)
+            else:
+                # GDN/KDA mode: h += k^T @ v_new
+                b_h1 += tl.dot(b_k, b_v)
+                if K > 64:
+                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (64, i_t * BT), (64, BT), (0, 1))
+                    b_k = tl.load(p_k, boundary_check=(0, 1))
+                    b_h2 += tl.dot(b_k, b_v)
+                if K > 128:
+                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (128, i_t * BT), (64, BT), (0, 1))
+                    b_k = tl.load(p_k, boundary_check=(0, 1))
+                    b_h3 += tl.dot(b_k, b_v)
+                if K > 192:
+                    p_k = tl.make_block_ptr(k, (K, T), (1, stride_k), (192, i_t * BT), (64, BT), (0, 1))
+                    b_k = tl.load(p_k, boundary_check=(0, 1))
+                    b_h4 += tl.dot(b_k, b_v)
 
         # Store h results
         stride_hm_kv = K + V
@@ -228,7 +274,12 @@ def pre_process_fwd_kernel_merged(
 
         for i_t in range(NT):
             # Load k and w with full BK1 rows
-            p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
+            if USE_BG:
+                # DPLR mode: use bg for transition matrix
+                # bg was already offset at the beginning of the kernel
+                p_k = tl.make_block_ptr(bg, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
+            else:
+                p_k = tl.make_block_ptr(k, (T, K), (stride_k, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
             b_k = tl.load(p_k, boundary_check=(0, 1))
             p_w = tl.make_block_ptr(w, (T, K), (stride_w, 1), (i_t * BT, 0), (BT, BK1), (1, 0))
             b_w = tl.load(p_w, boundary_check=(0, 1))
@@ -257,9 +308,16 @@ def pre_process_fwd_kernel_merged(
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
 
-            # Compute m update: m = (diag - k^T @ w) @ m
-            b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
-            b_m_i = b_diag - b_kw
+            # Compute m update
+            if USE_BG:
+                # DPLR mode: M = (diag + bg^T @ w) @ M
+                # bg was already offset at the beginning of the kernel
+                b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
+                b_m_i = b_diag + b_kw
+            else:
+                # GDN/KDA mode: M = (diag - k^T @ w) @ M
+                b_kw = tl.dot(tl.trans(b_k.to(b_w.dtype)), b_w)
+                b_m_i = b_diag - b_kw
             b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
 
         # Store m result
@@ -459,6 +517,7 @@ def pre_process_bwd_kernel_merged(
     BK1: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
+    USE_BG: tl.constexpr,
     USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -483,12 +542,17 @@ def pre_process_bwd_kernel_merged(
     is_dh_part = i_col * BLOCK_SIZE < V
 
     # Calculate offsets
+    # For DPLR (USE_BG), w shares the same head dim H as q/k/ag.
+    # For GDN/KDA, w has head dim HV (same as do/dv).
     q += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     k += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
-    w += ((bos * HV + i_h) * K).to(tl.int64)
+    if USE_BG:
+        w += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
+    else:
+        w += ((bos * HV + i_h) * K).to(tl.int64)
     dhm += i_h * K * (V + K)
     stride_qk = H * K
-    stride_w = HV * K
+    stride_w = H * K if USE_BG else HV * K
 
     if is_dh_part:
         # ====== Stage 1: Compute dh (K x V) ======
@@ -594,7 +658,11 @@ def pre_process_bwd_kernel_merged(
                     b_dh1 *= exp2(b_gk_last1[:, None])
                 else:
                     b_dh1 *= exp(b_gk_last1[:, None])
-            b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
+            if USE_BG:
+                # DPLR mode: dh += q^T @ do + w^T @ dv2 (no scale)
+                b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
+            else:
+                b_dh1 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 64:
                 p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (64, i_t * BT), (64, BT), (0, 1))
@@ -609,7 +677,10 @@ def pre_process_bwd_kernel_merged(
                         b_dh2 *= exp2(b_gk_last2[:, None])
                     else:
                         b_dh2 *= exp(b_gk_last2[:, None])
-                b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
+                if USE_BG:
+                    b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
+                else:
+                    b_dh2 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 128:
                 p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (128, i_t * BT), (64, BT), (0, 1))
@@ -624,7 +695,10 @@ def pre_process_bwd_kernel_merged(
                         b_dh3 *= exp2(b_gk_last3[:, None])
                     else:
                         b_dh3 *= exp(b_gk_last3[:, None])
-                b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
+                if USE_BG:
+                    b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
+                else:
+                    b_dh3 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
             if K > 192:
                 p_q = tl.make_block_ptr(q, (K, T), (1, stride_qk), (192, i_t * BT), (64, BT), (0, 1))
@@ -639,7 +713,10 @@ def pre_process_bwd_kernel_merged(
                         b_dh4 *= exp2(b_gk_last4[:, None])
                     else:
                         b_dh4 *= exp(b_gk_last4[:, None])
-                b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
+                if USE_BG:
+                    b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) + tl.dot(b_w, b_dv.to(b_w.dtype))
+                else:
+                    b_dh4 += tl.dot(b_q.to(b_q.dtype), b_do.to(b_q.dtype)) * scale - tl.dot(b_w, b_dv.to(b_w.dtype))
 
         # Store dh results
         p_dh1 = tl.make_block_ptr(dhm, (K, V), (V + K, 1), (0, i_v * BLOCK_SIZE), (64, BLOCK_SIZE), (1, 0))
@@ -701,10 +778,14 @@ def pre_process_bwd_kernel_merged(
             else:
                 b_diag = tl.where(row[:, None] == row[None, :], 1.0, 0.0)
 
-            # Compute dm update for backward: m = (diag - w^T @ k) @ m
-            # Note: FORWARD=False uses tl.trans(b_w) @ b_k instead of tl.trans(b_k) @ b_w
+            # Compute dm update for backward
             b_kw = tl.dot(tl.trans(b_w), b_k.to(b_w.dtype))
-            b_m_i = b_diag - b_kw
+            if USE_BG:
+                # DPLR mode: dM = (diag + w^T @ bg) @ dM
+                b_m_i = b_diag + b_kw
+            else:
+                # GDN/KDA mode: dM = (diag - w^T @ k) @ dM
+                b_m_i = b_diag - b_kw
             # Keep m chain in fp32 to avoid precision loss from repeated bf16 casting
             b_m = tl.dot(b_m_i.to(tl.float32), b_m.to(tl.float32))
 
@@ -719,6 +800,8 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     u: torch.Tensor,
     g: torch.Tensor | None = None,
     gk: torch.Tensor | None = None,
+    bg: torch.Tensor | None = None,
+    v: torch.Tensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     cu_seqlens: torch.LongTensor | None = None,
     use_exp2: bool = False,
@@ -750,12 +833,16 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     if not context.is_last_rank:
         BLOCK_SIZE = 32 if K <= 64 else 64
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
+        # For DPLR, v provides the original v for computing h contributions,
+        # while u remains the WY-processed values (A_ab @ A_ak @ v) for v_new = w @ h + u.
         pre_process_fwd_kernel_merged[grid](
             k=k,
-            v=u,
+            v=u if v is None else v,
             w=w,
             g=g,
             gk=gk,
+            bg=bg,
+            u=u,
             hm=hm,
             cu_seqlens=cu_seqlens[-2:],
             T=T,
@@ -801,6 +888,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     dv: torch.Tensor,
     g: torch.Tensor | None = None,
     gk: torch.Tensor | None = None,
+    bg: torch.Tensor | None = None,
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     use_exp2: bool = False,
@@ -836,7 +924,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         grid = (triton.cdiv(V, BLOCK_SIZE) + triton.cdiv(K, BLOCK_SIZE), HV)
         pre_process_bwd_kernel_merged[grid](
             q=q,
-            k=k,
+            k=k if bg is None else bg,
             w=w,
             g=g,
             gk=gk,
@@ -854,6 +942,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             BK1=BK,
             USE_EXP2=use_exp2,
             BLOCK_SIZE=BLOCK_SIZE,
+            USE_BG=bg is not None,
         )
 
     ag_dhm, _ = all_gather_into_tensor(dhm, group=context.group)
