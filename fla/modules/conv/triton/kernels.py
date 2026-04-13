@@ -325,10 +325,11 @@ def causal_conv1d_bwd_kernel(
 @triton.autotune(
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps)
-        for BD in [16, 32, 64, 128, 256]
-        for num_warps in [8, 16, 32]
+        for BD in [8, 16, 32, 64, 128, 256]
+        for num_warps in NUM_WARPS_AUTOTUNE
     ],
-    key=['D'],
+    key=['D', 'W'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def causal_conv1d_update_kernel(

@@ -13,7 +13,6 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.utils import input_guard
 
 from .kernels import (
-    STATIC_WARPS,
     causal_conv1d_bwd_kernel,
     causal_conv1d_fwd_kernel,
     causal_conv1d_states_fwd_kernel,
