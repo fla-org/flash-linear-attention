@@ -31,24 +31,17 @@ With the bug:  all heads read head 0's gk (=0 in both A and B) → dh identical
 With the fix:  heads 1+ read their own gk → dh very different between A and B
 """
 
-import logging
 import os
 import tempfile
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 import triton
 
-from fla.ops.cp import build_cp_context
 from fla.ops.cp.chunk_delta_h import pre_process_bwd_kernel_merged
-from fla.ops.kda import chunk_kda
-from fla.utils import assert_close, device
+from fla.utils import device
 
 os.environ["FLA_ALWAYS_CHECK_CACHE"] = "1"
-
-logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
 class TestBwdGkOffset:
@@ -118,6 +111,7 @@ class TestBwdGkOffset:
             q=q, k=k, w=w, g=None, gk=gk_zero, do=do, dhm=dhm_a, dv=dv,
             cu_seqlens=cu_seqlens, scale=1.0, T=T, H=H, HV=H, K=K, V=V,
             BT=BT, BK1=BK, USE_EXP2=True, BLOCK_SIZE=BLOCK_SIZE,
+            USE_BG=False,
         )
 
         # Run B: head 0 = 0, heads 1+ = -10
@@ -126,6 +120,7 @@ class TestBwdGkOffset:
             q=q, k=k, w=w, g=None, gk=gk_diff, do=do, dhm=dhm_b, dv=dv,
             cu_seqlens=cu_seqlens, scale=1.0, T=T, H=H, HV=H, K=K, V=V,
             BT=BT, BK1=BK, USE_EXP2=True, BLOCK_SIZE=BLOCK_SIZE,
+            USE_BG=False,
         )
 
         # Head 0: same gk (=0) in both runs → dh must be identical
@@ -148,126 +143,3 @@ class TestBwdGkOffset:
                 f"Head {h} dh ratio={ratio:.4f} is too small. "
                 f"Expected large difference due to exp2(-10) ≈ 0.001 decay."
             )
-
-
-def _cp_bwd_worker(
-    rank: int,
-    world_size: int,
-    T: int,
-    H: int,
-    D: int,
-    port: int,
-):
-    """Worker for CP backward correctness test."""
-    try:
-        os.environ['TRITON_CACHE_DIR'] = tempfile.mkdtemp()
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = str(port)
-        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-        torch.cuda.set_device(rank)
-        dev = torch.device(f'cuda:{rank}')
-
-        import math
-        torch.manual_seed(42)
-
-        B = 1
-        q = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16)
-        k = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16)
-        v = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16)
-        g = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16)
-        beta = torch.randn(B, T, H, device=dev, dtype=torch.bfloat16).sigmoid()
-        do_t = torch.randn(B, T, H, D, device=dev, dtype=torch.bfloat16)
-
-        num_even_heads = triton.next_power_of_2(H)
-        A_log = torch.log(torch.empty(num_even_heads, dtype=torch.float32, device=dev).uniform_(1, 16))
-        proj_size = H * D
-        dt = torch.exp(torch.rand(proj_size, device=dev) * (math.log(0.1) -
-                       math.log(0.001)) + math.log(0.001)).clamp_(min=1e-4)
-        dt_bias = dt + torch.log(-torch.expm1(-dt))
-
-        cu_seqlens = torch.tensor([0, T], device=dev, dtype=torch.long)
-
-        # Non-CP reference on rank 0
-        ref_dq = ref_dk = ref_dv = ref_dg = ref_db = ref_out = None
-        if rank == 0:
-            q_ref = q.clone().requires_grad_(True)
-            k_ref = k.clone().requires_grad_(True)
-            v_ref = v.clone().requires_grad_(True)
-            g_ref = g.clone().requires_grad_(True)
-            beta_ref = beta.clone().requires_grad_(True)
-
-            o_ref, _ = chunk_kda(
-                q=q_ref, k=k_ref, v=v_ref, g=g_ref, beta=beta_ref,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
-                safe_gate=True, lower_bound=-5.0,
-                A_log=A_log[:H].contiguous(), dt_bias=dt_bias,
-            )
-            o_ref.backward(do_t)
-            ref_out = o_ref.detach()
-            ref_dq, ref_dk, ref_dv = q_ref.grad.detach(), k_ref.grad.detach(), v_ref.grad.detach()
-            ref_dg, ref_db = g_ref.grad.detach(), beta_ref.grad.detach()
-
-        # CP run
-        dist.barrier()
-        context = build_cp_context(cu_seqlens, group=dist.group.WORLD)
-
-        chunk = T // world_size
-        sl = slice(rank * chunk, (rank + 1) * chunk)
-        q_l = q[:, sl].clone().requires_grad_(True)
-        k_l = k[:, sl].clone().requires_grad_(True)
-        v_l = v[:, sl].clone().requires_grad_(True)
-        g_l = g[:, sl].clone().requires_grad_(True)
-        beta_l = beta[:, sl].clone().requires_grad_(True)
-
-        o_l, _ = chunk_kda(
-            q=q_l, k=k_l, v=v_l, g=g_l, beta=beta_l,
-            cp_context=context,
-            use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
-            safe_gate=True, lower_bound=-5.0,
-            A_log=A_log[:H].contiguous(), dt_bias=dt_bias,
-        )
-        o_l.backward(do_t[:, sl])
-
-        # Gather
-        def gather(t):
-            out = [torch.zeros_like(t) for _ in range(world_size)]
-            dist.all_gather(out, t)
-            return torch.cat(out, dim=1)
-
-        o_cp = gather(o_l.detach())
-        dq_cp = gather(q_l.grad)
-        dk_cp = gather(k_l.grad)
-        dv_cp = gather(v_l.grad)
-        dg_cp = gather(g_l.grad)
-        db_cp = gather(beta_l.grad)
-
-        if rank == 0:
-            for name, ref, cp in [
-                ("o", ref_out, o_cp), ("dq", ref_dq, dq_cp),
-                ("dk", ref_dk, dk_cp), ("dv", ref_dv, dv_cp),
-                ("dg", ref_dg, dg_cp), ("db", ref_db, db_cp),
-            ]:
-                assert_close(name, ref, cp, ratio=5e-3)
-
-        dist.barrier()
-        dist.destroy_process_group()
-    except Exception:
-        if dist.is_initialized():
-            dist.destroy_process_group()
-        raise
-
-
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need 2+ GPUs")
-def test_cp2_kda_backward():
-    """
-    End-to-end test: CP2 KDA backward matches non-CP reference.
-
-    For a single sequence evenly split across 2 ranks, the CP and non-CP
-    results should be numerically identical (no varlen precision differences).
-    """
-    mp.start_processes(
-        _cp_bwd_worker,
-        args=(2, 2048, 4, 128, 29530),
-        nprocs=2, join=True, start_method='spawn',
-    )

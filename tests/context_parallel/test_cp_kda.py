@@ -375,7 +375,7 @@ def run_cp_kda_test_worker(
         if rank == 0:
             print(f"\n[{test_name}] Verifying results...")
 
-            # Tolerance: ratio=2e-2 for all tensors.
+            # Tolerance: ratio=8e-3 for all tensors.
             # KDA CP has ~0.7-1.2% error from per-dim gating + L2 norm
             # amplifying bf16 state communication precision loss.
             # db (beta grad) involves cross-rank reduction → higher error
@@ -392,7 +392,7 @@ def run_cp_kda_test_worker(
             try:
                 for name, ref, cp in tensors_to_verify:
                     warn = (name == "db")
-                    assert_close(name, ref, cp, ratio=2e-2, warning=warn)
+                    assert_close(name, ref, cp, ratio=8e-3, warning=warn)
                 print(f"✅ [{test_name}] Test Passed!\n")
             except AssertionError as e:
                 print(f"❌ [{test_name}] Test Failed: {e}\n")
