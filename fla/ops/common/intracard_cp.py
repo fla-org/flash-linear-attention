@@ -262,6 +262,8 @@ def intracard_pre_scan(
         w=w,
         g=g,
         gk=gk,
+        bg=None,
+        u=u,
         hm=hm,
         cu_seqlens=cu_seqlens_subseq_split,
         T=0,
