@@ -16,6 +16,7 @@ def parallel_forgetting_attn(
     v: torch.Tensor,
     g: torch.Tensor,
     scale: float | None = None,
+    window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     **kwargs
 ) -> torch.Tensor:
@@ -33,6 +34,10 @@ def parallel_forgetting_attn(
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        window_size (Optional[int]):
+            Sliding window size. If provided, each query at position i only attends to
+            keys in `[i - window_size + 1, i]`. If `None`, full causal attention is used.
+            Default: `None`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -51,5 +56,5 @@ def parallel_forgetting_attn(
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
 
-    o = parallel_attn(q, k, v, g, scale, cu_seqlens=cu_seqlens)
+    o = parallel_attn(q, k, v, g, scale, window_size=window_size, cu_seqlens=cu_seqlens)
     return o
