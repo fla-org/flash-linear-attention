@@ -18,8 +18,8 @@ from fla.utils import check_shared_mem
 
 @lru_cache(maxsize=64)
 def _build_kernel(
-    B, T_val, H, K, V, NT, BT, BK, BV, NK,
-    total_h, hD1, hD2,
+    B, H, K, V, BT, BK, BV, NK,
+    hD1, hD2,
     dtype_str,
     USE_G, USE_DW, USE_EXP2, TRANSPOSE_STATE, IS_VARLEN=False,
     num_warps=4,
@@ -30,28 +30,28 @@ def _build_kernel(
     threads = num_warps * 32
     tile_hD1, tile_hD2 = (BV, BK) if TRANSPOSE_STATE else (BK, BV)
 
-    # 4D tensor shapes: (B, T, H, D) — matches original layout, no flattening.
-    # TileLang's LegalizeSafeMemoryAccess pass auto-handles OOB reads (zero-fill)
-    # and OOB writes (skip) so no padding is needed.
-    qk_s = (B, T_val, H, K)
-    v_s = (B, T_val, H, V)
-    h_s = (total_h, hD1, hD2)
-    g_s = (B, T_val, H)
-    dg_s = (NK, B, T_val, H)
-
     @tilelang.jit(pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
     def make_kernel(
-        _B=B, _T=T_val, _H=H, _K=K, _V=V,
-        _NT=NT, _BT=BT, _BK=BK, _BV=BV, _NK=NK,
+        _B=B, _H=H, _K=K, _V=V,
+        _BT=BT, _BK=BK, _BV=BV, _NK=NK,
         _NV=NV, _hD1=hD1, _hD2=hD2, _thD1=tile_hD1, _thD2=tile_hD2,
         _dtype=dtype, _threads=threads,
         _USE_G=USE_G, _USE_DW=USE_DW, _USE_EXP2=USE_EXP2, _TS=TRANSPOSE_STATE, _VAR=IS_VARLEN,
     ):
-        # Kernel body shared between varlen and non-varlen via @T.macro.
-        # All compile-time constants (_BT, _BK, etc.) are captured from closure.
+        # T, NT, total_h are dynamic (vary with sequence length, no recompilation).
+        # B, H are compile-time (stable across batches, enables fast integer division).
+        T_d, NT_d, total_h_d = T.dynamic("T, NT, total_h")
+
+        # 4D tensor shapes using dynamic T + compile-time B, H, K, V.
+        qk_s = (_B, T_d, _H, _K)
+        v_s = (_B, T_d, _H, _V)
+        h_s = (total_h_d, _hD1, _hD2)
+        g_s = (_B, T_d, _H)
+        dg_s = (_NK, _B, T_d, _H)
+
         @T.macro
         def kernel_body(q, k, v, g, h, do, dh, dq, dk, dw, dv, dg, scale,
                         i_b, i_h, i_k, t_s, T_seq, i_t_local, h_idx, k_off):
@@ -301,11 +301,11 @@ def _build_kernel(
                 dh: T.Tensor(h_s, _dtype), dq: T.Tensor(qk_s, _dtype),
                 dk: T.Tensor(qk_s, _dtype), dw: T.Tensor(qk_s, _dtype),
                 dv: T.Tensor(v_s, _dtype), dg: T.Tensor(dg_s, T.float32),
-                cu_seqlens: T.Tensor((_NT + 2,), T.int32),
-                chunk_indices: T.Tensor((_NT, 2), T.int32),
+                cu_seqlens: T.Tensor((NT_d + 2,), T.int32),
+                chunk_indices: T.Tensor((NT_d, 2), T.int32),
                 scale: T.float32,
             ):
-                with T.Kernel(_NK, _NT, _H, threads=_threads) as (i_k, i_t, i_h):
+                with T.Kernel(_NK, NT_d, _H, threads=_threads) as (i_k, i_t, i_h):
                     i_n = chunk_indices[i_t, 0]
                     i_t_local = chunk_indices[i_t, 1]
                     bos = cu_seqlens[i_n]
@@ -326,13 +326,14 @@ def _build_kernel(
                 dv: T.Tensor(v_s, _dtype), dg: T.Tensor(dg_s, T.float32),
                 scale: T.float32,
             ):
-                with T.Kernel(_NK, _NT, _B * _H, threads=_threads) as (i_k, i_t, i_bh):
+                with T.Kernel(_NK, T.ceildiv(T_d, _BT), _B * _H, threads=_threads) as (i_k, i_t, i_bh):
                     i_b = i_bh // _H
                     i_h = i_bh % _H
-                    h_idx = (i_b * _NT + i_t) * _H + i_h
+                    NT_local = T.ceildiv(T_d, _BT)
+                    h_idx = (i_b * NT_local + i_t) * _H + i_h
                     t_s = i_t * _BT
                     kernel_body(q, k, v, g, h, do, dh, dq, dk, dw, dv, dg,
-                                scale, i_b, i_h, i_k, t_s, _T, i_t,
+                                scale, i_b, i_h, i_k, t_s, T_d, i_t,
                                 h_idx, i_k * _BK)
 
         return kernel
@@ -351,7 +352,6 @@ def chunk_bwd_dqkwg_tilelang(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     IS_VARLEN = cu_seqlens is not None
-    NT = len(chunk_indices) if IS_VARLEN else triton.cdiv(T, BT)
 
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
@@ -371,13 +371,13 @@ def chunk_bwd_dqkwg_tilelang(
 
     h_flat = h.reshape(-1, h.shape[-2], h.shape[-1])
     dh_flat = dh.reshape(-1, dh.shape[-2], dh.shape[-1])
-    total_h = h_flat.shape[0]
     hD1, hD2 = h_flat.shape[-2], h_flat.shape[-1]
     dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}[q.dtype]
 
+    # Cache key: B, H, tile sizes, flags. T is dynamic (no recompilation for different seq lengths).
     kernel = _build_kernel(
-        B, T, H, K, V, NT, BT, BK, BV, NK,
-        total_h, hD1, hD2, dtype_str,
+        B, H, K, V, BT, BK, BV, NK,
+        hD1, hD2, dtype_str,
         USE_G, USE_DW, use_exp2, transpose_state_layout, IS_VARLEN,
     )
 
