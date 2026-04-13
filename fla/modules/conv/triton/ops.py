@@ -334,10 +334,8 @@ def causal_conv1d_update(
         stride_y_d=stride_y_d,
         D=D,
         W=W,
-        BD=BD,
         BW=BW,
         ACTIVATION=activation,
-        num_warps=STATIC_WARPS,
     )
     return y.view(shape), cache
 
