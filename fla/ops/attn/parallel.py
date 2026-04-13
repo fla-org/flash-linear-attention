@@ -85,10 +85,7 @@ def parallel_attn_fwd_kernel(
 
     # for sliding window, skip key blocks that are entirely outside the window.
     # the earliest key position any query in this block needs: max(0, i_t*BT - W + 1)
-    i_start = 0
-    if USE_WINDOW:
-        i_start = (i_t * BT - W + 1) // BS * BS
-        i_start = i_start * (i_start > 0)
+    i_start = tl.maximum((i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
 
     # per-query window start: the earliest key position within its sliding window.
     # used to detect when a query has not yet encountered any valid key,
@@ -263,10 +260,7 @@ def parallel_attn_bwd_kernel_dq(
 
     o_q = i_t * BT + tl.arange(0, BT)
 
-    i_start = 0
-    if USE_WINDOW:
-        i_start = (i_t * BT - W + 1) // BS * BS
-        i_start = i_start * (i_start > 0)
+    i_start = tl.maximum((i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
 
     for i_s in range(i_start, i_t * BT, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
