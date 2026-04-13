@@ -619,7 +619,6 @@ def causal_conv1d_update(
     D = x.shape[-1]
     N = x.numel() // D
     W = weight.shape[1] if weight is not None else None
-    BD = 8
     BW = triton.next_power_of_2(W)
 
     if x.dim() == 2:
