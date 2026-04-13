@@ -11,15 +11,15 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, exp2
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, TRITON_AT_MOST_3_6_0, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 # On Hopper (SM90) with Triton 3.4.0–3.6.0, ttg.local_alloc for a #linear tensor (from
-# tt.trans #mma) incorrectly emits stmatrix instead of st.shared.b32. Triton 3.3.x is
-# unaffected; behavior above 3.6.0 is unknown.
-HOPPER_TRANS_PATCH = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and TRITON_AT_MOST_3_6_0
+# tt.trans #mma) incorrectly emits stmatrix instead of st.shared.b32.
+# TODO: remove once fixed in a future Triton release.
+HOPPER_TRANS_PATCH = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0
 HOPPER_TRANS_PATCH_CONSTEXPR = tl.constexpr(HOPPER_TRANS_PATCH)
 
 
