@@ -11,15 +11,16 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp, exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, TRITON_AT_MOST_3_6_0, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
-# On Hopper (SM90) with Triton 3.4+, ttg.local_alloc for a #linear tensor (from
-# tt.trans #mma) incorrectly emits stmatrix instead of st.shared.b32
-# (Triton JIT disallows plain Python globals; constexpr-wrapped values are allowed)
-IS_NVIDIA_HOPPER_CONSTEXPR = tl.constexpr(IS_NVIDIA_HOPPER)
+# On Hopper (SM90) with Triton 3.4.0–3.6.0, ttg.local_alloc for a #linear tensor (from
+# tt.trans #mma) incorrectly emits stmatrix instead of st.shared.b32. Triton 3.3.x is
+# unaffected; behavior above 3.6.0 is unknown.
+HOPPER_TRANS_PATCH = IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 and TRITON_AT_MOST_3_6_0
+HOPPER_TRANS_PATCH_CONSTEXPR = tl.constexpr(HOPPER_TRANS_PATCH)
 
 
 @triton.heuristics({
@@ -196,7 +197,7 @@ def chunk_bwd_kernel_dqkwg(
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // HV, i_bh % HV
 
-    if IS_NVIDIA_HOPPER_CONSTEXPR:
+    if HOPPER_TRANS_PATCH_CONSTEXPR:
         i_prog_t = i_t
 
     all = B * T
@@ -283,7 +284,7 @@ def chunk_bwd_kernel_dqkwg(
     m_t = o_t < T
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
 
-    if IS_NVIDIA_HOPPER_CONSTEXPR:
+    if HOPPER_TRANS_PATCH_CONSTEXPR:
         scratch_off = (i_k.to(tl.int64) * tl.num_programs(1) * (B * HV) +
                        i_prog_t.to(tl.int64) * (B * HV) + i_bh.to(tl.int64)) * (BT * BT)
         p_scr = tl.make_block_ptr(scratch + scratch_off, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0))
@@ -321,7 +322,7 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
-        if IS_NVIDIA_HOPPER_CONSTEXPR:
+        if HOPPER_TRANS_PATCH_CONSTEXPR:
             tl.store(p_scr, b_ds)
             b_ds = tl.load(p_scr)
         b_dk += tl.dot(tl.trans(b_ds), b_q)
@@ -345,7 +346,7 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
-        if IS_NVIDIA_HOPPER_CONSTEXPR:
+        if HOPPER_TRANS_PATCH_CONSTEXPR:
             tl.store(p_scr, b_ds)
             b_ds = tl.load(p_scr)
         b_dk += tl.dot(tl.trans(b_ds), b_q)
@@ -356,7 +357,7 @@ def chunk_bwd_kernel_dqkwg(
         b_ds = tl.where(m_A, b_ds, 0)
         b_ds = b_ds.to(b_k.dtype)
         b_dq += tl.dot(b_ds, b_k)
-        if IS_NVIDIA_HOPPER_CONSTEXPR:
+        if HOPPER_TRANS_PATCH_CONSTEXPR:
             tl.store(p_scr, b_ds)
             b_ds = tl.load(p_scr)
         b_dk += tl.dot(tl.trans(b_ds), b_q) * scale
@@ -760,7 +761,7 @@ def chunk_bwd_dqkwg(
 
     scratch = (
         torch.empty(NK * NT * B * HV * BT * BT, dtype=q.dtype, device=q.device)
-        if IS_NVIDIA_HOPPER else None
+        if HOPPER_TRANS_PATCH else None
     )
 
     grid = (NK, NT, B * HV)
