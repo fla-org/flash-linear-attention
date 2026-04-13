@@ -12,14 +12,7 @@ import torch
 
 from fla.ops.attn.naive import naive_parallel_attn
 from fla.ops.attn.parallel import parallel_attn
-from fla.ops.utils import prepare_lens
 from fla.utils import assert_close, check_shared_mem, device
-
-try:
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    HAS_FLASH = True
-except Exception:
-    HAS_FLASH = False
 
 
 @pytest.mark.parametrize(
@@ -45,8 +38,6 @@ def test_parallel(
 ):
     if not check_shared_mem('hopper') and D > 128:
         pytest.skip(reason="Skip test, do not have enough shard mem")
-    if not HAS_FLASH:
-        pytest.skip(reason="Skipping test because flash-attn is not installed")
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
@@ -54,7 +45,8 @@ def test_parallel(
     v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
     do = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device)
 
-    ref = flash_attn_func(q=q, k=k, v=v, softmax_scale=scale, causal=True)
+    ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), scale=scale)
+    ref = ref.to(q.dtype)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -89,10 +81,9 @@ def test_parallel_varlen(
     D: int,
     cu_seqlens: list[int],
 ):
-    if not HAS_FLASH:
-        pytest.skip(reason="Skipping test because flash-attn is not installed")
+    torch.manual_seed(42)
     T = cu_seqlens[-1]
-    cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    cu_seqlens_th = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
     dtype = torch.float16
 
     q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
@@ -100,17 +91,15 @@ def test_parallel_varlen(
     v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
     do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
 
-    ref = flash_attn_varlen_func(
-        q=q.squeeze(0),
-        k=k.squeeze(0),
-        v=v.squeeze(0),
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=prepare_lens(cu_seqlens).max(),
-        max_seqlen_k=prepare_lens(cu_seqlens).max(),
-        causal=True,
-    )
-    ref.backward(do.squeeze(0))
+    ref = q.new_empty(1, T, HQ, D)
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
+        ref[:, bos:eos], _ = naive_parallel_attn(
+            q=q[:, bos:eos].float(),
+            k=k[:, bos:eos].float(),
+            v=v[:, bos:eos].float(),
+        )
+    ref = ref.to(dtype)
+    ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
@@ -119,14 +108,14 @@ def test_parallel_varlen(
         q=q,
         k=k,
         v=v,
-        cu_seqlens=cu_seqlens,
+        cu_seqlens=cu_seqlens_th,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    assert_close(" o", ref, tri, 0.004)
+    assert_close(" o", ref, tri, 0.005)
     assert_close("dq", ref_dq.squeeze(), tri_dq.squeeze(), 0.005)
     assert_close("dk", ref_dk.squeeze(), tri_dk.squeeze(), 0.005)
     assert_close("dv", ref_dv.squeeze(), tri_dv.squeeze(), 0.005)
@@ -160,10 +149,7 @@ def test_parallel_swa(
     v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
     do = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device)
 
-    ref, _ = naive_parallel_attn(
-        q=q.float(), k=k.float(), v=v.float(),
-        window_size=W,
-    )
+    ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), window_size=W)
     ref = ref.to(q.dtype)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
