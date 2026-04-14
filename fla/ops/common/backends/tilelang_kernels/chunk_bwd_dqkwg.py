@@ -80,7 +80,6 @@ def _build_kernel(
             for _i in T.Parallel(1):
                 s_dg_last_acc[0] = 0.0
             T.sync_threads()
-            s_hdh = T.alloc_shared((_thD1, _thD2), T.float32)
 
         # ========== V-loop ==========
         for i_v_py in T.Pipelined(_NV, num_stages=2):
@@ -102,26 +101,14 @@ def _build_kernel(
             # the downstream gemms are what the pipeline recognizes as consumers,
             # so they act as the barrier against the next iter's prefetch.
             if _USE_G:
-                for _i, _j in T.Parallel(_thD1, _thD2):
-                    s_hdh[_i, _j] = T.cast(s_h[_i, _j], T.float32) * T.cast(s_dh[_i, _j], T.float32)
-                T.sync_threads()
                 f_hdh = T.alloc_fragment((_thD1, _thD2), T.float32)
-                T.copy(s_hdh, f_hdh)
+                for _i, _j in T.Parallel(_thD1, _thD2):
+                    f_hdh[_i, _j] = T.cast(s_h[_i, _j], T.float32) * T.cast(s_dh[_i, _j], T.float32)
                 f_hdh_row = T.alloc_fragment((_thD1,), T.float32)
                 T.reduce_sum(f_hdh, f_hdh_row, dim=1)
-                s_hdh_row = T.alloc_shared((_thD1,), T.float32)
-                T.copy(f_hdh_row, s_hdh_row)
-                T.sync_threads()
-                s_hdh_scalar = T.alloc_shared((1,), T.float32)
-                for _i in T.Parallel(1):
-                    acc = T.alloc_local((1,), T.float32)
-                    acc[0] = 0.0
-                    for _j in T.serial(_thD1):
-                        acc[0] = acc[0] + s_hdh_row[_j]
-                    s_hdh_scalar[0] = acc[0]
-                T.sync_threads()
-                s_dg_last_acc[0] = s_dg_last_acc[0] + s_hdh_scalar[0]
-                T.sync_threads()
+                f_hdh_scalar = T.alloc_fragment((1,), T.float32)
+                T.reduce_sum(f_hdh_row, f_hdh_scalar, dim=0)
+                s_dg_last_acc[0] = s_dg_last_acc[0] + f_hdh_scalar[0]
 
             if _TS:
                 T.gemm(s_do, s_h, b_dq)
@@ -193,25 +180,15 @@ def _build_kernel(
             f_dg2 = T.alloc_fragment((_BT,), T.float32)
             T.reduce_sum(f_prod1, f_dg1, dim=1)
             T.reduce_sum(f_prod2, f_dg2, dim=1)
-            # f_dg_diff = dq*q - dk*k in fragment (both from T.reduce_sum, same layout)
             f_dg_diff = T.alloc_fragment((_BT,), T.float32)
             for _i in T.Parallel(_BT):
                 f_dg_diff[_i] = f_dg1[_i] - f_dg2[_i]
             s_dg = T.alloc_shared((_BT,), T.float32)
-            s_tmp1d = T.alloc_shared((_BT,), T.float32)
             T.copy(f_dg_diff, s_dg)
-            T.copy(f_dg2, s_tmp1d)  # kept for scalar sum below
-            T.sync_threads()
-            # b_dg_last += sum(dk*k) via serial sum on shared
-            s_scalar = T.alloc_shared((1,), T.float32)
-            for _i in T.Parallel(1):
-                acc_all = T.alloc_local((1,), T.float32)
-                acc_all[0] = 0.0
-                for _j in T.serial(_BT):
-                    acc_all[0] = acc_all[0] + s_tmp1d[_j]
-                s_scalar[0] = acc_all[0]
-            T.sync_threads()
-            b_dg_last = b_dg_last + s_scalar[0]
+            # b_dg_last += sum(dk*k) via fragment reduce (f_dg2 → scalar)
+            f_dkk_scalar = T.alloc_fragment((1,), T.float32)
+            T.reduce_sum(f_dg2, f_dkk_scalar, dim=0)
+            b_dg_last = b_dg_last + f_dkk_scalar[0]
 
             # b_ds = where(causal, b_ds * exp(g_i - g_j), 0) * scale
             for _i, _j in T.Parallel(_BT, _BT):
