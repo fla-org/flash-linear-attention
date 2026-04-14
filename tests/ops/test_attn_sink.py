@@ -37,7 +37,7 @@ def test_parallel_attn_sink_matches_reference(window_size, cu_seqlens):
     q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
     k = torch.randn((B, T, H, D), dtype=dtype, device=device)
     v = torch.randn((B, T, H, D), dtype=dtype, device=device)
-    sinks = torch.randn((HQ,), dtype=torch.float32, device=device) * 0.7
+    sinks = torch.randn((HQ,), dtype=torch.float32, device=device)
     do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
 
     q_ref = q.float().detach().clone().requires_grad_(True)
@@ -86,7 +86,7 @@ def test_parallel_attn_sink_empty_row_matches_reference():
     q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
     k = torch.randn((B, T, H, D), dtype=dtype, device=device)
     v = torch.randn((B, T, H, D), dtype=dtype, device=device)
-    sinks = torch.randn((HQ,), dtype=torch.float32, device=device) * 0.7
+    sinks = torch.randn((HQ,), dtype=torch.float32, device=device)
     do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
 
     q_ref = q.float().detach().clone().requires_grad_(True)
@@ -137,7 +137,7 @@ def test_parallel_attn_sink_with_g_matches_reference(window_size, cu_seqlens):
     k = torch.randn((B, T, H, D), dtype=dtype, device=device)
     v = torch.randn((B, T, H, D), dtype=dtype, device=device)
     g = torch.empty((B, T, HQ), dtype=dtype, device=device).uniform_(-0.1, -0.01)
-    sinks = torch.randn((HQ,), dtype=torch.float32, device=device) * 0.7
+    sinks = torch.randn((HQ,), dtype=torch.float32, device=device)
     do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
 
     q_ref = q.float().detach().clone().requires_grad_(True)
@@ -207,7 +207,7 @@ def test_attn_decoding_sink_matches_reference():
     q = torch.randn((1, B, HQ, D), dtype=dtype, device=device)
     k = torch.randn((1, T * B, H, D), dtype=dtype, device=device)
     v = torch.randn((1, T * B, H, D), dtype=dtype, device=device)
-    sinks = torch.randn((HQ,), dtype=torch.float32, device=device) * 0.7
+    sinks = torch.randn((HQ,), dtype=torch.float32, device=device)
     cu_seqlens = torch.tensor([i * T for i in range(B + 1)], dtype=torch.int32, device=device)
 
     refs = []
