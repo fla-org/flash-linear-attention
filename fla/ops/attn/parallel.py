@@ -122,9 +122,9 @@ def parallel_attn_fwd_kernel(
 
         # [BT, BS]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        # when the key block is entirely before a query's window, b_m is still -inf.
-        # replace with 0 so that exp2(-inf - 0) = 0 instead of exp2(-inf - (-inf)) = NaN
-        b_mw = tl.where((i_s + BS - 1) < o_w, 0., b_m) if USE_WINDOW else b_m
+        # Keep the online softmax pivot finite for rows that still have no valid key.
+        # This matches sglang's masked-row stabilization and avoids -inf - (-inf) = NaN.
+        b_mw = tl.where(b_m == float('-inf'), 0., b_m)
         b_r = exp2(b_mp - b_mw)
         b_p = exp2(b_s - b_mw[:, None])
         # [BT]
@@ -159,7 +159,7 @@ def parallel_attn_fwd_kernel(
 
         # [BT]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        b_mw = tl.where((i_s + BS - 1) < o_w, 0., b_m) if USE_WINDOW else b_m
+        b_mw = tl.where(b_m == float('-inf'), 0., b_m)
         b_r = exp2(b_mp - b_mw)
         b_p = exp2(b_s - b_mw[:, None])
         # [BT]
@@ -169,6 +169,10 @@ def parallel_attn_fwd_kernel(
         b_mp = b_m
 
     if USE_SINK:
+        # When a row has no valid key at all, b_m is still -inf here.
+        # Use a finite pivot before merging the sink mass so lse becomes the sink logit
+        # instead of hitting the -inf + inf = NaN path.
+        b_m = tl.where(b_m == float('-inf'), 0., b_m)
         # Match sglang's denominator-only sink update in extend_attention.py:
         # https://github.com/sgl-project/sglang/blob/6760c790bd5401b6793adc6761a04b8872caebf7/python/sglang/srt/layers/attention/triton_ops/extend_attention.py#L940-L943
         b_acc += exp2(b_sink - b_m)

@@ -77,6 +77,44 @@ def test_parallel_attn_sink_matches_reference(window_size, cu_seqlens):
     assert_close("ds_ref_vs_sg", sinks_ref.grad, sinks_sg.grad, 0.02)
 
 
+def test_parallel_attn_sink_empty_row_matches_reference():
+    torch.manual_seed(987)
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
+
+    dtype = torch.float16
+    B, T, H, HQ, D = 2, 96, 2, 8, 64
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    sinks = torch.randn((HQ,), dtype=torch.float32, device=device) * 0.7
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+
+    q_ref = q.float().detach().clone().requires_grad_(True)
+    k_ref = k.float().detach().clone().requires_grad_(True)
+    v_ref = v.float().detach().clone().requires_grad_(True)
+    sinks_ref = sinks.detach().clone().requires_grad_(True)
+    o_ref, _ = naive_parallel_attn(
+        q_ref, k_ref, v_ref, sinks=sinks_ref, scale=0.1, window_size=0
+    )
+    o_ref = o_ref.to(dtype)
+    o_ref.backward(do)
+
+    q_tri = q.detach().clone().requires_grad_(True)
+    k_tri = k.detach().clone().requires_grad_(True)
+    v_tri = v.detach().clone().requires_grad_(True)
+    sinks_tri = sinks.detach().clone().requires_grad_(True)
+    o_tri = parallel_attn(
+        q=q_tri, k=k_tri, v=v_tri, sinks=sinks_tri, scale=0.1, window_size=0
+    )
+    o_tri.backward(do)
+
+    assert_close(" o_ref_vs_tri", o_ref, o_tri, 0.01)
+    assert_close("dq_ref_vs_tri", q_ref.grad.to(dtype), q_tri.grad, 0.02)
+    assert_close("dk_ref_vs_tri", k_ref.grad.to(dtype), k_tri.grad, 0.02)
+    assert_close("dv_ref_vs_tri", v_ref.grad.to(dtype), v_tri.grad, 0.02)
+    assert_close("ds_ref_vs_tri", sinks_ref.grad, sinks_tri.grad, 0.02)
+
+
 @pytest.mark.parametrize(
     ("window_size", "cu_seqlens"),
     [
