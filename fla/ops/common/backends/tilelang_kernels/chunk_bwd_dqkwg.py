@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from functools import lru_cache
+
 import tilelang
 import tilelang.language as T
 import torch
@@ -14,6 +16,7 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.utils import check_shared_mem
 
 
+@lru_cache(maxsize=64)
 def _build_kernel(
     B, H, K, V, BT, BK, BV, NK,
     hD1, hD2,
