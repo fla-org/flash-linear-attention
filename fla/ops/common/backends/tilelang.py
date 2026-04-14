@@ -55,6 +55,11 @@ class TileLangBackend(BaseBackend):
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
             return False, "TileLang backend does not support g_gamma"
+        if v.shape[2] != k.shape[2]:
+            return False, (
+                "TileLang backend does not support GQA (v has more heads than k); "
+                "use repeat_interleave on k/q to match v's head count, or fall back to Triton"
+            )
         return True, None
 
     def chunk_bwd_dqkwg(
