@@ -164,7 +164,7 @@ def _build_kernel(
                 s_g = T.alloc_shared((_BT,), T.float32)
                 T.copy(g[i_b, t_s:t_s + _BT, i_h], s_g, disable_tma=True)
 
-                last_pos = T.min(_BT, T_seq - i_t_local * _BT) - 1
+                last_pos = T.max(0, T.min(_BT, T_seq - i_t_local * _BT) - 1)
                 g_last = s_g[last_pos]
                 b_dg_last = T.alloc_var(T.float32)
                 b_dg_last = s_dg_last_acc[0] * (T.exp2(g_last) if _USE_EXP2 else T.exp(g_last))
