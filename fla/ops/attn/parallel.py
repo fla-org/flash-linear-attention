@@ -18,6 +18,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem
 
 @triton.heuristics({
     'USE_G': lambda args: args['g_cumsum'] is not None,
+    'USE_SINK': lambda args: args['sinks'] is not None,
     'USE_WINDOW': lambda args: args['W'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
@@ -28,6 +29,7 @@ def parallel_attn_fwd_kernel(
     v,
     o,
     g_cumsum,
+    sinks,
     lse,
     scale,
     cu_seqlens,
@@ -45,6 +47,7 @@ def parallel_attn_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_SINK: tl.constexpr,
     USE_WINDOW: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -79,6 +82,11 @@ def parallel_attn_fwd_kernel(
         b_gq = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
     else:
         b_gq = None
+
+    if USE_SINK:
+        b_sink = tl.load(sinks + i_hq).to(tl.float32)
+    else:
+        b_sink = None
 
     # [BT]
     o_q = i_t * BT + tl.arange(0, BT)
@@ -159,6 +167,11 @@ def parallel_attn_fwd_kernel(
         # [BT, BV]
         b_o = b_o * b_r[:, None] + tl.dot(b_p.to(b_q.dtype), b_v)
         b_mp = b_m
+
+    if USE_SINK:
+        # Match sglang's denominator-only sink update in extend_attention.py:
+        # https://github.com/sgl-project/sglang/blob/6760c790bd5401b6793adc6761a04b8872caebf7/python/sglang/srt/layers/attention/triton_ops/extend_attention.py#L940-L943
+        b_acc += exp2(b_sink - b_m)
 
     b_o = b_o / b_acc[:, None]
     b_m += log2(b_acc)
@@ -496,6 +509,7 @@ def parallel_attn_fwd(
     k: torch.Tensor,
     v: torch.Tensor,
     g_cumsum: torch.Tensor,
+    sinks: torch.Tensor | None,
     scale: float,
     window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
@@ -537,6 +551,7 @@ def parallel_attn_fwd(
         v=v,
         o=o,
         g_cumsum=g_cumsum,
+        sinks=sinks,
         lse=lse,
         scale=scale,
         cu_seqlens=cu_seqlens,
@@ -686,7 +701,7 @@ def parallel_attn_bwd(
     dv = reduce(dv, 'b t (h g) v -> b t h v', g=G, reduction='sum')
     if g_cumsum is not None:
         dg_cumsum.add_(dg_cumsum_k)
-    return dq, dk, dv, dg_cumsum
+    return dq, dk, dv, dg_cumsum, delta
 
 
 @torch.compile
@@ -695,22 +710,24 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @staticmethod
     @contiguous
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, g, scale, window_size, cu_seqlens, chunk_indices=None):
+    def forward(ctx, q, k, v, g, sinks, scale, window_size, cu_seqlens, chunk_indices=None):
         ctx.dtype = q.dtype
 
         RCP_LN2: float = 1.4426950216
         g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, scale=RCP_LN2) if g is not None else None
+        sinks = sinks * RCP_LN2 if sinks is not None else None
         o, lse = parallel_attn_fwd(
             q=q,
             k=k,
             v=v,
             g_cumsum=g_cumsum,
+            sinks=sinks,
             scale=scale,
             window_size=window_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, k, v, o, g_cumsum, lse)
+        ctx.save_for_backward(q, k, v, o, g_cumsum, lse, sinks)
         ctx.scale = scale
         ctx.window_size = window_size
         ctx.cu_seqlens = cu_seqlens
@@ -720,8 +737,8 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @contiguous
     @autocast_custom_bwd
     def backward(ctx, do):
-        q, k, v, o, g_cumsum, lse = ctx.saved_tensors
-        dq, dk, dv, dg = parallel_attn_bwd(
+        q, k, v, o, g_cumsum, lse, sinks = ctx.saved_tensors
+        dq, dk, dv, dg, delta = parallel_attn_bwd(
             q=q,
             k=k,
             v=v,
@@ -736,7 +753,12 @@ class ParallelAttentionFunction(torch.autograd.Function):
         if dg is not None:
             dg = chunk_global_cumsum(dg, cu_seqlens=ctx.cu_seqlens, reverse=True)
 
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, None, None
+        dsinks = None
+        if sinks is not None:
+            p_sink = torch.exp2(sinks[None, None, :] - lse)
+            dsinks = -(p_sink * delta).sum((0, 1))
+
+        return dq.to(q), dk.to(k), dv.to(v), dg, dsinks, None, None, None, None
 
 
 def parallel_attn(
@@ -748,6 +770,8 @@ def parallel_attn(
     window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
+    *,
+    sinks: torch.Tensor | None = None,
     **kwargs
 ) -> torch.Tensor:
     r"""
@@ -771,6 +795,8 @@ def parallel_attn(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        sinks (Optional[torch.Tensor]):
+            Per-query-head sink logits of shape `[HQ]`.
 
     Returns:
         o (torch.Tensor):
@@ -785,6 +811,10 @@ def parallel_attn(
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
+    if sinks is not None:
+        assert sinks.shape == (q.shape[2],), "sinks must have shape [HQ]"
 
-    o = ParallelAttentionFunction.apply(q, k, v, g, scale, window_size, cu_seqlens, chunk_indices)
+    o = ParallelAttentionFunction.apply(
+        q, k, v, g, sinks, scale, window_size, cu_seqlens, chunk_indices
+    )
     return o

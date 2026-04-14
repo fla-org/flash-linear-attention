@@ -16,6 +16,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 @triton.heuristics({
     'USE_G': lambda args: args['g_cumsum'] is not None,
+    'USE_SINK': lambda args: args['sinks'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -33,6 +34,7 @@ def naive_attn_decoding_kernel(
     v,
     o,
     g_cumsum,
+    sinks,
     scale,
     gate_scale,
     cu_seqlens,
@@ -47,6 +49,7 @@ def naive_attn_decoding_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_SINK: tl.constexpr,
 ):
     i_v, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -71,6 +74,11 @@ def naive_attn_decoding_kernel(
         b_gq = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
     else:
         b_gq = None
+
+    if USE_SINK:
+        b_sink = tl.load(sinks + i_hq).to(tl.float32)
+    else:
+        b_sink = None
 
     for i_s in range(0, T, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_s, 0), (BS, BK), (1, 0))
@@ -100,6 +108,9 @@ def naive_attn_decoding_kernel(
         # [BT, BV]
         b_o = b_o * b_r + tl.sum(b_p[:, None] * b_v, 0)
         b_mp = b_m
+
+    if USE_SINK:
+        b_acc += exp(b_sink - b_m)
     b_o = b_o / b_acc
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, ))
 
@@ -112,6 +123,8 @@ def attn_decoding_one_step(
     scale: float | None = None,
     cu_seqlens: torch.LongTensor = None,
     do_gate_scale: bool = False,
+    *,
+    sinks: torch.Tensor | None = None,
 ):
     r"""
     Args:
@@ -133,6 +146,8 @@ def attn_decoding_one_step(
         do_gate_scale (bool):
             Whether to apply gate scale. Default: `False`. If `True`, the attention scale will also be applied
             to the gating bias term in Forgetting Transformer or PaTH-FoX.
+        sinks (Optional[torch.Tensor]):
+            Per-query-head sink logits of shape `[HQ]`.
 
     Returns:
         o (torch.Tensor):
@@ -145,6 +160,8 @@ def attn_decoding_one_step(
     G = HQ // H
     if scale is None:
         scale = K ** -0.5
+    if sinks is not None:
+        assert sinks.shape == (HQ,), "sinks must have shape [HQ]"
 
     BK = max(triton.next_power_of_2(K), 16)
     if check_shared_mem('hopper', q.device.index):
@@ -168,6 +185,7 @@ def attn_decoding_one_step(
         v=v,
         o=o,
         g_cumsum=g_cumsum,
+        sinks=sinks,
         scale=scale,
         gate_scale=gate_scale,
         cu_seqlens=cu_seqlens,
