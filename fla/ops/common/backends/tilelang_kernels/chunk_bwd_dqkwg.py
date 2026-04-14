@@ -14,9 +14,6 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.utils import check_shared_mem
 
 
-# Rely on TileLang's own JIT cache keyed by (shapes, dtypes, pass configs).
-# Adding functools.lru_cache on top was redundant and, at least in our Hopper
-# CI, appeared to return a stale compiled kernel across unrelated test invocations.
 def _build_kernel(
     B, H, K, V, BT, BK, BV, NK,
     hD1, hD2,
@@ -79,11 +76,6 @@ def _build_kernel(
                 for _i in T.Parallel(1):
                     s_dg_last_acc[0] = 0.0
                 T.sync_threads()
-                # Dedicated h·dh shared buffer allocated OUTSIDE the pipelined loop.
-                # s_h/s_dh inside T.Pipelined are double-buffered by the pipeline;
-                # any T.Parallel read of them races with the next iter's T.copy load
-                # because the pipeline doesn't track T.Parallel as a consumer.
-                # Copying through a dedicated non-pipelined buffer breaks the race.
                 s_hdh = T.alloc_shared((_thD1, _thD2), T.float32)
 
             # ========== V-loop ==========
@@ -102,13 +94,9 @@ def _build_kernel(
 
                 T.gemm(s_do, s_v, b_ds, transpose_B=True)
 
-                # dg_last: h*dh sum must run BEFORE any T.gemm that consumes s_h/s_dh.
-                # The pipeline scheduler tracks T.gemm as a consumer and won't prefetch
-                # the next iter's h/dh into the same double-buffered slot until those
-                # gemms finish. Running the reduction first makes the downstream gemms
-                # act as the effective barrier against the next-iter prefetch — without
-                # the reduction would race with the prefetch on Hopper (observed dg
-                # error 15% on H100 despite correctness on Blackwell).
+                # h·dh reduction must precede the gemms that consume s_h/s_dh:
+                # the downstream gemms are what the pipeline recognizes as consumers,
+                # so they act as the barrier against the next iter's prefetch.
                 if _USE_G:
                     f_h_tmp = T.alloc_fragment((_thD1, _thD2), T.float32)
                     f_dh_tmp = T.alloc_fragment((_thD1, _thD2), T.float32)
