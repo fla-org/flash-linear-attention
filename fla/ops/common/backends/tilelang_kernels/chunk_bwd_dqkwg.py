@@ -102,14 +102,8 @@ def _build_kernel(
             # the downstream gemms are what the pipeline recognizes as consumers,
             # so they act as the barrier against the next iter's prefetch.
             if _USE_G:
-                f_h_tmp = T.alloc_fragment((_thD1, _thD2), T.float32)
-                f_dh_tmp = T.alloc_fragment((_thD1, _thD2), T.float32)
-                T.copy(s_h, f_h_tmp)
-                T.copy(f_h_tmp, s_hdh)
-                T.copy(s_dh, f_dh_tmp)
-                T.sync_threads()
                 for _i, _j in T.Parallel(_thD1, _thD2):
-                    s_hdh[_i, _j] = s_hdh[_i, _j] * f_dh_tmp[_i, _j]
+                    s_hdh[_i, _j] = T.cast(s_h[_i, _j], T.float32) * T.cast(s_dh[_i, _j], T.float32)
                 T.sync_threads()
                 f_hdh = T.alloc_fragment((_thD1, _thD2), T.float32)
                 T.copy(s_hdh, f_hdh)
@@ -187,36 +181,26 @@ def _build_kernel(
                     b_dk[_i, _j] * (T.exp2(-s_g[_i] + g_last) if _USE_EXP2 else T.exp(-s_g[_i] + g_last)),
                     0.0)
 
-            # Batched dg reductions: write both b_dq and b_dk to shared
-            # in one round to reduce syncthreads count.
-            s_A1 = T.alloc_shared((_BT, _BK), T.float32)
-            s_A2 = T.alloc_shared((_BT, _BK), T.float32)
-            T.copy(b_dq, s_A1)
-            T.copy(b_dk, s_A2)
-            T.sync_threads()
-            # Multiply both with q/k in shared
-            for _i, _j in T.Parallel(_BT, _BK):
-                s_A1[_i, _j] = s_A1[_i, _j] * s_q[_i, _j]
-                s_A2[_i, _j] = s_A2[_i, _j] * s_k[_i, _j]
-            T.sync_threads()
-            # Reduce both: dq*q → dg_add, dk*k → dg_sub
+            # dq*q and dk*k reductions: compute products directly in fragments
+            # via fragment×shared (safe per pattern 174). Avoids the shared
+            # round-trip through s_A1/s_A2.
             f_prod1 = T.alloc_fragment((_BT, _BK), T.float32)
             f_prod2 = T.alloc_fragment((_BT, _BK), T.float32)
-            T.copy(s_A1, f_prod1)
-            T.copy(s_A2, f_prod2)
+            for _i, _j in T.Parallel(_BT, _BK):
+                f_prod1[_i, _j] = b_dq[_i, _j] * s_q[_i, _j]
+                f_prod2[_i, _j] = b_dk[_i, _j] * s_k[_i, _j]
             f_dg1 = T.alloc_fragment((_BT,), T.float32)
             f_dg2 = T.alloc_fragment((_BT,), T.float32)
             T.reduce_sum(f_prod1, f_dg1, dim=1)
             T.reduce_sum(f_prod2, f_dg2, dim=1)
-            # Write both to shared
+            # f_dg_diff = dq*q - dk*k in fragment (both from T.reduce_sum, same layout)
+            f_dg_diff = T.alloc_fragment((_BT,), T.float32)
+            for _i in T.Parallel(_BT):
+                f_dg_diff[_i] = f_dg1[_i] - f_dg2[_i]
             s_dg = T.alloc_shared((_BT,), T.float32)
             s_tmp1d = T.alloc_shared((_BT,), T.float32)
-            T.copy(f_dg1, s_dg)
-            T.copy(f_dg2, s_tmp1d)
-            T.sync_threads()
-            # s_dg = dq*q - dk*k
-            for _i in T.Parallel(_BT):
-                s_dg[_i] = s_dg[_i] - s_tmp1d[_i]
+            T.copy(f_dg_diff, s_dg)
+            T.copy(f_dg2, s_tmp1d)  # kept for scalar sum below
             T.sync_threads()
             # b_dg_last += sum(dk*k) via serial sum on shared
             s_scalar = T.alloc_shared((1,), T.float32)
