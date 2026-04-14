@@ -464,7 +464,7 @@ IS_INTEL = (device_platform == 'xpu')
 IS_NVIDIA = (device_platform == 'cuda')
 IS_INTEL_ALCHEMIST = (IS_INTEL and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
 IS_NVIDIA_HOPPER = (IS_NVIDIA and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] >= 9))
-IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] == 10)
+IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] >= 10)
 USE_CUDA_GRAPH = (IS_NVIDIA and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
 
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
@@ -479,13 +479,20 @@ if IS_NVIDIA and not IS_TF32_SUPPORTED:
     # This is a workaround for old nvidia card.
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
+
+def _default_alloc_fn(size: int, alignment: int, stream: int | None):
+    return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
+
+
 if IS_TMA_SUPPORTED:
     logger.info('TMA is supported, using TMA by default.')
-
-    def alloc_fn(size: int, alignment: int, stream: int | None):
-        return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
-
-    triton.set_allocator(alloc_fn)
+    triton.set_allocator(_default_alloc_fn)
+elif IS_NVIDIA_BLACKWELL:
+    # Blackwell (SM 10.0+): Triton compiler may emit global_scratch for
+    # autotuned kernels even without TMA. Register a default allocator to
+    # prevent NullAllocator crashes. See triton-lang/triton#10002.
+    logger.info('Blackwell detected: registering default global_scratch allocator.')
+    triton.set_allocator(_default_alloc_fn)
 
 
 def get_all_max_shared_mem():

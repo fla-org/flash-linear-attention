@@ -1,6 +1,6 @@
-# Kimi Context Parallel
+# Context Parallel of Linear Atttention
 
-Kimi Context Parallel (KCP) is context parallelism designed for delta-rule recurrent models such as GDN (Gated Delta Rule) and KDA (Kimi Delta Attention). It enables efficient distributed training by partitioning the sequence dimension across ranks, with each rank processing a local token chunk and CP automatically synchronizing cross-rank states.
+Context Parallel of Linear Atttention (alias KCP in Moonshot) is context parallelism designed for delta-rule recurrent models such as GDN (Gated Delta Rule) and KDA (Kimi Delta Attention). It enables efficient distributed training by partitioning the sequence dimension across ranks, with each rank processing a local token chunk and CP automatically synchronizing cross-rank states.
 
 ## Quick Start
 
@@ -390,6 +390,18 @@ In CP mode, only the first sequence in the local batch can be a continuation fro
 - [`tests/context_parallel/test_cp_conv.py`](../../../tests/context_parallel/test_cp_conv.py)
 - [`tests/context_parallel/test_cp_kda.py`](../../../tests/context_parallel/test_cp_kda.py)
 
+## Discussion
+
+While this document focuses on delta-rule models such as GDN and KDA, the underlying CP mechanism is **not restricted to delta-rule recurrences**. In fact, any linear attention formulation that can be expressed in a *chunkwise* form — i.e., one where the state transition across a chunk can be decomposed into a transition matrix $\mathbf{M}$ and an accumulated state $\mathbf{S}_\text{ext}$ — can adopt the same **pre-process + all-gather + merge** strategy for context parallelism.
+
+The only model-specific components are:
+1. How $\mathbf{M}$ and $\mathbf{S}_\text{ext}$ are computed from the local chunk.
+2. How the merge kernel chains these quantities across ranks.
+
+As long as these two operations are well-defined, the same CP infrastructure (`build_cp_context`, all-gather, and merge) applies without changing the high-level data flow.
+
+At the time of writing, CP has been implemented and verified for **GDN**, **KDA**, and **DPLR** (a.k.a. RWKV-7). If you would like to see support for another linear-attention variant, please feel free to open an issue.
+
 ## Acknowledgments
 
-CP was first introduced in [PR #691](https://github.com/fla-org/flash-linear-attention/pull/691), implemented by [Duyue MA](https://github.com/mdy666) and integrated by Zhiyuan Li. Also known as KCP (Kimi Context Parallel) internally at Moonshot AI.
+Context Parallel of Linear Attention was first introduced in [PR #691](https://github.com/fla-org/flash-linear-attention/pull/691), implemented by [Duyue MA](https://github.com/mdy666). It is also known as **KCP** (Kimi Context Parallel) internally at Moonshot AI. The implementation in this repository was independently contributed to FLA and is a separate codebase from the internal Moonshot implementation.
