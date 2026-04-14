@@ -38,7 +38,7 @@ def packunpack_sequence_kernel(
     i_d, i_s, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     bos, eos = tl.load(cu_seqlens + i_b), tl.load(cu_seqlens + i_b + 1)
 
-    T = (eos - bos).to(tl.int32)
+    T = eos - bos
     if PADDING_SIDE == 'left':
         NP = S - T
         if i_s < NP:
@@ -53,11 +53,11 @@ def packunpack_sequence_kernel(
     mask = o_d < D
 
     if PACK:
-        b_x = tl.load(x + (tl.cast(i_b, tl.int64) * S + i_s) * D + o_d, mask=mask)
+        b_x = tl.load(x + (i_b * S + i_s) * D + o_d, mask=mask)
         tl.store(y + i_t * D + o_d, b_x, mask=mask)
     else:
         b_x = tl.load(x + i_t * D + o_d, mask=mask)
-        tl.store(y + (tl.cast(i_b, tl.int64) * S + i_s) * D + o_d, b_x, mask=mask)
+        tl.store(y + (i_b * S + i_s) * D + o_d, b_x, mask=mask)
 
 
 def pack_sequence_fwdbwd(

@@ -45,9 +45,9 @@ def fused_recurrent_hgrn_fwd_kernel(
     i_d, i_n = tl.program_id(0), tl.program_id(1)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = (eos - bos).to(tl.int32)
+        T = eos - bos
     else:
-        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
+        bos, eos = i_n * T, i_n * T + T
 
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
@@ -110,9 +110,9 @@ def fused_recurrent_hgrn_bwd_kernel(
     i_d, i_n = tl.program_id(0), tl.program_id(1)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = (eos - bos).to(tl.int32)
+        T = eos - bos
     else:
-        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
+        bos, eos = i_n * T, i_n * T + T
 
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D

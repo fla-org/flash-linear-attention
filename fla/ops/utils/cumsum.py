@@ -47,10 +47,10 @@ def chunk_local_cumsum_scalar_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = (eos - bos).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
     else:
-        bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
+        bos, eos = i_b * T, i_b * T + T
 
     if HEAD_FIRST:
         p_s = tl.make_block_ptr(s + bos*H + i_h*T, (T,), (1,), (i_t * BT,), (BT,), (0,))
@@ -104,10 +104,10 @@ def chunk_local_cumsum_vector_kernel(
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = (eos - bos).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
     else:
-        bos, eos = tl.cast(i_b, tl.int64) * T, tl.cast(i_b, tl.int64) * T + T
+        bos, eos = i_b * T, i_b * T + T
 
     if HEAD_FIRST:
         p_s = tl.make_block_ptr(s + (bos * H + i_h*T)*S, (T, S), (S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
@@ -158,10 +158,10 @@ def chunk_global_cumsum_scalar_kernel(
     i_nh = tl.program_id(0)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     else:
-        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
-    T = (eos - bos).to(tl.int32)
+        bos, eos = i_n * T, i_n * T + T
+    T = eos - bos
 
     b_z = tl.zeros([], dtype=tl.float32)
     NT = tl.cdiv(T, BT)
@@ -220,10 +220,10 @@ def chunk_global_cumsum_vector_kernel(
     i_s, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
     else:
-        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
-    T = (eos - bos).to(tl.int32)
+        bos, eos = i_n * T, i_n * T + T
+    T = eos - bos
 
     b_z = tl.zeros([BS], dtype=tl.float32)
     NT = tl.cdiv(T, BT)

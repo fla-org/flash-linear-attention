@@ -36,15 +36,15 @@ def chunk_cumprod_householder_bwd_kernel(
 
     if IS_VARLEN:
         i_n, i_s = tl.load(split_indices + i_ss * 2).to(tl.int32), tl.load(split_indices + i_ss * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = (eos - bos).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        T = eos - bos
         NS = tl.cdiv(T, S)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int64)
-        boh_large = tl.load(split_offsets + i_n).to(tl.int64)
+        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        boh_large = tl.load(split_offsets + i_n).to(tl.int32)
     else:
         NS = tl.cdiv(T, S)
         i_n, i_s = i_ss // NS, i_ss % NS
-        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
+        bos, eos = i_n * T, i_n * T + T
         boh = i_n * tl.cdiv(T, BT)
         boh_large = i_n * tl.cdiv(T, S)
 

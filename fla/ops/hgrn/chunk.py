@@ -66,10 +66,10 @@ def chunk_hgrn_fwd_kernel_h(
     o_d = i_d * BD + tl.arange(0, BD)
     mask = o_d < D
 
-    p_x = x + tl.cast(i_b, tl.int64) * T * D + i_t * BT * D + o_d
-    p_g = g + tl.cast(i_b, tl.int64) * T * D + i_t * BT * D + o_d
-    p_gc = gc + tl.cast(i_b, tl.int64) * T * D + i_t * BT * D + o_d
-    p_o = o + tl.cast(i_b, tl.int64) * T * D + i_t * BT * D + o_d
+    p_x = x + i_b * T * D + i_t * BT * D + o_d
+    p_g = g + i_b * T * D + i_t * BT * D + o_d
+    p_gc = gc + i_b * T * D + i_t * BT * D + o_d
+    p_o = o + i_b * T * D + i_t * BT * D + o_d
 
     b_h = tl.zeros([BD], dtype=tl.float32)
     b_gc = tl.zeros([BD], dtype=tl.float32)
@@ -108,11 +108,11 @@ def chunk_hgrn_fwd_kernel_o(
     mask = o_d < D
 
     for i_t in range(1, tl.cdiv(T, BT)):
-        p_gc = tl.make_block_ptr(gc + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_o = tl.make_block_ptr(o + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        p_gc = tl.make_block_ptr(gc + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        p_o = tl.make_block_ptr(o + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
 
         # [BD,]
-        b_h0 = tl.load(o + tl.cast(i_b, tl.int64) * T * D + i_t * BT * D - D + o_d, mask=mask, other=0).to(tl.float32)
+        b_h0 = tl.load(o + i_b * T * D + i_t * BT * D - D + o_d, mask=mask, other=0).to(tl.float32)
         # [BT, BD]
         b_gc = tl.load(p_gc, boundary_check=(0, 1)).to(tl.float32)
         b_o = tl.load(p_o, boundary_check=(0, 1)).to(tl.float32)
@@ -146,15 +146,15 @@ def chunk_hgrn_bwd_kernel_h(
     BC = min(BT, T - i_t * BT)
     NT = tl.num_programs(1)
 
-    p_g = g + (tl.cast(i_b, tl.int64) * T + i_t * BT + BC - 1) * D + o_d
-    p_gc = gc + (tl.cast(i_b, tl.int64) * T + i_t * BT + BC - 1) * D + o_d
-    p_dx = dx + (tl.cast(i_b, tl.int64) * T + i_t * BT + BC - 1) * D + o_d
-    p_do = do + (tl.cast(i_b, tl.int64) * T + i_t * BT + BC - 1) * D + o_d
+    p_g = g + (i_b * T + i_t * BT + BC - 1) * D + o_d
+    p_gc = gc + (i_b * T + i_t * BT + BC - 1) * D + o_d
+    p_dx = dx + (i_b * T + i_t * BT + BC - 1) * D + o_d
+    p_do = do + (i_b * T + i_t * BT + BC - 1) * D + o_d
 
     if i_t == NT - 1:
         b_gc = tl.zeros([BD], dtype=tl.float32)
     else:
-        b_gc = tl.load(g + (tl.cast(i_b, tl.int64) * T + i_t * BT + BT) * D + o_d, mask=mask, other=0).to(tl.float32)
+        b_gc = tl.load(g + (i_b * T + i_t * BT + BT) * D + o_d, mask=mask, other=0).to(tl.float32)
     b_dh = tl.zeros([BD], dtype=tl.float32)
     for _ in range(BC - 1, -1, -1):
         tl.store(p_gc, b_gc.to(p_gc.dtype.element_ty), mask=mask)
@@ -195,16 +195,15 @@ def chunk_hgrn_bwd_kernel_o(
     mask = o_d < D
 
     for i_t in range(tl.cdiv(T, BT) - 1, -1, -1):
-        p_g = tl.make_block_ptr(g + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_gc = tl.make_block_ptr(gc + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_o = tl.make_block_ptr(o + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d),
-                                (i_t * BT - 1, i_d * BD), (BT, BD), (1, 0))
-        p_dx = tl.make_block_ptr(dx + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
-        p_dg = tl.make_block_ptr(dg + tl.cast(i_b, tl.int64) * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        p_g = tl.make_block_ptr(g + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        p_gc = tl.make_block_ptr(gc + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        p_o = tl.make_block_ptr(o + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT - 1, i_d * BD), (BT, BD), (1, 0))
+        p_dx = tl.make_block_ptr(dx + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
+        p_dg = tl.make_block_ptr(dg + i_b * s_b, (T, D), (s_t, s_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
 
         # [BD,]
         mask_t = mask & ((i_t + 1) * BT < T)
-        b_ht = tl.load(dx + tl.cast(i_b, tl.int64) * T * D + (i_t + 1) * BT * D + o_d, mask=mask_t, other=0).to(tl.float32)
+        b_ht = tl.load(dx + i_b * T * D + (i_t + 1) * BT * D + o_d, mask=mask_t, other=0).to(tl.float32)
         # [BT, BD]
         b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
         b_gc = tl.load(p_gc, boundary_check=(0, 1)).to(tl.float32)

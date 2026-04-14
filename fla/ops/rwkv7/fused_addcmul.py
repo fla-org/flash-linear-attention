@@ -65,7 +65,7 @@ def fused_addcmul_fwd_kernel(
 ):
     i_b, i_t = tl.program_id(0), tl.program_id(1) * BT
 
-    bos = tl.cast(i_b, tl.int64) * (T + T_OFFSET)
+    bos = i_b * (T + T_OFFSET)
     t_vec = i_t + T_OFFSET + tl.arange(0, BT)
     mask_t = t_vec < (T + T_OFFSET)
     o_d = tl.arange(0, BD)[None, :]
@@ -143,7 +143,7 @@ def addcmul_bwd_kernel1(
     mask_d = d_idx < D
     mask = mask_t & mask_d
 
-    offset_base = tl.cast(i_b, tl.int64) * (T + T_OFFSET) * D
+    offset_base = i_b * (T + T_OFFSET) * D
     x_idx = (offset_base + t_idx * D + d_idx).to(tl.uint32)
 
     b_dxr = tl.load(dxr + x_idx, mask=mask).to(DTYPE)

@@ -52,8 +52,8 @@ def naive_attn_decoding_kernel(
     i_b, i_hq = i_bh // HQ, i_bh % HQ
     i_h = i_hq // G
 
-    bos, eos = tl.load(cu_seqlens + i_b).to(tl.int64), tl.load(cu_seqlens + i_b + 1).to(tl.int64)
-    T = (eos - bos).to(tl.int32)
+    bos, eos = tl.load(cu_seqlens + i_b).to(tl.int32), tl.load(cu_seqlens + i_b + 1).to(tl.int32)
+    T = eos - bos
 
     p_q = tl.make_block_ptr(q + i_bh * K, (K,), (1, ), (0, ), (BK,), (0,))
     p_o = tl.make_block_ptr(o + i_bh * V, (V,), (1, ), (0, ), (BV,), (0,))
