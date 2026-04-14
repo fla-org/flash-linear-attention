@@ -47,9 +47,9 @@ def fused_recurrent_delta_rule_fwd_kernel(
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
         all = B * T
 
     p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
@@ -139,9 +139,9 @@ def fused_recurrent_delta_rule_bwd_kernel(
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
         all = B * T
 
     mask_k = i_k * BK + tl.arange(0, BK) < K

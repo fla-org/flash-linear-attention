@@ -19,8 +19,6 @@ Requires ~20GB GPU memory. Run with CUDA_LAUNCH_BLOCKING=1 for
 immediate error reporting.
 """
 
-import os
-
 import pytest
 import torch
 import torch.nn.functional as F

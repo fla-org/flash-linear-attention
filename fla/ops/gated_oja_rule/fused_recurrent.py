@@ -52,9 +52,9 @@ def fused_recurrent_oja_fwd_kernel(
     i_h = i_hv // (HV // H)
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = tl.cast(i_n, tl.int64) * T, tl.cast(i_n, tl.int64) * T + T
     o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
