@@ -218,21 +218,21 @@ jobs:
           echo "Found ops test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
-      - name: Detect backend/dispatch changes
+      - name: Detect op/backend/dispatch changes
         if: steps.check_skip.outputs.skip_tests == 'false'
         id: check-dispatch
         shell: bash
         run: |
           CHANGED="${{ steps.changed-files.outputs.all_changed_files }}"
-          # Match any file under an ops backends dir: the top-level dispatch machinery
-          # (fla/ops/backends/) or any per-op backends subtree (e.g. fla/ops/common/backends/,
-          # fla/ops/kda/backends/). These are the only paths whose correctness depends on
-          # the dispatch-on code path.
-          if echo "$CHANGED" | tr ' ' '\n' | grep -qE '^fla/ops/(backends/|[^/]+/backends/)'; then
-            echo "Dispatch-related changes detected; will run dispatch-on suite"
+          # Any change under fla/ops/ triggers the dispatch-on suite: backend dirs
+          # obviously need it, but op changes also do because backend impls may rely
+          # on op internals (shared helpers, default kwargs, chunk layout). Skipping
+          # saves CI only on PRs that touch no op code (e.g. models/, docs, benches).
+          if echo "$CHANGED" | tr ' ' '\n' | grep -qE '^fla/ops/'; then
+            echo "Op/backend changes detected; will run dispatch-on suite"
             echo "dispatch_changed=true" >> $GITHUB_OUTPUT
           else
-            echo "No dispatch-related changes; skipping dispatch-on suite"
+            echo "No op changes; skipping dispatch-on suite"
             echo "dispatch_changed=false" >> $GITHUB_OUTPUT
           fi
 
