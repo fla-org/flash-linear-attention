@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from functools import lru_cache
-
 import tilelang
 import tilelang.language as T
 import torch
@@ -16,7 +14,9 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.utils import check_shared_mem
 
 
-@lru_cache(maxsize=64)
+# Rely on TileLang's own JIT cache keyed by (shapes, dtypes, pass configs).
+# Adding functools.lru_cache on top was redundant and, at least in our Hopper
+# CI, appeared to return a stale compiled kernel across unrelated test invocations.
 def _build_kernel(
     B, H, K, V, BT, BK, BV, NK,
     hD1, hD2,
@@ -102,34 +102,20 @@ def _build_kernel(
 
                 T.gemm(s_do, s_v, b_ds, transpose_B=True)
 
-                if _TS:
-                    T.gemm(s_do, s_h, b_dq)
-                    T.gemm(s_v, s_dh, b_dk)
-                else:
-                    T.gemm(s_do, s_h, b_dq, transpose_B=True)
-                    T.gemm(s_v, s_dh, b_dk, transpose_B=True)
-
-                if _USE_DW:
-                    s_dv = T.alloc_shared((_BT, _BV), _dtype)
-                    T.copy(dv[i_b, t_s:t_s + _BT, i_h, v_off_c:v_off_c + _BV], s_dv)
-                    if _TS:
-                        T.gemm(s_dv, s_h, b_dw)
-                    else:
-                        T.gemm(s_dv, s_h, b_dw, transpose_B=True)
-
-                # dg_last: h*dh sum merged into V-loop.
-                # Funnel s_h and s_dh through fragments into dedicated s_hdh buffer,
-                # so T.copy becomes the only (tracked) consumer of pipelined s_h/s_dh.
+                # dg_last: h*dh sum must run BEFORE any T.gemm that consumes s_h/s_dh.
+                # The pipeline scheduler tracks T.gemm as a consumer and won't prefetch
+                # the next iter's h/dh into the same double-buffered slot until those
+                # gemms finish. Running the reduction first makes the downstream gemms
+                # act as the effective barrier against the next-iter prefetch — without
+                # the reduction would race with the prefetch on Hopper (observed dg
+                # error 15% on H100 despite correctness on Blackwell).
                 if _USE_G:
                     f_h_tmp = T.alloc_fragment((_thD1, _thD2), T.float32)
                     f_dh_tmp = T.alloc_fragment((_thD1, _thD2), T.float32)
-                    T.copy(s_h, f_h_tmp)      # tracked consumer of s_h (pipelined)
-                    T.copy(f_h_tmp, s_hdh)    # dedicated non-pipelined buffer
-                    T.copy(s_dh, f_dh_tmp)    # tracked consumer of s_dh (pipelined)
+                    T.copy(s_h, f_h_tmp)
+                    T.copy(f_h_tmp, s_hdh)
+                    T.copy(s_dh, f_dh_tmp)
                     T.sync_threads()
-                    # Multiply s_hdh (dedicated shared) in-place by f_dh_tmp (fragment).
-                    # Fragment×shared: each thread writes s_hdh[_i,_j] exactly once per
-                    # its owned (_i,_j) from f_dh_tmp's layout — no cross-layout hazard.
                     for _i, _j in T.Parallel(_thD1, _thD2):
                         s_hdh[_i, _j] = s_hdh[_i, _j] * f_dh_tmp[_i, _j]
                     T.sync_threads()
@@ -150,6 +136,21 @@ def _build_kernel(
                     T.sync_threads()
                     s_dg_last_acc[0] = s_dg_last_acc[0] + s_hdh_scalar[0]
                     T.sync_threads()
+
+                if _TS:
+                    T.gemm(s_do, s_h, b_dq)
+                    T.gemm(s_v, s_dh, b_dk)
+                else:
+                    T.gemm(s_do, s_h, b_dq, transpose_B=True)
+                    T.gemm(s_v, s_dh, b_dk, transpose_B=True)
+
+                if _USE_DW:
+                    s_dv = T.alloc_shared((_BT, _BV), _dtype)
+                    T.copy(dv[i_b, t_s:t_s + _BT, i_h, v_off_c:v_off_c + _BV], s_dv)
+                    if _TS:
+                        T.gemm(s_dv, s_h, b_dw)
+                    else:
+                        T.gemm(s_dv, s_h, b_dw, transpose_B=True)
 
             # ========== store dw (negated, with varlen boundary mask) ==========
             if _USE_DW:
