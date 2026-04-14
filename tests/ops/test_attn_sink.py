@@ -9,11 +9,171 @@ import os
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from fla.ops.attn.decoding import attn_decoding_one_step
 from fla.ops.attn.naive import naive_parallel_attn
 from fla.ops.attn.parallel import parallel_attn
 from fla.utils import assert_close, device
+
+
+def _repeat_kv_for_gpt_oss(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    if n_rep == 1:
+        return hidden_states
+    batch_size, num_kv_heads, seq_len, head_dim = hidden_states.shape
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch_size, num_kv_heads, n_rep, seq_len, head_dim)
+    return hidden_states.reshape(batch_size, num_kv_heads * n_rep, seq_len, head_dim)
+
+
+def _gpt_oss_eager_sink_reference(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sinks: torch.Tensor,
+    *,
+    scale: float,
+    window_size: int | None = None,
+    query_indices: torch.Tensor | None = None,
+):
+    """
+    Mirrors the sink path in transformers' GPT-OSS eager attention:
+    concat sink logits as an extra column, softmax once, then drop the sink column.
+    """
+    batch_size, q_len, num_heads, head_dim = q.shape
+    kv_len = k.shape[1]
+    num_kv_heads = k.shape[2]
+    num_key_value_groups = num_heads // num_kv_heads
+
+    query_states = q.transpose(1, 2)
+    key_states = _repeat_kv_for_gpt_oss(k.transpose(1, 2), num_key_value_groups)
+    value_states = _repeat_kv_for_gpt_oss(v.transpose(1, 2), num_key_value_groups)
+
+    attn_logits = torch.matmul(query_states, key_states.transpose(2, 3)) * scale
+
+    if query_indices is None:
+        query_positions = torch.arange(q_len, device=q.device).unsqueeze(0).expand(batch_size, q_len)
+    else:
+        if query_indices.ndim == 1:
+            query_positions = query_indices.unsqueeze(0).expand(batch_size, q_len)
+        else:
+            query_positions = query_indices
+        query_positions = query_positions.to(device=q.device, dtype=torch.long)
+        assert query_positions.shape == (batch_size, q_len), "query_indices must have shape [TQ] or [B, TQ]"
+
+    row_idx = query_positions[:, :, None]
+    col_idx = torch.arange(kv_len, device=q.device)[None, None, :]
+    invalid = col_idx > row_idx
+    if window_size is not None:
+        invalid = invalid | (row_idx - col_idx >= window_size)
+    attn_logits = attn_logits.masked_fill(invalid[:, None], float("-inf"))
+
+    sink_logits = sinks.view(1, num_heads, 1, 1).expand(batch_size, num_heads, q_len, 1)
+    combined_logits = torch.cat((attn_logits, sink_logits), dim=-1)
+    combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+    probs = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
+    attn_probs = probs[..., :-1]
+    output = torch.matmul(attn_probs, value_states).transpose(1, 2).contiguous()
+    return output, attn_probs
+
+
+@pytest.mark.parametrize(
+    ("window_size", "query_indices"),
+    [
+        pytest.param(None, None, id="full"),
+        pytest.param(64, None, id="swa"),
+        pytest.param(None, [0, 31, 63, 95], id="indexed"),
+        pytest.param(32, [31, 63, 95, 95], id="indexed_swa"),
+    ],
+)
+def test_attn_sink_ref_matches_gpt_oss_eager(window_size, query_indices):
+    torch.manual_seed(777)
+    dtype = torch.float64
+
+    batch_size, kv_len, q_len, num_kv_heads, num_heads, head_dim = 2, 96, 96, 2, 8, 64
+    if query_indices is not None:
+        q_len = len(query_indices)
+        query_indices = torch.tensor(query_indices, device=device)
+
+    q = torch.randn((batch_size, q_len, num_heads, head_dim), dtype=dtype, device=device)
+    k = torch.randn((batch_size, kv_len, num_kv_heads, head_dim), dtype=dtype, device=device)
+    v = torch.randn((batch_size, kv_len, num_kv_heads, head_dim), dtype=dtype, device=device)
+    sinks = torch.randn((num_heads,), dtype=dtype, device=device)
+    do = torch.randn((batch_size, q_len, num_heads, head_dim), dtype=dtype, device=device)
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    sinks_ref = sinks.detach().clone().requires_grad_(True)
+    o_ref, _ = naive_parallel_attn(
+        q=q_ref,
+        k=k_ref,
+        v=v_ref,
+        sinks=sinks_ref,
+        scale=0.1,
+        window_size=window_size,
+        query_indices=query_indices,
+    )
+    o_ref.backward(do)
+
+    q_gpt = q.detach().clone().requires_grad_(True)
+    k_gpt = k.detach().clone().requires_grad_(True)
+    v_gpt = v.detach().clone().requires_grad_(True)
+    sinks_gpt = sinks.detach().clone().requires_grad_(True)
+    o_gpt, _ = _gpt_oss_eager_sink_reference(
+        q=q_gpt,
+        k=k_gpt,
+        v=v_gpt,
+        sinks=sinks_gpt,
+        scale=0.1,
+        window_size=window_size,
+        query_indices=query_indices,
+    )
+    o_gpt.backward(do)
+
+    assert_close(" o_ref_vs_gpt", o_ref, o_gpt, 1e-10, err_atol=1e-10)
+    assert_close("dq_ref_vs_gpt", q_ref.grad, q_gpt.grad, 1e-10, err_atol=1e-10)
+    assert_close("dk_ref_vs_gpt", k_ref.grad, k_gpt.grad, 1e-10, err_atol=1e-10)
+    assert_close("dv_ref_vs_gpt", v_ref.grad, v_gpt.grad, 1e-10, err_atol=1e-10)
+    assert_close("ds_ref_vs_gpt", sinks_ref.grad, sinks_gpt.grad, 1e-10, err_atol=1e-10)
+
+
+def test_attn_sink_empty_row_ref_matches_gpt_oss_eager():
+    torch.manual_seed(778)
+    dtype = torch.float64
+
+    batch_size, seq_len, num_kv_heads, num_heads, head_dim = 2, 48, 2, 8, 64
+    q = torch.randn((batch_size, seq_len, num_heads, head_dim), dtype=dtype, device=device)
+    k = torch.randn((batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype, device=device)
+    v = torch.randn((batch_size, seq_len, num_kv_heads, head_dim), dtype=dtype, device=device)
+    sinks = torch.randn((num_heads,), dtype=dtype, device=device)
+    do = torch.randn((batch_size, seq_len, num_heads, head_dim), dtype=dtype, device=device)
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    sinks_ref = sinks.detach().clone().requires_grad_(True)
+    o_ref, _ = naive_parallel_attn(q=q_ref, k=k_ref, v=v_ref, sinks=sinks_ref, scale=0.1, window_size=0)
+    o_ref.backward(do)
+
+    q_gpt = q.detach().clone().requires_grad_(True)
+    k_gpt = k.detach().clone().requires_grad_(True)
+    v_gpt = v.detach().clone().requires_grad_(True)
+    sinks_gpt = sinks.detach().clone().requires_grad_(True)
+    o_gpt, _ = _gpt_oss_eager_sink_reference(
+        q=q_gpt,
+        k=k_gpt,
+        v=v_gpt,
+        sinks=sinks_gpt,
+        scale=0.1,
+        window_size=0,
+    )
+    o_gpt.backward(do)
+
+    assert_close(" o_empty_ref_vs_gpt", o_ref, o_gpt, 1e-10, err_atol=1e-10)
+    assert_close("dq_empty_ref_vs_gpt", q_ref.grad, q_gpt.grad, 1e-10, err_atol=1e-10)
+    assert_close("dk_empty_ref_vs_gpt", k_ref.grad, k_gpt.grad, 1e-10, err_atol=1e-10)
+    assert_close("dv_empty_ref_vs_gpt", v_ref.grad, v_gpt.grad, 1e-10, err_atol=1e-10)
+    assert_close("ds_empty_ref_vs_gpt", sinks_ref.grad, sinks_gpt.grad, 1e-10, err_atol=1e-10)
 
 
 @pytest.mark.parametrize(
