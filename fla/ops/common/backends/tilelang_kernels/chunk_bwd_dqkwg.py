@@ -79,6 +79,12 @@ def _build_kernel(
                 for _i in T.Parallel(1):
                     s_dg_last_acc[0] = 0.0
                 T.sync_threads()
+                # Dedicated h·dh shared buffer allocated OUTSIDE the pipelined loop.
+                # s_h/s_dh inside T.Pipelined are double-buffered by the pipeline;
+                # any T.Parallel read of them races with the next iter's T.copy load
+                # because the pipeline doesn't track T.Parallel as a consumer.
+                # Copying through a dedicated non-pipelined buffer breaks the race.
+                s_hdh = T.alloc_shared((_thD1, _thD2), T.float32)
 
             # ========== V-loop ==========
             for i_v_py in T.Pipelined(_NV, num_stages=2):
@@ -111,15 +117,22 @@ def _build_kernel(
                     else:
                         T.gemm(s_dv, s_h, b_dw, transpose_B=True)
 
-                # dg_last: h*dh sum merged into V-loop (avoids re-reading h/dh)
-                # Use separate s_hdh buffer (not s_h) to avoid write conflict in pipeline
+                # dg_last: h*dh sum merged into V-loop.
+                # Funnel s_h and s_dh through fragments into dedicated s_hdh buffer,
+                # so T.copy becomes the only (tracked) consumer of pipelined s_h/s_dh.
                 if _USE_G:
-                    # Compute h*dh products in shared memory (float32 for precision)
-                    s_hdh = T.alloc_shared((_thD1, _thD2), T.float32)
-                    for _i, _j in T.Parallel(_thD1, _thD2):
-                        s_hdh[_i, _j] = T.cast(s_h[_i, _j], T.float32) * T.cast(s_dh[_i, _j], T.float32)
+                    f_h_tmp = T.alloc_fragment((_thD1, _thD2), T.float32)
+                    f_dh_tmp = T.alloc_fragment((_thD1, _thD2), T.float32)
+                    T.copy(s_h, f_h_tmp)      # tracked consumer of s_h (pipelined)
+                    T.copy(f_h_tmp, s_hdh)    # dedicated non-pipelined buffer
+                    T.copy(s_dh, f_dh_tmp)    # tracked consumer of s_dh (pipelined)
                     T.sync_threads()
-                    # Parallel row reduction via T.reduce_sum, then serial sum of row results
+                    # Multiply s_hdh (dedicated shared) in-place by f_dh_tmp (fragment).
+                    # Fragment×shared: each thread writes s_hdh[_i,_j] exactly once per
+                    # its owned (_i,_j) from f_dh_tmp's layout — no cross-layout hazard.
+                    for _i, _j in T.Parallel(_thD1, _thD2):
+                        s_hdh[_i, _j] = s_hdh[_i, _j] * f_dh_tmp[_i, _j]
+                    T.sync_threads()
                     f_hdh = T.alloc_fragment((_thD1, _thD2), T.float32)
                     T.copy(s_hdh, f_hdh)
                     f_hdh_row = T.alloc_fragment((_thD1,), T.float32)
