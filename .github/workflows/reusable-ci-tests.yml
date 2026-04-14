@@ -218,8 +218,34 @@ jobs:
           echo "Found ops test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
-      - name: Run pytest on ops test files
+      - name: Detect backend/dispatch changes
+        if: steps.check_skip.outputs.skip_tests == 'false'
+        id: check-dispatch
+        shell: bash
+        run: |
+          CHANGED="${{ steps.changed-files.outputs.all_changed_files }}"
+          # Match any file under an ops backends dir: the top-level dispatch machinery
+          # (fla/ops/backends/) or any per-op backends subtree (e.g. fla/ops/common/backends/,
+          # fla/ops/kda/backends/). These are the only paths whose correctness depends on
+          # the dispatch-on code path.
+          if echo "$CHANGED" | tr ' ' '\n' | grep -qE '^fla/ops/(backends/|[^/]+/backends/)'; then
+            echo "Dispatch-related changes detected; will run dispatch-on suite"
+            echo "dispatch_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No dispatch-related changes; skipping dispatch-on suite"
+            echo "dispatch_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run pytest on ops test files (dispatch DISABLED, Triton baseline)
         if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
+        shell: bash
+        env:
+          FLA_DISABLE_BACKEND_DISPATCH: "1"
+        run: |
+          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
+
+      - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
+        if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
         shell: bash
         run: |
           $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
