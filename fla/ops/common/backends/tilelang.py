@@ -60,6 +60,11 @@ class TileLangBackend(BaseBackend):
                 "TileLang backend does not support GQA (v has more heads than k); "
                 "use repeat_interleave on k/q to match v's head count, or fall back to Triton"
             )
+        if h.dtype != q.dtype:
+            return False, (
+                f"TileLang backend requires h.dtype == q.dtype (got h={h.dtype}, q={q.dtype}); "
+                "e.g. simple_gla's bwd keeps h/dh in fp32 for h·dh reduction precision"
+            )
         return True, None
 
     def chunk_bwd_dqkwg(
