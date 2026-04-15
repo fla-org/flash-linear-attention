@@ -64,7 +64,6 @@ def recompute_w_u_fwd_kda_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    q += (bos * H + i_h) * K
     k += (bos * H + i_h) * K
     v += (bos * HV + i_hv) * V
     u += (bos * HV + i_hv) * V
@@ -73,9 +72,10 @@ def recompute_w_u_fwd_kda_kernel(
     beta += bos * HV + i_hv
     A += (bos * HV + i_hv) * BT
     if STORE_QG:
-        qg += (bos * H + i_h) * K
+        q += (bos * H + i_h) * K
+        qg += (bos * HV + i_hv) * K
     if STORE_KG:
-        kg += (bos * H + i_h) * K
+        kg += (bos * HV + i_hv) * K
 
     p_b = tl.make_block_ptr(beta, (T,), (HV,), (i_t * BT,), (BT,), (0,))
     b_b = tl.load(p_b, boundary_check=(0,))
@@ -102,7 +102,7 @@ def recompute_w_u_fwd_kda_kernel(
         b_kb *= exp2(b_gk)
         if STORE_QG:
             p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
-            p_qg = tl.make_block_ptr(qg, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_qg = tl.make_block_ptr(qg, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_qg = b_q * exp2(b_gk)
             tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
@@ -112,7 +112,7 @@ def recompute_w_u_fwd_kda_kernel(
             m_k = o_k < K
             b_gn = tl.load(gk + last_idx * HV*K + o_k, mask=m_k, other=0.).to(tl.float32)
             b_kg = b_k * tl.where((i_t * BT + tl.arange(0, BT) < T)[:, None], exp2(b_gn[None, :] - b_gk), 0)
-            p_kg = tl.make_block_ptr(kg, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
+            p_kg = tl.make_block_ptr(kg, (T, K), (HV*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
             tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
 
         b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
@@ -266,8 +266,8 @@ def recompute_w_u_fwd(
 
     w = torch.empty_like(gk)
     u = torch.empty_like(v)
-    qg = torch.empty_like(q) if q is not None else None
-    kg = torch.empty_like(k) if gk is not None else None
+    qg = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype) if q is not None else None
+    kg = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype) if gk is not None else None
     recompute_w_u_fwd_kda_kernel[(NT, B*HV)](
         q=q,
         k=k,
