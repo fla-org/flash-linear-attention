@@ -24,7 +24,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
         for num_warps in [1, 2, 4] + ([] if check_shared_mem('hopper') else [8])
         for num_stages in [2, 3, 4, 5]
     ],
-    key=['H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G'],
+    key=['H', 'G', 'K', 'V', 'BK', 'BV', 'USE_G', 'USE_SINK'],
     **autotune_cache_kwargs,
 )
 @triton.jit
