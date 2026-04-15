@@ -67,6 +67,7 @@ class DeltaNetBlock(GradientCheckpointingLayer):
                 use_gate=config.use_gate,
                 use_beta=config.use_beta,
                 use_short_conv=config.use_short_conv,
+                allow_neg_eigval=config.allow_neg_eigval,
                 use_output_norm=config.use_output_norm,
                 conv_size=config.conv_size,
                 qk_norm=config.qk_norm,
