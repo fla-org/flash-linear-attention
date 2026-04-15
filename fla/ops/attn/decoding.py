@@ -110,6 +110,8 @@ def naive_attn_decoding_kernel(
         b_mp = b_m
 
     if USE_SINK:
+        # Keep the sink merge finite when masking leaves a row with no valid key.
+        b_m = tl.where(b_m == float('-inf'), 0., b_m)
         b_acc += exp(b_sink - b_m)
     b_o = b_o / b_acc
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, ))

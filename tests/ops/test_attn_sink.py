@@ -388,6 +388,39 @@ def test_attn_decoding_sink_matches_reference():
     assert_close("o_decode_ref_vs_tri", ref, tri, 0.01)
 
 
+def test_attn_decoding_sink_empty_row_matches_reference():
+    torch.manual_seed(457)
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
+
+    B, H, HQ, D = 3, 2, 8, 64
+    lengths = [0, 128, 73]
+    dtype = torch.float16
+    q = torch.randn((1, B, HQ, D), dtype=dtype, device=device)
+    total_t = sum(lengths)
+    k = torch.randn((1, total_t, H, D), dtype=dtype, device=device)
+    v = torch.randn((1, total_t, H, D), dtype=dtype, device=device)
+    sinks = torch.randn((HQ,), dtype=torch.float32, device=device)
+    cu_seqlens = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()], dtype=torch.int32, device=device)
+
+    refs = []
+    for bos, eos in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False):
+        query_idx = max(eos - bos - 1, 0)
+        o_i, _ = _gpt_oss_eager_sink_reference(
+            q=q[:, len(refs):len(refs)+1].float(),
+            k=k[:, bos:eos].float(),
+            v=v[:, bos:eos].float(),
+            sinks=sinks,
+            scale=0.1,
+            query_indices=torch.tensor([query_idx], dtype=torch.long, device=device),
+        )
+        refs.append(o_i)
+    ref = torch.cat(refs, dim=1).to(dtype)
+
+    tri = attn_decoding_one_step(q=q, k=k, v=v, sinks=sinks, scale=0.1, cu_seqlens=cu_seqlens)
+    assert torch.isfinite(tri).all()
+    assert_close("o_decode_empty_row_ref_vs_tri", ref, tri, 0.01)
+
+
 @pytest.mark.parametrize(
     "do_gate_scale",
     [
