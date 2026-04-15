@@ -791,7 +791,7 @@ def parallel_attn(
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g (Optional[torch.Tensor]):
-            log decay factors of shape `[B, T, H]`.
+            log decay factors of shape `[B, T, HQ]`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.

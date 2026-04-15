@@ -136,7 +136,7 @@ def attn_decoding_one_step(
         v (torch.Tensor):
             values of shape `[1, T, H, V]`.
         g (Optional[torch.Tensor]):
-            log decay factors of shape `[1, T, H]`. Default: `None`.
+            log decay factors of shape `[1, T, HQ]`. Default: `None`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -151,7 +151,7 @@ def attn_decoding_one_step(
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, 1, HQ, V]`.
+            Outputs of shape `[1, B, HQ, V]`.
     """
     assert cu_seqlens is not None, "The cu_seqlens must be provided for varlen decoding"
     B, T, H, K, V = *k.shape, v.shape[-1]

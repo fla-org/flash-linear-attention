@@ -221,20 +221,20 @@ def test_parallel_attn_sink_matches_reference(window_size, cu_seqlens):
     o_ref = o_ref.to(dtype)
     o_ref.backward(do)
 
-    q_sg = q.detach().clone().requires_grad_(True)
-    k_sg = k.detach().clone().requires_grad_(True)
-    v_sg = v.detach().clone().requires_grad_(True)
-    sinks_sg = sinks.detach().clone().requires_grad_(True)
-    o_sg = parallel_attn(
-        q=q_sg, k=k_sg, v=v_sg, sinks=sinks_sg, scale=0.1, window_size=window_size, cu_seqlens=cu_seqlens
+    q_tri = q.detach().clone().requires_grad_(True)
+    k_tri = k.detach().clone().requires_grad_(True)
+    v_tri = v.detach().clone().requires_grad_(True)
+    sinks_tri = sinks.detach().clone().requires_grad_(True)
+    o_tri = parallel_attn(
+        q=q_tri, k=k_tri, v=v_tri, sinks=sinks_tri, scale=0.1, window_size=window_size, cu_seqlens=cu_seqlens
     )
-    o_sg.backward(do)
+    o_tri.backward(do)
 
-    assert_close(" o_ref_vs_sg", o_ref, o_sg, 0.01)
-    assert_close("dq_ref_vs_sg", q_ref.grad.to(dtype), q_sg.grad, 0.02)
-    assert_close("dk_ref_vs_sg", k_ref.grad.to(dtype), k_sg.grad, 0.02)
-    assert_close("dv_ref_vs_sg", v_ref.grad.to(dtype), v_sg.grad, 0.02)
-    assert_close("ds_ref_vs_sg", sinks_ref.grad, sinks_sg.grad, 0.02)
+    assert_close(" o_ref_vs_tri", o_ref, o_tri, 0.01)
+    assert_close("dq_ref_vs_tri", q_ref.grad.to(dtype), q_tri.grad, 0.02)
+    assert_close("dk_ref_vs_tri", k_ref.grad.to(dtype), k_tri.grad, 0.02)
+    assert_close("dv_ref_vs_tri", v_ref.grad.to(dtype), v_tri.grad, 0.02)
+    assert_close("ds_ref_vs_tri", sinks_ref.grad, sinks_tri.grad, 0.02)
 
 
 def test_parallel_attn_sink_empty_row_matches_reference():
@@ -385,7 +385,7 @@ def test_attn_decoding_sink_matches_reference():
     ref = torch.cat(refs, dim=1).to(dtype)
 
     tri = attn_decoding_one_step(q=q, k=k, v=v, sinks=sinks, scale=0.1, cu_seqlens=cu_seqlens)
-    assert_close("o_decode_ref_vs_sg", ref, tri, 0.01)
+    assert_close("o_decode_ref_vs_tri", ref, tri, 0.01)
 
 
 @pytest.mark.parametrize(
