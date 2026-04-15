@@ -601,6 +601,7 @@ def parallel_attn_bwd(
     g_cumsum: torch.Tensor,
     lse: torch.Tensor,
     do: torch.Tensor,
+    sinks: torch.Tensor | None = None,
     scale: float = None,
     window_size: int | None = None,
     chunk_size: int = 128,
@@ -705,7 +706,13 @@ def parallel_attn_bwd(
     dv = reduce(dv, 'b t (h g) v -> b t h v', g=G, reduction='sum')
     if g_cumsum is not None:
         dg_cumsum.add_(dg_cumsum_k)
-    return dq, dk, dv, dg_cumsum, delta
+
+    dsinks = None
+    if sinks is not None:
+        p_sink = torch.exp2(sinks[None, None, :] - lse)
+        dsinks = -(p_sink * delta).sum((0, 1))
+
+    return dq, dk, dv, dg_cumsum, dsinks
 
 
 @torch.compile
@@ -742,7 +749,7 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @autocast_custom_bwd
     def backward(ctx, do):
         q, k, v, o, g_cumsum, lse, sinks = ctx.saved_tensors
-        dq, dk, dv, dg, delta = parallel_attn_bwd(
+        dq, dk, dv, dg, dsinks = parallel_attn_bwd(
             q=q,
             k=k,
             v=v,
@@ -750,17 +757,13 @@ class ParallelAttentionFunction(torch.autograd.Function):
             g_cumsum=g_cumsum,
             lse=lse,
             do=do,
+            sinks=sinks,
             scale=ctx.scale,
             window_size=ctx.window_size,
             cu_seqlens=ctx.cu_seqlens,
         )
         if dg is not None:
             dg = chunk_global_cumsum(dg, cu_seqlens=ctx.cu_seqlens, reverse=True)
-
-        dsinks = None
-        if sinks is not None:
-            p_sink = torch.exp2(sinks[None, None, :] - lse)
-            dsinks = -(p_sink * delta).sum((0, 1))
 
         return dq.to(q), dk.to(k), dv.to(v), dg, dsinks, None, None, None, None
 
