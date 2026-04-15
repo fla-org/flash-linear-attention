@@ -23,6 +23,7 @@ class DeltaNetConfig(PretrainedConfig):
         expand_v: float = 1.0,
         use_gate: bool = False,
         use_short_conv: bool = True,
+        allow_neg_eigval: bool = False,
         conv_size: int = 4,
         use_beta: bool = True,
         use_output_norm: bool = True,
@@ -78,6 +79,7 @@ class DeltaNetConfig(PretrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.allow_neg_eigval = allow_neg_eigval
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
