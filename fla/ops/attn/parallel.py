@@ -11,6 +11,7 @@ import triton.language as tl
 from einops import reduce
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import exp2, log2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
@@ -724,7 +725,6 @@ class ParallelAttentionFunction(torch.autograd.Function):
     def forward(ctx, q, k, v, g, sinks, scale, window_size, cu_seqlens, chunk_indices=None):
         ctx.dtype = q.dtype
 
-        RCP_LN2: float = 1.4426950216
         g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, scale=RCP_LN2) if g is not None else None
         sinks = sinks * RCP_LN2 if sinks is not None else None
         o, lse = parallel_attn_fwd(

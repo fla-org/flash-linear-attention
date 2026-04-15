@@ -86,6 +86,7 @@ def naive_parallel_attn(
     # max_logits: [B, H, G, TQ] -> [B, TQ, HQ]
     max_logits = scores.max(dim=-1).values
     if sinks is not None:
+        assert sinks.shape == (HQ,), "sinks must have shape [HQ]"
         sink_logits = sinks.reshape(H, G)[None, :, :, None]
         max_logits = torch.maximum(max_logits, sink_logits)
 
