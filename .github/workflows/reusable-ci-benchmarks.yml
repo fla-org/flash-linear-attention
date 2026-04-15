@@ -43,6 +43,8 @@ jobs:
     runs-on: ${{ inputs.runner }}
     env:
       FLA_CI_ENV: 1
+      # Disable all backend dispatch (TileLang etc.) — benchmark measures Triton baseline only
+      FLA_DISABLE_BACKEND_DISPATCH: 1
       # Longer Triton timing windows + pause between commits reduce clock/thermal variance.
       FLA_BENCH_WARMUP_MS: 40
       FLA_BENCH_REP_MS: 200
