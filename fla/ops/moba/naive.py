@@ -16,7 +16,6 @@ from flash_attn.flash_attn_interface import (
 )
 
 
-@lru_cache(maxsize=16)
 def calc_chunks(cu_seqlen, moba_chunk_size):
     """calc chunks that needs moba attention"""
 
