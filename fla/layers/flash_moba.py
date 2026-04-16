@@ -243,7 +243,7 @@ class FlashMoBA(nn.Module):
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
-        if not output_attentions:
-            attentions = None
+        # FlashMoBA does not support returning attention weights
+        attentions = None
 
         return o, attentions, past_key_values
