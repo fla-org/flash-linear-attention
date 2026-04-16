@@ -86,7 +86,7 @@ class TileLangBackend(BaseBackend):
         use_exp2: bool = False,
         transpose_state_layout: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        from fla.ops.common.backends.tilelang_kernels.chunk_bwd_dqkwg import (
+        from fla.ops.common.backends.tilelang.chunk_bwd import (
             chunk_bwd_dqkwg_tilelang,
         )
         return chunk_bwd_dqkwg_tilelang(

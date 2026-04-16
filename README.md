@@ -29,6 +29,7 @@ This repo provides efficient implementations for emerging model architectures, w
 
 ## News
 
+- **[2026-04]** 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
 - **[2026-03]** 🚀 Add [Context Parallel](fla/ops/cp/README.md) support for KDA and GDN, enabling efficient distributed training across sequence dimension.
 - **[2025-10]** 🌑 Add Kimi Delta Attention implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
 - **[2025-09]** 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
