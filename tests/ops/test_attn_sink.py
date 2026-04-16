@@ -39,7 +39,7 @@ def _gpt_oss_eager_sink_reference(
     Mirrors the sink path in transformers' GPT-OSS eager attention:
     concat sink logits as an extra column, softmax once, then drop the sink column.
     """
-    batch_size, q_len, num_heads, head_dim = q.shape
+    batch_size, q_len, num_heads, _ = q.shape
     kv_len = k.shape[1]
     num_kv_heads = k.shape[2]
     num_key_value_groups = num_heads // num_kv_heads

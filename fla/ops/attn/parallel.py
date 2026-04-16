@@ -96,12 +96,6 @@ def parallel_attn_fwd_kernel(
     # the earliest key position any query in this block needs: max(0, i_t*BT - W + 1)
     i_start = tl.maximum((i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
 
-    # per-query window start: the earliest key position within its sliding window.
-    # used to detect when a query has not yet encountered any valid key,
-    # avoiding -inf - (-inf) = NaN in the online softmax rescaling.
-    if USE_WINDOW:
-        o_w = tl.where(o_q - W + 1 > 0, o_q - W + 1, 0)
-
     for i_s in range(i_start, i_t * BT, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
