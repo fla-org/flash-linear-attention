@@ -21,6 +21,8 @@ def calc_chunks(cu_seqlen, moba_chunk_size):
 
     # batch_sizes[batch_idx] = batch size ( seqlen ) of batch idx
     batch_sizes = cu_seqlen[1:] - cu_seqlen[:-1]
+    if torch.any(batch_sizes == 0):
+        raise ValueError("moba_attn_varlen does not support empty sequences in cu_seqlens")
     # batch_num_chunk[batch_idx] = how many chunk in batch idx
     batch_num_chunk = (batch_sizes + (moba_chunk_size - 1)) // moba_chunk_size
     # cu_num_chunk[batch_idx] = first chunk id of this batch
