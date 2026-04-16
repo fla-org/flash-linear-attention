@@ -28,8 +28,8 @@ def prepare_position_ids_kernel(
     B: tl.constexpr,
 ):
     i_n = tl.program_id(0)
-    bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-    T = eos - bos
+    bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+    T = (eos - bos).to(tl.int32)
 
     o = tl.arange(0, B)
     for i in range(0, tl.cdiv(T, B) * B, B):
