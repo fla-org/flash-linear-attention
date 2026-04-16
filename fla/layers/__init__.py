@@ -12,6 +12,7 @@ from .bitattn import BitAttention
 from .comba import Comba
 from .delta_net import DeltaNet
 from .deltaformer import DeltaFormerAttention
+from .flash_moba import FlashMoBA
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
@@ -27,6 +28,7 @@ from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mesa_net import MesaNet
 from .mla import MultiheadLatentAttention
+from .moba import MobaAttention
 from .mom import MomAttention
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
@@ -44,6 +46,7 @@ __all__ = [
     'Comba',
     'DeltaFormerAttention',
     'DeltaNet',
+    'FlashMoBA',
     'ForgettingAttention',
     'GatedDeltaNet',
     'GatedDeltaProduct',
@@ -58,6 +61,7 @@ __all__ = [
     'Mamba',
     'Mamba2',
     'MesaNet',
+    'MobaAttention',
     'MomAttention',
     'MultiScaleRetention',
     'MultiheadLatentAttention',
