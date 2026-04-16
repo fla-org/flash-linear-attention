@@ -175,7 +175,7 @@ class FlashMoBA(nn.Module):
             cu_seqlens_q, cu_seqlens_k = cu_seqlens_tuple
             max_seqlen_q, max_seqlen_k = max_seq_lens_tuple
 
-            # FlashMoBA 区分了 Q 和 KV 的长度参数
+            # FlashMoBA distinguishes between Q and KV length parameters
             o_unpad = flash_moba_varlen_func(
                 q=q_unpad,
                 k=k_unpad,
