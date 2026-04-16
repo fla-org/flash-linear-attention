@@ -29,39 +29,40 @@ This repo provides efficient implementations for emerging model architectures, w
 
 ## News
 
-- **[2026-04]** 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
-- **[2026-03]** 🚀 Add [Context Parallel](fla/ops/cp/README.md) support for KDA and GDN, enabling efficient distributed training across sequence dimension.
-- **[2025-10]** 🌑 Add Kimi Delta Attention implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
-- **[2025-09]** 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
-- **[2025-09]** 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more infos!
-- **[2025-08]** 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
-- **[2025-08]** 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
-- **[2025-07]** 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
-- **[2025-07]** 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
-- **[2025-06]** 🎉 Add MesaNet implementation to `fla` ([paper](https://arxiv.org/abs/2506.05233)).
-- **[2025-06]** 🐍 Add Comba implementation to `fla` ([paper](https://arxiv.org/abs/2506.02475)).
-- **[2025-05]** 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
-- **[2025-04]** 🎉 Add DeltaProduct implementation to `fla` ([paper](https://arxiv.org/abs/2502.10297)).
-- **[2025-04]** 🎉 Add FoX implementation to `fla` ([paper](https://arxiv.org/abs/2503.02130)).
-- **[2025-03]** ~~We have changed the default `initializer_range` to the magic 🐳 0.006~~ The `initializer_range` was rolled back to the default value of 0.02. For actual training, we recommend trying both.
-- **[2025-02]** 🐳 Add NSA implementations to `fla`. See kernels [here](fla/ops/nsa).
-- **[2025-01]** 🔥 We are migrating to `torchtitan`-based training framework. Check out the [flame](https://github.com/fla-org/flame) repo for more details.
+- [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
+- [2026-04] 🎯 Add [GPT-OSS](https://openai.com/index/introducing-gpt-oss/)-style attention sink support to `fla`'s attention kernels.
+- [2026-03] 🚀 Add [Context Parallel](fla/ops/cp/README.md) support for KDA and GDN, enabling efficient distributed training across sequence dimension.
+- [2025-10] 🌑 Add Kimi Delta Attention implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
+- [2025-09] 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
+- [2025-09] 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more infos!
+- [2025-08] 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
+- [2025-08] 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
+- [2025-07] 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
+- [2025-07] 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
+- [2025-06] 🎉 Add MesaNet implementation to `fla` ([paper](https://arxiv.org/abs/2506.05233)).
+- [2025-06] 🐍 Add Comba implementation to `fla` ([paper](https://arxiv.org/abs/2506.02475)).
+- [2025-05] 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
+- [2025-04] 🎉 Add DeltaProduct implementation to `fla` ([paper](https://arxiv.org/abs/2502.10297)).
+- [2025-04] 🎉 Add FoX implementation to `fla` ([paper](https://arxiv.org/abs/2503.02130)).
 
 <details>
 <summary>Older news</summary>
 
-- **[2025-01]** 🦅 Add RWKV7 implementations (both kernels and models) to `fla`.
-- **[2024-12]** Add `flash-bidirectional-attention` to `fla-org` ([repo](https://github.com/fla-org/flash-bidirectional-linear-attention)).
-- **[2024-12]** 🎉 Add Gated DeltaNet implementation to `fla` ([paper](https://arxiv.org/abs/2412.06464)).
-- **[2024-12]** 🚀 `fla` now officially supports kernels with variable-length inputs.
-- **[2024-11]** The inputs are now switched from head-first to seq-first format.
-- **[2024-11]** 💥 `fla` now provides a flexible way for training hybrid models.
-- **[2024-10]** 🔥 Announcing `flame`, a minimal and scalable framework for training `fla` models. Check out the details [here](https://github.com/fla-org/flame).
-- **[2024-09]** `fla` now includes a fused linear and cross-entropy layer, significantly reducing memory usage during training.
-- **[2024-09]** 🎉 Add GSA implementation to `fla` ([paper](https://arxiv.org/abs/2409.07146)).
-- **[2024-05]** 🎉 Add DeltaNet implementation to `fla` ([paper](https://arxiv.org/abs/2102.11174)).
-- **[2024-05]** 💥 `fla` v0.1: a variety of subquadratic kernels/layers/models integrated (RetNet/GLA/Mamba/HGRN/HGRN2/RWKV6, etc., see [Models](#models)).
-- **[2023-12]** 💥 Launch `fla`, offering a collection of implementations for state-of-the-art linear attention models.
+- [2025-03] ~~We have changed the default `initializer_range` to the magic 🐳 0.006~~ The `initializer_range` was rolled back to the default value of 0.02. For actual training, we recommend trying both.
+- [2025-02] 🐳 Add NSA implementations to `fla`. See kernels [here](fla/ops/nsa).
+- [2025-01] 🔥 We are migrating to `torchtitan`-based training framework. Check out the [flame](https://github.com/fla-org/flame) repo for more details.
+- [2025-01] 🦅 Add RWKV7 implementations (both kernels and models) to `fla`.
+- [2024-12] Add `flash-bidirectional-attention` to `fla-org` ([repo](https://github.com/fla-org/flash-bidirectional-linear-attention)).
+- [2024-12] 🎉 Add Gated DeltaNet implementation to `fla` ([paper](https://arxiv.org/abs/2412.06464)).
+- [2024-12] 🚀 `fla` now officially supports kernels with variable-length inputs.
+- [2024-11] The inputs are now switched from head-first to seq-first format.
+- [2024-11] 💥 `fla` now provides a flexible way for training hybrid models.
+- [2024-10] 🔥 Announcing `flame`, a minimal and scalable framework for training `fla` models. Check out the details [here](https://github.com/fla-org/flame).
+- [2024-09] `fla` now includes a fused linear and cross-entropy layer, significantly reducing memory usage during training.
+- [2024-09] 🎉 Add GSA implementation to `fla` ([paper](https://arxiv.org/abs/2409.07146)).
+- [2024-05] 🎉 Add DeltaNet implementation to `fla` ([paper](https://arxiv.org/abs/2102.11174)).
+- [2024-05] 💥 `fla` v0.1: a variety of subquadratic kernels/layers/models integrated (RetNet/GLA/Mamba/HGRN/HGRN2/RWKV6, etc., see [Models](#models)).
+- [2023-12] 💥 Launch `fla`, offering a collection of implementations for state-of-the-art linear attention models.
 
 </details>
 
