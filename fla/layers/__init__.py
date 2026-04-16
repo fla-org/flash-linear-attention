@@ -27,6 +27,7 @@ from .mamba import Mamba
 from .mamba2 import Mamba2
 from .mesa_net import MesaNet
 from .mla import MultiheadLatentAttention
+from .quasar import QuasarAttention
 from .mom import MomAttention
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
@@ -62,6 +63,7 @@ __all__ = [
     'MultiScaleRetention',
     'MultiheadLatentAttention',
     'NativeSparseAttention',
+    'QuasarAttention',
     'PaTHAttention',
     'RWKV6Attention',
     'RWKV7Attention',
