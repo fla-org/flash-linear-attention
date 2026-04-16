@@ -249,8 +249,8 @@ def recompute_w_u_fwd(
     v: torch.Tensor,
     beta: torch.Tensor,
     A: torch.Tensor,
+    gk: torch.Tensor,
     q: torch.Tensor | None = None,
-    gk: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
@@ -267,7 +267,7 @@ def recompute_w_u_fwd(
     w = torch.empty_like(gk)
     u = torch.empty_like(v)
     qg = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype) if q is not None else None
-    kg = torch.empty(B, T, HV, K, device=k.device, dtype=k.dtype) if gk is not None else None
+    kg = torch.empty_like(gk)
     recompute_w_u_fwd_kda_kernel[(NT, B*HV)](
         q=q,
         k=k,
