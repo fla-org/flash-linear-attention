@@ -158,9 +158,17 @@ class MobaAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
+            if q_len == 1 and attention_mask.shape[-1] != k.shape[1]:
+                attention_mask = attention_mask[:, -k.shape[1]:]
+
             # q, k, v are (B, S, H, D). unpad_input turns them into (Total, H, D)
             q_unpad, (k_unpad, v_unpad), indices_q, cu_seqlens_tuple, max_seq_lens_tuple = unpad_input(
                 q, (k, v), attention_mask, q_len)
+
+            if k.shape[1] != q_len:
+                raise NotImplementedError(
+                    "MobaAttention cached decoding requires separate Q/KV varlen metadata"
+                )
 
             cu_seqlens_moba = cu_seqlens_tuple[0]
             max_seqlen_moba = max_seq_lens_tuple[0]
@@ -181,6 +189,11 @@ class MobaAttention(nn.Module):
         # Path 2: No `attention_mask` (e.g., wikitext, or data is already unpadded)
         # We follow the original logic.
         else:
+            if k.shape[1] != q_len:
+                raise NotImplementedError(
+                    "MobaAttention cached decoding requires separate Q/KV varlen metadata"
+                )
+            
             if cu_seqlens is None:
                 cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len,
                                           dtype=torch.int32, device=hidden_states.device)
