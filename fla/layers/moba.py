@@ -193,7 +193,7 @@ class MobaAttention(nn.Module):
                 raise NotImplementedError(
                     "MobaAttention cached decoding requires separate Q/KV varlen metadata"
                 )
-            
+
             if cu_seqlens is None:
                 cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len,
                                           dtype=torch.int32, device=hidden_states.device)
