@@ -229,7 +229,7 @@ class MixedAttention(torch.autograd.Function):
         )
 
         dmkv = torch.stack((dmk, dmv), dim=1)
-        return dq, dk, dv, None, dmq, dmkv, None, None, None, None, None, None
+        return dq, dk, dv, None, dmq, dmkv, None, None, None, None, None
 
 
 def moba_attn_varlen(
