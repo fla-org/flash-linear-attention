@@ -100,7 +100,7 @@ class FlashMoBA(nn.Module):
             )
             self.o_norm = FusedRMSNormGated(self.head_dim, activation='sigmoid', eps=1e-6)
         else:
-            logger.info("MobaAttention is NOT using output gate.")
+            logger.info("FlashMoBA is NOT using output gate.")
             self.o_norm = RMSNorm(self.head_dim, eps=1e-6)
 
     def forward(
