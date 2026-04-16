@@ -329,6 +329,7 @@ def causal_conv1d_bwd_kernel(
         for num_warps in NUM_WARPS_AUTOTUNE
     ],
     key=['D', 'W'],
+    restore_value=['cache'],
     **autotune_cache_kwargs,
 )
 @triton.jit
