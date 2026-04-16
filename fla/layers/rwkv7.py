@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from einops import rearrange
 from torch.nn import functional as F
 
 from fla.layers.rwkv6 import LoRA
+from fla.layers.utils import get_layer_cache, update_layer_cache
 from fla.modules import GroupNorm
 from fla.modules.l2norm import l2_norm
 from fla.modules.token_shift import token_shift
@@ -233,9 +239,7 @@ class RWKV7Attention(nn.Module):
             )
             am = attention_mask.narrow(1, attention_mask.size(1) - seq_len, seq_len).unsqueeze(-1)
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         if attention_mask is not None:
             hidden_states = hidden_states.mul(am)
@@ -329,13 +333,13 @@ class RWKV7Attention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=conv_state,
-                layer_idx=self.layer_idx,
-                offset=r.shape[1],
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=conv_state,
+            offset=r.shape[1],
+        )
 
         if self.fuse_norm:
             o = self.g_norm(rearrange(o, '... h d -> ... (h d)'))

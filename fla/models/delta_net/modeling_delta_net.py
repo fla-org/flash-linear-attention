@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 from __future__ import annotations
 
 import math
@@ -60,6 +67,7 @@ class DeltaNetBlock(GradientCheckpointingLayer):
                 use_gate=config.use_gate,
                 use_beta=config.use_beta,
                 use_short_conv=config.use_short_conv,
+                allow_neg_eigval=config.allow_neg_eigval,
                 use_output_norm=config.use_output_norm,
                 conv_size=config.conv_size,
                 qk_norm=config.qk_norm,

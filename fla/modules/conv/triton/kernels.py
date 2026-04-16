@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -63,7 +70,7 @@ def causal_conv1d_fwd_kernel(
     else:
         i_n = i_b
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
-        p_x = x + i_b * stride_x_n
+        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = tl.arange(0, BW) + W - BW
@@ -187,7 +194,7 @@ def causal_conv1d_bwd_kernel(
         i_tg = i_b * tl.num_programs(1) + i_t
         i_n = i_b
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
-        p_x = x + i_b * stride_x_n
+        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     o_w = tl.arange(0, BW) + W - BW
@@ -261,7 +268,7 @@ def causal_conv1d_bwd_kernel(
                 b_dw = tl.sum(b_dy_shift * b_x, 0)
                 # index of cache：c = W - i_w + t
                 if USE_INITIAL_STATE:
-                    mask_head_rows = (o_t < i_w)
+                    mask_head_rows = (o_t < i_w) & (o_t < T)
                     # dy_head = dy[t]
                     b_dy_head = tl.load(dy + bos * D + o_t[:, None] * D + o_d, mask=(mask_head_rows[:, None] & m_d[None, :]),
                                         other=0.0).to(tl.float32)
@@ -303,7 +310,7 @@ def causal_conv1d_bwd_kernel(
     if IS_VARLEN:
         p_dx = dx + bos * stride_dx_t
     else:
-        p_dx = dx + i_b * stride_dx_n
+        p_dx = dx + tl.cast(i_b, tl.int64) * stride_dx_n
 
     p_dx = tl.make_block_ptr(p_dx, (T, D), (stride_dx_t, stride_dx_d), (i_t * BT, i_d * BD), (BT, BD), (1, 0))
     tl.store(p_dx, tl.cast(b_dx, dtype=p_dx.dtype.element_ty, fp_downcast_rounding='rtne'), boundary_check=(0, 1))
@@ -315,6 +322,16 @@ def causal_conv1d_bwd_kernel(
     'HAS_BIAS': lambda args: args['bias'] is not None,
     'HAS_RESIDUAL': lambda args: args['residual'] is not None,
 })
+@triton.autotune(
+    configs=[
+        triton.Config({'BD': BD}, num_warps=num_warps)
+        for BD in [8, 16, 32, 64, 128, 256]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D', 'W'],
+    restore_value=['cache'],
+    **autotune_cache_kwargs,
+)
 @triton.jit
 def causal_conv1d_update_kernel(
     x,
@@ -426,15 +443,15 @@ def compute_dh0_kernel(
 
     # Get sequence boundaries
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         seq_len = eos - bos
         # For varlen, dy is [1, total_T, D], offset by bos
         dy_base = dy + bos * stride_dy_t
     else:
         seq_len = T
         # For non-varlen, dy is [B, T, D], offset by i_n * stride_dy_n
-        dy_base = dy + i_n * stride_dy_n
+        dy_base = dy + tl.cast(i_n, tl.int64) * stride_dy_n
 
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
@@ -457,7 +474,7 @@ def compute_dh0_kernel(
                     if IS_VARLEN:
                         p_y = y + bos * stride_dy_t + t * stride_dy_t + o_d
                     else:
-                        p_y = y + i_n * stride_dy_n + t * stride_dy_t + o_d
+                        p_y = y + tl.cast(i_n, tl.int64) * stride_dy_n + t * stride_dy_t + o_d
                     b_y = tl.load(p_y, mask=m_t, other=0).to(tl.float32)
                     b_ys = tl.sigmoid(b_y)
                     b_dy = b_dy * b_ys * (1 + b_y * (1 - b_ys))
@@ -501,13 +518,13 @@ def causal_conv1d_states_fwd_kernel(
     m_d = o_d < D
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        seq_len = eos - bos
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        seq_len = (eos - bos).to(tl.int32)
         p_x = x + bos * stride_x_t
     else:
         seq_len = T
-        p_x = x + i_n * stride_x_n
+        p_x = x + tl.cast(i_n, tl.int64) * stride_x_n
 
     p_x = tl.make_block_ptr(p_x, (seq_len, D), (stride_x_t, stride_x_d), (seq_len - BW, i_d * BD), (BW, BD), (1, 0))
 
@@ -532,7 +549,7 @@ def causal_conv1d_states_fwd_kernel(
     # o_d[:, None] -> [BD, 1]
     # o_w[None, :] -> [1, BW]
     # p_final Shape -> [BD, BW]
-    p_final = final_state + i_n * D*W + o_d[:, None] * W + o_w[None, :]
+    p_final = final_state + tl.cast(i_n, tl.int64) * D*W + o_d[:, None] * W + o_w[None, :]
 
     # m_final Shape -> [BD, BW]
     m_final = m_d[:, None] & (o_w[None, :] >= 0)
@@ -604,7 +621,6 @@ def causal_conv1d_update(
     D = x.shape[-1]
     N = x.numel() // D
     W = weight.shape[1] if weight is not None else None
-    BD = 8
     BW = triton.next_power_of_2(W)
 
     if x.dim() == 2:
@@ -649,9 +665,7 @@ def causal_conv1d_update(
         stride_y_d=stride_y_d,
         D=D,
         W=W,
-        BD=BD,
         BW=BW,
         ACTIVATION=activation,
-        num_warps=STATIC_WARPS,
     )
     return y.view(shape), cache

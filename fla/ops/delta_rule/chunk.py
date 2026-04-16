@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
 
@@ -8,6 +13,7 @@ from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.delta_rule.wy_fast import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
+from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -20,6 +26,7 @@ def chunk_delta_rule_fwd(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     # obtain WY representation. u is actually the new v.
     w, u, A = prepare_wy_repr_fwd(
@@ -27,6 +34,7 @@ def chunk_delta_rule_fwd(
         v=v,
         beta=beta,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -36,6 +44,7 @@ def chunk_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
 
     o = chunk_fwd_o(
@@ -46,6 +55,7 @@ def chunk_delta_rule_fwd(
         g=None,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     return o, A, final_state
 
@@ -61,6 +71,7 @@ def chunk_delta_rule_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     w, u = recompute_w_u_fwd(
         k=k,
@@ -68,6 +79,7 @@ def chunk_delta_rule_bwd(
         beta=beta,
         A=A,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     h, v_new, _ = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -77,6 +89,7 @@ def chunk_delta_rule_bwd(
         initial_state=initial_state,
         output_final_state=False,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -85,6 +98,7 @@ def chunk_delta_rule_bwd(
         g=None,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
@@ -97,6 +111,7 @@ def chunk_delta_rule_bwd(
         dv=dv,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dq, dk, dw, _ = chunk_bwd_dqkwg(
         q=q,
@@ -110,6 +125,7 @@ def chunk_delta_rule_bwd(
         g=None,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dk2, dv, db = prepare_wy_repr_bwd(
         k=k,
@@ -119,6 +135,7 @@ def chunk_delta_rule_bwd(
         dw=dw,
         du=dv,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
     )
     dk.add_(dk2)
     return dq, dk, dv, db, dh0
@@ -140,6 +157,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -147,6 +165,8 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
 
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
         o, A, final_state = chunk_delta_rule_fwd(
             q=q,
             k=k,
@@ -156,10 +176,10 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A, initial_state)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, beta, A, initial_state, cu_seqlens, chunk_indices)
         ctx.scale = scale
-        ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
 
@@ -171,7 +191,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        q, q_rstd, k, k_rstd, v, beta, A, initial_state = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, beta, A, initial_state, cu_seqlens, chunk_indices = ctx.saved_tensors
 
         dq, dk, dv, db, dh0 = chunk_delta_rule_bwd(
             q=q,
@@ -183,12 +203,13 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             do=do,
             dht=dht,
-            cu_seqlens=ctx.cu_seqlens,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None, None
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, dh0, None, None, None, None
 
 
 @torch.compiler.disable
@@ -202,6 +223,7 @@ def chunk_delta_rule(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     head_first: bool = False,
 ):
     r"""
@@ -305,5 +327,6 @@ def chunk_delta_rule(
         output_final_state,
         use_qk_l2norm_in_kernel,
         cu_seqlens,
+        cu_seqlens_cpu,
     )
     return o, final_state

@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import ast
 import os
@@ -38,11 +44,12 @@ setup(
     ],
     python_requires='>=3.10',
     install_requires=[
-        'torch',
+        'torch>=2.7.0',
         'transformers',
         'einops',
     ],
     extras_require={
+        'tilelang': ['tilelang'],
         'conv1d': ['causal-conv1d>=1.4.0'],
         'benchmark': ['matplotlib', 'datasets>=3.3.0'],
         'test': ['pytest'],

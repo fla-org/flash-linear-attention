@@ -1,4 +1,10 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # Related files are modified and supported by the Moonshot AI Team
 
 import torch
@@ -36,6 +42,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
+        transpose_state_layout: bool = False,
     ):
         chunk_size = 64
 
@@ -48,13 +55,13 @@ class ChunkKDAFunction(torch.autograd.Function):
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
 
-        g_org = g if use_gate_in_kernel else None
+        g_input = g
 
-        (o, final_state, g, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state) = chunk_kda_fwd(
+        (o, final_state, g_cumsum, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state) = chunk_kda_fwd(
             q=q,
             k=k,
             v=v,
-            g=g,
+            g=g_input,
             beta=beta,
             scale=scale,
             initial_state=initial_state,
@@ -70,6 +77,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             disable_recompute=disable_recompute,
             return_intermediate_states=return_intermediate_states,
             cp_context=cp_context,
+            transpose_state_layout=transpose_state_layout,
         )
 
         if return_intermediate_states:
@@ -78,7 +86,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             return o.type_as(q), final_state, h
 
         ctx.save_for_backward(
-            q, q_rstd, k, k_rstd, v, g, g_org, beta, A_log, dt_bias, Aqk, Akk,
+            q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta, A_log, dt_bias, Aqk, Akk,
             w, u, qg, kg, v_new, h,
             initial_state, cu_seqlens, chunk_indices
         )
@@ -90,6 +98,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.use_gate_in_kernel = use_gate_in_kernel
         ctx.disable_recompute = disable_recompute
         ctx.cp_context = cp_context
+        ctx.transpose_state_layout = transpose_state_layout
         return o.type_as(q), final_state
 
     @staticmethod
@@ -100,7 +109,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        (q, q_rstd, k, k_rstd, v, g, g_org, beta, A_log, dt_bias, Aqk, Akk,
+        (q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta, A_log, dt_bias, Aqk, Akk,
          w, u, qg, kg, v_new, h,
          initial_state, cu_seqlens, chunk_indices) = (
             ctx.saved_tensors
@@ -110,7 +119,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             q=q,
             k=k,
             v=v,
-            g=g,
+            g=g_cumsum,
             beta=beta,
             Aqk=Aqk,
             Akk=Akk,
@@ -122,19 +131,20 @@ class ChunkKDAFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             chunk_size=ctx.chunk_size,
             safe_gate=ctx.safe_gate,
-            g_org=g_org, lower_bound=ctx.lower_bound,
+            g_org=g_input if ctx.use_gate_in_kernel else None, lower_bound=ctx.lower_bound,
             use_gate_in_kernel=ctx.use_gate_in_kernel,
             A_log=A_log, dt_bias=dt_bias,
             disable_recompute=ctx.disable_recompute,
             w=w, u=u, qg=qg, kg=kg, v_new=v_new, h=h,
             cp_context=ctx.cp_context,
+            transpose_state_layout=ctx.transpose_state_layout,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
 
-        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None)
+        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta), dA, dbias, None, dh0,
+                None, None, None, None, None, None, None, None, None, None, None)
 
 
 @torch.compiler.disable
@@ -156,6 +166,7 @@ def chunk_kda(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext = None,
+    transpose_state_layout: bool = False,
     **kwargs,
 ):
     r"""
@@ -196,13 +207,19 @@ def chunk_kda(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         safe_gate (bool):
-            Whether the kernel can assume the input gate values `g` are in a safe range.
-            When `True`, the kernel can use M=16 TensorCore acceleration.
-            The safe range is approximately [-5, 0). Default: `False`.
+            Whether the kernel can assume the gate values (in log space) are in a safe range
+            and use M=16 TensorCore acceleration for higher throughput.
+            The safe range is ``[lower_bound, 0)``. With the default ``lower_bound=-5``,
+            the per-step decay factor ``exp(g)`` is bounded in ``[exp(-5), 1) ≈ [0.0067, 1)``,
+            meaning each step retains at least ~0.67% of the state — a negligible loss that
+            has minimal impact on model quality while enabling significant speedup.
+            Requires ``lower_bound`` to be set. Default: ``False``.
         lower_bound (Optional[float]):
-            Lower bound for the forget gate activation function when `use_gate_in_kernel=True`.
-            This parameter modifies the internal forget gate activation and is recommended
-            to be set to `-5` when `safe_gate` is enabled. Default: `None`.
+            Lower bound for the forget gate (in log space) when ``use_gate_in_kernel=True``.
+            Changes the gate activation from ``-exp(A_log) * softplus(g + dt_bias)``
+            to ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
+            which naturally clamps the output to ``[lower_bound, 0)``.
+            Recommended value: ``-5`` (i.e., ``exp(-5) ≈ 0.0067``). Default: ``None``.
         disable_recompute (bool):
             Whether to disable gradient recomputation in the kernel. When `True`, the kernel
             will save all intermediate activations for backward pass, which is beneficial
@@ -211,6 +228,13 @@ def chunk_kda(
             If True, returns intermediate state `h` for inference scenarios (e.g., vLLM).
             Must be used within `torch.inference_mode()` and will return a 3-tuple instead of 2-tuple.
             This is not intended for training as it bypasses autograd. Default: `False`.
+        cp_context (Optional[FLACPContext]):
+            Context parallel context for distributed training across multiple devices.
+            When provided, `initial_state` and `output_final_state` are not supported,
+            and `cu_seqlens` will be overridden by the context. Default: `None`.
+        transpose_state_layout (Optional[bool]):
+            Whether to use the transposed state layout for the hidden state.
+            Default: `False`.
 
     Returns:
         - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
@@ -226,7 +250,9 @@ def chunk_kda(
             h (torch.Tensor):
                 Intermediate states of shape `[B, NT, H, K, V]` and dtype `bfloat16` for caching or further processing.
                 - For equal-length sequences: `NT = #chunks_per_sequence` (typically `ceil(T / chunk_size)`)
-                - For variable-length sequences (cu_seqlens): B is always 1 (flattened), NT is the total number of chunks across all sequences, determined by `prepare_chunk_indices(cu_seqlens, chunk_size)`
+                - For variable-length sequences (cu_seqlens): B is always 1 (flattened),
+                  NT is the total number of chunks across all sequences,
+                  determined by `prepare_chunk_indices(cu_seqlens, chunk_size)`
 
     Examples::
         >>> import torch
@@ -329,4 +355,5 @@ def chunk_kda(
         disable_recompute,
         return_intermediate_states,
         cp_context,
+        transpose_state_layout,
     )

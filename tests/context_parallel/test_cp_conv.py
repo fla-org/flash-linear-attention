@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 """
 Test for Context Parallel (CP) Causal Convolution 1D
 
@@ -362,6 +369,187 @@ def test_cp2_many_short_sequences():
         D=128,
         W=4,
         lengths=[100, 150, 200, 250, 124, 100, 100],
+        dtype=torch.float32,
+    )
+
+
+# ============================================================
+# Extreme Edge Cases: Short Local Sequences (T_local < W)
+#
+# These tests target a specific bug in causal_conv1d_bwd_kernel:
+# when CP splits a sequence so that a rank gets a very short local
+# segment (T_local < W), the backward kernel's mask_head_rows was
+# missing the `& (o_t < T)` bound check, causing out-of-bounds
+# reads from dy and producing NaN in dw.
+# ============================================================
+
+@pytest.mark.parametrize("backend", ["triton"])
+def test_cp2_short_tail_len1(backend):
+    """
+    CP2: seq0 has 513 tokens, so rank 1 gets a length-1 tail (T=1 < W=4).
+
+    Rank 0: [0, 512)  → 512 tokens of seq0
+    Rank 1: [512, 1024) → 1 token of seq0 (T_local=1!) + 511 tokens of seq1
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name=f"CP2_ShortTail_Len1_{backend}",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[513, 511],
+        dtype=torch.float32,
+    )
+
+
+@pytest.mark.parametrize("backend", ["triton"])
+def test_cp2_short_tail_len2(backend):
+    """
+    CP2: seq0 has 514 tokens, so rank 1 gets a length-2 tail (T=2 < W=4).
+
+    Rank 1: [512, 1024) → 2 tokens of seq0 (T_local=2!) + 510 tokens of seq1
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name=f"CP2_ShortTail_Len2_{backend}",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[514, 510],
+        dtype=torch.float32,
+    )
+
+
+@pytest.mark.parametrize("backend", ["triton"])
+def test_cp4_every_rank_gets_short_tail(backend):
+    """
+    CP4: every non-first rank gets a length-1 local sequence tail.
+
+    lengths=[257, 255, 257, 255], T=1024, chunk_size=256
+    Rank 0: [0, 256)   → 256 tokens of seq0
+    Rank 1: [256, 512)  → 1 token of seq0 (T=1!) + 255 tokens of seq1
+    Rank 2: [512, 768)  → 256 tokens of seq1(rest) + start of seq2
+                          actually seq1=[257,512) so all 255 on rank1, then
+                          seq2=[512,769) → rank2 gets 256, rank3 gets 1
+    Rank 3: [768, 1024) → 1 token of seq2 (T=1!) + 255 tokens of seq3
+    """
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name=f"CP4_EveryRankShortTail_{backend}",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[257, 255, 257, 255],
+        dtype=torch.float32,
+    )
+
+
+@pytest.mark.parametrize("backend", ["triton"])
+def test_cp2_multiple_short_tails(backend):
+    """
+    CP2: multiple sequences each end 1 token into rank 1.
+
+    lengths=[200, 313, 511] → seq0 ends at 200 (rank 0), seq1 ends at 513 (rank 1 gets 1 token)
+    Rank 0: [0, 512)   → seq0(200) + 312 tokens of seq1
+    Rank 1: [512, 1024) → 1 token of seq1 (T=1!) + 511 tokens of seq2
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name=f"CP2_MultipleShortTails_{backend}",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[200, 313, 511],
+        dtype=torch.float32,
+    )
+
+
+@pytest.mark.parametrize("backend", ["triton"])
+def test_cp2_global_len1_sequence(backend):
+    """
+    CP2: a globally length-1 sequence sits right at the rank boundary.
+
+    lengths=[512, 1, 511] → seq1 is globally length 1, entirely on rank 1
+    Rank 0: [0, 512)   → seq0(512)
+    Rank 1: [512, 1024) → seq1(1, T=1!) + seq2(511)
+    seq1 has no initial_state from prev rank (it starts fresh), but the
+    initial_state tensor is still allocated for all seqs on non-first ranks.
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name=f"CP2_GlobalLen1Sequence_{backend}",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[512, 1, 511],
+        dtype=torch.float32,
+    )
+
+
+@pytest.mark.parametrize("backend", ["triton"])
+def test_cp4_multiple_short_tails(backend):
+    """
+    CP4: multiple sequences each end 1-2 tokens past a rank boundary,
+    creating short local segments on multiple ranks.
+
+    lengths=[257, 253, 257, 257], T=1024, chunk_size=256
+    Rank 0: [0, 256)   → seq0[0:256]  (256 tokens)
+    Rank 1: [256, 512)  → seq0 tail (1 tok, T=1!) + seq1 (253 tok) + seq2 start (2 tok, T=2!)
+    Rank 2: [512, 768)  → seq2 cont (255 tok) + seq3 start (1 tok, T=1!)
+    Rank 3: [768, 1024) → seq3 cont (256 tok)
+
+    Ranks 1 and 2 each have local sequences with T < W=4.
+    """
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name=f"CP4_MultipleShortTails_{backend}",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[257, 253, 257, 257],
+        dtype=torch.float32,
+    )
+
+
+@pytest.mark.parametrize("backend", ["triton"])
+def test_cp4_worst_case_many_len1(backend):
+    """
+    CP4: globally length-1 sequences + short tails across multiple ranks.
+    Stress test for cross-sequence gradient isolation in CP backward.
+
+    lengths=[257, 1, 253, 257, 1, 253, 2], T=1024, chunk_size=256
+    Rank 1: cu_seqlens=[0,1,2,255,256] → 4 local seqs, lengths [1,1,253,1]
+    Rank 2: cu_seqlens=[0,256], pre_num_conv_tokens=1 → gradient must be
+            masked to only 1 valid position, not all W-1=3.
+    """
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name=f"CP4_WorstCaseManyLen1_{backend}",
+        T=1024,
+        D=128,
+        W=4,
+        lengths=[257, 1, 253, 257, 1, 253, 2],
         dtype=torch.float32,
     )
 

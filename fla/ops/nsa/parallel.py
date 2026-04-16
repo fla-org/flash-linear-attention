@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
 
@@ -633,6 +638,7 @@ def parallel_nsa_bwd(
     scale: float = None,
     cu_seqlens: torch.LongTensor | None = None,
     token_indices: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
     HQ = q.shape[2]
@@ -674,10 +680,10 @@ def parallel_nsa_bwd(
     dq = dq.sum(0)
 
     if cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BS)
+        if chunk_indices is None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BS)
         NS = len(chunk_indices)
     else:
-        chunk_indices = None
         NS = triton.cdiv(T, BS)
 
     # [B, T, H, M]

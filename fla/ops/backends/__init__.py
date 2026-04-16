@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 """Generic backend dispatch system for FLA operations."""
 
 from __future__ import annotations
@@ -15,12 +22,27 @@ logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable)
 
 
+_DISPATCH_DISABLED = os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1"
+if _DISPATCH_DISABLED:
+    logger.info("[FLA Backend] FLA_DISABLE_BACKEND_DISPATCH=1 — all dispatch bypassed")
+
+
 class BaseBackend:
-    """Base class for operation-specific backends."""
+    """Base class for operation-specific backends.
+
+    Attributes:
+        backend_type: Identifier for the backend type, used to distinguish different backend implementations.
+        package_name: Name of the external package required by the backend. None indicates no external dependency.
+        env_var: Environment variable name that controls whether the backend is enabled. None means always enabled.
+        default_enable: Controls whether the backend is enabled by default when env_var is not set.
+                       Defaults to True (enabled). Set to False to require explicit user opt-in.
+        priority: Backend priority, lower values indicate higher priority (default is 5).
+    """
 
     backend_type: ClassVar[str] = "base"
     package_name: ClassVar[str | None] = None
     env_var: ClassVar[str | None] = None
+    default_enable: ClassVar[bool] = True
     # Lower number = higher priority, default is 5
     priority: ClassVar[int] = 5
 
@@ -34,7 +56,8 @@ class BaseBackend:
     def is_enabled(cls) -> bool:
         if cls.env_var is None:
             return True
-        return os.environ.get(cls.env_var, "1") != "0"
+        default_value = "1" if cls.default_enable else "0"
+        return os.environ.get(cls.env_var, default_value) != "0"
 
     @classmethod
     def can_use(cls) -> bool:
@@ -120,6 +143,8 @@ def dispatch(operation: str):
     that passes the verifier for the given function call.
     """
     def decorator(func: F) -> F:
+        if _DISPATCH_DISABLED:
+            return func
         func_name = func.__name__
 
         @wraps(func)

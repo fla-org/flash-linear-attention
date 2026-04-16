@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ import torch.nn as nn
 from einops import rearrange
 from torch.nn import functional as F
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.modules.l2norm import l2_norm
 from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step
@@ -137,9 +142,7 @@ class MesaNet(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
         if attention_mask is not None:
@@ -204,13 +207,13 @@ class MesaNet(nn.Module):
             )
             o = o.unsqueeze(0).to(q)
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=(h_kk, h_kv),
-                conv_state=(conv_state_q, conv_state_k),
-                layer_idx=self.layer_idx,
-                offset=q_len,
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=(h_kk, h_kv),
+            conv_state=(conv_state_q, conv_state_k),
+            offset=q_len,
+        )
         if self.use_output_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)
             o = self.o_norm(o, g)
