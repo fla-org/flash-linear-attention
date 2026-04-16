@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from functools import lru_cache
-
 import torch
 from einops import rearrange
 from flash_attn import flash_attn_varlen_func
