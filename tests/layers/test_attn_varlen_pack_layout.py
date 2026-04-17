@@ -1,13 +1,20 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import pytest
 import torch
 
 from fla.layers.attn import Attention
 from fla.utils import device
 
-
 try:
+    import flash_attn  # noqa: F401
     HAS_FLASH = True
-except Exception:
+except ImportError:
     HAS_FLASH = False
 
 
