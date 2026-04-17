@@ -8,6 +8,14 @@
 import torch
 from einops import rearrange
 
+from fla.ops.utils.index import (
+    prepare_chunk_indices,
+    prepare_chunk_offsets,
+    prepare_cu_seqlens_from_lens,
+    prepare_lens,
+    prepare_split_cu_seqlens,
+)
+
 try:
     from flash_attn import flash_attn_varlen_func
     from flash_attn.flash_attn_interface import (
@@ -20,58 +28,28 @@ except ImportError:
     _flash_attn_varlen_forward = None
 
 
-def calc_chunks(cu_seqlen, moba_chunk_size):
+def calc_chunks(cu_seqlens, moba_chunk_size):
     """calc chunks that needs moba attention"""
-
-    # batch_sizes[batch_idx] = batch size ( seqlen ) of batch idx
-    batch_sizes = cu_seqlen[1:] - cu_seqlen[:-1]
-    if torch.any(batch_sizes == 0):
+    if torch.any(prepare_lens(cu_seqlens) == 0):
         raise ValueError("parallel_moba does not support empty sequences in cu_seqlens")
-    # batch_num_chunk[batch_idx] = how many chunk in batch idx
-    batch_num_chunk = (batch_sizes + (moba_chunk_size - 1)) // moba_chunk_size
+
     # cu_num_chunk[batch_idx] = first chunk id of this batch
-    cu_num_chunk = torch.zeros(
-        batch_num_chunk.numel() + 1,
-        device=cu_seqlen.device,
-        dtype=batch_num_chunk.dtype,
+    cu_num_chunk = prepare_chunk_offsets(cu_seqlens, moba_chunk_size)
+    num_chunk = int(cu_num_chunk[-1])
+    # cu_chunk[chunk_idx] = start token offset of chunk idx (within packed tensor)
+    cu_chunk = prepare_split_cu_seqlens(
+        batch_size=0, seq_len=0, split_size=moba_chunk_size,
+        cu_seqlens=cu_seqlens, dtype=torch.int32, device=cu_seqlens.device,
     )
-    cu_num_chunk[1:] = batch_num_chunk.cumsum(dim=0)
-    # total chunk ( for all batch )
-    num_chunk = cu_num_chunk[-1]
-    # chunk_sizes[chunk_idx] = chunk_size of chunk idx
-    chunk_sizes = torch.full(
-        (num_chunk + 1,), moba_chunk_size, dtype=torch.int32, device=cu_seqlen.device
-    )
-    chunk_sizes[0] = 0  # for calc cu chunk
-    batch_last_chunk_size = batch_sizes - (batch_num_chunk - 1) * moba_chunk_size
-    chunk_sizes[cu_num_chunk[1:]] = batch_last_chunk_size
-    # cu_chunk[chunk_idx] = the start chunk offset of chunk idx
-    cu_chunk = chunk_sizes.cumsum(dim=-1, dtype=torch.int32)
     # chunk_to_batch[chunk_idx] = batch idx of the chunk idx
-    chunk_to_batch = torch.zeros(
-        (num_chunk,), dtype=torch.int32, device=cu_seqlen.device
-    )
-    chunk_to_batch[cu_num_chunk[1:-1]] = 1
-    chunk_to_batch = chunk_to_batch.cumsum(dim=0, dtype=torch.int32)
+    chunk_to_batch = prepare_chunk_indices(cu_seqlens, moba_chunk_size)[:, 0].to(torch.int32)
 
-    """ filter chunks that need moba attn """
-
-    # filter chunks ( remove last chunk of each batch )
-    # filtered_chunk_indices: chunk index list that excludes the last chunk of each batch
-    chunk_to_remove = cu_num_chunk[1:] - 1
-    chunk_to_remain = torch.ones(
-        (num_chunk,), dtype=torch.bool, device=cu_seqlen.device
-    )
-    chunk_to_remain[chunk_to_remove] = False
+    # filter chunks (remove last chunk of each batch)
+    chunk_to_remain = torch.ones(num_chunk, dtype=torch.bool, device=cu_seqlens.device)
+    chunk_to_remain[cu_num_chunk[1:] - 1] = False
     filtered_chunk_indices = chunk_to_remain.nonzero(as_tuple=True)[0]
-    num_filtered_chunk = len(filtered_chunk_indices)
 
-    return (
-        cu_chunk,
-        filtered_chunk_indices,
-        num_filtered_chunk,
-        chunk_to_batch,
-    )
+    return cu_chunk, filtered_chunk_indices, len(filtered_chunk_indices), chunk_to_batch
 
 
 class ParallelMoBAFunction(torch.autograd.Function):
@@ -82,11 +60,11 @@ class ParallelMoBAFunction(torch.autograd.Function):
         q,
         k,
         v,
-        self_attn_cu_seqlen,
+        self_attn_cu_seqlens,
         moba_q,
         moba_kv,
-        moba_cu_seqlen_q,
-        moba_cu_seqlen_kv,
+        moba_cu_seqlens_q,
+        moba_cu_seqlens_k,
         max_seqlen,
         moba_chunk_size,
         moba_q_sh_indices,
@@ -101,8 +79,8 @@ class ParallelMoBAFunction(torch.autograd.Function):
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=self_attn_cu_seqlen,
-                cu_seqlens_k=self_attn_cu_seqlen,
+                cu_seqlens_q=self_attn_cu_seqlens,
+                cu_seqlens_k=self_attn_cu_seqlens,
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
                 softmax_scale=softmax_scale,
@@ -116,8 +94,8 @@ class ParallelMoBAFunction(torch.autograd.Function):
             q=moba_q,
             k=moba_kv[:, 0],
             v=moba_kv[:, 1],
-            cu_seqlens_q=moba_cu_seqlen_q,
-            cu_seqlens_k=moba_cu_seqlen_kv,
+            cu_seqlens_q=moba_cu_seqlens_q,
+            cu_seqlens_k=moba_cu_seqlens_k,
             max_seqlen_q=max_seqlen,
             max_seqlen_k=moba_chunk_size,
             softmax_scale=softmax_scale,
@@ -129,13 +107,11 @@ class ParallelMoBAFunction(torch.autograd.Function):
         self_attn_lse_sh = self_attn_lse_hs.t().contiguous()
         moba_attn_lse = moba_attn_lse_hs.t().contiguous()
 
-        # output buffer [S, H, D], same shape as q
-        output = torch.zeros(
-            (q.shape[0], q.shape[1], q.shape[2]), device=q.device, dtype=torch.float32
-        )
+        # output buffer [T, H, K], same shape as q
+        output = torch.zeros_like(q, dtype=torch.float32)
 
-        # flatten vS & H for index ops
-        output_2d = output.view(-1, q.shape[2])
+        # flatten T & H for index ops
+        output_2d = output.view(-1, q.shape[-1])
 
         # calc mixed_lse
         # minus max lse to avoid exp explosion
@@ -159,7 +135,7 @@ class ParallelMoBAFunction(torch.autograd.Function):
         mixed_attn_lse_sh = mixed_attn_se_sh.log()
 
         # add attn output
-        factor = (self_attn_lse_sh - mixed_attn_lse_sh).exp()  # [ vS, H ]
+        factor = (self_attn_lse_sh - mixed_attn_lse_sh).exp()  # [ T, H ]
         self_attn_out_sh = self_attn_out_sh * factor.unsqueeze(-1)
         output_2d += self_attn_out_sh.reshape_as(output_2d)
 
@@ -169,7 +145,7 @@ class ParallelMoBAFunction(torch.autograd.Function):
             .index_select(0, moba_q_sh_indices)
             .view_as(moba_attn_lse)
         )
-        factor = (moba_attn_lse - mixed_attn_lse).exp()  # [ vS, H ]
+        factor = (moba_attn_lse - mixed_attn_lse).exp()  # [ T, H ]
         moba_attn_out = moba_attn_out * factor.unsqueeze(-1)
         raw_attn_out = moba_attn_out.view(-1, moba_attn_out.shape[-1])
         output_2d.index_add_(0, moba_q_sh_indices, raw_attn_out)
@@ -182,11 +158,11 @@ class ParallelMoBAFunction(torch.autograd.Function):
             q,
             k,
             v,
-            self_attn_cu_seqlen,
+            self_attn_cu_seqlens,
             moba_q,
             moba_kv,
-            moba_cu_seqlen_q,
-            moba_cu_seqlen_kv,
+            moba_cu_seqlens_q,
+            moba_cu_seqlens_k,
             moba_q_sh_indices,
         )
 
@@ -196,8 +172,8 @@ class ParallelMoBAFunction(torch.autograd.Function):
     def backward(ctx, d_output):
         max_seqlen, moba_chunk_size, softmax_scale = ctx.max_seqlen, ctx.moba_chunk_size, ctx.softmax_scale
         (
-            output, mixed_attn_vlse_sh, q, k, v, self_attn_cu_seqlen, moba_q,
-            moba_kv, moba_cu_seqlen_q, moba_cu_seqlen_kv, moba_q_sh_indices,
+            output, mixed_attn_vlse_sh, q, k, v, self_attn_cu_seqlens, moba_q,
+            moba_kv, moba_cu_seqlens_q, moba_cu_seqlens_k, moba_q_sh_indices,
         ) = ctx.saved_tensors
         d_output = d_output.contiguous()
 
@@ -208,16 +184,16 @@ class ParallelMoBAFunction(torch.autograd.Function):
         _ = _flash_attn_varlen_backward(
             dout=d_output, q=q, k=k, v=v, out=output, softmax_lse=mixed_attn_vlse_sh.t().contiguous(),
             dq=dq, dk=dk, dv=dv,
-            cu_seqlens_q=self_attn_cu_seqlen, cu_seqlens_k=self_attn_cu_seqlen,
+            cu_seqlens_q=self_attn_cu_seqlens, cu_seqlens_k=self_attn_cu_seqlens,
             max_seqlen_q=max_seqlen, max_seqlen_k=max_seqlen, softmax_scale=softmax_scale, causal=True,
             dropout_p=0.0,
             window_size_left=-1, window_size_right=-1, softcap=0.0, alibi_slopes=None,
             deterministic=True,
         )
 
-        headdim = q.shape[-1]
-        d_moba_output = d_output.view(-1, headdim).index_select(0, moba_q_sh_indices).unsqueeze(1)
-        moba_output = output.view(-1, headdim).index_select(0, moba_q_sh_indices).unsqueeze(1)
+        K = q.shape[-1]
+        d_moba_output = d_output.view(-1, K).index_select(0, moba_q_sh_indices).unsqueeze(1)
+        moba_output = output.view(-1, K).index_select(0, moba_q_sh_indices).unsqueeze(1)
         mixed_attn_vlse = mixed_attn_vlse_sh.view(-1).index_select(0, moba_q_sh_indices).view(1, -1)
 
         dmq = torch.empty_like(moba_q)
@@ -228,8 +204,8 @@ class ParallelMoBAFunction(torch.autograd.Function):
             dout=d_moba_output, q=moba_q, k=moba_kv[:, 0], v=moba_kv[:, 1], out=moba_output,
             softmax_lse=mixed_attn_vlse,
             dq=dmq, dk=dmk, dv=dmv,
-            cu_seqlens_q=moba_cu_seqlen_q,
-            cu_seqlens_k=moba_cu_seqlen_kv, max_seqlen_q=max_seqlen, max_seqlen_k=moba_chunk_size,
+            cu_seqlens_q=moba_cu_seqlens_q,
+            cu_seqlens_k=moba_cu_seqlens_k, max_seqlen_q=max_seqlen, max_seqlen_k=moba_chunk_size,
             softmax_scale=softmax_scale, causal=False, dropout_p=0.0,
             window_size_left=-1,
             window_size_right=-1,
@@ -251,7 +227,7 @@ def parallel_moba(
     moba_chunk_size: int,
     moba_topk: int,
 ) -> torch.Tensor:
-    """Flash-attn based MoBA implementation. Core logic:
+    r"""Flash-attn based MoBA implementation. Core logic:
     1. Calculate the chunks and the number of chunks, n = floor(data_size / chunk_size)
        - tokens in the tail chunk are reserved for self attn
        - tokens in other chunks will be processed in later steps
@@ -261,45 +237,49 @@ def parallel_moba(
     4. Combine the varlen attn and self attn results via online softmax to get the final result
 
     Args:
-        q (torch.Tensor): [seqlen, head, head_dim]
-        k (torch.Tensor): [seqlen, head, head_dim]
-        v (torch.Tensor): [seqlen, head, head_dim]
-        cu_seqlens (torch.Tensor): the cumulative sequence length tensor, same definition in flash attn
-        max_seqlen (int): the max sequence length of the batch, same definition in flash attn
+        q (torch.Tensor):
+            queries of shape `[T, H, K]`.
+        k (torch.Tensor):
+            keys of shape `[T, H, K]`.
+        v (torch.Tensor):
+            values of shape `[T, H, K]`.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
+        max_seqlen (int):
+            Max sequence length across the batch, consistent with the FlashAttention API.
+        moba_chunk_size (int):
+            Size of each MoBA chunk.
+        moba_topk (int):
+            Number of chunks each query attends to (including its own current chunk).
 
     Returns:
-        attn_output (torch.Tensor): [seqlen, head, head_dim]
+        Output of shape `[T, H, K]`.
     """
     if flash_attn_varlen_func is None:
         raise ImportError(
             "`parallel_moba` requires `flash-attn`. Install it via `pip install flash-attn`."
         )
 
-    """ some basic variables """
-    # qkv shape = [ S, H, D ]
-    seqlen, num_head, head_dim = q.shape
+    T, H, K = q.shape
 
-    """ prepare chunk meta """
-    (
-        cu_chunk,
-        filtered_chunk_indices,
-        num_filtered_chunk,
-        chunk_to_batch,
-    ) = calc_chunks(cu_seqlens, moba_chunk_size)
+    # prepare chunk meta
+    cu_chunk, filtered_chunk_indices, num_filtered_chunk, chunk_to_batch = (
+        calc_chunks(cu_seqlens, moba_chunk_size)
+    )
 
-    # we will adjust selective topk to moba_topk - 1, as the last chunk is always chosen
+    # the last chunk is always chosen by self-attn, so we only need `moba_topk - 1` from MoBA
     moba_topk = min(moba_topk - 1, num_filtered_chunk)
-    need_moba_attn = moba_topk > 0
 
-    # corner case: if no moba attn needed, just return self attn
-    if not need_moba_attn:
+    # corner case: no MoBA chunks selectable, fall back to plain causal self-attn
+    if moba_topk <= 0:
         return flash_attn_varlen_func(
             q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen, causal=True
         )
 
     kv = torch.stack((k, v), dim=1)
 
-    self_attn_cu_seqlen = cu_chunk
+    self_attn_cu_seqlens = cu_chunk
 
     # filtered_kv is a dense matrix that only contains filtered chunk of kv
     filtered_kv_indices = torch.arange(
@@ -308,27 +288,21 @@ def parallel_moba(
     filtered_kv_indices += cu_chunk[filtered_chunk_indices][:, None]
     filtered_kv = kv.index_select(0, filtered_kv_indices.view(-1))
 
-    """ calc key_gate_weight and gate """
-
-    # key_gate_weight [ F_N_CHUNK, HEAD, HEAD_DIM ]
+    # key_gate_weight [ F_N_CHUNK, H, K ], float32 for better gate logit perception
     key_gate_weight = (
         filtered_kv[:, 0]
-        .view(num_filtered_chunk, moba_chunk_size, num_head, head_dim)
+        .view(num_filtered_chunk, moba_chunk_size, H, K)
         .mean(dim=1)
         .float()
     )
-    q = q.type(torch.float32)  # float logit on the fly for better gate logit perception
-    key_gate_weight = key_gate_weight.type(
-        torch.float32
-    )  # float logit for better gate logit perception
-    gate = torch.einsum(
-        "nhd,shd->nhs", key_gate_weight, q
-    )  # gate [ F_N_CHUNK, HEAD, SEQ ]
+    q = q.float()
+    # gate [ F_N_CHUNK, H, T ]
+    gate = torch.einsum("nhk,thk->nht", key_gate_weight, q)
     key_gate_weight = key_gate_weight.type_as(k)
     q = q.type_as(k)
 
-    # pose process gate, masking unchosen batch and apply causal mask to current chunk
-    gate_seq_idx = torch.arange(0, seqlen, device=q.device, dtype=torch.int32)[
+    # mask out chunks that lie outside the current sequence, and the current chunk itself
+    gate_seq_idx = torch.arange(0, T, device=q.device, dtype=torch.int32)[
         None, :
     ].repeat(num_filtered_chunk, 1)
     chunk_end = cu_chunk[filtered_chunk_indices + 1]
@@ -338,84 +312,66 @@ def parallel_moba(
     gate_inf_mask = gate_chunk_end_mask | gate_batch_end_mask
     gate.masked_fill_(gate_inf_mask.unsqueeze(1), -float("inf"))
 
-    """ find moba q that needs moba attn """
-    # find topk chunks
-    # gate_mask [ N_CHUNK, HEAD, SEQ ], true indicates that needs attention
+    # find topk chunks per (head, token), then AND with the causal mask
+    # gate_mask [ N_CHUNK, H, T ], True means the (chunk, head, token) triple participates in MoBA attn
     _, gate_top_k_idx = torch.topk(gate, k=moba_topk, dim=0, largest=True, sorted=False)
-    # apply causal mask
     gate_mask = torch.logical_not(gate.isinf())
-    # select topk chunks
-    gate_idx_mask = torch.zeros(gate_mask.shape, dtype=torch.bool, device=q.device)
-    gate_idx_mask = gate_idx_mask.scatter_(dim=0, index=gate_top_k_idx, value=True)
+    gate_idx_mask = torch.zeros_like(gate_mask).scatter_(dim=0, index=gate_top_k_idx, value=True)
     gate_mask = torch.logical_and(gate_mask, gate_idx_mask)
 
     # varlen trick: combining all q index that needs moba attn
     # the result will be like [ C0H0 ][ C0H1 ][ C0H2 ][ ... ][ CnHm ]
-    moba_q_indices = gate_mask.reshape(gate_mask.shape[0], -1).nonzero(as_tuple=True)[
-        -1
-    ]  # [ HS indices ] * N
-    # moba_seqlen_q indicates that how many q chunks are selected for each kv chunk - head
-    moba_seqlen_q = gate_mask.sum(dim=-1).flatten()
-    # select all q that needs moba attn based on the moba_q_indices
-    moba_q = rearrange(q, "s h d -> ( h s ) d").index_select(
-        0, moba_q_indices
-    )  # [ selected_S, D ]
+    moba_q_indices = gate_mask.reshape(gate_mask.shape[0], -1).nonzero(as_tuple=True)[-1]  # [HT] * N
+    # moba_seqlens_q[i]: number of q tokens selected for the i-th kv (chunk, head) pair
+    moba_seqlens_q = gate_mask.sum(dim=-1).flatten()
+    # gather the selected q tokens, shape [ selected_T, K ]
+    moba_q = rearrange(q, "t h k -> (h t) k").index_select(0, moba_q_indices)
     moba_q = moba_q.unsqueeze(1)
-    # moba_q_sh_indices represents the position in the origin q tensor of each q token inside moba_q
-    moba_q_sh_indices = moba_q_indices % seqlen * num_head + moba_q_indices // seqlen
+    # moba_q_sh_indices: position of each gathered q token inside the original q tensor
+    moba_q_sh_indices = moba_q_indices % T * H + moba_q_indices // T
 
-    """ prepare moba kv """
-    # Since moba_q is organized as HS * N, we need to reorganize kv to adapt to q
+    # reorganize kv to align with moba_q (grouped as (H, chunk) pairs)
 
-    # cut off zero experts
-    q_zero_mask = moba_seqlen_q == 0
+    # cut off (chunk, head) pairs whose q selection is empty
+    q_zero_mask = moba_seqlens_q == 0
     valid_expert_mask = ~q_zero_mask
     zero_expert_count = q_zero_mask.sum()
-    # only keep the kv that has q select > 0
     if zero_expert_count > 0:
-        moba_seqlen_q = moba_seqlen_q[valid_expert_mask]
-    # moba cu_seqlen for flash attn
-    moba_cu_seqlen_q = torch.cat(
-        (
-            torch.tensor([0], device=q.device, dtype=moba_seqlen_q.dtype),
-            moba_seqlen_q.cumsum(dim=0),
-        ),
-        dim=0,
-    ).to(torch.int32)
-    moba_kv = rearrange(filtered_kv, "s x h d -> h s x d")
+        moba_seqlens_q = moba_seqlens_q[valid_expert_mask]
+    # moba cu_seqlens for flash-attn varlen
+    moba_cu_seqlens_q = prepare_cu_seqlens_from_lens(moba_seqlens_q)
+    moba_kv = rearrange(filtered_kv, "t x h k -> h t x k")
     moba_kv = moba_kv.split(moba_chunk_size, dim=1)
     moba_kv = torch.cat(moba_kv, dim=0)
     if zero_expert_count > 0:
         assert valid_expert_mask.sum() == moba_kv.shape[0] - zero_expert_count
-        moba_kv = moba_kv[
-            valid_expert_mask
-        ]  # cut off zero Q expert from kv , or the grad may be nan
+        # drop (chunk, head) pairs with zero q, otherwise grads may be nan
+        moba_kv = moba_kv[valid_expert_mask]
     moba_kv = moba_kv.flatten(start_dim=0, end_dim=1).unsqueeze(2)
-    moba_cu_seqlen_kv = (
+    moba_cu_seqlens_k = (
         torch.arange(
             0,
-            num_filtered_chunk * num_head + 1 - zero_expert_count,
+            num_filtered_chunk * H + 1 - zero_expert_count,
             dtype=torch.int32,
             device=q.device,
         )
         * moba_chunk_size
     )
 
-    # Shape check
-    assert (
-        moba_cu_seqlen_kv.shape == moba_cu_seqlen_q.shape
-    ), f"moba_cu_seqlen_kv.shape != moba_cu_seqlen_q.shape {moba_cu_seqlen_kv.shape} != {moba_cu_seqlen_q.shape}"
+    assert moba_cu_seqlens_k.shape == moba_cu_seqlens_q.shape, (
+        f"moba_cu_seqlens_k.shape != moba_cu_seqlens_q.shape "
+        f"{moba_cu_seqlens_k.shape} != {moba_cu_seqlens_q.shape}"
+    )
 
-    # Wrapping up the flash attn call and online softmax dlse inside ParallelMoBAFunction class
     return ParallelMoBAFunction.apply(
         q,
         k,
         v,
-        self_attn_cu_seqlen,
+        self_attn_cu_seqlens,
         moba_q,
         moba_kv,
-        moba_cu_seqlen_q,
-        moba_cu_seqlen_kv,
+        moba_cu_seqlens_q,
+        moba_cu_seqlens_k,
         max_seqlen,
         moba_chunk_size,
         moba_q_sh_indices,
