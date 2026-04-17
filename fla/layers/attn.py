@@ -155,9 +155,9 @@ class Attention(nn.Module):
             o = pad_input(o, indices_q, batch_size, q_len)
         elif cu_seqlens is not None:
             o = flash_attn_varlen_func(
-                rearrange(q, 'b l ... -> (b l) ...').contiguous(), 
-                rearrange(k, 'b l ... -> (b l) ...').contiguous(), 
-                rearrange(v, 'b l ... -> (b l) ...').contiguous(), 
+                rearrange(q, 'b l ... -> (b l) ...').contiguous(),
+                rearrange(k, 'b l ... -> (b l) ...').contiguous(),
+                rearrange(v, 'b l ... -> (b l) ...').contiguous(),
                 cu_seqlens_q=cu_seqlens,
                 cu_seqlens_k=cu_seqlens,
                 max_seqlen_q=max_seqlen,
