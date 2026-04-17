@@ -114,17 +114,7 @@ jobs:
         run: |
           $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
           $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
-
-          $CONDA/bin/conda install -n $CONDA_ENV_NAME nvidia/label/cuda-12.8.1::cuda-nvcc -y
-          STABLE_URL="https://download.pytorch.org/whl/cu128"
-          echo "Using stable index URL: $STABLE_URL"
-          $CONDA_BIN_PATH/pip install -U torch~=2.7.0 triton --index-url $STABLE_URL
-          $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
           $CONDA_BIN_PATH/pip install .
-          echo "Installing flash-attn for NVIDIA"
-          $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
-          echo "Installing tilelang for NVIDIA H100"
-          $CONDA_BIN_PATH/pip install "apache-tvm-ffi<=0.1.9" tilelang -f https://tile-ai.github.io/whl/nightly
 
       - name: Run pytest
         id: pytest
