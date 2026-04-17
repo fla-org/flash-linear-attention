@@ -29,7 +29,8 @@ jobs:
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          ARGS="${COMMENT_BODY#pytest }"
+          FIRST_LINE="$(printf '%s\n' "$COMMENT_BODY" | head -n1)"
+          ARGS="${FIRST_LINE#pytest }"
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "pytest_args<<$EOF" >> $GITHUB_OUTPUT
           echo "$ARGS" >> $GITHUB_OUTPUT
@@ -52,6 +53,7 @@ jobs:
   run-pytest:
     needs: parse
     runs-on: nvidia-h100-pt2-7
+    timeout-minutes: 60
     outputs:
       status: ${{ steps.pytest.outputs.status }}
       exit_code: ${{ steps.pytest.outputs.exit_code }}
@@ -79,11 +81,10 @@ jobs:
           set -e
           TARGET_CONDA_ENV="pytorch_2_7"
           echo "Determining conda environment based on runner: ${{ runner.name }}"
-          if [[ "${{ runner.name }}" == "nvidia-h100-1" ]]; then
-            TARGET_CONDA_ENV="pytorch_2_7"
-          elif [[ "${{ runner.name }}" == "nvidia-h100-2" ]]; then
-            TARGET_CONDA_ENV="pytorch_2_7_1"
-          fi
+          case "${{ runner.name }}" in
+            nvidia-h100-pt2-7|nvidia-h100-1) TARGET_CONDA_ENV="pytorch_2_7" ;;
+            nvidia-h100-2) TARGET_CONDA_ENV="pytorch_2_7_1" ;;
+          esac
           echo "--> Runner is '${{ runner.name }}', selected environment is '${TARGET_CONDA_ENV}'"
 
           echo "Searching for Conda installation in home directory ($HOME)..."
@@ -134,40 +135,54 @@ jobs:
           fi
 
       - name: Upload pytest output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pytest-output
           path: pytest_output.txt
           retention-days: 1
+          if-no-files-found: warn
 
   post-result:
     needs: [parse, run-pytest]
+    if: always() && needs.parse.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Download pytest output
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: pytest-output
 
       - name: Post comment
         uses: actions/github-script@v7
+        env:
+          PYTEST_ARGS: ${{ needs.parse.outputs.pytest_args }}
+          PYTEST_STATUS: ${{ needs.run-pytest.outputs.status }}
+          PYTEST_EXIT_CODE: ${{ needs.run-pytest.outputs.exit_code }}
+          ISSUE_NUMBER: ${{ needs.parse.outputs.issue_number }}
         with:
           script: |
             const fs = require('fs');
-            let output = fs.readFileSync('pytest_output.txt', 'utf8');
-            // GitHub comment body limit is 65536 characters. Leave margin for markdown wrapper.
-            const MAX_LEN = 60000;
-            if (output.length > MAX_LEN) {
-              output = output.slice(0, MAX_LEN) + '\n\n... (output truncated due to GitHub comment length limit)';
+            let output;
+            if (fs.existsSync('pytest_output.txt')) {
+              output = fs.readFileSync('pytest_output.txt', 'utf8');
+              // GitHub comment body limit is 65536 characters. Leave margin for markdown wrapper.
+              const MAX_LEN = 60000;
+              if (output.length > MAX_LEN) {
+                output = output.slice(0, MAX_LEN) + '\n\n... (output truncated due to GitHub comment length limit)';
+              }
+            } else {
+              output = '(No pytest output available. The test job may have failed before running pytest.)';
             }
-            const status = '${{ needs.run-pytest.outputs.status }}';
-            const exitCode = '${{ needs.run-pytest.outputs.exit_code }}';
+            const status   = process.env.PYTEST_STATUS   || 'Unknown';
+            const exitCode = process.env.PYTEST_EXIT_CODE || '';
+            const args     = (process.env.PYTEST_ARGS || '').trim();
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const args = `${{ needs.parse.outputs.pytest_args }}`.trim();
             const body = `## ${status} — Pytest Results (H100 PyTorch 2.7)\n\n**Command:** \\`pytest ${args}\\`\n**Exit code:** ${exitCode}\n\n[View workflow run logs](${runUrl})\n\n<details><summary>Click to expand pytest output</summary>\n\n\\`\\`\\`\n${output}\n\\`\\`\\`\n\n</details>`;
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${{ needs.parse.outputs.issue_number }},
+              issue_number: Number(process.env.ISSUE_NUMBER),
               body: body,
             });
