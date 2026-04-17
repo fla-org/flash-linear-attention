@@ -10,6 +10,7 @@ import tilelang.language as T
 import torch
 
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 
 
 @tilelang.jit(pass_configs={
@@ -150,7 +151,7 @@ def _build_parallel_attn_bwd_kernel(
             T.copy(dsT_cast, dsT_shared)
             T.clear(dq_local)
             T.gemm(dsT_shared, K_shared, dq_local, transpose_A=True, policy=T.GemmWarpPolicy.FullRow)
-            for i, d in T.Parallel(_BT, _K):
+            for i, d in T.Parallel(_BT, _K_orig):
                 if q_t_s + i < T_seq + bos:
                     T.atomic_add(dq_out[i_b, q_t_s + i, i_h, d], dq_local[i, d])
 
@@ -169,10 +170,10 @@ def _build_parallel_attn_bwd_kernel(
         # store dv and dk via element-wise atomic_add with explicit boundary checks.
         # atomic_add is required because in GQA multiple query-head blocks map to
         # the same KV head and accumulate into the same dk/dv rows.
-        for i, d in T.Parallel(_BT, _V):
+        for i, d in T.Parallel(_BT, _V_orig):
             if t_s + i < T_seq + bos:
                 T.atomic_add(dv_out[i_b, t_s + i, i_hkv, d], dv_local[i, d])
-        for i, d in T.Parallel(_BT, _K):
+        for i, d in T.Parallel(_BT, _K_orig):
             if t_s + i < T_seq + bos:
                 T.atomic_add(dk_out[i_b, t_s + i, i_hkv, d], dk_local[i, d])
 
@@ -229,7 +230,7 @@ def parallel_attn_bwd_tilelang(
     V = v.shape[-1]
     BT = 64
     sm_scale = scale if scale is not None else K ** -0.5
-    log2e_scale = sm_scale * 1.44269504
+    log2e_scale = sm_scale * RCP_LN2
 
     USE_G = g_cumsum is not None
     IS_VARLEN = cu_seqlens is not None
@@ -254,7 +255,9 @@ def parallel_attn_bwd_tilelang(
     g_kern = g_cumsum.float() if USE_G else torch.zeros(B, T, HQ, dtype=torch.float32, device=q.device)
     dg_kern = dg if USE_G else torch.zeros(B, T, HQ, dtype=torch.float32, device=q.device)
 
-    dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}[q.dtype]
+    dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}.get(q.dtype)
+    if dtype_str is None:
+        raise ValueError(f"Unsupported dtype {q.dtype} for TileLang backend")
 
     kernel = _build_parallel_attn_bwd_kernel(
         B, HQ, H, K, V, BT, sm_scale, log2e_scale, dtype_str,
