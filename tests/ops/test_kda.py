@@ -17,17 +17,20 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
+    ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "dtype"),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
         )
         for test in [
-            (1, 64, 1, 64, 1, 1, torch.float),
-            (2, 512, 3, 60, 1, 1, torch.float),
-            (4, 1024, 4, 128, 0.1, 1, torch.float),
-            (4, 1024, 4, 128, 1, 10, torch.float),
+            (1, 64, 1, 1, 64, 1, 1, torch.float),
+            (2, 512, 3, 3, 60, 1, 1, torch.float),
+            (4, 1024, 4, 4, 128, 0.1, 1, torch.float),
+            (4, 1024, 4, 4, 128, 1, 10, torch.float),
+
+            (1, 64, 1, 2, 64, 1, 1, torch.float),
+            (2, 512, 2, 4, 60, 1, 1, torch.float),
         ]
     ],
 )
@@ -35,6 +38,7 @@ def test_naive_chunk(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -46,10 +50,10 @@ def test_naive_chunk(
 
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, HV, D, dtype=torch.float)) / gate_logit_normalizer
+    beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
     ref, ref_ht = naive_recurrent_kda(
@@ -78,17 +82,19 @@ def test_naive_chunk(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
+    ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm{}-{}".format(*test),
         )
         for test in [
-            (1, 64, 1, 64, 1, 1, False, torch.float),
-            (2, 512, 3, 60, 1, 1, False, torch.float),
-            (3, 1000, 4, 100, 0.1, 1, True, torch.float),
-            (4, 1024, 4, 128, 0.1, 1, False, torch.float),
+            (1, 64, 1, 1, 64, 1, 1, False, torch.float),
+            (2, 512, 3, 3, 60, 1, 1, False, torch.float),
+            (3, 1000, 4, 4, 100, 0.1, 1, True, torch.float),
+            (4, 1024, 4, 4, 128, 0.1, 1, False, torch.float),
+            (2, 512, 2, 4, 60, 1, 1, False, torch.float),
+            (2, 1024, 2, 8, 128, 0.1, 1, True, torch.float),
         ]
     ],
 )
@@ -96,6 +102,7 @@ def test_fused_recurrent(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -108,10 +115,10 @@ def test_fused_recurrent(
 
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, HV, D, dtype=torch.float)) / gate_logit_normalizer
+    beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
     ref, ref_ht = naive_recurrent_kda(
@@ -341,6 +348,7 @@ def test_fused_recurrent_vllm_decode(
         "B",
         "T",
         "H",
+        "HV",
         "D",
         "scale",
         "gate_logit_normalizer",
@@ -354,18 +362,22 @@ def test_fused_recurrent_vllm_decode(
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-qk_l2norm{}-gate{}-dtype{}-safe_gate{}-disable_recompute{}".format(
-                *test),
+            id=("B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}"
+                "-use_qk_l2norm{}-use_gate{}-{}-safe_gate{}-disable_recompute{}").format(*test),
         )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, False, False, torch.float16, True, False),
-            (2, 500, 3, 60, 1, 1, 0, False, False, torch.float16, True, True),
-            (2, 1000, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True),
-            (3, 1024, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False),
-            (4, 1024, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True),
-            (4, 1024, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False),
-            (2, 1500, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True),
-            (4, 2048, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True),
+            (1, 63, 1, 1, 64, 1, 1, 0, False, False, torch.float16, True, False),
+            (2, 500, 3, 3, 60, 1, 1, 0, False, False, torch.float16, True, True),
+            (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True),
+            (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False),
+            (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True),
+            (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True),
+
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, False, torch.float16, False, False),
+            (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False),
+            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False),
         ]
     ],
 )
@@ -373,6 +385,7 @@ def test_chunk(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -386,11 +399,11 @@ def test_chunk(
     torch.manual_seed(42)
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
-    g = torch.randn(B, T, H, D, dtype=torch.float if not use_gate_in_kernel else dtype)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    g = torch.randn(B, T, HV, D, dtype=torch.float if not use_gate_in_kernel else dtype)
     if use_gate_in_kernel:
-        A_log = torch.randn(H, dtype=torch.float)
-        dt_bias = torch.randn(H * D, dtype=torch.float)
+        A_log = torch.randn(HV, dtype=torch.float)
+        dt_bias = torch.randn(HV * D, dtype=torch.float)
     else:
         g = F.logsigmoid(g) / gate_logit_normalizer
         g = g * (torch.rand_like(g) > mask_p)
@@ -403,8 +416,8 @@ def test_chunk(
         lower_bound = None
         naive_kda_gate_fn = naive_kda_gate
 
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     if use_gate_in_kernel:
         A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))

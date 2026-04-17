@@ -172,94 +172,95 @@ def chunk_kda(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]`.
+            queries of shape ``[B, T, H, K]``.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            keys of shape ``[B, T, H, K]``.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
+            values of shape ``[B, T, HV, V]``.
+            GVA (Grouped Value Attention) is applied if ``HV > H``, where ``HV`` must be divisible by ``H``.
         g (torch.Tensor):
-            (forget) gating tensor (in log space!) of shape `[B, T, H, K]`.
+            (forget) gating tensor (in log space!) of shape ``[B, T, HV, K]``.
+            When ``use_gate_in_kernel=False`` (default), ``g`` should be the pre-computed decay value.
+            When ``use_gate_in_kernel=True``, ``g`` is the raw input before gate activation;
+            the kernel fuses ``-exp(A_log) * softplus(g + dt_bias)`` + chunk cumsum internally.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]`.
+            betas of shape ``[B, T, HV]``.
         scale (Optional[float]):
             Scale factor for the KDA attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+            If not provided, it will default to ``1 / sqrt(K)``. Default: ``None``.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
-            For equal-length input sequences, `N` equals the batch size `B`.
-            Default: `None`.
+            Initial state of shape ``[N, HV, K, V]`` for ``N`` input sequences.
+            For equal-length input sequences, ``N`` equals the batch size ``B``.
+            Default: ``None``.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape ``[N, HV, K, V]``. Default: ``False``.
         use_qk_l2norm_in_kernel (bool):
-            Whether to apply L2norm to the q,k tensor internally. Default: `False`.
+            Whether to apply L2norm to the q,k tensor internally. Default: ``False``.
         use_gate_in_kernel (bool):
             Whether to compute the log-space KDA decay internally.
-            - If `True`:
-              The passed `g` acts as the raw input for `-exp(A_log).view(H, -1) * softplus(g + dt_bias.view(H, K))`.
+            - If ``True``:
+              The passed ``g`` acts as the raw input for ``-exp(A_log) * softplus(g + dt_bias.view(HV, K))``.
               Note that as part of the input arguments,
-              `A_log` (shape `[H]`) and the optional `dt_bias` (shape `[H * K]`) should be provided.
-            - If `False`, `g` is expected to be the pre-computed decay value.
-            Default: `False`.
+              ``A_log`` (shape ``[HV]``) and the optional ``dt_bias`` (shape ``[HV * K]``) should be provided.
+            - If ``False``, ``g`` is expected to be the pre-computed decay value.
+            Default: ``False``.
         cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
             consistent with the FlashAttention API.
         cu_seqlens_cpu (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
             consistent with the FlashAttention API.
         safe_gate (bool):
-            Whether the kernel can assume the gate values (in log space) are in a safe range
-            and use M=16 TensorCore acceleration for higher throughput.
-            The safe range is ``[lower_bound, 0)``. With the default ``lower_bound=-5``,
-            the per-step decay factor ``exp(g)`` is bounded in ``[exp(-5), 1) ≈ [0.0067, 1)``,
-            meaning each step retains at least ~0.67% of the state — a negligible loss that
-            has minimal impact on model quality while enabling significant speedup.
-            Requires ``lower_bound`` to be set. Default: ``False``.
+            Whether to clamp the gate to ``[lower_bound, 0)`` and enable M=16 TensorCore
+            acceleration for higher throughput. Requires ``lower_bound`` to be set.
+            Default: ``False``.
         lower_bound (Optional[float]):
-            Lower bound for the forget gate (in log space) when ``use_gate_in_kernel=True``.
-            Changes the gate activation from ``-exp(A_log) * softplus(g + dt_bias)``
-            to ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
+            Lower bound for the forget gate (in log space). When set together with
+            ``safe_gate=True``, changes the gate activation from
+            ``-exp(A_log) * softplus(g + dt_bias)`` to
+            ``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))``,
             which naturally clamps the output to ``[lower_bound, 0)``.
-            Recommended value: ``-5`` (i.e., ``exp(-5) ≈ 0.0067``). Default: ``None``.
+            Recommended value: ``-5`` (i.e., per-step decay ``exp(-5) ≈ 0.0067``).
+            Default: ``None``.
         disable_recompute (bool):
-            Whether to disable gradient recomputation in the kernel. When `True`, the kernel
+            Whether to disable gradient recomputation in the kernel. When ``True``, the kernel
             will save all intermediate activations for backward pass, which is beneficial
-            for training small models at the cost of increased memory usage. Default: `False`.
+            for training small models at the cost of increased memory usage. Default: ``False``.
         return_intermediate_states (bool):
-            If True, returns intermediate state `h` for inference scenarios (e.g., vLLM).
-            Must be used within `torch.inference_mode()` and will return a 3-tuple instead of 2-tuple.
-            This is not intended for training as it bypasses autograd. Default: `False`.
+            If True, returns intermediate state ``h`` for inference scenarios (e.g., vLLM).
+            Must be used within ``torch.inference_mode()`` and will return a 3-tuple instead of 2-tuple.
+            This is not intended for training as it bypasses autograd. Default: ``False``.
         cp_context (Optional[FLACPContext]):
             Context parallel context for distributed training across multiple devices.
-            When provided, `initial_state` and `output_final_state` are not supported,
-            and `cu_seqlens` will be overridden by the context. Default: `None`.
+            When provided, ``initial_state`` and ``output_final_state`` are not supported,
+            and ``cu_seqlens`` will be overridden by the context. Default: ``None``.
         transpose_state_layout (Optional[bool]):
             Whether to use the transposed state layout for the hidden state.
-            Default: `False`.
+            Default: ``False``.
 
     Returns:
         - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
             o (torch.Tensor):
-                Outputs of shape `[B, T, H, V]`.
+                Outputs of shape ``[B, T, HV, V]``.
             final_state (torch.Tensor):
-                Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+                Final state of shape ``[N, HV, K, V]`` if ``output_final_state=True`` else ``None``.
         - Inference mode (return_intermediate_states=True): A tuple (o, final_state, h)
             o (torch.Tensor):
-                Outputs of shape `[B, T, H, V]`.
+                Outputs of shape ``[B, T, HV, V]``.
             final_state (torch.Tensor):
-                Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+                Final state of shape ``[N, HV, K, V]`` if ``output_final_state=True`` else ``None``.
             h (torch.Tensor):
-                Intermediate states of shape `[B, NT, H, K, V]` and dtype `bfloat16` for caching or further processing.
-                - For equal-length sequences: `NT = #chunks_per_sequence` (typically `ceil(T / chunk_size)`)
+                Intermediate states of shape ``[B, NT, HV, K, V]`` and dtype ``bfloat16``.
+                - For equal-length sequences: ``NT = ceil(T / chunk_size)``
                 - For variable-length sequences (cu_seqlens): B is always 1 (flattened),
-                  NT is the total number of chunks across all sequences,
-                  determined by `prepare_chunk_indices(cu_seqlens, chunk_size)`
+                  NT is the total number of chunks across all sequences.
 
     Examples::
         >>> import torch
         >>> import torch.nn.functional as F
         >>> from einops import rearrange
         >>> from fla.ops.kda import chunk_kda
-        # inputs with equal lengths
+        # inputs with equal lengths (no GVA, HV == H)
         >>> B, T, H, K, V = 4, 2048, 4, 512, 512
         >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> k = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
@@ -269,6 +270,23 @@ def chunk_kda(
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
         >>> A_log = torch.randn(H, dtype=torch.float32, device='cuda')
         >>> dt_bias = torch.randn(H * K, dtype=torch.float32, device='cuda')
+        >>> o, ht = chunk_kda(
+            q, k, v, g, beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            initial_state=h0,
+            output_final_state=True
+        )
+        # GVA mode (HV > H)
+        >>> HV = 8  # 2x more value heads than qk heads
+        >>> v = torch.randn(B, T, HV, V, dtype=torch.bfloat16, device='cuda')
+        >>> g = torch.rand(B, T, HV, K, dtype=torch.bfloat16, device='cuda')
+        >>> beta = torch.rand(B, T, HV, dtype=torch.bfloat16, device='cuda')
+        >>> h0 = torch.randn(B, HV, K, V, dtype=torch.bfloat16, device='cuda')
+        >>> A_log = torch.randn(HV, dtype=torch.float32, device='cuda')
+        >>> dt_bias = torch.randn(HV * K, dtype=torch.float32, device='cuda')
         >>> o, ht = chunk_kda(
             q, k, v, g, beta,
             A_log=A_log,
@@ -328,13 +346,19 @@ def chunk_kda(
         if not (-5 <= lower_bound < 0):
             raise ValueError(f"`lower_bound` must be in the safe range [-5, 0), got {lower_bound}.")
 
-    assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
-    assert k.shape[-1] <= 256, "Currently we only support key headdim <=256 for KDA :-("
-    assert beta.shape == q.shape[:3], "beta must be of shape (batch size, seq len, num of head)."
-    assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
+    # Validate head dimensions for GVA
+    B, T, H, K, HV = *q.shape, v.shape[2]
+    assert q.shape == k.shape, f"q and k must have the same shape, got q={q.shape} vs k={k.shape}"
+    assert K <= 256, f"Currently we only support key headdim <=256 for KDA, got {K}."
+    assert HV % H == 0, (
+        f"For GVA, num_v_heads (HV={HV}) must be evenly divisible by num_qk_heads (H={H}), "
+        f"but got HV % H = {HV % H}"
+    )
+    assert g.shape == (B, T, HV, K), f"g must have shape [B, T, HV, K]={[B, T, HV, K]}, got {list(g.shape)}"
+    assert beta.shape == (B, T, HV), f"beta must have shape [B, T, HV]={[B, T, HV]}, got {list(beta.shape)}"
 
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = K ** -0.5
     return ChunkKDAFunction.apply(
         q,
         k,
