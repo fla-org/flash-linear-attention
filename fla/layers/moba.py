@@ -23,15 +23,6 @@ from fla.ops.utils.index import prepare_lens_from_mask
 if TYPE_CHECKING:
     from fla.models.utils import Cache
 
-try:
-    from flash_attn import flash_attn_func
-except ImportError:
-    warnings.warn(
-        "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
-        category=ImportWarning
-    )
-    flash_attn_func = None
-
 logger = logging.get_logger(__name__)
 
 
@@ -73,9 +64,6 @@ class MobaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
-
-        if flash_attn_func is None:
-            raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
