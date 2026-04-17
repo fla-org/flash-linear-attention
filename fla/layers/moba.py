@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import TYPE_CHECKING
 
 import torch
@@ -22,6 +21,11 @@ from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
+
+try:
+    from flash_moba import flash_moba_varlen_func
+except ImportError:
+    flash_moba_varlen_func = None
 
 logger = logging.get_logger(__name__)
 
@@ -42,6 +46,7 @@ class MobaAttention(nn.Module):
         moba_chunk_size: int = 256,
         moba_topk: int = 4,
         use_output_gate: bool = True,
+        use_flash_moba: bool = False,
     ):
         super().__init__()
 
@@ -59,11 +64,18 @@ class MobaAttention(nn.Module):
         self.moba_chunk_size = moba_chunk_size
         self.moba_topk = moba_topk
         self.use_output_gate = use_output_gate
+        self.use_flash_moba = use_flash_moba
 
         self.window_size = window_size
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
+
+        if self.use_flash_moba and flash_moba_varlen_func is None:
+            raise ImportError(
+                "Please install `flash_moba` via `pip install flash-moba` "
+                "to use `use_flash_moba=True`."
+            )
 
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
@@ -138,7 +150,6 @@ class MobaAttention(nn.Module):
         # Handle attention_mask by unpadding
 
         # Path 1: `attention_mask` is provided (e.g., Ruler tasks)
-        # unpad the input, run moba, and then pad the output.
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
@@ -146,6 +157,7 @@ class MobaAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
+            # Align the padding mask to the actual cached KV span before unpadding.
             if q_len == 1 and attention_mask.shape[-1] != k.shape[1]:
                 attention_mask = attention_mask[:, -k.shape[1]:]
 
@@ -153,53 +165,90 @@ class MobaAttention(nn.Module):
             q_unpad, (k_unpad, v_unpad), indices_q, cu_seqlens_tuple, max_seq_lens_tuple = unpad_input(
                 q, (k, v), attention_mask, q_len)
 
-            if k.shape[1] != q_len:
-                raise NotImplementedError(
-                    "MobaAttention cached decoding requires separate Q/KV varlen metadata"
+            if self.use_flash_moba:
+                cu_seqlens_q, cu_seqlens_k = cu_seqlens_tuple
+                max_seqlen_q, max_seqlen_k = max_seq_lens_tuple
+                o_unpad = flash_moba_varlen_func(
+                    q=q_unpad,
+                    k=k_unpad,
+                    v=v_unpad,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    moba_chunk_size=self.moba_chunk_size,
+                    moba_topk=self.moba_topk,
+                    causal=True
                 )
-
-            cu_seqlens_moba = cu_seqlens_tuple[0]
-            max_seqlen_moba = max_seq_lens_tuple[0]
-
-            o_unpad = moba_attn_varlen(
-                q_unpad,
-                k_unpad,
-                v_unpad,
-                cu_seqlens=cu_seqlens_moba,
-                max_seqlen=max_seqlen_moba,
-                moba_chunk_size=self.moba_chunk_size,
-                moba_topk=self.moba_topk
-            )
+            else:
+                if k.shape[1] != q_len:
+                    raise NotImplementedError(
+                        "MobaAttention cached decoding requires separate Q/KV varlen metadata for the Triton backend."
+                    )
+                cu_seqlens_moba = cu_seqlens_tuple[0]
+                max_seqlen_moba = max_seq_lens_tuple[0]
+                o_unpad = moba_attn_varlen(
+                    q_unpad,
+                    k_unpad,
+                    v_unpad,
+                    cu_seqlens=cu_seqlens_moba,
+                    max_seqlen=max_seqlen_moba,
+                    moba_chunk_size=self.moba_chunk_size,
+                    moba_topk=self.moba_topk
+                )
 
             # pad_input turns o_unpad (Total, H, D) back into (B, S, H, D)
             o = pad_input(o_unpad, indices_q, batch_size, q_len)
 
         # Path 2: No `attention_mask` (e.g., wikitext, or data is already unpadded)
-        # We follow the original logic.
         else:
-            if k.shape[1] != q_len:
-                raise NotImplementedError(
-                    "MobaAttention cached decoding requires separate Q/KV varlen metadata"
-                )
-
-            if cu_seqlens is None:
-                cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len,
-                                          dtype=torch.int32, device=hidden_states.device)
-
+            k_len = k.shape[1]
             q_unbatched = rearrange(q, 'b s h d -> (b s) h d')
             k_unbatched = rearrange(k, 'b s h d -> (b s) h d')
             v_unbatched = rearrange(v, 'b s h d -> (b s) h d')
 
-            o = moba_attn_varlen(
-                q_unbatched,
-                k_unbatched,
-                v_unbatched,
-                cu_seqlens=cu_seqlens,
-                # Use the max_seqlen calculated earlier, not just q_len
-                max_seqlen=max_seqlen,
-                moba_chunk_size=self.moba_chunk_size,
-                moba_topk=self.moba_topk
-            )
+            if self.use_flash_moba:
+                if cu_seqlens is None:
+                    cu_seqlens_q = torch.arange(0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=hidden_states.device)
+                    cu_seqlens_k = torch.arange(0, (batch_size + 1) * k_len, step=k_len, dtype=torch.int32, device=hidden_states.device)
+                elif isinstance(cu_seqlens, (tuple, list)):
+                    cu_seqlens_q, cu_seqlens_k = cu_seqlens
+                else:
+                    cu_seqlens_q = cu_seqlens
+                    if k_len == q_len:
+                        cu_seqlens_k = cu_seqlens
+                    else:
+                        cu_seqlens_k = torch.arange(0, (batch_size + 1) * k_len, step=k_len, dtype=torch.int32, device=hidden_states.device)
+
+                o = flash_moba_varlen_func(
+                    q=q_unbatched,
+                    k=k_unbatched,
+                    v=v_unbatched,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=q_len,
+                    max_seqlen_k=k_len,
+                    moba_chunk_size=self.moba_chunk_size,
+                    moba_topk=self.moba_topk,
+                    causal=True
+                )
+            else:
+                if k_len != q_len:
+                    raise NotImplementedError(
+                        "MobaAttention cached decoding requires separate Q/KV varlen metadata for the Triton backend."
+                    )
+                if cu_seqlens is None:
+                    cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=hidden_states.device)
+
+                o = moba_attn_varlen(
+                    q_unbatched,
+                    k_unbatched,
+                    v_unbatched,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                    moba_chunk_size=self.moba_chunk_size,
+                    moba_topk=self.moba_topk
+                )
 
             o = rearrange(o, '(b s) h d -> b s h d', b=batch_size)
 
@@ -212,7 +261,5 @@ class MobaAttention(nn.Module):
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
 
-        # MoBA does not support returning attention weights
         attentions = None
-
         return o, attentions, past_key_values
