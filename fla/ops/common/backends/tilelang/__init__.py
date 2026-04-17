@@ -23,8 +23,6 @@ class TileLangBackend(BaseBackend):
     backend_type = "tilelang"
     package_name = "tilelang"
     env_var = "FLA_TILELANG"
-    default_enable = True
-    priority = 1
 
     @classmethod
     def is_available(cls) -> bool:
