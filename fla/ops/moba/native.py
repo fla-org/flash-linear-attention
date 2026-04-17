@@ -7,11 +7,17 @@
 
 import torch
 from einops import rearrange
-from flash_attn import flash_attn_varlen_func
-from flash_attn.flash_attn_interface import (
-    _flash_attn_varlen_backward,
-    _flash_attn_varlen_forward,
-)
+
+try:
+    from flash_attn import flash_attn_varlen_func
+    from flash_attn.flash_attn_interface import (
+        _flash_attn_varlen_backward,
+        _flash_attn_varlen_forward,
+    )
+except ImportError:
+    flash_attn_varlen_func = None
+    _flash_attn_varlen_backward = None
+    _flash_attn_varlen_forward = None
 
 
 def calc_chunks(cu_seqlen, moba_chunk_size):
@@ -24,7 +30,7 @@ def calc_chunks(cu_seqlen, moba_chunk_size):
     # batch_num_chunk[batch_idx] = how many chunk in batch idx
     batch_num_chunk = (batch_sizes + (moba_chunk_size - 1)) // moba_chunk_size
     # cu_num_chunk[batch_idx] = first chunk id of this batch
-    cu_num_chunk = torch.ones(
+    cu_num_chunk = torch.zeros(
         batch_num_chunk.numel() + 1,
         device=cu_seqlen.device,
         dtype=batch_num_chunk.dtype,
@@ -245,7 +251,7 @@ def moba_attn_varlen(
     moba_chunk_size: int,
     moba_topk: int,
 ) -> torch.Tensor:
-    """An efficient version of moba implementation with triton kernels and flash-attn, the core logic:
+    """Flash-attn based MoBA implementation. Core logic:
     1. Calculate the chunks and the number of chunks, n = floor(data_size / chunk_size)
        - tokens in the tail chunk are reserved for self attn
        - tokens in other chunks will be processed in later steps
@@ -264,8 +270,10 @@ def moba_attn_varlen(
     Returns:
         attn_output (torch.Tensor): [seqlen, head, head_dim]
     """
-
-    kv = torch.stack((k, v), dim=1)
+    if flash_attn_varlen_func is None:
+        raise ImportError(
+            "`moba_attn_varlen` requires `flash-attn`. Install it via `pip install flash-attn`."
+        )
 
     """ some basic variables """
     # qkv shape = [ S, H, D ]
@@ -288,6 +296,8 @@ def moba_attn_varlen(
         return flash_attn_varlen_func(
             q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen, causal=True
         )
+
+    kv = torch.stack((k, v), dim=1)
 
     self_attn_cu_seqlen = cu_chunk
 

@@ -30,7 +30,44 @@ except ImportError:
 logger = logging.get_logger(__name__)
 
 
-class MobaAttention(nn.Module):
+class MoBA(nn.Module):
+    """
+    The layer implementation for [MoBA: Mixture of Block Attention for Long-Context LLMs]
+    (https://arxiv.org/abs/2502.13189).
+
+    MoBA partitions the key/value sequence into fixed-size chunks ("blocks") and, for every query token,
+    only attends to a small set of the most relevant blocks instead of the entire history:
+
+    1. Each KV block is summarized by the mean of its keys, producing one representative key per block.
+    2. Each query token scores every block via a dot product with these representative keys, and selects
+       the `moba_topk` highest-scoring blocks (the block containing the query itself is always included
+       to preserve causal locality).
+    3. Self-attention is run inside the current block, block-MoBA attention is run over the selected
+       blocks, and the two outputs are merged via an online-softmax LSE combination.
+
+    This implementation exposes two backends:
+      - Triton / flash-attn path (`use_flash_moba=False`, default): routed through
+        `fla.ops.moba.moba_attn_varlen`, composes `flash_attn_varlen_func` with an online softmax combine.
+      - FlashMoBA CUDA path (`use_flash_moba=True`): routed through
+        [`flash_moba_varlen_func`](https://github.com/mit-han-lab/flash-moba), a fused kernel from MIT HAN Lab
+        that performs gate computation, top-k selection, and attention in a single pass.
+
+    Args:
+        hidden_size (int): Model hidden size.
+        num_heads (int): Number of query heads.
+        num_kv_heads (int, optional): Number of KV heads for GQA. Defaults to `num_heads` (MHA).
+        qkv_bias (bool): Whether Q/K/V projections have a bias term.
+        qk_norm (bool): Apply RMSNorm to Q and K before attention.
+        window_size (int, optional): Sliding-window size forwarded to the KV cache.
+        rope_theta (float): RoPE base frequency.
+        max_position_embeddings (int, optional): Maximum position used for RoPE scaling.
+        layer_idx (int): Layer index (required for KV cache bookkeeping).
+        moba_chunk_size (int): Size of each KV block. Must evenly divide the sequences where possible;
+            tail blocks are handled via the chunk-masking logic in `calc_chunks`.
+        moba_topk (int): Number of blocks each query attends to (including the local block).
+        use_output_gate (bool): If True, apply a sigmoid-gated RMSNorm on the attention output.
+        use_flash_moba (bool): Use the fused FlashMoBA CUDA kernel. Requires `pip install flash-moba`.
+    """
 
     def __init__(
         self,
@@ -95,7 +132,7 @@ class MobaAttention(nn.Module):
             )
             self.o_norm = FusedRMSNormGated(self.head_dim, activation='sigmoid', eps=1e-6)
         else:
-            logger.info("MobaAttention is NOT using output gate.")
+            logger.info("MoBA is NOT using output gate.")
             self.o_norm = RMSNorm(self.head_dim, eps=1e-6)
 
     def forward(
@@ -183,7 +220,7 @@ class MobaAttention(nn.Module):
             else:
                 if k.shape[1] != q_len:
                     raise NotImplementedError(
-                        "MobaAttention cached decoding requires separate Q/KV varlen metadata for the Triton backend."
+                        "MoBA cached decoding requires separate Q/KV varlen metadata for the Triton backend."
                     )
                 cu_seqlens_moba = cu_seqlens_tuple[0]
                 max_seqlen_moba = max_seq_lens_tuple[0]
@@ -207,22 +244,14 @@ class MobaAttention(nn.Module):
             k_unbatched = rearrange(k, 'b s h d -> (b s) h d')
             v_unbatched = rearrange(v, 'b s h d -> (b s) h d')
 
-            if self.use_flash_moba:
-                if cu_seqlens is None:
-                    cu_seqlens_q = torch.arange(0, (batch_size + 1) * q_len, step=q_len,
-                                                dtype=torch.int32, device=hidden_states.device)
-                    cu_seqlens_k = torch.arange(0, (batch_size + 1) * k_len, step=k_len,
-                                                dtype=torch.int32, device=hidden_states.device)
-                elif isinstance(cu_seqlens, (tuple, list)):
-                    cu_seqlens_q, cu_seqlens_k = cu_seqlens
-                else:
-                    cu_seqlens_q = cu_seqlens
-                    if k_len == q_len:
-                        cu_seqlens_k = cu_seqlens
-                    else:
-                        cu_seqlens_k = torch.arange(0, (batch_size + 1) * k_len, step=k_len,
-                                                    dtype=torch.int32, device=hidden_states.device)
+            offsets = torch.arange(batch_size + 1, dtype=torch.int32, device=hidden_states.device)
+            if isinstance(cu_seqlens, (tuple, list)):
+                cu_seqlens_q, cu_seqlens_k = cu_seqlens
+            else:
+                cu_seqlens_q = offsets * q_len if cu_seqlens is None else cu_seqlens
+                cu_seqlens_k = cu_seqlens_q if k_len == q_len else offsets * k_len
 
+            if self.use_flash_moba:
                 o = flash_moba_varlen_func(
                     q=q_unbatched,
                     k=k_unbatched,
@@ -238,17 +267,13 @@ class MobaAttention(nn.Module):
             else:
                 if k_len != q_len:
                     raise NotImplementedError(
-                        "MobaAttention cached decoding requires separate Q/KV varlen metadata for the Triton backend."
+                        "MoBA cached decoding requires separate Q/KV varlen metadata for the Triton backend."
                     )
-                if cu_seqlens is None:
-                    cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len,
-                                              dtype=torch.int32, device=hidden_states.device)
-
                 o = moba_attn_varlen(
                     q_unbatched,
                     k_unbatched,
                     v_unbatched,
-                    cu_seqlens=cu_seqlens,
+                    cu_seqlens=cu_seqlens_q,
                     max_seqlen=max_seqlen,
                     moba_chunk_size=self.moba_chunk_size,
                     moba_topk=self.moba_topk
