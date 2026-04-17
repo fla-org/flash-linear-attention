@@ -220,7 +220,8 @@ class MobaAttention(nn.Module):
                     if k_len == q_len:
                         cu_seqlens_k = cu_seqlens
                     else:
-                        cu_seqlens_k = torch.arange(0, (batch_size + 1) * k_len, step=k_len, dtype=torch.int32, device=hidden_states.device)
+                        cu_seqlens_k = torch.arange(0, (batch_size + 1) * k_len, step=k_len,
+                                                    dtype=torch.int32, device=hidden_states.device)
 
                 o = flash_moba_varlen_func(
                     q=q_unbatched,
@@ -240,7 +241,8 @@ class MobaAttention(nn.Module):
                         "MobaAttention cached decoding requires separate Q/KV varlen metadata for the Triton backend."
                     )
                 if cu_seqlens is None:
-                    cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=hidden_states.device)
+                    cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len,
+                                              dtype=torch.int32, device=hidden_states.device)
 
                 o = moba_attn_varlen(
                     q_unbatched,
