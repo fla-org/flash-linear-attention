@@ -264,6 +264,11 @@ def parallel_path_attn(
     """
     if scale is None:
         scale = k.shape[-1]**-0.5
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+            f"Please flatten variable-length inputs before processing.",
+        )
     assert w.dtype == beta.dtype == torch.float32, 'w, beta should be float32 to preserve precision.'
     if g is not None:
         assert g.dtype == torch.float32, 'g should be float32 to preserve precision.'

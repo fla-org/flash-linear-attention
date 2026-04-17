@@ -955,6 +955,12 @@ def deltaformer_attn(
     if flash_attn_func is None:
         raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
 
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+            f"Please flatten variable-length inputs before processing.",
+        )
+
     B, T, H, D = k.shape
     C = min(C, T)
 
