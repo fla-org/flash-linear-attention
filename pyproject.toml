@@ -19,7 +19,6 @@ dependencies = [
     "torch>=2.7.0",
     "transformers",
     "einops",
-    "flash-attn>=2.7.0",
 ]
 
 [project.optional-dependencies]
