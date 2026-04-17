@@ -74,7 +74,7 @@ def calc_chunks(cu_seqlen, moba_chunk_size):
     )
 
 
-class MixedAttention(torch.autograd.Function):
+class MobaAttnFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(
@@ -406,8 +406,8 @@ def moba_attn_varlen(
         moba_cu_seqlen_kv.shape == moba_cu_seqlen_q.shape
     ), f"moba_cu_seqlen_kv.shape != moba_cu_seqlen_q.shape {moba_cu_seqlen_kv.shape} != {moba_cu_seqlen_q.shape}"
 
-    # Wrapping up the flash attn call and online softmax dlse inside MixedAttention class
-    return MixedAttention.apply(
+    # Wrapping up the flash attn call and online softmax dlse inside MobaAttnFunction class
+    return MobaAttnFunction.apply(
         q,
         k,
         v,
