@@ -12,7 +12,6 @@ from .bitattn import BitAttention
 from .comba import Comba
 from .delta_net import DeltaNet
 from .deltaformer import DeltaFormerAttention
-from .flash_moba import FlashMoBA
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
@@ -46,7 +45,6 @@ __all__ = [
     'Comba',
     'DeltaFormerAttention',
     'DeltaNet',
-    'FlashMoBA',
     'ForgettingAttention',
     'GatedDeltaNet',
     'GatedDeltaProduct',
