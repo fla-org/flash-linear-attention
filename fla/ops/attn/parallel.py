@@ -832,10 +832,3 @@ def parallel_attn(
         q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices
     )
     return o
-
-
-# Register TileLang backend for attention operations.
-from fla.ops.backends import BackendRegistry  # noqa: E402
-from fla.ops.common.backends.tilelang import TileLangBackend  # noqa: E402
-
-BackendRegistry("attn").register(TileLangBackend())

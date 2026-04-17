@@ -20,6 +20,14 @@ def _build_parallel_attn_bwd_kernel(
     B, HQ, H, K, V, BT, sm_scale, log2e_scale, dtype_str,
     USE_G=False, IS_VARLEN=False, num_warps=4,
 ):
+    """Build the TileLang JIT kernel for parallel attention backward.
+
+    Note: B (batch size) is baked into the compiled kernel as a compile-time
+    constant because it appears in static tensor shape annotations. Varying B
+    at runtime will trigger a recompilation. Callers should either keep B fixed
+    per process or pad batches to a fixed size.
+    """
+
     dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
     _dtype = dtype_map[dtype_str]
     accum_dtype = T.float32
@@ -130,7 +138,9 @@ def _build_parallel_attn_bwd_kernel(
             T.gemm(V_shared, do_shared, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
             for i, j in T.Parallel(_BT, _BT):
-                dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta_shared[j]) * _sm_scale
+                dsT[i, j] = qkT[i, j] * (dsT[i, j] - delta_shared[j])
+            for i, j in T.Parallel(_BT, _BT):
+                dsT_cast[i, j] = dsT[i, j] * _sm_scale
 
             # dk += ds^T @ q
             T.copy(dsT_cast, ds)
@@ -241,8 +251,8 @@ def parallel_attn_bwd_tilelang(
     dv = torch.zeros(B, T, H, V, dtype=torch.float32, device=v.device)
     dg = torch.zeros(B, T, HQ, dtype=torch.float32, device=q.device) if USE_G else None
 
-    g_kern = g_cumsum.float() if USE_G else q.new_empty(B, T, HQ, dtype=torch.float32)
-    dg_kern = dg if USE_G else q.new_empty(B, T, HQ, dtype=torch.float32)
+    g_kern = g_cumsum.float() if USE_G else torch.zeros(B, T, HQ, dtype=torch.float32, device=q.device)
+    dg_kern = dg if USE_G else torch.zeros(B, T, HQ, dtype=torch.float32, device=q.device)
 
     dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}[q.dtype]
 

@@ -103,7 +103,7 @@ class TileLangBackend(BaseBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         o: torch.Tensor,
-        g_cumsum: torch.Tensor,
+        g_cumsum: torch.Tensor | None,
         lse: torch.Tensor,
         do: torch.Tensor,
         sink_bias: torch.Tensor | None = None,
@@ -117,6 +117,8 @@ class TileLangBackend(BaseBackend):
             return False, "TileLang backend does not support window_size; fall back to Triton"
         if sink_bias is not None:
             return False, "TileLang backend does not support sink_bias; fall back to Triton"
+        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
         return True, None
 
     def parallel_attn_bwd(
@@ -125,7 +127,7 @@ class TileLangBackend(BaseBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         o: torch.Tensor,
-        g_cumsum: torch.Tensor,
+        g_cumsum: torch.Tensor | None,
         lse: torch.Tensor,
         do: torch.Tensor,
         sink_bias: torch.Tensor | None = None,

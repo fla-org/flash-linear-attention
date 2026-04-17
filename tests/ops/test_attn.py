@@ -65,6 +65,57 @@ def test_parallel(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'scale'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 1.0),
+            (3, 111, 2, 2, 100, 1.0),
+            (3, 1024, 2, 8, 60, 0.1),
+        ]
+    ],
+)
+def test_parallel_with_g(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    D: int,
+    scale: float,
+):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shard mem")
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    g = torch.randn((B, T, HQ), dtype=torch.float16, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device)
+
+    ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), g=g.float(), scale=scale)
+    ref = ref.to(q.dtype)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dg, g.grad = g.grad.clone(), None
+
+    tri = parallel_attn(q=q, k=k, v=v, g=g, scale=scale)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dg, g.grad = g.grad.clone(), None
+
+    assert_close(" o", ref, tri, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.005)
+    assert_close("dk", ref_dk, tri_dk, 0.005)
+    assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close("dg", ref_dg, tri_dg, 0.005)
+
+
+@pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'cu_seqlens'),
     [
         pytest.param(*test, id="H{}-HQ{}-D{}-cu_seqlens{}".format(*test))
