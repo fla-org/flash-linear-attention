@@ -209,8 +209,10 @@ class MobaAttention(nn.Module):
 
             if self.use_flash_moba:
                 if cu_seqlens is None:
-                    cu_seqlens_q = torch.arange(0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=hidden_states.device)
-                    cu_seqlens_k = torch.arange(0, (batch_size + 1) * k_len, step=k_len, dtype=torch.int32, device=hidden_states.device)
+                    cu_seqlens_q = torch.arange(0, (batch_size + 1) * q_len, step=q_len,
+                                                dtype=torch.int32, device=hidden_states.device)
+                    cu_seqlens_k = torch.arange(0, (batch_size + 1) * k_len, step=k_len,
+                                                dtype=torch.int32, device=hidden_states.device)
                 elif isinstance(cu_seqlens, (tuple, list)):
                     cu_seqlens_q, cu_seqlens_k = cu_seqlens
                 else:
