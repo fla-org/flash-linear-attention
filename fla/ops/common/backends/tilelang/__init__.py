@@ -23,6 +23,8 @@ class TileLangBackend(BaseBackend):
     backend_type = "tilelang"
     package_name = "tilelang"
     env_var = "FLA_TILELANG"
+    default_enable = True
+    priority = 1
 
     @classmethod
     def is_available(cls) -> bool:
@@ -95,4 +97,52 @@ class TileLangBackend(BaseBackend):
             scale=scale, cu_seqlens=cu_seqlens,
             chunk_size=chunk_size, chunk_indices=chunk_indices,
             use_exp2=use_exp2, transpose_state_layout=transpose_state_layout,
+        )
+
+    def parallel_attn_bwd_verifier(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: torch.Tensor,
+        g_cumsum: torch.Tensor,
+        lse: torch.Tensor,
+        do: torch.Tensor,
+        sink_bias: torch.Tensor | None = None,
+        scale: float | None = None,
+        window_size: int | None = None,
+        chunk_size: int = 128,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+    ) -> tuple[bool, str | None]:
+        if window_size is not None:
+            return False, "TileLang backend does not support window_size; fall back to Triton"
+        if sink_bias is not None:
+            return False, "TileLang backend does not support sink_bias; fall back to Triton"
+        return True, None
+
+    def parallel_attn_bwd(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        o: torch.Tensor,
+        g_cumsum: torch.Tensor,
+        lse: torch.Tensor,
+        do: torch.Tensor,
+        sink_bias: torch.Tensor | None = None,
+        scale: float | None = None,
+        window_size: int | None = None,
+        chunk_size: int = 128,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        from fla.ops.common.backends.tilelang.parallel_attn_bwd import (
+            parallel_attn_bwd_tilelang,
+        )
+        return parallel_attn_bwd_tilelang(
+            q=q, k=k, v=v, o=o, g_cumsum=g_cumsum, lse=lse, do=do,
+            sink_bias=sink_bias, scale=scale, window_size=window_size,
+            chunk_size=chunk_size, cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
