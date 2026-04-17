@@ -16,7 +16,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, RotaryEmbedding
-from fla.ops.moba import moba_attn_varlen
+from fla.ops.moba import parallel_moba
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
@@ -47,7 +47,7 @@ class MoBA(nn.Module):
 
     This implementation exposes two backends:
       - Triton / flash-attn path (`use_flash_moba=False`, default): routed through
-        `fla.ops.moba.moba_attn_varlen`, composes `flash_attn_varlen_func` with an online softmax combine.
+        `fla.ops.moba.parallel_moba`, which composes `flash_attn_varlen_func` with an online-softmax combine.
       - FlashMoBA CUDA path (`use_flash_moba=True`): routed through
         [`flash_moba_varlen_func`](https://github.com/mit-han-lab/flash-moba), a fused kernel from MIT HAN Lab
         that performs gate computation, top-k selection, and attention in a single pass.
@@ -224,7 +224,7 @@ class MoBA(nn.Module):
                     )
                 cu_seqlens_moba = cu_seqlens_tuple[0]
                 max_seqlen_moba = max_seq_lens_tuple[0]
-                o_unpad = moba_attn_varlen(
+                o_unpad = parallel_moba(
                     q_unpad,
                     k_unpad,
                     v_unpad,
@@ -269,7 +269,7 @@ class MoBA(nn.Module):
                     raise NotImplementedError(
                         "MoBA cached decoding requires separate Q/KV varlen metadata for the Triton backend."
                     )
-                o = moba_attn_varlen(
+                o = parallel_moba(
                     q_unbatched,
                     k_unbatched,
                     v_unbatched,

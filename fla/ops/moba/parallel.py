@@ -26,7 +26,7 @@ def calc_chunks(cu_seqlen, moba_chunk_size):
     # batch_sizes[batch_idx] = batch size ( seqlen ) of batch idx
     batch_sizes = cu_seqlen[1:] - cu_seqlen[:-1]
     if torch.any(batch_sizes == 0):
-        raise ValueError("moba_attn_varlen does not support empty sequences in cu_seqlens")
+        raise ValueError("parallel_moba does not support empty sequences in cu_seqlens")
     # batch_num_chunk[batch_idx] = how many chunk in batch idx
     batch_num_chunk = (batch_sizes + (moba_chunk_size - 1)) // moba_chunk_size
     # cu_num_chunk[batch_idx] = first chunk id of this batch
@@ -74,7 +74,7 @@ def calc_chunks(cu_seqlen, moba_chunk_size):
     )
 
 
-class MobaAttnFunction(torch.autograd.Function):
+class ParallelMoBAFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(
@@ -242,7 +242,7 @@ class MobaAttnFunction(torch.autograd.Function):
         return dq, dk, dv, None, dmq, dmkv, None, None, None, None, None
 
 
-def moba_attn_varlen(
+def parallel_moba(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -272,7 +272,7 @@ def moba_attn_varlen(
     """
     if flash_attn_varlen_func is None:
         raise ImportError(
-            "`moba_attn_varlen` requires `flash-attn`. Install it via `pip install flash-attn`."
+            "`parallel_moba` requires `flash-attn`. Install it via `pip install flash-attn`."
         )
 
     """ some basic variables """
@@ -406,8 +406,8 @@ def moba_attn_varlen(
         moba_cu_seqlen_kv.shape == moba_cu_seqlen_q.shape
     ), f"moba_cu_seqlen_kv.shape != moba_cu_seqlen_q.shape {moba_cu_seqlen_kv.shape} != {moba_cu_seqlen_q.shape}"
 
-    # Wrapping up the flash attn call and online softmax dlse inside MobaAttnFunction class
-    return MobaAttnFunction.apply(
+    # Wrapping up the flash attn call and online softmax dlse inside ParallelMoBAFunction class
+    return ParallelMoBAFunction.apply(
         q,
         k,
         v,
