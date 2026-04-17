@@ -1,0 +1,183 @@
+name: Issue / PR pytest command
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: issue-pytest-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  parse:
+    if: |
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      startsWith(github.event.comment.body, 'pytest ')
+    runs-on: ubuntu-latest
+    outputs:
+      pytest_args: ${{ steps.parse.outputs.pytest_args }}
+      issue_number: ${{ github.event.issue.number }}
+      is_pr: ${{ github.event.issue.pull_request != null }}
+      comment_id: ${{ github.event.comment.id }}
+    steps:
+      - id: parse
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          ARGS="${COMMENT_BODY#pytest }"
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "pytest_args<<$EOF" >> $GITHUB_OUTPUT
+          echo "$ARGS" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
+  react:
+    needs: parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: ${{ needs.parse.outputs.comment_id }},
+              content: 'eyes',
+            });
+
+  run-pytest:
+    needs: parse
+    runs-on: nvidia-h100-pt2-7
+    outputs:
+      status: ${{ steps.pytest.outputs.status }}
+      exit_code: ${{ steps.pytest.outputs.exit_code }}
+    env:
+      FLA_CI_ENV: 1
+    steps:
+      - name: Determine checkout ref
+        id: ref
+        run: |
+          if [ "${{ needs.parse.outputs.is_pr }}" = "true" ]; then
+            echo "ref=refs/pull/${{ needs.parse.outputs.issue_number }}/head" >> $GITHUB_OUTPUT
+          else
+            echo "ref=${{ github.event.repository.default_branch }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+
+      - name: Discover Conda Path and Set Env Vars
+        id: find_conda
+        shell: bash
+        run: |
+          set -e
+          TARGET_CONDA_ENV="pytorch_2_7"
+          echo "Determining conda environment based on runner: ${{ runner.name }}"
+          if [[ "${{ runner.name }}" == "nvidia-h100-1" ]]; then
+            TARGET_CONDA_ENV="pytorch_2_7"
+          elif [[ "${{ runner.name }}" == "nvidia-h100-2" ]]; then
+            TARGET_CONDA_ENV="pytorch_2_7_1"
+          fi
+          echo "--> Runner is '${{ runner.name }}', selected environment is '${TARGET_CONDA_ENV}'"
+
+          echo "Searching for Conda installation in home directory ($HOME)..."
+          POSSIBLE_NAMES=("miniforge3" "miniconda3" "anaconda3")
+          FOUND_PATH=""
+          for name in "${POSSIBLE_NAMES[@]}"; do
+            CANDIDATE_PATH="$HOME/$name"
+            echo "--> Checking for path: ${CANDIDATE_PATH}"
+            if [ -d "${CANDIDATE_PATH}" ] && [ -x "${CANDIDATE_PATH}/bin/conda" ]; then
+              echo "    Found valid Conda installation: ${CANDIDATE_PATH}"
+              FOUND_PATH="${CANDIDATE_PATH}"
+              break
+            fi
+          done
+
+          if [ -n "${FOUND_PATH}" ]; then
+            echo "Setting CONDA environment variable to: ${FOUND_PATH}"
+            echo "CONDA=${FOUND_PATH}" >> $GITHUB_ENV
+            echo "CONDA_BIN_PATH=${FOUND_PATH}/envs/${TARGET_CONDA_ENV}/bin" >> $GITHUB_ENV
+            echo "CONDA_ENV_NAME=${TARGET_CONDA_ENV}" >> $GITHUB_ENV
+          else
+            echo "::error::Could not automatically find a Conda installation."
+            exit 1
+          fi
+
+      - name: Install/Update Dependencies
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
+          $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
+
+          $CONDA/bin/conda install -n $CONDA_ENV_NAME nvidia/label/cuda-12.8.1::cuda-nvcc -y
+          STABLE_URL="https://download.pytorch.org/whl/cu128"
+          echo "Using stable index URL: $STABLE_URL"
+          $CONDA_BIN_PATH/pip install -U torch~=2.7.0 triton --index-url $STABLE_URL
+          $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
+          $CONDA_BIN_PATH/pip install .
+          echo "Installing flash-attn for NVIDIA"
+          $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
+          echo "Installing tilelang for NVIDIA H100"
+          $CONDA_BIN_PATH/pip install "apache-tvm-ffi<=0.1.9" tilelang -f https://tile-ai.github.io/whl/nightly
+
+      - name: Run pytest
+        id: pytest
+        env:
+          PYTEST_ARGS: ${{ needs.parse.outputs.pytest_args }}
+        shell: bash
+        run: |
+          set +e
+          $CONDA_BIN_PATH/pytest $PYTEST_ARGS > pytest_output.txt 2>&1
+          EXIT_CODE=$?
+          set -e
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=✅ PASSED" >> $GITHUB_OUTPUT
+          else
+            echo "status=❌ FAILED" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload pytest output
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: pytest_output.txt
+          retention-days: 1
+
+  post-result:
+    needs: [parse, run-pytest]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download pytest output
+        uses: actions/download-artifact@v4
+        with:
+          name: pytest-output
+
+      - name: Post comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let output = fs.readFileSync('pytest_output.txt', 'utf8');
+            // GitHub comment body limit is 65536 characters. Leave margin for markdown wrapper.
+            const MAX_LEN = 60000;
+            if (output.length > MAX_LEN) {
+              output = output.slice(0, MAX_LEN) + '\n\n... (output truncated due to GitHub comment length limit)';
+            }
+            const status = '${{ needs.run-pytest.outputs.status }}';
+            const exitCode = '${{ needs.run-pytest.outputs.exit_code }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const args = `${{ needs.parse.outputs.pytest_args }}`.trim();
+            const body = `## ${status} — Pytest Results (H100 PyTorch 2.7)\n\n**Command:** \\`pytest ${args}\\`\n**Exit code:** ${exitCode}\n\n[View workflow run logs](${runUrl})\n\n<details><summary>Click to expand pytest output</summary>\n\n\\`\\`\\`\n${output}\n\\`\\`\\`\n\n</details>`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ needs.parse.outputs.issue_number }},
+              body: body,
+            });
