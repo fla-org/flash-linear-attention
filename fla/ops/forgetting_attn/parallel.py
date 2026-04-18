@@ -53,8 +53,11 @@ def parallel_forgetting_attn(
         )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    if cu_seqlens is not None:
-        assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+            f"Please flatten variable-length inputs before processing.",
+        )
 
     o = parallel_attn(q, k, v, g, scale, window_size=window_size, cu_seqlens=cu_seqlens)
     return o
