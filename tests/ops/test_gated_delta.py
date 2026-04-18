@@ -79,14 +79,14 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'Hq', 'H', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
+    ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'mask_p', 'use_qk_l2norm_in_kernel', 'dtype'),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-Hq{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
-            # non-GQA (Hq == H)
+            # non-GVA (HV == H)
             (2, 75, 4, 4, 64, 1, 0.01, 0, False, torch.float16),
             (2, 500, 3, 3, 60, 1, 1, 0, False, torch.float16),
             (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, torch.float16),
@@ -94,7 +94,7 @@ def test_fused_recurrent(
             (4, 1024, 4, 4, 128, 0.1, 1, 0, True, torch.float16),
             (2, 1500, 4, 4, 128, 0.1, 10, 0, False, torch.float16),
             (4, 2048, 8, 8, 64, 0.1, 1, 0, False, torch.float16),
-            # GQA (Hq < H)
+            # GVA (HV > H)
             (2, 256, 2, 4, 64, 1, 1, 0, False, torch.float16),
             (2, 512, 2, 8, 64, 1, 0.1, 0, True, torch.float16),
             (2, 1024, 4, 8, 128, 0.1, 1, 0, False, torch.float16),
@@ -104,8 +104,8 @@ def test_fused_recurrent(
 def test_chunk(
     B: int,
     T: int,
-    Hq: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -116,17 +116,17 @@ def test_chunk(
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
-    assert H % Hq == 0
-    G = H // Hq
+    assert HV % H == 0
+    G = HV // H
 
-    q = torch.rand(B, T, Hq, D, dtype=dtype)
-    k = torch.rand(B, T, Hq, D, dtype=dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
-    beta = torch.rand(B, T, H, dtype=torch.float).sigmoid()
-    g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.float32))
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    beta = torch.rand(B, T, HV, dtype=torch.float).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32))
     g = g / gate_logit_normalizer
     g = g * (torch.rand_like(g) > mask_p)
-    h0 = torch.zeros(B, H, D, D, dtype=torch.float32)
+    h0 = torch.zeros(B, HV, D, D, dtype=torch.float32)
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
 
     tri, tri_ht = chunk_gated_delta_rule(
