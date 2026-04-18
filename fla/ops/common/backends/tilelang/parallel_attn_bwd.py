@@ -19,7 +19,7 @@ from fla.ops.utils.constant import RCP_LN2
 })
 def _build_parallel_attn_bwd_kernel(
     B, HQ, H, K, V, BT, sm_scale, log2e_scale, dtype_str,
-    USE_G=False, IS_VARLEN=False, num_warps=4,
+    USE_G=False, USE_WINDOW=False, WINDOW_SIZE=0, IS_VARLEN=False, num_warps=4,
 ):
     """Build the TileLang JIT kernel for parallel attention backward.
 
@@ -41,6 +41,8 @@ def _build_parallel_attn_bwd_kernel(
     _V = (V + 15) // 16 * 16
     _G = HQ // H
     _USE_G = USE_G
+    _USE_WINDOW = USE_WINDOW
+    _W = WINDOW_SIZE
     _sm_scale = sm_scale
     _log2e_scale = log2e_scale
 
@@ -99,6 +101,12 @@ def _build_parallel_attn_bwd_kernel(
         i_t_local = (t_s - bos) // _BT
         loop_st = i_t_local
         loop_ed = T.ceildiv(T_seq, _BT)
+        if _USE_WINDOW:
+            # For a K tile at positions [t_s, t_s+BT), the farthest query
+            # that can still attend (under window W) is at position
+            # (t_s+BT-1) + (W-1). Round up to the enclosing Q tile.
+            loop_ed_swa = i_t_local + 1 + (_W + _BT - 2) // _BT
+            loop_ed = T.min(loop_ed, loop_ed_swa)
 
         # Note: T.Pipelined is intentionally avoided here because combining it
         # with standard-layout T.atomic_add into dq_out produces garbage values
@@ -123,12 +131,17 @@ def _build_parallel_attn_bwd_kernel(
                 else:
                     qkT[i, j] = T.exp2(qkT[i, j] * _log2e_scale - lse_shared[j])
 
-            # causal + boundary mask
+            # causal + boundary (+ optional sliding window) mask
             for i, j in T.Parallel(_BT, _BT):
                 key_pos = t_s + i
                 q_pos = q_t_s + j
                 causal = (key_pos <= q_pos) & (key_pos < T_seq + bos) & (q_pos < T_seq + bos)
-                qkT[i, j] = T.if_then_else(causal, qkT[i, j], T.cast(0, accum_dtype))
+                if _USE_WINDOW:
+                    in_window = (q_pos - key_pos < _W)
+                    mask = causal & in_window
+                else:
+                    mask = causal
+                qkT[i, j] = T.if_then_else(mask, qkT[i, j], T.cast(0, accum_dtype))
 
             # dv += p @ do
             T.copy(qkT, qkT_cast)
@@ -233,6 +246,7 @@ def parallel_attn_bwd_tilelang(
     log2e_scale = sm_scale * RCP_LN2
 
     USE_G = g_cumsum is not None
+    USE_WINDOW = window_size is not None
     IS_VARLEN = cu_seqlens is not None
 
     if chunk_indices is None and IS_VARLEN:
@@ -261,7 +275,8 @@ def parallel_attn_bwd_tilelang(
 
     kernel = _build_parallel_attn_bwd_kernel(
         B, HQ, H, K, V, BT, sm_scale, log2e_scale, dtype_str,
-        USE_G=USE_G, IS_VARLEN=IS_VARLEN,
+        USE_G=USE_G, USE_WINDOW=USE_WINDOW, WINDOW_SIZE=window_size or 0,
+        IS_VARLEN=IS_VARLEN,
     )
 
     if IS_VARLEN:
@@ -270,7 +285,15 @@ def parallel_attn_bwd_tilelang(
     else:
         kernel(q, k, v, g_kern, lse, delta, do, dq, dk, dv, dg_kern)
 
+    # sink_bias gradient is derived from the saved lse (which already includes
+    # the sink mass in the softmax normalizer) and delta — no kernel change
+    # needed. Matches the Triton reference.
+    dsink_bias = None
+    if sink_bias is not None:
+        p_sink = torch.exp2(sink_bias.float()[None, None, :] - lse.float())
+        dsink_bias = -(p_sink * delta.float()).sum((0, 1))
+
     dq = dq.to(q.dtype)
     dk = dk.to(k.dtype)
     dv = dv.to(v.dtype)
-    return dq, dk, dv, dg, None
+    return dq, dk, dv, dg, dsink_bias
