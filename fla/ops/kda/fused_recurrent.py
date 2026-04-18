@@ -154,10 +154,10 @@ def fused_recurrent_kda_fwd_kernel(
         b_g = tl.load(p_g, eviction_policy='evict_last').to(tl.float32)
 
         if USE_GATE_IN_KERNEL:
-            b_A = tl.load(A_log + i_h).to(tl.float32)
+            b_A = tl.load(A_log + i_hv).to(tl.float32)
 
             if HAS_DT_BIAS:
-                b_bias = tl.load(dt_bias + i_h * K + o_k, mask=mask_k, other=0).to(tl.float32)
+                b_bias = tl.load(dt_bias + i_hv * K + o_k, mask=mask_k, other=0).to(tl.float32)
                 b_g = b_g + b_bias
 
             if USE_LOWER_BOUND:
