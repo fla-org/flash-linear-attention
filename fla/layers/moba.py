@@ -59,20 +59,34 @@ class MoBA(nn.Module):
         that performs gate computation, top-k selection, and attention in a single pass.
 
     Args:
-        hidden_size (int): Model hidden size.
-        num_heads (int): Number of query heads.
-        num_kv_heads (int, optional): Number of KV heads for GQA. Defaults to `num_heads` (MHA).
-        qkv_bias (bool): Whether Q/K/V projections have a bias term.
-        qk_norm (bool): Apply RMSNorm to Q and K before attention.
-        window_size (int, optional): Sliding-window size forwarded to the KV cache.
-        rope_theta (float): RoPE base frequency.
-        max_position_embeddings (int, optional): Maximum position used for RoPE scaling.
-        layer_idx (int): Layer index (required for KV cache bookkeeping).
-        moba_chunk_size (int): Size of each KV block. Must evenly divide the sequences where possible;
-            tail blocks are handled via the chunk-masking logic in `calc_chunks`.
-        moba_topk (int): Number of blocks each query attends to (including the local block).
-        use_output_gate (bool): If True, apply a sigmoid-gated RMSNorm on the attention output.
-        use_flash_moba (bool): Use the fused FlashMoBA CUDA kernel. Requires `pip install flash-moba`.
+        hidden_size (int, Optional):
+            The hidden size of the input. Default: 2048.
+        num_heads (int, Optional):
+            The number of query heads. Default: 32.
+        num_kv_heads (int, Optional):
+            The number of key/value heads for GQA. If None, falls back to MHA. Default: None.
+        qkv_bias (bool, Optional):
+            Whether to use bias in the Q/K/V projections. Default: `False`.
+        qk_norm (bool, Optional):
+            Whether to apply RMSNorm to Q and K before attention. Default: `False`.
+        window_size (int, Optional):
+            Sliding-window size forwarded to the KV cache. Default: None.
+        rope_theta (float, Optional):
+            The base frequency of RoPE. Default: 10000.
+        max_position_embeddings (int, Optional):
+            The maximum position used for RoPE scaling. Default: None.
+        layer_idx (int, Optional):
+            The index of the layer, required for KV cache bookkeeping. Default: None.
+        moba_chunk_size (int, Optional):
+            The size of each KV block. Tail blocks are handled via the chunk-masking
+            logic in `prepare_moba_chunks`. Default: 256.
+        moba_topk (int, Optional):
+            The number of blocks each query attends to, including the local block. Default: 4.
+        use_output_gate (bool, Optional):
+            Whether to apply a sigmoid-gated RMSNorm on the attention output. Default: `False`.
+        use_flash_moba (bool, Optional):
+            Whether to use the fused FlashMoBA CUDA kernel. Requires `pip install flash-moba`.
+            Default: `False`.
     """
 
     def __init__(

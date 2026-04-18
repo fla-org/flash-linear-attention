@@ -28,7 +28,7 @@ except ImportError:
     _flash_attn_varlen_forward = None
 
 
-def calc_chunks(cu_seqlens, chunk_size):
+def prepare_moba_chunks(cu_seqlens, chunk_size):
     """calc chunks that needs moba attention"""
     if torch.any(prepare_lens(cu_seqlens) == 0):
         raise ValueError("parallel_moba does not support empty sequences in cu_seqlens")
@@ -304,7 +304,7 @@ def parallel_moba(
 
     # prepare chunk meta
     cu_chunk, filtered_chunk_indices, num_filtered_chunk, chunk_to_batch = (
-        calc_chunks(cu_seqlens, chunk_size)
+        prepare_moba_chunks(cu_seqlens, chunk_size)
     )
 
     # the last chunk is always chosen by self-attn, so we only need `topk - 1` from MoBA
