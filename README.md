@@ -33,7 +33,7 @@ This repo provides efficient implementations for emerging model architectures, w
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
 - [2026-04] 🎯 Add [GPT-OSS](https://openai.com/index/introducing-gpt-oss/)-style attention sink support to `fla`'s attention kernels.
 - [2026-03] 🚀 Add [Context Parallel](fla/ops/cp/README.md) support for KDA and GDN, enabling efficient distributed training across sequence dimension.
-- [2025-10] 🌑 Add Kimi Delta Attention implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
+- [2025-10] 🌘 Add Kimi Delta Attention implementation to `fla` ([paper](https://arxiv.org/abs/2510.26692)).
 - [2025-09] 🌲 Add DeltaFormer implementation to `fla` ([paper](https://arxiv.org/abs/2505.19488v1)).
 - [2025-09] 🐻 Thrilled to announce that [GDN](fla/ops/gated_delta_rule) has been integrated into Qwen3-Next. Check out their [blog post](https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&from=research.latest-advancements-list) for more infos!
 - [2025-08] 🌲 Add Log-Linear Attention implementation to `fla` ([paper](https://arxiv.org/abs/2506.04761)).
