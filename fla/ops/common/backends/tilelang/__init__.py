@@ -97,6 +97,43 @@ class TileLangBackend(BaseBackend):
             use_exp2=use_exp2, transpose_state_layout=transpose_state_layout,
         )
 
+    def parallel_attn_fwd_verifier(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g_cumsum: torch.Tensor | None,
+        sink_bias: torch.Tensor | None,
+        scale: float,
+        window_size: int | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+    ) -> tuple[bool, str | None]:
+        if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
+        return True, None
+
+    def parallel_attn_fwd(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g_cumsum: torch.Tensor | None,
+        sink_bias: torch.Tensor | None,
+        scale: float,
+        window_size: int | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        chunk_indices: torch.LongTensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from fla.ops.common.backends.tilelang.parallel_attn_fwd import (
+            parallel_attn_fwd_tilelang,
+        )
+        return parallel_attn_fwd_tilelang(
+            q=q, k=k, v=v, g_cumsum=g_cumsum, sink_bias=sink_bias,
+            scale=scale, window_size=window_size, cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+
     def parallel_attn_bwd_verifier(
         self,
         q: torch.Tensor,
@@ -113,10 +150,6 @@ class TileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[bool, str | None]:
-        if window_size is not None:
-            return False, "TileLang backend does not support window_size; fall back to Triton"
-        if sink_bias is not None:
-            return False, "TileLang backend does not support sink_bias; fall back to Triton"
         if q.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return False, f"TileLang backend does not support dtype {q.dtype}; fall back to Triton"
         return True, None

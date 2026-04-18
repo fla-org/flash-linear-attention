@@ -505,6 +505,7 @@ def parallel_attn_bwd_kernel_dkv(
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
+@dispatch('attn')
 def parallel_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
