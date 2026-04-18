@@ -18,7 +18,6 @@ from torch.nn import functional as F
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
-from fla.ops.kda.gate import fused_kda_gate
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -278,16 +277,19 @@ class KimiDeltaAttention(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
         elif mode == "fused_recurrent":
-            g = fused_kda_gate(g=g, A_log=self.A_log, dt_bias=self.dt_bias, lower_bound=self.lower_bound)
             o, recurrent_state = fused_recurrent_kda(
                 q=q,
                 k=k,
                 v=v,
                 g=g,
                 beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                lower_bound=self.lower_bound,
                 cu_seqlens=cu_seqlens,
             )
         else:

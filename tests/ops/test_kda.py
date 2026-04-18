@@ -210,6 +210,81 @@ def test_fused_recurrent_transpose_state(
 
 
 @pytest.mark.parametrize(
+    ("B", "T", "H", "HV", "D", "scale", "has_dt_bias", "safe_gate", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_dt_bias{}-safe_gate{}-{}".format(*test),
+        )
+        for test in [
+            (1, 64, 1, 1, 64, 1, False, False, torch.float),
+            (2, 256, 2, 2, 64, 1, True, False, torch.float),
+            (2, 512, 2, 4, 64, 0.1, True, True, torch.float16),
+            (3, 1000, 2, 8, 128, 1, False, False, torch.float16),
+            (4, 1024, 4, 4, 128, 0.1, True, True, torch.float16),
+        ]
+    ],
+)
+def test_fused_recurrent_gate_in_kernel(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    has_dt_bias: bool,
+    safe_gate: bool,
+    dtype: torch.dtype,
+):
+    """fused_recurrent_kda with use_gate_in_kernel=True matches manual gate path."""
+    torch.manual_seed(42)
+    if IS_INTEL_ALCHEMIST and D > 128:
+        pytest.skip(reason="fused_recurrent_kda is not supported on alchemist for D>128")
+
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
+    g_raw = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
+    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(HV * D, dtype=torch.float32, device=device) if has_dt_bias else None
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+
+    lower_bound = -5.0 if safe_gate else None
+    naive_gate_fn = naive_kda_lowerbound_gate if safe_gate else naive_kda_gate
+    g_ref = naive_gate_fn(g_raw, A_log, dt_bias)
+
+    ref, ref_ht = fused_recurrent_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_ref,
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    tri, tri_ht = fused_recurrent_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_raw.clone(),
+        beta=beta.clone(),
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone() if dt_bias is not None else None,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        lower_bound=lower_bound,
+    )
+    assert_close("o", ref, tri, 0.002)
+    assert_close("ht", ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize(
     ("B", "H", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "use_gate_in_kernel", "safe_gate", "dtype"),
     [
         pytest.param(

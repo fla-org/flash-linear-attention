@@ -384,6 +384,137 @@ def test_fused_recurrent_transpose_state(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'scale', 'has_dt_bias', 'dtype'),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_dt_bias{}-{}".format(*test),
+        )
+        for test in [
+            (1, 64, 1, 1, 64, 1, False, torch.float),
+            (2, 256, 2, 2, 64, 1, True, torch.float),
+            (2, 512, 2, 4, 64, 0.1, True, torch.float16),
+            (3, 1000, 2, 8, 128, 1, False, torch.float16),
+            (4, 1024, 4, 4, 128, 0.1, True, torch.float16),
+        ]
+    ],
+)
+def test_fused_recurrent_gate_in_kernel(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    has_dt_bias: bool,
+    dtype: torch.dtype,
+):
+    """fused_recurrent_gated_delta_rule with use_gate_in_kernel=True matches manual gate."""
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
+    g_raw = torch.randn(B, T, HV, dtype=torch.float32, device=device)
+    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) if has_dt_bias else None
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+
+    g_ref = naive_gdn_gate(g_raw, A_log, dt_bias)
+    ref, ref_ht = fused_recurrent_gated_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_ref,
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    tri, tri_ht = fused_recurrent_gated_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_raw.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone() if dt_bias is not None else None,
+    )
+    assert_close('o', ref, tri, 0.002)
+    assert_close('ht', ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize(
+    ('H', 'HV', 'D', 'has_dt_bias', 'cu_seqlens', 'dtype'),
+    [
+        pytest.param(*test, id="H{}-HV{}-D{}-has_dt_bias{}-cu_seqlens{}-{}".format(*test))
+        for test in [
+            (2, 2, 64, True, [0, 15, 100, 300], torch.float16),
+            (2, 4, 64, False, [0, 256, 500, 1000], torch.float16),
+            (4, 4, 128, True, [0, 15, 100, 300, 1200, 2000], torch.float16),
+        ]
+    ],
+)
+def test_fused_recurrent_gate_in_kernel_varlen(
+    H: int,
+    HV: int,
+    D: int,
+    has_dt_bias: bool,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+):
+    """Varlen fused_recurrent_gated_delta_rule with use_gate_in_kernel=True."""
+    torch.manual_seed(42)
+    cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1].item()
+    N = len(cu_seqlens) - 1
+
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(1, T, HV, dtype=dtype, device=device).sigmoid()
+    g_raw = torch.randn(1, T, HV, dtype=torch.float32, device=device)
+    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(HV, dtype=torch.float32, device=device) if has_dt_bias else None
+    h0 = torch.randn(N, HV, D, D, dtype=torch.float32, device=device)
+
+    g_ref = naive_gdn_gate(g_raw, A_log, dt_bias)
+    ref, ref_ht = fused_recurrent_gated_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_ref,
+        beta=beta.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+    )
+    tri, tri_ht = fused_recurrent_gated_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_raw.clone(),
+        beta=beta.clone(),
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone() if dt_bias is not None else None,
+    )
+    assert_close('o', ref, tri, 0.002)
+    assert_close('ht', ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize(
     ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
     [
         pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
