@@ -49,6 +49,17 @@ def fused_chunk_linear_attn(
         final_state (torch.Tensor):
             Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`
     """
+    if cu_seqlens is not None:
+        if q.shape[0] != 1:
+            raise ValueError(
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+                f"Please flatten variable-length inputs before processing.",
+            )
+        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
+            raise ValueError(
+                f"The number of initial states is expected to be equal to the number of input sequences, "
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
+            )
     o, final_state = fused_chunk_simple_gla(
         q=q,
         k=k,

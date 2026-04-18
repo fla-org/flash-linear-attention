@@ -49,6 +49,7 @@ setup(
         'einops',
     ],
     extras_require={
+        'tilelang': ['tilelang'],
         'conv1d': ['causal-conv1d>=1.4.0'],
         'benchmark': ['matplotlib', 'datasets>=3.3.0'],
         'test': ['pytest'],

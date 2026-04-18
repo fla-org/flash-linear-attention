@@ -161,6 +161,8 @@ jobs:
               if [[ "${{ inputs.runner }}" == nvidia-h100* ]]; then
                 echo "Installing flash-attn for NVIDIA"
                 $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
+                echo "Installing tilelang for NVIDIA H100"
+                $CONDA_BIN_PATH/pip install "apache-tvm-ffi<=0.1.9" tilelang -f https://tile-ai.github.io/whl/nightly
               fi
             fi
           elif [ "${{ inputs.gpu_type }}" = "intel" ]; then
@@ -216,8 +218,34 @@ jobs:
           echo "Found ops test files: $TEST_FILES"
           echo "test_files=$TEST_FILES" >> $GITHUB_OUTPUT
 
-      - name: Run pytest on ops test files
+      - name: Detect op/backend/dispatch changes
+        if: steps.check_skip.outputs.skip_tests == 'false'
+        id: check-dispatch
+        shell: bash
+        run: |
+          CHANGED="${{ steps.changed-files.outputs.all_changed_files }}"
+          # Any change under fla/ops/ triggers the dispatch-on suite: backend dirs
+          # obviously need it, but op changes also do because backend impls may rely
+          # on op internals (shared helpers, default kwargs, chunk layout). Skipping
+          # saves CI only on PRs that touch no op code (e.g. models/, docs, benches).
+          if echo "$CHANGED" | tr ' ' '\n' | grep -qE '^fla/ops/'; then
+            echo "Op/backend changes detected; will run dispatch-on suite"
+            echo "dispatch_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No op changes; skipping dispatch-on suite"
+            echo "dispatch_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run pytest on ops test files (dispatch DISABLED, Triton baseline)
         if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false'
+        shell: bash
+        env:
+          FLA_DISABLE_BACKEND_DISPATCH: "1"
+        run: |
+          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
+
+      - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
+        if: steps.find-ops-tests.outputs.test_files && steps.check_skip.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
         shell: bash
         run: |
           $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
@@ -354,6 +382,8 @@ jobs:
               if [[ "${{ inputs.runner }}" == nvidia-h100* ]]; then
                 echo "Installing flash-attn for NVIDIA"
                 $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
+                echo "Installing tilelang for NVIDIA H100"
+                $CONDA_BIN_PATH/pip install "apache-tvm-ffi<=0.1.9" tilelang -f https://tile-ai.github.io/whl/nightly
               fi
             fi
           elif [ "${{ inputs.gpu_type }}" = "intel" ]; then

@@ -65,14 +65,36 @@ def prepare_cu_seqlens_from_mask(
 
 @tensor_cache
 def prepare_split_cu_seqlens(
-    batch_size: int,
-    seq_len: int,
-    split_size: int,
+    batch_size: int | None = None,
+    seq_len: int | None = None,
+    split_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     dtype: torch.dtype | None = torch.int32,
     device: torch.device | None = torch.device('cpu'),
 ) -> torch.LongTensor:
+    """Sub-split a (optionally packed) batch along the token axis.
+
+    Two calling modes:
+      - **Rectangular batch**: pass `batch_size` and `seq_len`, leave
+        `cu_seqlens=None`. Internally synthesizes `[0, L, 2L, ..., B*L]`.
+      - **Packed varlen**: pass `cu_seqlens`. `batch_size` and `seq_len` are
+        ignored (kept as optional kwargs for backward-compat with callers
+        that used to pass dummies).
+
+    `split_size` is always required.
+
+    The legacy positional signature `(batch_size, seq_len, split_size, ...)`
+    continues to work — the first two args retain their position but may now
+    be omitted when `cu_seqlens` is supplied.
+    """
+    if split_size is None:
+        raise TypeError("prepare_split_cu_seqlens() requires `split_size`")
     if cu_seqlens is None:
+        if batch_size is None or seq_len is None:
+            raise TypeError(
+                "prepare_split_cu_seqlens() requires either `cu_seqlens`, "
+                "or both `batch_size` and `seq_len`"
+            )
         total_tokens = batch_size * seq_len
         cu_seqlens = list(range(0, total_tokens, seq_len)) + [total_tokens]
     else:

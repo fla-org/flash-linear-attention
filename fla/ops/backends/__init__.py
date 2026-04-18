@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable)
 
 
+_DISPATCH_DISABLED = os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1"
+if _DISPATCH_DISABLED:
+    logger.info("[FLA Backend] FLA_DISABLE_BACKEND_DISPATCH=1 — all dispatch bypassed")
+
+
 class BaseBackend:
     """Base class for operation-specific backends.
 
@@ -138,6 +143,8 @@ def dispatch(operation: str):
     that passes the verifier for the given function call.
     """
     def decorator(func: F) -> F:
+        if _DISPATCH_DISABLED:
+            return func
         func_name = func.__name__
 
         @wraps(func)
