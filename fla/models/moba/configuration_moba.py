@@ -28,7 +28,7 @@ class MoBAConfig(PretrainedConfig):
         max_position_embeddings: int = 2048,
         moba_chunk_size: int = 256,
         moba_topk: int = 4,
-        use_output_gate: bool = True,
+        use_output_gate: bool = False,
         use_flash_moba: bool = False,
         hidden_ratio: int | None = 4,
         intermediate_size: int | None = None,

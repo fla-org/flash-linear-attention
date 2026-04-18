@@ -23,6 +23,12 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+except ImportError:
+    flash_attn_func = None
+    flash_attn_varlen_func = None
+
+try:
     from flash_moba import flash_moba_varlen_func
 except ImportError:
     flash_moba_varlen_func = None
@@ -82,7 +88,7 @@ class MoBA(nn.Module):
         layer_idx: int = None,
         moba_chunk_size: int = 256,
         moba_topk: int = 4,
-        use_output_gate: bool = True,
+        use_output_gate: bool = False,
         use_flash_moba: bool = False,
     ):
         super().__init__()
@@ -110,8 +116,8 @@ class MoBA(nn.Module):
 
         if self.use_flash_moba and flash_moba_varlen_func is None:
             raise ImportError(
-                "Please install `flash_moba` via `pip install flash-moba` "
-                "to use `use_flash_moba=True`."
+                "Please install FlashMoBA via `pip install flash-moba` first "
+                "(see https://github.com/mit-han-lab/flash-moba)."
             )
 
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
@@ -132,7 +138,6 @@ class MoBA(nn.Module):
             )
             self.o_norm = FusedRMSNormGated(self.head_dim, activation='sigmoid', eps=1e-6)
         else:
-            logger.info("MoBA is NOT using output gate.")
             self.o_norm = RMSNorm(self.head_dim, eps=1e-6)
 
     def forward(
@@ -184,10 +189,16 @@ class MoBA(nn.Module):
                 k = rearrange(k, '... (h d) -> ... h d', d=self.head_dim)
                 v = rearrange(v, '... (h d) -> ... h d', d=self.head_dim)
 
-        # Handle attention_mask by unpadding
+        # During decoding, fall back to dense full attention as prescribed by
+        # the MoBA paper (https://arxiv.org/abs/2502.13189, Sec. 3.3), which
+        # defines a seamless switch from block-sparse to full attention for the
+        # generation phase.
+        is_decoding = k.shape[1] != q_len
 
-        # Path 1: `attention_mask` is provided (e.g., Ruler tasks)
-        if attention_mask is not None:
+        # Path 1: padding mask provided AND caller did not pre-compute cu_seqlens.
+        # When both are present, `cu_seqlens` wins because it carries strictly
+        # more packing info than a 2D padding mask (see #842).
+        if attention_mask is not None and cu_seqlens is None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
@@ -201,10 +212,19 @@ class MoBA(nn.Module):
             # q, k, v are (B, S, H, D). unpad_input turns them into (Total, H, D)
             q_unpad, (k_unpad, v_unpad), indices_q, cu_seqlens_tuple, max_seq_lens_tuple = unpad_input(
                 q, (k, v), attention_mask, q_len)
+            cu_seqlens_q, cu_seqlens_k = cu_seqlens_tuple
+            max_seqlen_q, max_seqlen_k = max_seq_lens_tuple
 
-            if self.use_flash_moba:
-                cu_seqlens_q, cu_seqlens_k = cu_seqlens_tuple
-                max_seqlen_q, max_seqlen_k = max_seq_lens_tuple
+            if is_decoding:
+                o_unpad = flash_attn_varlen_func(
+                    q_unpad, k_unpad, v_unpad,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    causal=True,
+                )
+            elif self.use_flash_moba:
                 o_unpad = flash_moba_varlen_func(
                     q=q_unpad,
                     k=k_unpad,
@@ -215,69 +235,63 @@ class MoBA(nn.Module):
                     max_seqlen_k=max_seqlen_k,
                     moba_chunk_size=self.moba_chunk_size,
                     moba_topk=self.moba_topk,
-                    causal=True
+                    causal=True,
                 )
             else:
-                if k.shape[1] != q_len:
-                    raise NotImplementedError(
-                        "MoBA cached decoding requires separate Q/KV varlen metadata for the Triton backend."
-                    )
-                cu_seqlens_moba = cu_seqlens_tuple[0]
-                max_seqlen_moba = max_seq_lens_tuple[0]
                 o_unpad = parallel_moba(
-                    q_unpad,
-                    k_unpad,
-                    v_unpad,
-                    cu_seqlens=cu_seqlens_moba,
-                    max_seqlen=max_seqlen_moba,
-                    moba_chunk_size=self.moba_chunk_size,
-                    moba_topk=self.moba_topk
-                )
+                    q_unpad.unsqueeze(0),
+                    k_unpad.unsqueeze(0),
+                    v_unpad.unsqueeze(0),
+                    cu_seqlens=cu_seqlens_q,
+                    max_seqlen=max_seqlen_q,
+                    chunk_size=self.moba_chunk_size,
+                    topk=self.moba_topk,
+                ).squeeze(0)
 
             # pad_input turns o_unpad (Total, H, D) back into (B, S, H, D)
             o = pad_input(o_unpad, indices_q, batch_size, q_len)
 
-        # Path 2: No `attention_mask` (e.g., wikitext, or data is already unpadded)
+        # Path 2: no padding mask, or caller already provided cu_seqlens.
+        elif is_decoding:
+            # Dense causal attention over the cached KV (q_len typically 1).
+            o = flash_attn_func(q, k, v, causal=True)
         else:
-            k_len = k.shape[1]
-            q_unbatched = rearrange(q, 'b s h d -> (b s) h d')
-            k_unbatched = rearrange(k, 'b s h d -> (b s) h d')
-            v_unbatched = rearrange(v, 'b s h d -> (b s) h d')
+            # Pack the batch along the token axis ([1, B*T, H, D]) so that
+            # cu_seqlens can describe sample boundaries — the fla varlen
+            # convention requires batch size 1 with packed inputs.
+            q_packed = rearrange(q, 'b s h d -> 1 (b s) h d').contiguous()
+            k_packed = rearrange(k, 'b s h d -> 1 (b s) h d').contiguous()
+            v_packed = rearrange(v, 'b s h d -> 1 (b s) h d').contiguous()
 
             offsets = torch.arange(batch_size + 1, dtype=torch.int32, device=hidden_states.device)
             if isinstance(cu_seqlens, (tuple, list)):
-                cu_seqlens_q, cu_seqlens_k = cu_seqlens
+                cu_seqlens_q, _ = cu_seqlens
             else:
                 cu_seqlens_q = offsets * q_len if cu_seqlens is None else cu_seqlens
-                cu_seqlens_k = cu_seqlens_q if k_len == q_len else offsets * k_len
 
             if self.use_flash_moba:
                 o = flash_moba_varlen_func(
-                    q=q_unbatched,
-                    k=k_unbatched,
-                    v=v_unbatched,
+                    q=q_packed.squeeze(0),
+                    k=k_packed.squeeze(0),
+                    v=v_packed.squeeze(0),
                     cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_k,
+                    cu_seqlens_k=cu_seqlens_q,
                     max_seqlen_q=q_len,
-                    max_seqlen_k=k_len,
+                    max_seqlen_k=q_len,
                     moba_chunk_size=self.moba_chunk_size,
                     moba_topk=self.moba_topk,
-                    causal=True
+                    causal=True,
                 )
             else:
-                if k_len != q_len:
-                    raise NotImplementedError(
-                        "MoBA cached decoding requires separate Q/KV varlen metadata for the Triton backend."
-                    )
                 o = parallel_moba(
-                    q_unbatched,
-                    k_unbatched,
-                    v_unbatched,
+                    q_packed,
+                    k_packed,
+                    v_packed,
                     cu_seqlens=cu_seqlens_q,
                     max_seqlen=max_seqlen,
-                    moba_chunk_size=self.moba_chunk_size,
-                    moba_topk=self.moba_topk
-                )
+                    chunk_size=self.moba_chunk_size,
+                    topk=self.moba_topk,
+                ).squeeze(0)
 
             o = rearrange(o, '(b s) h d -> b s h d', b=batch_size)
 
