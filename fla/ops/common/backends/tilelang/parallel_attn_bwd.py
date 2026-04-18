@@ -100,13 +100,14 @@ def _build_parallel_attn_bwd_kernel(
 
         i_t_local = (t_s - bos) // _BT
         loop_st = i_t_local
-        loop_ed = T.ceildiv(T_seq, _BT)
         if _USE_WINDOW:
             # For a K tile at positions [t_s, t_s+BT), the farthest query
             # that can still attend (under window W) is at position
             # (t_s+BT-1) + (W-1). Round up to the enclosing Q tile.
             loop_ed_swa = i_t_local + 1 + (_W + _BT - 2) // _BT
-            loop_ed = T.min(loop_ed, loop_ed_swa)
+            loop_ed = T.min(T.ceildiv(T_seq, _BT), loop_ed_swa)
+        else:
+            loop_ed = T.ceildiv(T_seq, _BT)
 
         # Note: T.Pipelined is intentionally avoided here because combining it
         # with standard-layout T.atomic_add into dq_out produces garbage values

@@ -116,8 +116,8 @@ def _build_parallel_attn_fwd_kernel(
             # earliest key the last query in this tile can see
             # (q_pos - k_pos < W) => k_pos > q_pos - W.
             # Round down to the enclosing K tile start.
-            s0 = i_t_local * _BT - _W + 1
-            s0 = T.max(s0, 0)
+            s0_raw = i_t_local * _BT - _W + 1
+            s0 = T.max(s0_raw, 0)
             loop_st = (s0 // _BS)
         else:
             loop_st = 0
