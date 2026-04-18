@@ -5,6 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from .native import moba_attn_varlen
+from .naive import moba_attn_varlen
 
 __all__ = ['moba_attn_varlen']
