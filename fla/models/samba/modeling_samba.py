@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 from __future__ import annotations
 
 import math
@@ -56,7 +63,7 @@ class SambaBlock(GradientCheckpointingLayer):
                 state_size=config.state_size,
                 conv_kernel=config.conv_kernel,
                 intermediate_size=config.intermediate_size,
-                time_step_rank=config.time_step_rank,
+                dt_rank=config.time_step_rank,
                 use_bias=config.use_bias,
                 layer_idx=layer_idx,
             )

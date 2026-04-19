@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from fla.layers import (
     ABCAttention,
@@ -18,6 +23,7 @@ from fla.layers import (
     LinearAttention,
     LogLinearMamba2,
     MesaNet,
+    MoBA,
     MomAttention,
     MultiheadLatentAttention,
     MultiScaleRetention,
@@ -61,6 +67,8 @@ from fla.models import (
     MesaNetModel,
     MLAForCausalLM,
     MLAModel,
+    MoBAForCausalLM,
+    MoBAModel,
     MomForCausalLM,
     MomModel,
     NSAForCausalLM,
@@ -129,6 +137,9 @@ __all__ = [
     "MesaNet",
     "MesaNetForCausalLM",
     "MesaNetModel",
+    "MoBA",
+    "MoBAForCausalLM",
+    "MoBAModel",
     "MomAttention",
     "MomForCausalLM",
     "MomModel",

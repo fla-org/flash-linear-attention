@@ -1,4 +1,10 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # This kernel is modified from the Decode kernel of the vllm gdn/kda model.
 
 import torch
@@ -148,10 +154,10 @@ def fused_recurrent_kda_fwd_kernel(
         b_g = tl.load(p_g, eviction_policy='evict_last').to(tl.float32)
 
         if USE_GATE_IN_KERNEL:
-            b_A = tl.load(A_log + i_h).to(tl.float32)
+            b_A = tl.load(A_log + i_hv).to(tl.float32)
 
             if HAS_DT_BIAS:
-                b_bias = tl.load(dt_bias + i_h * K + o_k, mask=mask_k, other=0).to(tl.float32)
+                b_bias = tl.load(dt_bias + i_hv * K + o_k, mask=mask_k, other=0).to(tl.float32)
                 b_g = b_g + b_bias
 
             if USE_LOWER_BOUND:

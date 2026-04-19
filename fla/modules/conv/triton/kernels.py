@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -315,6 +322,16 @@ def causal_conv1d_bwd_kernel(
     'HAS_BIAS': lambda args: args['bias'] is not None,
     'HAS_RESIDUAL': lambda args: args['residual'] is not None,
 })
+@triton.autotune(
+    configs=[
+        triton.Config({'BD': BD}, num_warps=num_warps)
+        for BD in [8, 16, 32, 64, 128, 256]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D', 'W'],
+    restore_value=['cache'],
+    **autotune_cache_kwargs,
+)
 @triton.jit
 def causal_conv1d_update_kernel(
     x,
@@ -426,8 +443,8 @@ def compute_dh0_kernel(
 
     # Get sequence boundaries
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         seq_len = eos - bos
         # For varlen, dy is [1, total_T, D], offset by bos
         dy_base = dy + bos * stride_dy_t
@@ -501,9 +518,9 @@ def causal_conv1d_states_fwd_kernel(
     m_d = o_d < D
 
     if IS_VARLEN:
-        bos = tl.load(cu_seqlens + i_n).to(tl.int32)
-        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        seq_len = eos - bos
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        seq_len = (eos - bos).to(tl.int32)
         p_x = x + bos * stride_x_t
     else:
         seq_len = T
@@ -604,7 +621,6 @@ def causal_conv1d_update(
     D = x.shape[-1]
     N = x.numel() // D
     W = weight.shape[1] if weight is not None else None
-    BD = 8
     BW = triton.next_power_of_2(W)
 
     if x.dim() == 2:
@@ -649,9 +665,7 @@ def causal_conv1d_update(
         stride_y_d=stride_y_d,
         D=D,
         W=W,
-        BD=BD,
         BW=BW,
         ACTIVATION=activation,
-        num_warps=STATIC_WARPS,
     )
     return y.view(shape), cache

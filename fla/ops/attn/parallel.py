@@ -1,13 +1,18 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-import warnings
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 from einops import reduce
 
+from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.utils.op import exp2, log2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
@@ -15,6 +20,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem
 
 @triton.heuristics({
     'USE_G': lambda args: args['g_cumsum'] is not None,
+    'USE_SINK_BIAS': lambda args: args['sink_bias'] is not None,
+    'USE_WINDOW': lambda args: args['W'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit
@@ -24,11 +31,13 @@ def parallel_attn_fwd_kernel(
     v,
     o,
     g_cumsum,
+    sink_bias,
     lse,
     scale,
     cu_seqlens,
     chunk_indices,
     T,
+    W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -40,6 +49,8 @@ def parallel_attn_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_SINK_BIAS: tl.constexpr,
+    USE_WINDOW: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -74,7 +85,19 @@ def parallel_attn_fwd_kernel(
     else:
         b_gq = None
 
-    for i_s in range(0, i_t * BT, BS):
+    if USE_SINK_BIAS:
+        b_sink_bias = tl.load(sink_bias + i_hq).to(tl.float32)
+    else:
+        b_sink_bias = None
+
+    # [BT]
+    o_q = i_t * BT + tl.arange(0, BT)
+
+    # for sliding window, skip key blocks that are entirely outside the window.
+    # the earliest key position any query in this block needs: max(0, i_t*BT - W + 1)
+    i_start = tl.maximum((i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
+
+    for i_s in range(i_start, i_t * BT, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
         # [BK, BS]
@@ -84,17 +107,22 @@ def parallel_attn_fwd_kernel(
         # [BT, BS]
         b_s = tl.dot(b_q, b_k) * scale * RCP_LN2
 
+        o_k = i_s + tl.arange(0, BS)
+        m_k = o_k < T
         if USE_G:
-            o_k = i_s + tl.arange(0, BS)
-            m_k = o_k < T
             b_gk = tl.load(g_cumsum + (bos + o_k) * HQ + i_hq, mask=m_k, other=0).to(tl.float32)
             b_s += b_gq[:, None] - b_gk[None, :]
 
+        if USE_WINDOW:
+            b_s = tl.where((o_q[:, None] - o_k[None, :] < W) & m_k[None, :], b_s, float('-inf'))
+
         # [BT, BS]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        b_r = exp2(b_mp - b_m)
-        # [BT, BS]
-        b_p = exp2(b_s - b_m[:, None])
+        # keep the online softmax pivot finite for rows that still have no valid key.
+        # this matches sglang's masked-row stabilization and avoids -inf - (-inf) = NaN.
+        b_mw = tl.where(b_m == float('-inf'), 0., b_m)
+        b_r = exp2(b_mp - b_mw)
+        b_p = exp2(b_s - b_mw[:, None])
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [BT, BV]
@@ -102,8 +130,6 @@ def parallel_attn_fwd_kernel(
 
         b_mp = b_m
 
-    # [BT]
-    o_q = i_t * BT + tl.arange(0, BT)
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
@@ -122,18 +148,31 @@ def parallel_attn_fwd_kernel(
             b_gk = tl.load(g_cumsum + (bos + o_k) * HQ + i_hq, mask=m_k, other=0).to(tl.float32)
             b_s += b_gq[:, None] - b_gk[None, :]
 
-        b_s = tl.where((o_q[:, None] >= o_k[None, :]) & m_k[None, :], b_s, float('-inf'))
+        m_s = (o_q[:, None] >= o_k[None, :]) & m_k[None, :]
+        if USE_WINDOW:
+            m_s = m_s & (o_q[:, None] - o_k[None, :] < W)
+        b_s = tl.where(m_s, b_s, float('-inf'))
 
         # [BT]
         b_m, b_mp = tl.maximum(b_m, tl.max(b_s, 1)), b_m
-        b_r = exp2(b_mp - b_m)
-        # [BT, BS]
-        b_p = exp2(b_s - b_m[:, None])
+        b_mw = tl.where(b_m == float('-inf'), 0., b_m)
+        b_r = exp2(b_mp - b_mw)
+        b_p = exp2(b_s - b_mw[:, None])
         # [BT]
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [BT, BV]
         b_o = b_o * b_r[:, None] + tl.dot(b_p.to(b_q.dtype), b_v)
         b_mp = b_m
+
+    if USE_SINK_BIAS:
+        # when a row has no valid key at all, b_m is still -inf here.
+        # use a finite pivot before merging the sink-bias mass so lse becomes
+        # the sink-bias logit instead of hitting the -inf + inf = NaN path.
+        b_m = tl.where(b_m == float('-inf'), 0., b_m)
+        # denominator-only sink-bias update (matches GPT-OSS / sglang):
+        # the bias logit augments the softmax normalizer without contributing
+        # to the value matmul.
+        b_acc += exp2(b_sink_bias - b_m)
 
     b_o = b_o / b_acc[:, None]
     b_m += log2(b_acc)
@@ -162,6 +201,7 @@ def parallel_attn_bwd_kernel_preprocess(
 
 @triton.heuristics({
     'USE_G': lambda args: args['g_cumsum'] is not None,
+    'USE_WINDOW': lambda args: args['W'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
@@ -179,6 +219,7 @@ def parallel_attn_bwd_kernel_dq(
     cu_seqlens,
     chunk_indices,
     T,
+    W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -189,8 +230,9 @@ def parallel_attn_bwd_kernel_dq(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_WINDOW: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -231,7 +273,10 @@ def parallel_attn_bwd_kernel_dq(
         b_dg = None
 
     o_q = i_t * BT + tl.arange(0, BT)
-    for i_s in range(0, i_t * BT, BS):
+
+    i_start = tl.maximum((i_t * BT - W + 1) // BS * BS, 0) if USE_WINDOW else 0
+
+    for i_s in range(i_start, i_t * BT, BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
 
@@ -247,7 +292,8 @@ def parallel_attn_bwd_kernel_dq(
             b_gk = tl.load(g_cumsum + (bos + o_k) * HQ + i_hq, mask=m_k, other=0).to(tl.float32)
             b_s += b_gq[:, None] - b_gk[None, :]
 
-        b_s = tl.where((o_q[:, None] >= o_k[None, :]) & m_k[None, :], b_s, float('-inf'))
+        if USE_WINDOW:
+            b_s = tl.where((o_q[:, None] - o_k[None, :] < W) & m_k[None, :], b_s, float('-inf'))
         b_p = exp2(b_s - b_lse[:, None])
         # [BT, BV] @ [BV, BS] -> [BT, BS]
         b_dp = tl.dot(b_do, b_v)
@@ -257,8 +303,6 @@ def parallel_attn_bwd_kernel_dq(
         if USE_G:
             b_dg += tl.sum(b_ds, 1)
 
-    # [BT]
-    o_q = i_t * BT + tl.arange(0, BT)
     for i_s in range(i_t * BT, min((i_t + 1) * BT, T), BS):
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
         p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (V, T), (1, H*V), (i_v * BV, i_s), (BV, BS), (0, 1))
@@ -277,7 +321,13 @@ def parallel_attn_bwd_kernel_dq(
             p_gk = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
             b_gk = tl.load(p_gk, boundary_check=(0,)).to(tl.float32)
             b_s += b_gq[:, None] - b_gk[None, :]
-        b_p = tl.where((o_q[:, None] >= o_k[None, :]) & m_k[None, :], exp2(b_s - b_lse[:, None]), 0)
+        if USE_WINDOW:
+            b_p = tl.where(
+                (o_q[:, None] >= o_k[None, :]) & (o_q[:, None] - o_k[None, :] < W) & m_k[None, :],
+                exp2(b_s - b_lse[:, None]), 0
+            )
+        else:
+            b_p = tl.where((o_q[:, None] >= o_k[None, :]) & m_k[None, :], exp2(b_s - b_lse[:, None]), 0)
 
         # [BT, BV] @ [BV, BS] -> [BT, BS]
         b_dp = tl.dot(b_do, b_v)
@@ -296,6 +346,7 @@ def parallel_attn_bwd_kernel_dq(
 
 @triton.heuristics({
     'USE_G': lambda args: args['g_cumsum'] is not None,
+    'USE_WINDOW': lambda args: args['W'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
@@ -314,6 +365,7 @@ def parallel_attn_bwd_kernel_dkv(
     chunk_indices,
     scale,
     T,
+    W: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -325,6 +377,7 @@ def parallel_attn_bwd_kernel_dkv(
     BK: tl.constexpr,
     BV: tl.constexpr,
     USE_G: tl.constexpr,
+    USE_WINDOW: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -384,7 +437,13 @@ def parallel_attn_bwd_kernel_dkv(
             p_gq = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
             b_gq = tl.load(p_gq, boundary_check=(0,)).to(tl.float32)
             b_s += b_gq[None, :] - b_gk[:, None]
-        b_p = tl.where((o_k[:, None] <= o_q[None, :]) & m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
+        if USE_WINDOW:
+            b_p = tl.where(
+                (o_k[:, None] <= o_q[None, :]) & (o_q[None, :] - o_k[:, None] < W) & m_q[None, :],
+                exp2(b_s - b_lse[None, :]), 0
+            )
+        else:
+            b_p = tl.where((o_k[:, None] <= o_q[None, :]) & m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
         # [BT, BS] @ [BS, BV] -> [BT, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
         # [BT, BV] @ [BV, BS] -> [BT, BS]
@@ -396,7 +455,12 @@ def parallel_attn_bwd_kernel_dkv(
         if USE_G:
             b_dg -= tl.sum(b_ds, 1)
 
-    for i_s in range((i_t + 1) * BT, tl.cdiv(T, BS) * BS, BS):
+    # for sliding window, limit the range of future query blocks to process.
+    # a key at position k_pos can only be attended to by queries at positions [k_pos, k_pos + W - 1].
+    # so we only need queries up to (i_t + 1) * BT - 1 + W - 1.
+    i_end = min(tl.cdiv(T, BS) * BS, (i_t + 1) * BT + W - 1) if USE_WINDOW else tl.cdiv(T, BS) * BS
+
+    for i_s in range((i_t + 1) * BT, i_end, BS):
         p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_s, 0), (BS, BK), (1, 0))
         p_do = tl.make_block_ptr(do + (bos * HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
         p_lse = tl.make_block_ptr(lse + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
@@ -418,7 +482,10 @@ def parallel_attn_bwd_kernel_dkv(
             p_gq = tl.make_block_ptr(g_cumsum + bos * HQ + i_hq, (T,), (HQ,), (i_s,), (BS,), (0,))
             b_gq = tl.load(p_gq, boundary_check=(0,)).to(tl.float32)
             b_s += b_gq[None, :] - b_gk[:, None]
-        b_p = tl.where(m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
+        if USE_WINDOW:
+            b_p = tl.where((o_q[None, :] - o_k[:, None] < W) & m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
+        else:
+            b_p = tl.where(m_q[None, :], exp2(b_s - b_lse[None, :]), 0)
         # [BT, BS] @ [BS, BV] -> [BT, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
         # [BT, BV] @ [BV, BS] -> [BT, BS]
@@ -438,12 +505,15 @@ def parallel_attn_bwd_kernel_dkv(
         tl.store(p_dg, b_dg.to(p_dg.dtype.element_ty), boundary_check=(0,))
 
 
+@dispatch('attn')
 def parallel_attn_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     g_cumsum: torch.Tensor,
+    sink_bias: torch.Tensor | None,
     scale: float,
+    window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
 ):
@@ -483,12 +553,14 @@ def parallel_attn_fwd(
         v=v,
         o=o,
         g_cumsum=g_cumsum,
+        sink_bias=sink_bias,
         lse=lse,
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         B=B,
         T=T,
+        W=window_size,
         H=H,
         HQ=HQ,
         G=G,
@@ -519,6 +591,7 @@ def parallel_attn_bwd_preprocess(
     return delta
 
 
+@dispatch('attn')
 def parallel_attn_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -527,7 +600,9 @@ def parallel_attn_bwd(
     g_cumsum: torch.Tensor,
     lse: torch.Tensor,
     do: torch.Tensor,
+    sink_bias: torch.Tensor | None = None,
     scale: float = None,
+    window_size: int | None = None,
     chunk_size: int = 128,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
@@ -585,6 +660,7 @@ def parallel_attn_bwd(
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
+        W=window_size,
         B=B,
         H=H,
         HQ=HQ,
@@ -612,6 +688,7 @@ def parallel_attn_bwd(
         chunk_indices=chunk_indices,
         scale=scale,
         T=T,
+        W=window_size,
         B=B,
         H=H,
         HQ=HQ,
@@ -628,7 +705,13 @@ def parallel_attn_bwd(
     dv = reduce(dv, 'b t (h g) v -> b t h v', g=G, reduction='sum')
     if g_cumsum is not None:
         dg_cumsum.add_(dg_cumsum_k)
-    return dq, dk, dv, dg_cumsum
+
+    dsink_bias = None
+    if sink_bias is not None:
+        p_sink_bias = torch.exp2(sink_bias[None, None, :] - lse)
+        dsink_bias = -(p_sink_bias * delta).sum((0, 1))
+
+    return dq, dk, dv, dg_cumsum, dsink_bias
 
 
 @torch.compile
@@ -637,31 +720,34 @@ class ParallelAttentionFunction(torch.autograd.Function):
     @staticmethod
     @contiguous
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, g, scale, cu_seqlens, chunk_indices=None):
+    def forward(ctx, q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices=None):
         ctx.dtype = q.dtype
 
-        RCP_LN2: float = 1.4426950216
         g_cumsum = chunk_global_cumsum(g, cu_seqlens=cu_seqlens, scale=RCP_LN2) if g is not None else None
+        sink_bias = sink_bias * RCP_LN2 if sink_bias is not None else None
         o, lse = parallel_attn_fwd(
             q=q,
             k=k,
             v=v,
             g_cumsum=g_cumsum,
+            sink_bias=sink_bias,
             scale=scale,
+            window_size=window_size,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, k, v, o, g_cumsum, lse)
-        ctx.cu_seqlens = cu_seqlens
+        ctx.save_for_backward(q, k, v, o, g_cumsum, lse, sink_bias)
         ctx.scale = scale
+        ctx.window_size = window_size
+        ctx.cu_seqlens = cu_seqlens
         return o.to(q.dtype)
 
     @staticmethod
     @contiguous
     @autocast_custom_bwd
     def backward(ctx, do):
-        q, k, v, o, g_cumsum, lse = ctx.saved_tensors
-        dq, dk, dv, dg = parallel_attn_bwd(
+        q, k, v, o, g_cumsum, lse, sink_bias = ctx.saved_tensors
+        dq, dk, dv, dg, dsink_bias = parallel_attn_bwd(
             q=q,
             k=k,
             v=v,
@@ -669,13 +755,15 @@ class ParallelAttentionFunction(torch.autograd.Function):
             g_cumsum=g_cumsum,
             lse=lse,
             do=do,
+            sink_bias=sink_bias,
             scale=ctx.scale,
+            window_size=ctx.window_size,
             cu_seqlens=ctx.cu_seqlens,
         )
         if dg is not None:
             dg = chunk_global_cumsum(dg, cu_seqlens=ctx.cu_seqlens, reverse=True)
 
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, dsink_bias, None, None, None, None
 
 
 def parallel_attn(
@@ -684,9 +772,12 @@ def parallel_attn(
     v: torch.Tensor,
     g: torch.Tensor | None = None,
     scale: float | None = None,
+    window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
     chunk_indices: torch.LongTensor | None = None,
+    *,
+    sink_bias: torch.Tensor | None = None,
+    **kwargs
 ) -> torch.Tensor:
     r"""
     Args:
@@ -698,37 +789,50 @@ def parallel_attn(
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g (Optional[torch.Tensor]):
-            log decay factors of shape `[B, T, H]`.
+            log decay factors of shape `[B, T, HQ]`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        window_size (Optional[int]):
+            Sliding window size. If provided, each query at position i only attends to
+            keys in `[i - window_size + 1, i]`. If `None`, full causal attention is used.
+            Default: `None`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        sink_bias (Optional[torch.Tensor]):
+            Per-query-head attention-sink bias logits of shape `[HQ]` — one
+            learnable scalar per query head, as introduced by GPT-OSS.
+
+            Augments the softmax denominator with `exp(sink_bias[h])` without
+            adding a corresponding key/value entry, so the model can route
+            attention mass to a learnable "no-op" target:
+                p_i    = exp(s_i)          / (sum_j exp(s_j) + exp(sink_bias[h]))
+                o      = sum_i p_i * v_i   # sink slot contributes no value
+            When `None`, standard softmax is used. Reserved name: the future
+            `sink_tokens_*` kwargs will support Xiao 2024-style K/V sink tokens
+            and may be combined with `sink_bias`.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
-    if head_first:
+    if kwargs.get('head_first', False):
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead.",
         )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    if cu_seqlens is not None:
-        assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+            f"Please flatten variable-length inputs before processing.",
+        )
+    if sink_bias is not None:
+        assert sink_bias.shape == (q.shape[2],), "sink_bias must have shape [HQ]"
 
-    o = ParallelAttentionFunction.apply(q, k, v, g, scale, cu_seqlens, chunk_indices)
+    o = ParallelAttentionFunction.apply(
+        q, k, v, g, sink_bias, scale, window_size, cu_seqlens, chunk_indices
+    )
     return o

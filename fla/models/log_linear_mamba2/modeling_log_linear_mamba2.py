@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import math
 
 import torch
@@ -34,12 +41,13 @@ class LogLinearMamba2Block(nn.Module):
             conv_kernel=config.conv_kernel,
             use_conv_bias=config.use_conv_bias,
             hidden_act=config.hidden_act,
-            rms_norm=config.rms_norm,
+            rmsnorm=config.rmsnorm,
+            D_has_hdim=config.D_has_hdim,
+            norm_before_gate=config.norm_before_gate,
             chunk_size=config.chunk_size,
-            time_step_rank=config.time_step_rank,
-            time_step_limit=config.time_step_limit,
-            time_step_min=config.time_step_min,
-            time_step_max=config.time_step_max,
+            dt_limit=config.dt_limit,
+            dt_min=config.dt_min,
+            dt_max=config.dt_max,
             use_bias=config.use_bias,
             norm_eps=config.norm_eps,
             layer_idx=layer_idx,
@@ -104,41 +112,50 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
         """Initialize the weights."""
         if isinstance(module, LogLinearMamba2):
             # --- A_log ---
-            A = torch.arange(1, module.num_heads + 1)
-            with torch.no_grad():
-                if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
-                    module.A_log.copy_(torch.log(A))
-                else:
-                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
+            if not getattr(module.A_log, '_is_hf_initialized', False):
+                A = torch.arange(1, module.num_heads + 1)
+                with torch.no_grad():
+                    if not isinstance(module.A_log, torch.distributed.tensor.DTensor):
+                        module.A_log.copy_(torch.log(A))
+                    else:
+                        logger.warning_once("`A_log` is a DTensor, skipping initialization")
             module.A_log._no_weight_decay = True
 
             # --- D ---
-            nn.init.ones_(module.D)
+            if not getattr(module.D, '_is_hf_initialized', False):
+                nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
+            # --- conv1d ---
+            if self.config.conv_init is not None:
+                nn.init.uniform_(module.conv1d.weight, -self.config.conv_init, self.config.conv_init)
+                module.conv1d.weight._no_reinit = True
+
             # --- L ---
-            nn.init.ones_(module.L)
+            if not getattr(module.L, '_is_hf_initialized', False):
+                nn.init.ones_(module.L)
             module.L._no_weight_decay = True
 
             # --- dt_bias ---
-            dt = torch.exp(
-                torch.rand(self.config.num_heads)
-                * (
-                    math.log(self.config.time_step_max)
-                    - math.log(self.config.time_step_min)
-                )
-                + math.log(self.config.time_step_min),
-            ).clamp(min=self.config.time_step_floor)
-
-            # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-            inv_dt = dt + torch.log(-torch.expm1(-dt))
-            with torch.no_grad():
-                if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
-                    module.dt_bias.copy_(inv_dt)
-                else:
-                    logger.warning_once(
-                        "`dt_bias` is a DTensor, skipping initialization",
+            if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                dt = torch.exp(
+                    torch.rand(self.config.num_heads)
+                    * (
+                        math.log(self.config.dt_max)
+                        - math.log(self.config.dt_min)
                     )
+                    + math.log(self.config.dt_min),
+                ).clamp(min=self.config.dt_init_floor)
+
+                # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                inv_dt = dt + torch.log(-torch.expm1(-dt))
+                with torch.no_grad():
+                    if not isinstance(module.dt_bias, torch.distributed.tensor.DTensor):
+                        module.dt_bias.copy_(inv_dt)
+                    else:
+                        logger.warning_once(
+                            "`dt_bias` is a DTensor, skipping initialization",
+                        )
             module.dt_bias._no_reinit = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
@@ -171,7 +188,7 @@ class LogLinearMamba2PreTrainedModel(PreTrainedModel, FLAGenerationMixin):
                 p = module.out_proj.weight
             elif hasattr(module, "down_proj"):
                 p = module.down_proj.weight
-            if p is not None:
+            if p is not None and not getattr(p, '_is_hf_initialized', False):
                 # Special Scaled Initialization --> There are 2 Layer Norms per Transformer Block
                 # Following Pytorch init, except scale by 1/sqrt(2 * n_layer)
                 # We need to reinit p since this code could be called multiple times

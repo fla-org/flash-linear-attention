@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 """
 Op registry, input factory, and shape configs for the unified benchmark system.
@@ -56,6 +61,14 @@ def sigmoid_transform(t):
 
 def logsigmoid_clamp(t):
     return F.logsigmoid(t).clamp_min(-5)
+
+
+RWKV7_W_MIN = -0.6065306597126334
+
+
+def rwkv7_w_transform(t):
+    w = RWKV7_W_MIN * t.sigmoid()
+    return w.clamp(min=RWKV7_W_MIN, max=-1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -325,12 +338,13 @@ register_op(OpConfig(
     import_path='fla.ops.rwkv7',
     inputs={
         'r': TensorSpec(shape_BTHD),
-        'w': TensorSpec(shape_BTHD, transform=logsigmoid),
+        'w': TensorSpec(shape_BTHD, transform=rwkv7_w_transform),
         'k': TensorSpec(shape_BTHD),
         'v': TensorSpec(shape_BTHD),
         'a': TensorSpec(shape_BTHD),
         'b': TensorSpec(shape_BTHD),
     },
+    extra_kwargs={'safe_gate': True, 'chunk_size': 64},
     post_init=_rwkv7_post_init,
     category='rwkv',
 ))

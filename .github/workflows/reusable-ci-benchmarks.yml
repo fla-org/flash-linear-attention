@@ -43,6 +43,13 @@ jobs:
     runs-on: ${{ inputs.runner }}
     env:
       FLA_CI_ENV: 1
+      # Disable all backend dispatch (TileLang etc.) — benchmark measures Triton baseline only
+      FLA_DISABLE_BACKEND_DISPATCH: 1
+      # Longer Triton timing windows + pause between commits reduce clock/thermal variance.
+      FLA_BENCH_WARMUP_MS: 40
+      FLA_BENCH_REP_MS: 200
+      FLA_BENCH_OP_WARMUP_ITERS: 6
+      FLA_BENCH_COOLDOWN_SEC: 3
 
     steps:
       - name: Check out repo (full history for cross-commit comparison)
@@ -112,19 +119,47 @@ jobs:
 
       - name: Run benchmark comparison
         if: steps.check_skip.outputs.skip_bench == 'false'
+        id: benchmark
         shell: bash
         run: |
           $CONDA_BIN_PATH/python scripts/run_benchmark_compare.py \
             --base ${{ inputs.base_ref }} \
             --head HEAD \
             --threshold ${{ inputs.threshold }} \
+            --no-fail-on-regression \
             --output benchmark_results.json
+
+      - name: Write benchmark metadata
+        if: always() && steps.check_skip.outputs.skip_bench == 'false'
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUNNER: ${{ inputs.runner }}
+          THRESHOLD: ${{ inputs.threshold }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -e
+          PR_JSON="null"
+          if [ -n "${PR_NUMBER:-}" ]; then
+            PR_JSON="${PR_NUMBER}"
+          fi
+          cat > benchmark_meta.json <<EOF
+          {
+            "pr_number": ${PR_JSON},
+            "runner": "${RUNNER}",
+            "threshold": ${THRESHOLD},
+            "event_name": "${EVENT_NAME}"
+          }
+          EOF
+          cat benchmark_meta.json
 
       - name: Upload benchmark results
         if: always() && steps.check_skip.outputs.skip_bench == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-${{ inputs.runner }}
-          path: benchmark_results.json
+          path: |
+            benchmark_results.json
+            benchmark_meta.json
           if-no-files-found: ignore
           retention-days: 30

@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 """Generic backend dispatch system for FLA operations."""
 
 from __future__ import annotations
@@ -13,6 +20,11 @@ from typing import Any, ClassVar, TypeVar
 
 logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable)
+
+
+_DISPATCH_DISABLED = os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1"
+if _DISPATCH_DISABLED:
+    logger.info("[FLA Backend] FLA_DISABLE_BACKEND_DISPATCH=1 — all dispatch bypassed")
 
 
 class BaseBackend:
@@ -131,6 +143,8 @@ def dispatch(operation: str):
     that passes the verifier for the given function call.
     """
     def decorator(func: F) -> F:
+        if _DISPATCH_DISABLED:
+            return func
         func_name = func.__name__
 
         @wraps(func)

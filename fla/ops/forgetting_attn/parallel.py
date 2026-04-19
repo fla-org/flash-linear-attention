@@ -1,6 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-import warnings
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 
@@ -13,8 +16,9 @@ def parallel_forgetting_attn(
     v: torch.Tensor,
     g: torch.Tensor,
     scale: float | None = None,
+    window_size: int | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs
 ) -> torch.Tensor:
     r"""
     Args:
@@ -26,37 +30,34 @@ def parallel_forgetting_attn(
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g (torch.Tensor):
-            Log decay at rach time step (in **log space**) of shape `[B, T, HQ]` if `head_first=False` else `[B, HQ, T]`.
+            log decay factors of shape `[B, T, HQ]`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
+        window_size (Optional[int]):
+            Sliding window size. If provided, each query at position i only attends to
+            keys in `[i - window_size + 1, i]`. If `None`, full causal attention is used.
+            Default: `None`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
-
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
-    if cu_seqlens is not None:
-        assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
-    if head_first:
+    if kwargs.get('head_first', False):
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead.",
         )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+            f"Please flatten variable-length inputs before processing.",
         )
-    o = parallel_attn(q, k, v, g, scale, cu_seqlens)
+
+    o = parallel_attn(q, k, v, g, scale, window_size=window_size, cu_seqlens=cu_seqlens)
     return o
