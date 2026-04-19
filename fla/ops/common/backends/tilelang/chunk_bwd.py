@@ -168,12 +168,10 @@ def _build_kernel(
                     b_dk[_i, _j] * (T.exp2(-s_g[_i] + g_last) if _USE_EXP2 else T.exp(-s_g[_i] + g_last)),
                     0.0)
 
-            # dq*q and dk*k reductions (before ds gemms): compute products directly
-            # in fragments via fragment×shared. b_dg_last uses the gated-only b_dk.
-            f_prod1 = T.alloc_fragment((_BT, _BK), T.float32)
+            # dk*k reduction (before ds gemms): compute product directly in
+            # fragments via fragment×shared. b_dg_last uses the gated-only b_dk.
             f_prod2 = T.alloc_fragment((_BT, _BK), T.float32)
             for _i, _j in T.Parallel(_BT, _BK):
-                f_prod1[_i, _j] = b_dq[_i, _j] * s_q[_i, _j]
                 f_prod2[_i, _j] = b_dk[_i, _j] * s_k[_i, _j]
             f_dg2 = T.alloc_fragment((_BT,), T.float32)
             T.reduce_sum(f_prod2, f_dg2, dim=1)
@@ -202,12 +200,10 @@ def _build_kernel(
 
             # b_dg = sum(b_dq * q) - sum(b_dk * k)  using the fully-updated b_dq/b_dk
             f_prod1 = T.alloc_fragment((_BT, _BK), T.float32)
-            f_prod2 = T.alloc_fragment((_BT, _BK), T.float32)
             for _i, _j in T.Parallel(_BT, _BK):
                 f_prod1[_i, _j] = b_dq[_i, _j] * s_q[_i, _j]
                 f_prod2[_i, _j] = b_dk[_i, _j] * s_k[_i, _j]
             f_dg1 = T.alloc_fragment((_BT,), T.float32)
-            f_dg2 = T.alloc_fragment((_BT,), T.float32)
             T.reduce_sum(f_prod1, f_dg1, dim=1)
             T.reduce_sum(f_prod2, f_dg2, dim=1)
             f_dg_diff = T.alloc_fragment((_BT,), T.float32)
