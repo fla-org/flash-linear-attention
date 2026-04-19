@@ -303,9 +303,7 @@ def chunk_bwd_kernel_dqkwg(
         b_dq += tl.dot(b_ds, b_k)
         b_dk += tl.dot(tl.trans(b_ds), b_q)
 
-        b_dg = tl.zeros([BT], dtype=tl.float32)
-        b_dg += tl.sum(b_dq * b_q, axis=1)
-        b_dg -= tl.sum(b_dk * b_k, axis=1)
+        b_dg = tl.sum(b_dq * b_q, axis=1) - tl.sum(b_dk * b_k, axis=1)
 
         p_dg = tl.make_block_ptr(dg, (T,), (HV,), (i_t * BT,), (BT,), (0,))
         # (SY 09/21) revcumsum in a separate kernel due to strange triton compiler issue
