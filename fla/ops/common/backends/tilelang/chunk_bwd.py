@@ -168,23 +168,13 @@ def _build_kernel(
                     b_dk[_i, _j] * (T.exp2(-s_g[_i] + g_last) if _USE_EXP2 else T.exp(-s_g[_i] + g_last)),
                     0.0)
 
-            # dq*q and dk*k reductions: compute products directly in fragments
-            # via fragment×shared (safe per pattern 174). Avoids the shared
-            # round-trip through s_A1/s_A2.
-            f_prod1 = T.alloc_fragment((_BT, _BK), T.float32)
+            # dk*k reduction (before ds gemms): compute product directly in
+            # fragments via fragment×shared. b_dg_last uses the gated-only b_dk.
             f_prod2 = T.alloc_fragment((_BT, _BK), T.float32)
             for _i, _j in T.Parallel(_BT, _BK):
-                f_prod1[_i, _j] = b_dq[_i, _j] * s_q[_i, _j]
                 f_prod2[_i, _j] = b_dk[_i, _j] * s_k[_i, _j]
-            f_dg1 = T.alloc_fragment((_BT,), T.float32)
             f_dg2 = T.alloc_fragment((_BT,), T.float32)
-            T.reduce_sum(f_prod1, f_dg1, dim=1)
             T.reduce_sum(f_prod2, f_dg2, dim=1)
-            f_dg_diff = T.alloc_fragment((_BT,), T.float32)
-            for _i in T.Parallel(_BT):
-                f_dg_diff[_i] = f_dg1[_i] - f_dg2[_i]
-            s_dg = T.alloc_shared((_BT,), T.float32)
-            T.copy(f_dg_diff, s_dg)
             # b_dg_last += sum(dk*k) via fragment reduce (f_dg2 → scalar)
             f_dkk_scalar = T.alloc_fragment((1,), T.float32)
             T.reduce_sum(f_dg2, f_dkk_scalar, dim=0)
@@ -198,46 +188,6 @@ def _build_kernel(
                     b_ds[_i, _j] * (T.exp2(s_g[_i] - s_g[_j]) if _USE_EXP2 else T.exp(s_g[_i] - s_g[_j])) * scale,
                     0.0)
 
-            # ds2 = ds * (q @ k^T);  dg += row_sum(ds2) - col_sum(ds2)
-            b_qk = T.alloc_fragment((_BT, _BT), T.float32)
-            T.clear(b_qk)
-            T.gemm(s_q, s_k, b_qk, transpose_B=True)
-            # Write both to shared, multiply to get ds2
-            s_ds_f32 = T.alloc_shared((_BT, _BT), T.float32)
-            s_qk_f32 = T.alloc_shared((_BT, _BT), T.float32)
-            T.copy(b_ds, s_ds_f32)
-            T.copy(b_qk, s_qk_f32)
-            T.sync_threads()
-            for _i, _j in T.Parallel(_BT, _BT):
-                s_ds_f32[_i, _j] = s_ds_f32[_i, _j] * s_qk_f32[_i, _j]
-            T.sync_threads()
-            # row_sum(ds2) via T.reduce_sum
-            f_ds2 = T.alloc_fragment((_BT, _BT), T.float32)
-            T.copy(s_ds_f32, f_ds2)
-            f_row_sum = T.alloc_fragment((_BT,), T.float32)
-            T.reduce_sum(f_ds2, f_row_sum, dim=1)
-            s_row = T.alloc_shared((_BT,), T.float32)
-            T.copy(f_row_sum, s_row)
-            T.sync_threads()
-            for _i in T.Parallel(_BT):
-                s_dg[_i] = s_dg[_i] + s_row[_i]
-            T.sync_threads()
-            # col_sum(ds2): transpose in shared, then T.reduce_sum
-            # Reuse s_qk_f32 for the transposed ds2
-            for _i, _j in T.Parallel(_BT, _BT):
-                s_qk_f32[_i, _j] = s_ds_f32[_j, _i]
-            T.sync_threads()
-            f_ds2t = T.alloc_fragment((_BT, _BT), T.float32)
-            T.copy(s_qk_f32, f_ds2t)
-            f_col_sum = T.alloc_fragment((_BT,), T.float32)
-            T.reduce_sum(f_ds2t, f_col_sum, dim=1)
-            s_col = T.alloc_shared((_BT,), T.float32)
-            T.copy(f_col_sum, s_col)
-            T.sync_threads()
-            for _i in T.Parallel(_BT):
-                s_dg[_i] = s_dg[_i] - s_col[_i]
-            T.sync_threads()
-
             # cast ds for final gemms
             s_ds = T.alloc_shared((_BT, _BT), _dtype)
             f_ds = T.alloc_fragment((_BT, _BT), _dtype)
@@ -247,6 +197,20 @@ def _build_kernel(
 
             T.gemm(s_ds, s_k, b_dq)               # dq += ds @ k
             T.gemm(s_ds, s_q, b_dk, transpose_A=True)  # dk += ds^T @ q
+
+            # b_dg = sum(b_dq * q) - sum(b_dk * k)  using the fully-updated b_dq/b_dk
+            f_prod1 = T.alloc_fragment((_BT, _BK), T.float32)
+            for _i, _j in T.Parallel(_BT, _BK):
+                f_prod1[_i, _j] = b_dq[_i, _j] * s_q[_i, _j]
+                f_prod2[_i, _j] = b_dk[_i, _j] * s_k[_i, _j]
+            f_dg1 = T.alloc_fragment((_BT,), T.float32)
+            T.reduce_sum(f_prod1, f_dg1, dim=1)
+            T.reduce_sum(f_prod2, f_dg2, dim=1)
+            f_dg_diff = T.alloc_fragment((_BT,), T.float32)
+            for _i in T.Parallel(_BT):
+                f_dg_diff[_i] = f_dg1[_i] - f_dg2[_i]
+            s_dg = T.alloc_shared((_BT,), T.float32)
+            T.copy(f_dg_diff, s_dg)
 
             # store dq, dk via shared (fragment has MMA layout, can't index directly)
             f_out = T.alloc_fragment((_BT, _BK), _dtype)
