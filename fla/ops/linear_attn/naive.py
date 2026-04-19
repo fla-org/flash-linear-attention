@@ -62,5 +62,10 @@ def naive_chunk_linear_attn(
     )) @ v
     o = inter + intra
     if normalize:
-        o = normalize_output(q * scale, k, o)
+        # normalize_output needs flat temporal axis for correct cumsum
+        return normalize_output(
+            rearrange(q, 'b h n c d -> b (n c) h d'),
+            rearrange(k, 'b h n c d -> b (n c) h d'),
+            rearrange(o, 'b h n c d -> b (n c) h d'),
+        )
     return rearrange(o, 'b h n c d -> b (n c) h d')
