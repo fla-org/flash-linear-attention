@@ -67,7 +67,10 @@ def naive_chunk_linear_attn(
         0,
     )) @ v
     o = inter + intra
+    o = rearrange(o, 'b h n c d -> b (n c) h d')
     if normalize:
-        k_cum = k.cumsum(-2)
+        q = rearrange(q, 'b h n c d -> b (n c) h d')
+        k = rearrange(k, 'b h n c d -> b (n c) h d')
+        k_cum = k.cumsum(1)
         o = o / ((q * k_cum).sum(-1, keepdim=True) + 1e-10)
-    return rearrange(o, 'b h n c d -> b (n c) h d')
+    return o
