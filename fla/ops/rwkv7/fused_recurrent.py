@@ -244,7 +244,7 @@ def fused_mul_recurrent_rwkv7(
     v: torch.Tensor,
     kk: torch.Tensor,
     a: torch.Tensor,
-    scale: float | None = 1.0,
+    scale: float = 1.0,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
@@ -267,9 +267,8 @@ def fused_mul_recurrent_rwkv7(
             kk of shape `[B, T, H, K]`.
         a (torch.Tensor):
             a of shape `[B, T, H, K]`.
-        scale (Optional[float]):
-            Scale factor for the attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: `1.0`.
+        scale (float):
+            Scale factor for the attention scores. Default: `1.0`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.

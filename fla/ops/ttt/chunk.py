@@ -1357,7 +1357,7 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
         )
         return (
             dq.to(q), dk.to(k), dv.to(v), dw.to(w), db.to(b),
-            None, de.to(eta), None, None, dh0, dhb0, None, None, None, None,
+            None, de.to(eta), None, None, dh0, dhb0, None, None, None,
         )
 
 
@@ -1427,6 +1427,8 @@ def chunk_ttt_linear(
             Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+        final_state_bias (torch.Tensor):
+            Final state bias of shape `[N, H, 1, V]` if `output_final_state=True` else `None`.
     """
     assert q.dtype == k.dtype == v.dtype
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."

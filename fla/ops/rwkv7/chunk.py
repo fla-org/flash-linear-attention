@@ -40,9 +40,8 @@ def chunk_rwkv7(
             a of shape `[B, T, H, K]`.
         b (torch.Tensor):
             b of shape `[B, T, H, K]`.
-        scale (Optional[float]):
-            Scale factor for the attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: `1.0`.
+        scale (float):
+            Scale factor for the attention scores. Default: `1.0`.
         initial_state (Optional[torch.Tensor]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
