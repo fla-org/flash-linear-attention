@@ -10,6 +10,7 @@
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.backends import dispatch
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
@@ -147,6 +148,7 @@ class ChunkKDAFunction(torch.autograd.Function):
                 None, None, None, None, None, None, None, None, None, None, None)
 
 
+@dispatch('kda')
 @torch.compiler.disable
 def chunk_kda(
     q: torch.Tensor,
