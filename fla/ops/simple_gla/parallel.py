@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 import torch
 import triton
 import triton.language as tl
@@ -672,7 +670,7 @@ def parallel_simple_gla(
     output_attentions: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -682,43 +680,34 @@ def parallel_simple_gla(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
-        g (torch.Tensor):
+        g (Optional[torch.Tensor]):
             Forget gates of shape `[B, T, H]`.
-            Compared to GLA, the gating is head-wise instead of elementwise.
+            Compared to GLA, the gating is head-wise instead of elementwise. Default: `None`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         output_attentions (bool):
-            Whether to output the materialized attention scores of shape [B, H, T, T]. Default: `False`.
+            Whether to output the materialized attention scores of shape `[B, H, T, T]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        cu_seqlens_cpu (torch.LongTensor):
+            CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
         attn (torch.Tensor):
-            Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`
+            Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
                 f"Please flatten variable-length inputs before processing.",
             )
     if output_attentions:

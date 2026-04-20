@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 import torch
 
 from fla.ops.simple_gla.parallel import parallel_simple_gla
@@ -19,7 +17,7 @@ def parallel_retention(
     scale: float | None = None,
     output_attentions: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -33,31 +31,20 @@ def parallel_retention(
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         output_attentions (bool):
-            Whether to output the materialized attention scores of shape [B, H, T, T]. Default: `False`.
+            Whether to output the materialized attention scores of shape `[B, H, T, T]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
         attn (torch.Tensor):
-            Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`
+            Attention scores of shape `[B, H, T, T]` if `output_attentions=True` else `None`.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError(
