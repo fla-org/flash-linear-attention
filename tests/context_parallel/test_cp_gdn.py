@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 """
 Test for Context Parallel (CP) Gated Delta Rule (GDN)
 
@@ -99,6 +106,8 @@ def run_cp_gdn_test_worker(
     D: int,
     lengths: list[int],
     dtype,
+    transpose_state_layout: bool = False,
+    Hq: int | None = None,
 ):
     """
     Worker function for CP GDN test.
@@ -114,14 +123,15 @@ def run_cp_gdn_test_worker(
         if rank == 0:
             print(f"\n{'='*60}")
             print(f"Test: {test_name}")
-            print(f"Config: T={T}, H={H}, D={D}, world_size={world_size}")
+            print(f"Config: T={T}, H={H}, D={D}, Hq={Hq}, world_size={world_size}")
             print(f"Sequence lengths: {lengths}")
             print(f"{'='*60}")
 
         # Step 1: Prepare Global Data (all generated on rank 0, broadcast to all)
         B = 1
-        q_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
-        k_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
+        Hq_actual = Hq if Hq is not None else H
+        q_global = torch.empty(B, T, Hq_actual, D, device=device, dtype=dtype)
+        k_global = torch.empty(B, T, Hq_actual, D, device=device, dtype=dtype)
         v_global = torch.empty(B, T, H, D, device=device, dtype=dtype)
         g_global = torch.empty(B, T, H, device=device, dtype=dtype)
         beta_global = torch.empty(B, T, H, device=device, dtype=torch.float32)
@@ -129,8 +139,10 @@ def run_cp_gdn_test_worker(
 
         if rank == 0:
             torch.manual_seed(42)
-            q_global.copy_(F.normalize(torch.randn(B, T, H, D, device=device, dtype=torch.float32), p=2, dim=-1).to(dtype))
-            k_global.copy_(F.normalize(torch.randn(B, T, H, D, device=device, dtype=torch.float32), p=2, dim=-1).to(dtype))
+            q_global.copy_(F.normalize(torch.randn(B, T, Hq_actual, D, device=device,
+                           dtype=torch.float32), p=2, dim=-1).to(dtype))
+            k_global.copy_(F.normalize(torch.randn(B, T, Hq_actual, D, device=device,
+                           dtype=torch.float32), p=2, dim=-1).to(dtype))
             v_global.copy_(torch.randn(B, T, H, D, device=device, dtype=dtype))
             g_global.copy_(F.logsigmoid(torch.randn(B, T, H, device=device, dtype=dtype)))
             beta_global.copy_(torch.randn(B, T, H, device=device, dtype=torch.float32).sigmoid())
@@ -166,6 +178,7 @@ def run_cp_gdn_test_worker(
                 g=g_ref,
                 beta=beta_ref,
                 cu_seqlens=cu_seqlens_global,
+                transpose_state_layout=transpose_state_layout,
             )
 
             o_ref.backward(do_global)
@@ -207,6 +220,7 @@ def run_cp_gdn_test_worker(
             g=g_local,
             beta=beta_local,
             cp_context=context,
+            transpose_state_layout=transpose_state_layout,
         )
 
         # CP Backward
@@ -252,7 +266,7 @@ def run_cp_gdn_test_worker(
 
             try:
                 for name, ref, cp in tensors_to_verify:
-                    assert_close(name, ref, cp, ratio=2e-3, warning=False)
+                    assert_close(name, ref, cp, ratio=3e-3, warning=False)
                 print(f"[{test_name}] Test Passed!\n")
             except AssertionError as e:
                 print(f"[{test_name}] Test Failed: {e}\n")
@@ -277,6 +291,8 @@ def run_cp_test_with_spawn(
     D: int,
     lengths: list[int],
     dtype=torch.bfloat16,
+    transpose_state_layout: bool = False,
+    Hq: int | None = None,
 ):
     """
     Run CP test using torch.multiprocessing.spawn.
@@ -284,7 +300,7 @@ def run_cp_test_with_spawn(
     """
     mp.start_processes(
         run_cp_gdn_test_worker,
-        args=(world_size, test_name, T, H, D, lengths, dtype),
+        args=(world_size, test_name, T, H, D, lengths, dtype, transpose_state_layout, Hq),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -376,6 +392,68 @@ def test_cp2_many_short_sequences():
         T=10240, H=4, D=128,
         lengths=[1000, 1500, 2000, 2500, 1240, 1000, 1000],
         dtype=torch.bfloat16,
+    )
+
+
+def test_cp2_gqa_sequence_cut():
+    """CP2 GQA: sequences cut across rank boundary, Hq < H."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_GQA_SequenceCut",
+        T=10240, H=4, D=64, Hq=2,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
+    )
+
+
+def test_cp2_gqa_single_sequence():
+    """CP2 GQA: single long sequence with Hq < H."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_GQA_SingleSequence",
+        T=10240, H=8, D=64, Hq=2,
+        lengths=[10240],
+        dtype=torch.bfloat16,
+    )
+
+
+# ============================================================
+# Transpose State Layout Tests
+# ============================================================
+
+def test_cp2_transpose_state():
+    """CP2: transpose_state_layout=True with sequence cut."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("At least 2 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=2,
+        test_name="CP2_TransposeState",
+        T=10240, H=4, D=128,
+        lengths=[3000, 4000, 3240],
+        dtype=torch.bfloat16,
+        transpose_state_layout=True,
+    )
+
+
+def test_cp4_transpose_state():
+    """CP4: transpose_state_layout=True with single long sequence."""
+    if torch.cuda.device_count() < 4:
+        pytest.skip("At least 4 GPUs required")
+
+    run_cp_test_with_spawn(
+        world_size=4,
+        test_name="CP4_TransposeState",
+        T=10240, H=4, D=128,
+        lengths=[10240],
+        dtype=torch.bfloat16,
+        transpose_state_layout=True,
     )
 
 

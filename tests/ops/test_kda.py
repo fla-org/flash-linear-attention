@@ -1,5 +1,11 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib.util
 
 import pytest
 import torch
@@ -13,17 +19,20 @@ from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
+    ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "dtype"),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
         )
         for test in [
-            (1, 64, 1, 64, 1, 1, torch.float),
-            (2, 512, 3, 60, 1, 1, torch.float),
-            (4, 1024, 4, 128, 0.1, 1, torch.float),
-            (4, 1024, 4, 128, 1, 10, torch.float),
+            (1, 64, 1, 1, 64, 1, 1, torch.float),
+            (2, 512, 3, 3, 60, 1, 1, torch.float),
+            (4, 1024, 4, 4, 128, 0.1, 1, torch.float),
+            (4, 1024, 4, 4, 128, 1, 10, torch.float),
+
+            (1, 64, 1, 2, 64, 1, 1, torch.float),
+            (2, 512, 2, 4, 60, 1, 1, torch.float),
         ]
     ],
 )
@@ -31,6 +40,7 @@ def test_naive_chunk(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -42,10 +52,10 @@ def test_naive_chunk(
 
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, HV, D, dtype=torch.float)) / gate_logit_normalizer
+    beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
     ref, ref_ht = naive_recurrent_kda(
@@ -74,17 +84,19 @@ def test_naive_chunk(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
+    ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-use_qk_l2norm{}-{}".format(*test),
         )
         for test in [
-            (1, 64, 1, 64, 1, 1, False, torch.float),
-            (2, 512, 3, 60, 1, 1, False, torch.float),
-            (3, 1000, 4, 100, 0.1, 1, True, torch.float),
-            (4, 1024, 4, 128, 0.1, 1, False, torch.float),
+            (1, 64, 1, 1, 64, 1, 1, False, torch.float),
+            (2, 512, 3, 3, 60, 1, 1, False, torch.float),
+            (3, 1000, 4, 4, 100, 0.1, 1, True, torch.float),
+            (4, 1024, 4, 4, 128, 0.1, 1, False, torch.float),
+            (2, 512, 2, 4, 60, 1, 1, False, torch.float),
+            (2, 1024, 2, 8, 128, 0.1, 1, True, torch.float),
         ]
     ],
 )
@@ -92,6 +104,7 @@ def test_fused_recurrent(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -104,10 +117,10 @@ def test_fused_recurrent(
 
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
-    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, HV, D, dtype=torch.float)) / gate_logit_normalizer
+    beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
 
     ref, ref_ht = naive_recurrent_kda(
@@ -134,6 +147,143 @@ def test_fused_recurrent(
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
+        )
+        for test in [
+            (1, 64, 1, 64, 1, 1, torch.float),
+            (2, 512, 3, 60, 1, 1, torch.float),
+            (3, 1000, 4, 100, 0.1, 1, torch.float),
+            (4, 1024, 4, 128, 0.1, 1, torch.float),
+        ]
+    ],
+)
+def test_fused_recurrent_transpose_state(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
+    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    h0_kv = torch.randn(B, H, D, D, dtype=torch.float32)
+    h0_vk = h0_kv.transpose(-1, -2).contiguous()
+    q, k, v, g, beta, h0_kv, h0_vk = map(lambda x: x.to(device), (q, k, v, g, beta, h0_kv, h0_vk))
+
+    ref, ref_ht = fused_recurrent_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0_kv.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=False,
+        transpose_state_layout=False,
+    )
+    tri, tri_ht = fused_recurrent_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0_vk.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=False,
+        transpose_state_layout=True,
+    )
+    assert_close("o", ref, tri, 1e-4)
+    assert_close("ht", ref_ht, tri_ht.transpose(-1, -2), 1e-4)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "HV", "D", "scale", "has_dt_bias", "safe_gate", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_dt_bias{}-safe_gate{}-{}".format(*test),
+        )
+        for test in [
+            (1, 64, 1, 1, 64, 1, False, False, torch.float),
+            (2, 256, 2, 2, 64, 1, True, False, torch.float),
+            (2, 512, 2, 4, 64, 0.1, True, True, torch.float16),
+            (3, 1000, 2, 8, 128, 1, False, False, torch.float16),
+            (4, 1024, 4, 4, 128, 0.1, True, True, torch.float16),
+        ]
+    ],
+)
+def test_fused_recurrent_gate_in_kernel(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    has_dt_bias: bool,
+    safe_gate: bool,
+    dtype: torch.dtype,
+):
+    """fused_recurrent_kda with use_gate_in_kernel=True matches manual gate path."""
+    torch.manual_seed(42)
+    if IS_INTEL_ALCHEMIST and D > 128:
+        pytest.skip(reason="fused_recurrent_kda is not supported on alchemist for D>128")
+
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
+    g_raw = torch.randn(B, T, HV, D, dtype=torch.float32, device=device)
+    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(HV * D, dtype=torch.float32, device=device) if has_dt_bias else None
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+
+    lower_bound = -5.0 if safe_gate else None
+    naive_gate_fn = naive_kda_lowerbound_gate if safe_gate else naive_kda_gate
+    g_ref = naive_gate_fn(g_raw, A_log, dt_bias)
+
+    ref, ref_ht = fused_recurrent_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_ref,
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    tri, tri_ht = fused_recurrent_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g_raw.clone(),
+        beta=beta.clone(),
+        A_log=A_log.clone(),
+        dt_bias=dt_bias.clone() if dt_bias is not None else None,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        lower_bound=lower_bound,
+    )
+    assert_close("o", ref, tri, 0.002)
+    assert_close("ht", ref_ht, tri_ht, 0.002)
 
 
 @pytest.mark.parametrize(
@@ -275,6 +425,7 @@ def test_fused_recurrent_vllm_decode(
         "B",
         "T",
         "H",
+        "HV",
         "D",
         "scale",
         "gate_logit_normalizer",
@@ -288,18 +439,22 @@ def test_fused_recurrent_vllm_decode(
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-qk_l2norm{}-gate{}-dtype{}-safe_gate{}-disable_recompute{}".format(
-                *test),
+            id=("B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}"
+                "-use_qk_l2norm{}-use_gate{}-{}-safe_gate{}-disable_recompute{}").format(*test),
         )
         for test in [
-            (1, 63, 1, 64, 1, 1, 0, False, False, torch.float16, True, False),
-            (2, 500, 3, 60, 1, 1, 0, False, False, torch.float16, True, True),
-            (2, 1000, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True),
-            (3, 1024, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False),
-            (4, 1024, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True),
-            (4, 1024, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False),
-            (2, 1500, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True),
-            (4, 2048, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True),
+            (1, 63, 1, 1, 64, 1, 1, 0, False, False, torch.float16, True, False),
+            (2, 500, 3, 3, 60, 1, 1, 0, False, False, torch.float16, True, True),
+            (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True),
+            (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False),
+            (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True),
+            (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True),
+
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, False, torch.float16, False, False),
+            (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False),
+            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False),
         ]
     ],
 )
@@ -307,6 +462,7 @@ def test_chunk(
     B: int,
     T: int,
     H: int,
+    HV: int,
     D: int,
     scale: float,
     gate_logit_normalizer: float,
@@ -320,11 +476,11 @@ def test_chunk(
     torch.manual_seed(42)
     q = torch.rand(B, T, H, D, dtype=dtype)
     k = torch.rand(B, T, H, D, dtype=dtype)
-    v = torch.rand(B, T, H, D, dtype=dtype)
-    g = torch.randn(B, T, H, D, dtype=torch.float if not use_gate_in_kernel else dtype)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    g = torch.randn(B, T, HV, D, dtype=torch.float if not use_gate_in_kernel else dtype)
     if use_gate_in_kernel:
-        A_log = torch.randn(H, dtype=torch.float)
-        dt_bias = torch.randn(H * D, dtype=torch.float)
+        A_log = torch.randn(HV, dtype=torch.float)
+        dt_bias = torch.randn(HV * D, dtype=torch.float)
     else:
         g = F.logsigmoid(g) / gate_logit_normalizer
         g = g * (torch.rand_like(g) > mask_p)
@@ -337,8 +493,8 @@ def test_chunk(
         lower_bound = None
         naive_kda_gate_fn = naive_kda_gate
 
-    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
-    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    beta = torch.randn(B, T, HV, dtype=dtype).sigmoid()
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32)
     if use_gate_in_kernel:
         A_log, dt_bias = map(lambda x: x.to(device).requires_grad_(True), (A_log, dt_bias))
     q, k, v, g, beta, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0))
@@ -398,6 +554,85 @@ def test_chunk(
         assert_close("dA", ref_dA, tri_dA, 0.003, warning=True)
         assert_close("dbias", ref_dbias, tri_dbias, 0.008)
     assert_close("dh0", ref_dh0, tri_dh0, 0.008)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test),
+        )
+        for test in [
+            (1, 63, 1, 64, 1, 1, torch.float16),
+            (2, 500, 3, 60, 1, 1, torch.float16),
+            (3, 1024, 4, 128, 0.1, 1, torch.float16),
+            (4, 2048, 8, 64, 0.1, 1, torch.float16),
+        ]
+    ],
+)
+def test_chunk_transpose_state(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float)) / gate_logit_normalizer
+    beta = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    h0_kv = torch.randn(B, H, D, D, dtype=torch.float32)
+    h0_vk = h0_kv.transpose(-1, -2).contiguous()
+    q, k, v, g, beta, h0_kv, h0_vk = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, g, beta, h0_kv, h0_vk))
+
+    do = torch.randn_like(v)
+    dht_vk = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    dht_kv = dht_vk.transpose(-1, -2).contiguous()
+
+    tri, tri_ht = chunk_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0_vk.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=False,
+        transpose_state_layout=True,
+    )
+    ((tri * do).sum() + (tri_ht * dht_vk).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_vk.grad
+    q.grad = k.grad = v.grad = g.grad = beta.grad = h0_vk.grad = None
+
+    ref, ref_ht = chunk_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0_kv.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=False,
+        transpose_state_layout=False,
+    )
+    ((ref * do).sum() + (ref_ht * dht_kv).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_kv.grad
+
+    assert_close("o", ref, tri, 1e-4)
+    assert_close("ht", ref_ht, tri_ht.transpose(-1, -2), 1e-4)
+    assert_close("dq", ref_dq, tri_dq, 1e-4)
+    assert_close("dk", ref_dk, tri_dk, 1e-4)
+    assert_close("dv", ref_dv, tri_dv, 1e-4)
+    assert_close("dg", ref_dg, tri_dg, 1e-4)
+    assert_close("db", ref_db, tri_db, 1e-4)
+    assert_close("dh0", ref_dh0, tri_dh0.transpose(-1, -2), 1e-4)
 
 
 @pytest.mark.parametrize(
@@ -746,3 +981,145 @@ def test_chunk_return_intermediate_states(dtype):
         assert h_varlen.shape[0] == 1, f"Varlen h batch dim should be 1, got: {h_varlen.shape[0]}"
         assert h_varlen.shape[2:] == (H, D, D), f"Varlen h dims mismatch: {h_varlen.shape[2:]}"
         assert h_varlen.dtype == dtype, f"Varlen h dtype should be {dtype}, got: {h_varlen.dtype}"
+
+
+# ---------------------------------------------------------------------------
+# FlashKDA CUTLASS backend (inference-only)
+# ---------------------------------------------------------------------------
+
+_FLASH_KDA_AVAILABLE = importlib.util.find_spec("flash_kda") is not None
+_SKIP_FLASHKDA = pytest.mark.skipif(
+    device == "cpu" or not _FLASH_KDA_AVAILABLE,
+    reason="FlashKDA backend requires GPU and the flash_kda package",
+)
+
+_FLASHKDA_REQUIRED_KWARGS = dict(
+    use_qk_l2norm_in_kernel=True,
+    use_gate_in_kernel=True,
+    use_beta_sigmoid_in_kernel=True,
+    safe_gate=True,
+    lower_bound=-5.0,
+    transpose_state_layout=True,
+)
+
+_FLASHKDA_RTOL = 0.006
+
+
+def _flashkda_make_gate_params(H, D):
+    A_log = torch.log(torch.empty(H, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(H * D, dtype=torch.float32, device=device)
+    return A_log, dt_bias
+
+
+def _flashkda_run(monkeypatch, **kwargs):
+    monkeypatch.setenv("FLA_FLASH_KDA", "1")
+    with torch.inference_mode():
+        return chunk_kda(**kwargs, **_FLASHKDA_REQUIRED_KWARGS)
+
+
+def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
+                   lower_bound=-5.0, cu_seqlens=None):
+    kwargs = {}
+    if cu_seqlens is not None:
+        kwargs["cu_seqlens"] = cu_seqlens
+    return fused_recurrent_kda(
+        q=q.to(torch.float64),
+        k=k.to(torch.float64),
+        v=v.to(torch.float64),
+        g=g.to(torch.float64),
+        beta=torch.sigmoid(beta_raw.to(torch.float64)),
+        A_log=A_log.to(torch.float64),
+        dt_bias=dt_bias.to(torch.float64),
+        scale=scale,
+        initial_state=initial_state.to(torch.float64),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        lower_bound=lower_bound,
+        transpose_state_layout=True,
+        **kwargs,
+    )
+
+
+@_SKIP_FLASHKDA
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        for test in [
+            (1, 1024, 4, 128),
+            (2, 2048, 8, 128),
+            (1, 4096, 16, 128),
+        ]
+    ],
+)
+def test_flashkda_chunk(B, T, H, D, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device)
+    A_log, dt_bias = _flashkda_make_gate_params(H, D)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+
+    ref_o, ref_ht = _flashkda_gold(
+        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone())
+
+    tri_o, tri_ht = _flashkda_run(
+        monkeypatch,
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)
+
+
+@_SKIP_FLASHKDA
+@pytest.mark.parametrize(
+    ("H", "D", "cu_seqlens"),
+    [
+        pytest.param(H, D, cu, id=f"H{H}-D{D}-cu{cu}")
+        for (H, D, cu) in [
+            (4, 128, [0, 256, 500, 1000]),
+            (8, 128, [0, 100, 300, 1200, 2000]),
+            (16, 128, [0, 101, 303, 1205, 3007, 4096]),
+        ]
+    ],
+)
+def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(1, T, H, dtype=dtype, device=device)
+    A_log, dt_bias = _flashkda_make_gate_params(H, D)
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+
+    ref_o, ref_ht = _flashkda_gold(
+        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(),
+        cu_seqlens=cu_seqlens_t,
+    )
+    tri_o, tri_ht = _flashkda_run(
+        monkeypatch,
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens_t,
+    )
+    assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)

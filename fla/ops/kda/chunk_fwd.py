@@ -1,11 +1,15 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.cp import FLACPContext
-from fla.ops.cp.chunk_delta_h import (
-    chunk_gated_delta_rule_fwd_h_pre_process,
-    compress_h0,
-)
+from fla.ops.cp.chunk_delta_h import chunk_gated_delta_rule_fwd_h_pre_process, compress_h0
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.chunk_intra import chunk_kda_fwd_intra
 from fla.ops.kda.gate import kda_gate_chunk_cumsum
@@ -34,6 +38,7 @@ def chunk_kda_fwd(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext | None = None,
+    transpose_state_layout: bool = False,
 ):
     # Apply gate activation
     g_org = None
@@ -83,6 +88,7 @@ def chunk_kda_fwd(
             initial_state=initial_state,
             context=cp_context,
             use_exp2=True,
+            transpose_state_layout=transpose_state_layout,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -96,6 +102,7 @@ def chunk_kda_fwd(
         cu_seqlens_cpu=cu_seqlens_cpu,
         chunk_indices=chunk_indices,
         use_exp2=True,
+        transpose_state_layout=transpose_state_layout,
     )
 
     if cp_context is not None:
@@ -116,12 +123,12 @@ def chunk_kda_fwd(
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         use_exp2=True,
+        transpose_state_layout=transpose_state_layout,
     )
     if disable_recompute is False:
         # Delete to save memory
         w, u, qg, kg, v_new = None, None, None, None, None
         if not return_intermediate_states:
-            # Only delete h if not requested for inference
             h = None
         if use_gate_in_kernel:
             g = None

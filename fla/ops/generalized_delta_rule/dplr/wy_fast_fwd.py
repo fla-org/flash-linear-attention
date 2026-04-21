@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -211,11 +216,13 @@ def wu_fwd(
     A_ab_inv: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
     chunk_size: int,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *ag.shape, v.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(max(triton.next_power_of_2(K), 16), 64)
     BV = min(max(triton.next_power_of_2(V), 16), 64)
@@ -277,6 +284,7 @@ def prepare_wy_repr_fwd(
         A_ab_inv=A_ab_inv,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
+        chunk_indices=chunk_indices,
     )
     return w, u, A_ab_inv
 

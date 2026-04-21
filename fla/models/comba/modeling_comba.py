@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 from __future__ import annotations
 
 import math
@@ -126,14 +133,16 @@ class CombaPreTrainedModel(PreTrainedModel):
     ):
         if isinstance(module, Comba) and next(module.parameters()).device.type != 'meta':
             with torch.no_grad():
-                module.A_log.copy_(nn.init.uniform_(module.A_log, a=0, b=16).log())
+                if not getattr(module.A_log, '_is_hf_initialized', False):
+                    module.A_log.copy_(nn.init.uniform_(module.A_log, a=0, b=16).log())
                 module.A_log._no_weight_decay = True
-                dt = torch.exp(
-                    nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
-                ).clamp(min=1e-4)
-                # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-                inv_dt = dt + torch.log(-torch.expm1(-dt))
-                module.dt_bias.copy_(inv_dt)
+                if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                    dt = torch.exp(
+                        nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
+                    ).clamp(min=1e-4)
+                    # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                    inv_dt = dt + torch.log(-torch.expm1(-dt))
+                    module.dt_bias.copy_(inv_dt)
                 module.dt_bias._no_weight_decay = True
 
         elif isinstance(module, (nn.Linear, nn.Conv1d)):

@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
@@ -8,10 +13,10 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import rearrange
 from torch.nn import functional as F
 
-from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
+from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
@@ -21,23 +26,15 @@ if TYPE_CHECKING:
     from fla.models.utils import Cache
 
 
-@torch.compile
-def elu_p1(x):
-    return (F.elu(x, 1., False) + 1.).to(x)
-
-
-@torch.compile
-def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
-
-
 class GatedDeltaNet(nn.Module):
     """
-    The layer implementaion for [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464).  # noqa
+    Gated Delta Networks (GDN) layer implementation.
+
+    Reference: `Gated Delta Networks: Improving Mamba2 with Delta Rule <https://arxiv.org/abs/2412.06464>`_
 
     Similar to Mamba2, each layer contains around 6*hidden_size*hidden_size parameters.
 
-    Parameter alloation when use_gate=True:
+    Parameter allocation when use_gate=True:
         - 0.75 * hidden_size * hidden_size for the q_proj and k_proj each
         - 1.5 * hidden_size * hidden_size for the v_proj, g_proj and o_proj each
         - Others are ignorably small.
@@ -54,27 +51,29 @@ class GatedDeltaNet(nn.Module):
         hidden_size (int, Optional):
             The hidden size of the input. Default: 2048.
         expand_v (float, Optional):
-            The expansion ratio for the value dim. Default: 2.0.
+            The expansion ratio for the value dimension. Default: 2.0.
         head_dim (int, Optional):
             The dimension of each head. Default: 256.
         num_heads (int, Optional):
-            The number of heads. Default: 4.
+            The number of heads. Default: 6.
         num_v_heads (int, Optional):
             The number of heads for the value projection, equal to `num_heads` if `None`.
-            GVA is applied if `num_v_heads` > `num_heads`. Default: `None`.
+            GVA (Grouped Value Attention) is applied if `num_v_heads` > `num_heads`,
+            where `num_v_heads` must be divisible by `num_heads`.
+            The kernels natively support GVA by mapping multiple value heads to each query/key head.
+            Default: `None`.
         mode (str, Optional):
             Which Gated DeltaNet kernel to use.
             Currently available: `chunk` and `fused_recurrent`.
             Default: `chunk`.
-        use_beta (bool, Optional):
-            Whether to use beta. Default: `True`.
         use_gate (bool, Optional):
             Whether to use output gate. Default: `True`.
         use_short_conv (bool, Optional):
             Whether to use short convolutions. Default: `True`.
         allow_neg_eigval (bool, Optional):
             Allow negative eigenvalues. Default: `False`. If set to `True`, the beta will be multiplied by 2.
-            See reference: [Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues](https://arxiv.org/abs/2411.12537)
+            See reference:
+            `Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues <https://arxiv.org/abs/2411.12537>`_
         conv_size (int, Optional):
             The kernel size of the short convolution, only used when `use_short_conv` is `True`. Default: 4.
         conv_bias (bool, Optional):
@@ -221,12 +220,10 @@ class GatedDeltaNet(nn.Module):
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
-        last_state = None
-        if past_key_values is not None and len(past_key_values) > self.layer_idx:
-            last_state = past_key_values[self.layer_idx]
+        last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
@@ -260,14 +257,9 @@ class GatedDeltaNet(nn.Module):
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 
-        if self.num_v_heads > self.num_heads:
-            q, k = map(lambda x: repeat(x, '... h d -> ... (h g) d', g=self.num_v_heads // self.num_heads), (q, k))
-
         beta = self.b_proj(hidden_states).sigmoid()
         if self.allow_neg_eigval:
             beta = beta * 2.
-
-        g = -self.A_log.float().exp() * F.softplus(self.a_proj(hidden_states).float() + self.dt_bias)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
@@ -275,35 +267,41 @@ class GatedDeltaNet(nn.Module):
                 q=q,
                 k=k,
                 v=v,
-                g=g,
+                g=self.a_proj(hidden_states),
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
-                g=g,
+                g=self.a_proj(hidden_states),
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-        if past_key_values is not None:
-            past_key_values.update(
-                recurrent_state=recurrent_state,
-                conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
-                layer_idx=self.layer_idx,
-                offset=q_len,
-            )
+        update_layer_cache(
+            self,
+            past_key_values,
+            recurrent_state=recurrent_state,
+            conv_state=(conv_state_q, conv_state_k, conv_state_v) if self.use_short_conv else None,
+            offset=q_len,
+        )
 
         if self.use_gate:
             g = rearrange(self.g_proj(hidden_states), '... (h d) -> ... h d', d=self.head_v_dim)

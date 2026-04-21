@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -97,7 +104,7 @@ def parallel_path_bwd_dq_kernel(
 
     for offset_outer in range(0, curr_end, S):
         idx_j = offset_outer // S
-        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K),
+        p_q = tl.make_block_ptr(q + ((bos.to(tl.int64) * NUM_BLOCKS + idx_j + 1) * HQ + i_hq) * K, (T, K),
                                 (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
 
@@ -147,13 +154,16 @@ def parallel_path_bwd_dq_fn(
     S,
     BT,
     BS,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, num_blocks, HQ, K = q.shape
     H, V = v.shape[-2:]
     G = HQ // H
     BK, BV = triton.next_power_of_2(K), triton.next_power_of_2(V)
 
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
 

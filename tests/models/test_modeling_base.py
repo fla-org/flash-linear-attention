@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 
@@ -33,6 +38,7 @@ def run_test_model_forward_backward(
     config_class: type,
     use_l2warp: bool,
     dtype: torch.dtype,
+    **kwargs,
 ):
     """
     A foundational test for the forward and backward passes of a model.
@@ -44,7 +50,7 @@ def run_test_model_forward_backward(
     if config_class.__name__ in NOT_READY_FOR_TESTING:
         pytest.skip(f"{config_class.__name__} is not yet ready for testing.")
 
-    model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype)
+    model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype, **kwargs)
     input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T), device=device)
     output_fixed = model(input_ids, output_hidden_states=True).hidden_states[-1]
     assert output_fixed.shape == (B, T, config.hidden_size)

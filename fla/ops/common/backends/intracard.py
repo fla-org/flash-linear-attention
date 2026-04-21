@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 """Intra-card CP backend for shared delta rule operations.
 
 Accelerates prefill by splitting long sequences into sub-sequences
@@ -25,6 +32,7 @@ class IntraCardCPBackend(BaseBackend):
     backend_type = "intracard_cp"
     package_name = None  # No external package needed
     env_var = "FLA_INTRACARD_CP"
+    default_enable = False
 
     @classmethod
     def is_available(cls) -> bool:
@@ -45,6 +53,7 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
         use_exp2: bool = False,
+        transpose_state_layout: bool = False,
     ) -> tuple[bool, str | None]:
         """Check if intracard CP should handle this call."""
         # Only in inference mode
@@ -72,6 +81,7 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
         use_exp2: bool = False,
+        transpose_state_layout: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Intra-card CP implementation of chunk_gated_delta_rule_fwd_h."""
         from fla.ops.common.intracard_cp import intracard_fwd_h
@@ -87,4 +97,5 @@ class IntraCardCPBackend(BaseBackend):
             chunk_indices=chunk_indices,
             use_exp2=use_exp2,
             max_splits=MAX_SUBSEQS,
+            transpose_state_layout=transpose_state_layout,
         )

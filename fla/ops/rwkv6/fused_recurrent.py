@@ -1,6 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-import warnings
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -560,12 +563,12 @@ def fused_recurrent_rwkv6(
     v: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    scale: int | None = None,
+    scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -577,9 +580,9 @@ def fused_recurrent_rwkv6(
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         w (torch.Tensor):
-            data-dependent decays of shape `[B, T, H, K]`. in log space! Alias: g.
+            data-dependent decays of shape `[B, T, H, K]` in log space. Alias: g.
         u (torch.Tensor):
-            bonus of shape `[H, K]`
+            bonus of shape `[H, K]`.
         scale (Optional[float]):
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -594,9 +597,6 @@ def fused_recurrent_rwkv6(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
@@ -635,22 +635,14 @@ def fused_recurrent_rwkv6(
         >>> assert o.allclose(o_var.view(o.shape))
         >>> assert ht.allclose(ht_var)
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-        )
-    if not head_first and r.shape[1] < r.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({r.shape[1]}) < num_heads ({r.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if cu_seqlens is not None:
         if r.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`."
+                f"The batch size is expected to be 1 rather than {r.shape[0]} when using `cu_seqlens`. "
                 f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:

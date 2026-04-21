@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -86,10 +93,13 @@ def chunk_cumprod_householder_fwd_fn(
     S: int,  # split size, aka large chunk size
     BT: int,  # small chunk size
     cu_seqlens: torch.Tensor = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K = k.shape
 
-    split_indices = prepare_chunk_indices(cu_seqlens, S) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, S)
+    split_indices = chunk_indices
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
 

@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
 import warnings
@@ -949,6 +954,12 @@ def deltaformer_attn(
 ) -> torch.Tensor:
     if flash_attn_func is None:
         raise ImportError("Please install Flash Attention via `pip install flash-attn --no-build-isolation` first")
+
+    if cu_seqlens is not None and q.shape[0] != 1:
+        raise ValueError(
+            f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+            f"Please flatten variable-length inputs before processing.",
+        )
 
     B, T, H, D = k.shape
     C = min(C, T)

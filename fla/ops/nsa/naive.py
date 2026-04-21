@@ -1,6 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-import warnings
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 from einops import repeat
@@ -14,50 +17,39 @@ def naive_nsa(
     block_size: int = 64,
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs,
 ) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, HQ, K]`..
+            queries of shape `[B, T, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         block_indices (torch.LongTensor):
-            Block indices of shape `[B, T, H, S]` if `head_first=False` else `[B, H, T, S]`.
+            Block indices of shape `[B, T, H, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
         block_size (int):
-            Selected block size. Default: 64.
+            Selected block size. Default: `64`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-        )
 
     dtype = q.dtype
     G = q.shape[2] // k.shape[2]

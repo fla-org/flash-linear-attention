@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 from __future__ import annotations
 
 import math
@@ -71,7 +78,7 @@ class RWKV6FeedForward(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         if attention_mask is not None:
-            x = x.mul_(attention_mask[:, -x.shape[-2]:, None])
+            x = x.mul(attention_mask[:, -x.shape[-2]:, None])
         if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
             delta = shifted - x

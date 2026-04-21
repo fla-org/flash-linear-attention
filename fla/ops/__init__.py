@@ -1,3 +1,9 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from .abc import chunk_abc
 from .attn import parallel_attn
@@ -5,7 +11,7 @@ from .based import fused_chunk_based, parallel_based
 from .comba import chunk_comba, fused_recurrent_comba
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
 from .forgetting_attn import parallel_forgetting_attn
-from .gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
+from .gated_delta_rule import chunk_gated_delta_rule, chunk_gdn, fused_recurrent_gated_delta_rule, fused_recurrent_gdn
 from .generalized_delta_rule import (
     chunk_dplr_delta_rule,
     chunk_iplr_delta_rule,
@@ -29,26 +35,50 @@ from .simple_gla import chunk_simple_gla, fused_chunk_simple_gla, fused_recurren
 
 __all__ = [
     'chunk_abc',
-    'parallel_attn',
-    'fused_chunk_based', 'parallel_based',
-    'chunk_delta_rule', 'fused_chunk_delta_rule', 'fused_recurrent_delta_rule',
-    'parallel_forgetting_attn',
-    'chunk_gated_delta_rule', 'fused_recurrent_gated_delta_rule',
-    'chunk_comba', 'fused_recurrent_comba',
-    'chunk_dplr_delta_rule', 'chunk_iplr_delta_rule',
-    'fused_recurrent_dplr_delta_rule', 'fused_recurrent_iplr_delta_rule',
-    'chunk_kda', 'fused_recurrent_kda',
-    'chunk_gla', 'fused_chunk_gla', 'fused_recurrent_gla',
-    'chunk_gsa', 'fused_recurrent_gsa',
-    'fused_recurrent_hgrn',
-    'chunk_lightning_attn', 'fused_recurrent_lightning_attn',
-    'chunk_linear_attn', 'fused_chunk_linear_attn', 'fused_recurrent_linear_attn',
+    'chunk_comba',
+    'chunk_delta_rule',
+    'chunk_dplr_delta_rule',
+    'chunk_gated_delta_rule',
+    'chunk_gdn',
+    'chunk_gla',
+    'chunk_gsa',
+    'chunk_iplr_delta_rule',
+    'chunk_kda',
+    'chunk_lightning_attn',
+    'chunk_linear_attn',
     'chunk_log_linear_attn',
     'chunk_mesa_net',
+    'chunk_retention',
+    'chunk_rwkv6',
+    'chunk_rwkv7',
+    'chunk_simple_gla',
+    'fused_chunk_based',
+    'fused_chunk_delta_rule',
+    'fused_chunk_gla',
+    'fused_chunk_linear_attn',
+    'fused_chunk_retention',
+    'fused_chunk_simple_gla',
+    'fused_recurrent_comba',
+    'fused_recurrent_delta_rule',
+    'fused_recurrent_dplr_delta_rule',
+    'fused_recurrent_gated_delta_rule',
+    'fused_recurrent_gdn',
+    'fused_recurrent_gla',
+    'fused_recurrent_gsa',
+    'fused_recurrent_hgrn',
+    'fused_recurrent_iplr_delta_rule',
+    'fused_recurrent_kda',
+    'fused_recurrent_lightning_attn',
+    'fused_recurrent_linear_attn',
+    'fused_recurrent_retention',
+    'fused_recurrent_rwkv6',
+    'fused_recurrent_rwkv7',
+    'fused_recurrent_simple_gla',
+    'parallel_attn',
+    'parallel_based',
+    'parallel_forgetting_attn',
     'parallel_nsa',
     'parallel_path_attn',
-    'chunk_retention', 'fused_chunk_retention', 'fused_recurrent_retention', 'parallel_retention',
-    'chunk_rwkv6', 'fused_recurrent_rwkv6',
-    'chunk_rwkv7', 'fused_recurrent_rwkv7',
-    'chunk_simple_gla', 'fused_chunk_simple_gla', 'fused_recurrent_simple_gla', 'parallel_simple_gla',
+    'parallel_retention',
+    'parallel_simple_gla',
 ]

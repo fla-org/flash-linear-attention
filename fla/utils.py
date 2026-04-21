@@ -1,4 +1,9 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import contextlib
 import functools
@@ -42,18 +47,24 @@ def check_environments():
     """
     # Check Operating System
     if sys.platform == 'win32':
-        logger.warning(
-            "Detected Windows operating system. Triton does not have an official Windows release, "
-            "thus FLA will not be adapted for Windows, and any potential errors will not be fixed. "
-            "Please consider using a Linux environment for compatibility.",
-        )
+        # Check if triton-windows is installed
+        try:
+            from importlib.metadata import PackageNotFoundError, metadata
+            metadata('triton-windows')
+            # triton-windows is installed, no warning needed
+        except PackageNotFoundError:
+            logger.warning(
+                "Detected Windows operating system. Consider installing triton-windows "
+                "(https://github.com/triton-lang/triton-windows) for better compatibility. "
+                "Without it, some features may not work correctly.",
+            )
 
     triton_version = version.parse(triton.__version__)
-    required_triton_version = version.parse("3.2.0")
+    required_triton_version = version.parse("3.3.0")
 
     if triton_version < required_triton_version:
         logger.warning(
-            f"Current Triton version {triton_version} is below the recommended 3.2.0 version. "
+            f"Current Triton version {triton_version} is below the recommended 3.3.0 version. "
             "Errors may occur and these issues will not be fixed. "
             "Please consider upgrading Triton.",
         )
@@ -452,7 +463,7 @@ IS_AMD = (device_platform == 'hip')
 IS_INTEL = (device_platform == 'xpu')
 IS_NVIDIA = (device_platform == 'cuda')
 IS_INTEL_ALCHEMIST = (IS_INTEL and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
-IS_NVIDIA_HOPPER = (IS_NVIDIA and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] >= 9))
+IS_NVIDIA_HOPPER = (IS_NVIDIA and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] == 9))
 IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] == 10)
 USE_CUDA_GRAPH = (IS_NVIDIA and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
 
@@ -468,13 +479,20 @@ if IS_NVIDIA and not IS_TF32_SUPPORTED:
     # This is a workaround for old nvidia card.
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
+
+def _default_alloc_fn(size: int, alignment: int, stream: int | None):
+    return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
+
+
 if IS_TMA_SUPPORTED:
     logger.info('TMA is supported, using TMA by default.')
-
-    def alloc_fn(size: int, alignment: int, stream: int | None):
-        return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
-
-    triton.set_allocator(alloc_fn)
+    triton.set_allocator(_default_alloc_fn)
+elif IS_NVIDIA_BLACKWELL:
+    # Blackwell (SM 10.0+): Triton compiler may emit global_scratch for
+    # autotuned kernels even without TMA. Register a default allocator to
+    # prevent NullAllocator crashes. See triton-lang/triton#10002.
+    logger.info('Blackwell detected: registering default global_scratch allocator.')
+    triton.set_allocator(_default_alloc_fn)
 
 
 def get_all_max_shared_mem():

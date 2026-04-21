@@ -1,4 +1,10 @@
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 # This file is modified and supported by the Moonshot AI Team
 
 import torch
@@ -77,7 +83,7 @@ def naive_kda_lowerbound_gate(
     key=["H", "D"],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def kda_gate_fwd_kernel(
     g,
     A_log,
@@ -133,7 +139,7 @@ def kda_gate_fwd_kernel(
     key=["H", "D"],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['T'])
 def kda_gate_bwd_kernel(
     g,
     A_log,
@@ -349,7 +355,7 @@ def fused_kda_gate(
         for BS in BS_LIST
         for num_warps in [2, 4, 8]
     ],
-    key=['B', 'H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
+    key=['H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -363,7 +369,6 @@ def kda_gate_chunk_cumsum_vector_kernel(
     chunk_indices,
     lower_bound,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     S: tl.constexpr,
     BT: tl.constexpr,
@@ -447,7 +452,6 @@ def kda_gate_chunk_cumsum(
         chunk_indices=chunk_indices,
         lower_bound=lower_bound,
         T=T,
-        B=B,
         H=H,
         S=S,
         BT=BT,

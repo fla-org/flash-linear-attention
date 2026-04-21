@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import torch.distributed as dist
 
@@ -72,6 +79,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         W: int,
         group: dist.ProcessGroup | None,
         is_first_rank: bool,
+        pre_num_conv_tokens: int = 0,
     ) -> None:
         """Correct dx gradients for CP backward pass by communicating with next rank.
 
@@ -81,6 +89,9 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             W: Kernel size
             group: Process group for communication
             is_first_rank: Whether this is the first rank in the sequence's processing chain
+            pre_num_conv_tokens: Number of tokens from the previous rank that
+                belong to the first sequence on the current rank. Must match the
+                value used in the forward pass to construct initial_state.
         """
         if group is None:
             return
@@ -89,8 +100,14 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         # dh0: [N, D, W] or None
         # We only care about the first sequence's initial_state gradient
         if dh0 is not None:
-            # Get first sequence's d_initial_state: [D, W] -> last W-1 cols -> [D, W-1] -> [W-1, D]
-            d_initial_state = dh0[0, :, -(W-1):].T.contiguous()  # [W-1, D]
+            # Only keep gradients for positions that had real data from the
+            # previous rank. The forward fills only the last valid_len positions
+            # of initial_state; gradients for the remaining (zero-padded) positions
+            # must not flow back, otherwise they leak into unrelated sequences.
+            valid_len = min(W - 1, pre_num_conv_tokens)
+            d_initial_state = torch.zeros(W-1, D, device=dx.device, dtype=dx.dtype)
+            if valid_len > 0:
+                d_initial_state[-valid_len:] = dh0[0, :, -valid_len:].T
         else:
             # dh0 is None only when this is the first rank (no initial_state needed)
             assert is_first_rank, "dh0 should not be None when is_first_rank=False"
@@ -141,6 +158,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         ctx.group = group
         ctx.W = W
         ctx.is_first_rank = cp_context.is_first_rank
+        ctx.pre_num_conv_tokens = cp_context.pre_num_conv_tokens
 
         # Call original forward
         y, _ = causal_conv1d_fwd(
@@ -191,6 +209,7 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
             W=W,
             group=group,
             is_first_rank=ctx.is_first_rank,
+            pre_num_conv_tokens=ctx.pre_num_conv_tokens,
         )
 
         return dx, dw, db, None, None, None, None, None
