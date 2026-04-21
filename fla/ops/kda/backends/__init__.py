@@ -9,8 +9,11 @@
 
 from fla.ops.backends import BackendRegistry, dispatch
 from fla.ops.kda.backends.flashkda import FlashKDABackend
+from fla.ops.kda.backends.tilelang import KDATileLangBackend
 
 kda_registry = BackendRegistry("kda")
 kda_registry.register(FlashKDABackend())
+kda_registry.register(KDATileLangBackend())
+
 
 __all__ = ['dispatch', 'kda_registry']
