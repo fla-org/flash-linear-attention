@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib.util
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -979,3 +981,145 @@ def test_chunk_return_intermediate_states(dtype):
         assert h_varlen.shape[0] == 1, f"Varlen h batch dim should be 1, got: {h_varlen.shape[0]}"
         assert h_varlen.shape[2:] == (H, D, D), f"Varlen h dims mismatch: {h_varlen.shape[2:]}"
         assert h_varlen.dtype == dtype, f"Varlen h dtype should be {dtype}, got: {h_varlen.dtype}"
+
+
+# ---------------------------------------------------------------------------
+# FlashKDA CUTLASS backend (inference-only)
+# ---------------------------------------------------------------------------
+
+_FLASH_KDA_AVAILABLE = importlib.util.find_spec("flash_kda") is not None
+_SKIP_FLASHKDA = pytest.mark.skipif(
+    device == "cpu" or not _FLASH_KDA_AVAILABLE,
+    reason="FlashKDA backend requires GPU and the flash_kda package",
+)
+
+_FLASHKDA_REQUIRED_KWARGS = dict(
+    use_qk_l2norm_in_kernel=True,
+    use_gate_in_kernel=True,
+    use_beta_sigmoid_in_kernel=True,
+    safe_gate=True,
+    lower_bound=-5.0,
+    transpose_state_layout=True,
+)
+
+_FLASHKDA_RTOL = 0.006
+
+
+def _flashkda_make_gate_params(H, D):
+    A_log = torch.log(torch.empty(H, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(H * D, dtype=torch.float32, device=device)
+    return A_log, dt_bias
+
+
+def _flashkda_run(monkeypatch, **kwargs):
+    monkeypatch.setenv("FLA_FLASH_KDA", "1")
+    with torch.inference_mode():
+        return chunk_kda(**kwargs, **_FLASHKDA_REQUIRED_KWARGS)
+
+
+def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
+                   lower_bound=-5.0, cu_seqlens=None):
+    kwargs = {}
+    if cu_seqlens is not None:
+        kwargs["cu_seqlens"] = cu_seqlens
+    return fused_recurrent_kda(
+        q=q.to(torch.float64),
+        k=k.to(torch.float64),
+        v=v.to(torch.float64),
+        g=g.to(torch.float64),
+        beta=torch.sigmoid(beta_raw.to(torch.float64)),
+        A_log=A_log.to(torch.float64),
+        dt_bias=dt_bias.to(torch.float64),
+        scale=scale,
+        initial_state=initial_state.to(torch.float64),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        lower_bound=lower_bound,
+        transpose_state_layout=True,
+        **kwargs,
+    )
+
+
+@_SKIP_FLASHKDA
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}".format(*test))
+        for test in [
+            (1, 1024, 4, 128),
+            (2, 2048, 8, 128),
+            (1, 4096, 16, 128),
+        ]
+    ],
+)
+def test_flashkda_chunk(B, T, H, D, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, H, dtype=dtype, device=device)
+    A_log, dt_bias = _flashkda_make_gate_params(H, D)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+
+    ref_o, ref_ht = _flashkda_gold(
+        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone())
+
+    tri_o, tri_ht = _flashkda_run(
+        monkeypatch,
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)
+
+
+@_SKIP_FLASHKDA
+@pytest.mark.parametrize(
+    ("H", "D", "cu_seqlens"),
+    [
+        pytest.param(H, D, cu, id=f"H{H}-D{D}-cu{cu}")
+        for (H, D, cu) in [
+            (4, 128, [0, 256, 500, 1000]),
+            (8, 128, [0, 100, 300, 1200, 2000]),
+            (16, 128, [0, 101, 303, 1205, 3007, 4096]),
+        ]
+    ],
+)
+def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
+    torch.manual_seed(42)
+    dtype = torch.bfloat16
+    cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    g = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    beta = torch.randn(1, T, H, dtype=dtype, device=device)
+    A_log, dt_bias = _flashkda_make_gate_params(H, D)
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+
+    ref_o, ref_ht = _flashkda_gold(
+        q, k, v, g, beta, A_log, dt_bias, scale, h0.clone(),
+        cu_seqlens=cu_seqlens_t,
+    )
+    tri_o, tri_ht = _flashkda_run(
+        monkeypatch,
+        q=q, k=k, v=v, g=g, beta=beta,
+        A_log=A_log, dt_bias=dt_bias,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens_t,
+    )
+    assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)
