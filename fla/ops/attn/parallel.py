@@ -817,10 +817,9 @@ def parallel_attn(
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]`.
     """
-    if kwargs.get('head_first', False):
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if scale is None:
         scale = k.shape[-1] ** -0.5

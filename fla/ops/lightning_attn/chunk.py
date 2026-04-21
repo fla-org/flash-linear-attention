@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import warnings
-
 import torch
 
 from fla.ops.simple_gla.chunk import chunk_simple_gla
@@ -23,7 +21,7 @@ def chunk_lightning_attn(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -49,9 +47,6 @@ def chunk_lightning_attn(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
@@ -59,19 +54,10 @@ def chunk_lightning_attn(
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
     """
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
-        )
-
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -93,6 +79,5 @@ def chunk_lightning_attn(
         g_gamma=g_gamma,
         initial_state=initial_state,
         output_final_state=output_final_state,
-        head_first=head_first,
         cu_seqlens=cu_seqlens,
     )
