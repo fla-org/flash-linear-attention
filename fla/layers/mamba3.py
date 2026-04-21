@@ -29,7 +29,6 @@ from fla.layers.utils import (
 )
 from fla.modules.layernorm_gated import RMSNormGated
 
-
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     try:
