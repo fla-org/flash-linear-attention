@@ -79,12 +79,13 @@ def _build_kda_bwd_kernel(
 
         # A in Triton is loaded transposed: b_A[bt, t] = A[i_b, t_s+t, i_h, bt]
         # Load, transpose, and zero OOB rows/cols for varlen safety
-        s_A_raw = T.alloc_shared((_BT, _BT), _dtype)
-        T.copy(A[i_b, t_s:t_s + _BT, i_h, 0:_BT], s_A_raw)
         s_A = T.alloc_shared((_BT, _BT), _dtype)
+        T.copy(A[i_b, t_s:t_s + _BT, i_h, 0:_BT], s_A)
+        f_A_tmp = T.alloc_fragment((_BT, _BT), _dtype)
         for _i, _j in T.Parallel(_BT, _BT):
             valid = ((i_t_local * _BT + _i) < T_seq) & ((i_t_local * _BT + _j) < T_seq)
-            s_A[_i, _j] = T.if_then_else(valid, s_A_raw[_j, _i], T.cast(0, _dtype))
+            f_A_tmp[_i, _j] = T.if_then_else(valid, s_A[_j, _i], T.cast(0, _dtype))
+        T.copy(f_A_tmp, s_A)
 
         # ========== 2. Init dA, db accumulators ==========
         b_dA = T.alloc_fragment((_BT, _BT), T.float32)
@@ -97,13 +98,9 @@ def _build_kda_bwd_kernel(
         s_dv_pre = T.alloc_shared((_BT, _BV), _dtype)
         s_v_orig = T.alloc_shared((_BT, _BV), _dtype)
         b_dvb = T.alloc_fragment((_BT, _BV), T.float32)
-        s_dvb = T.alloc_shared((_BT, _BV), T.float32)
         s_dv2 = T.alloc_shared((_BT, _BV), _dtype)
-        s_dvb_v = T.alloc_shared((_BT, _BV), T.float32)
         f_dvv = T.alloc_fragment((_BT, _BV), T.float32)
         f_dvv_row = T.alloc_fragment((_BT,), T.float32)
-        s_dvv_row = T.alloc_shared((_BT,), T.float32)
-        s_db_tmp = T.alloc_shared((_BT,), T.float32)
 
         for i_v in T.serial(_NV):
             v_off = i_v * _BV
@@ -119,25 +116,18 @@ def _build_kda_bwd_kernel(
             T.gemm(s_A, s_dv_pre, b_dvb)
 
             # Store dv2 = dvb * beta[:, None]
-            T.copy(b_dvb, s_dvb)
-
             for _i, _j in T.Parallel(_BT, _BV):
-                s_dv2[_i, _j] = T.cast(s_dvb[_i, _j] * s_beta[_i], _dtype)
+                s_dv2[_i, _j] = T.cast(b_dvb[_i, _j] * s_beta[_i], _dtype)
             for _i, _j in T.Parallel(_BT, _BV):
                 if (i_t_local * _BT + _i) < T_seq:
                     dv2[i_b, t_s + _i, i_h, v_off + _j] = s_dv2[_i, _j]
 
             # db += sum(dvb * v, dim=1)
             for _i, _j in T.Parallel(_BT, _BV):
-                s_dvb_v[_i, _j] = s_dvb[_i, _j] * T.cast(s_v_orig[_i, _j], T.float32)
-            T.copy(s_dvb_v, f_dvv)
+                f_dvv[_i, _j] = b_dvb[_i, _j] * T.cast(s_v_orig[_i, _j], T.float32)
             T.reduce_sum(f_dvv, f_dvv_row, dim=1)
-            # Accumulate into b_db via shared roundtrip
-            T.copy(f_dvv_row, s_dvv_row)
-            T.copy(b_db, s_db_tmp)
             for _i in T.Parallel(_BT):
-                s_db_tmp[_i] = s_db_tmp[_i] + s_dvv_row[_i]
-            T.copy(s_db_tmp, b_db)
+                b_db[_i] = b_db[_i] + f_dvv_row[_i]
 
         # ========== 4. K-loop ==========
         for i_k in T.serial(_NK):
@@ -182,14 +172,10 @@ def _build_kda_bwd_kernel(
             s_h = T.alloc_shared((_thD1, _thD2), _dtype)
             s_dh = T.alloc_shared((_thD1, _thD2), _dtype)
             s_dv_tile = T.alloc_shared((_BT, _BV), _dtype)
-            s_hdh = T.alloc_shared((_thD1, _thD2), T.float32)
             f_hdh = T.alloc_fragment((_thD1, _thD2), T.float32)
             f_hdh_k_nots = T.alloc_fragment((_thD1,), T.float32)
-            s_hdh_k_nots = T.alloc_shared((_thD1,), T.float32)
-            s_hdh_t = T.alloc_shared((_thD2, _thD1), T.float32)
             f_hdh_t = T.alloc_fragment((_thD2, _thD1), T.float32)
             f_hdh_k_ts = T.alloc_fragment((_thD2,), T.float32)
-            s_hdh_k_ts = T.alloc_shared((_thD2,), T.float32)
 
             for i_v in T.serial(_NV):
                 v_off = i_v * _BV
@@ -222,28 +208,21 @@ def _build_kda_bwd_kernel(
                     T.gemm(s_dv_tile, s_h, b_dw, transpose_B=True)
 
                 # dgk += sum(h * dh, axis=0) -- per-column sum -> (BK,)
-                # Done AFTER GEMMs so s_hdh alloc can't alias s_h/s_dh
                 for _i, _j in T.Parallel(_thD1, _thD2):
-                    s_hdh[_i, _j] = T.cast(s_h[_i, _j], T.float32) * T.cast(s_dh[_i, _j], T.float32)
+                    f_hdh[_i, _j] = T.cast(s_h[_i, _j], T.float32) * T.cast(s_dh[_i, _j], T.float32)
 
-                T.copy(s_hdh, f_hdh)
                 if not _TS:
                     T.reduce_sum(f_hdh, f_hdh_k_nots, dim=1)
-                    T.copy(f_hdh_k_nots, s_hdh_k_nots)
-
                     for _j in T.Parallel(_BK):
-                        s_dgk[_j] = s_dgk[_j] + s_hdh_k_nots[_j]
+                        s_dgk[_j] = s_dgk[_j] + f_hdh_k_nots[_j]
 
                 else:
                     for _i, _j in T.Parallel(_thD2, _thD1):
-                        s_hdh_t[_i, _j] = s_hdh[_j, _i]
+                        f_hdh_t[_i, _j] = f_hdh[_j, _i]
 
-                    T.copy(s_hdh_t, f_hdh_t)
                     T.reduce_sum(f_hdh_t, f_hdh_k_ts, dim=1)
-                    T.copy(f_hdh_k_ts, s_hdh_k_ts)
-
                     for _j in T.Parallel(_BK):
-                        s_dgk[_j] = s_dgk[_j] + s_hdh_k_ts[_j]
+                        s_dgk[_j] = s_dgk[_j] + f_hdh_k_ts[_j]
 
             # ========== 4b. Gate dq, dk ==========
             # b_dq = b_dq * exp2(g) * scale
@@ -285,36 +264,22 @@ def _build_kda_bwd_kernel(
             T.gemm(s_A, s_dw, b_dkgb)
 
             # ========== 4g. db += sum(dkgb * kg, dim=1) ==========
-            s_dkgb = T.alloc_shared((_BT, _BK), T.float32)
-            T.copy(b_dkgb, s_dkgb)
-            s_dkgb_kg = T.alloc_shared((_BT, _BK), T.float32)
-            for _i, _j in T.Parallel(_BT, _BK):
-                s_dkgb_kg[_i, _j] = s_dkgb[_i, _j] * T.cast(s_kg[_i, _j], T.float32)
             f_dkgb_kg = T.alloc_fragment((_BT, _BK), T.float32)
-            T.copy(s_dkgb_kg, f_dkgb_kg)
+            for _i, _j in T.Parallel(_BT, _BK):
+                f_dkgb_kg[_i, _j] = b_dkgb[_i, _j] * T.cast(s_kg[_i, _j], T.float32)
             f_db_row = T.alloc_fragment((_BT,), T.float32)
             T.reduce_sum(f_dkgb_kg, f_db_row, dim=1)
-            s_db_row = T.alloc_shared((_BT,), T.float32)
-            T.copy(f_db_row, s_db_row)
-            s_db_cur = T.alloc_shared((_BT,), T.float32)
-            T.copy(b_db, s_db_cur)
             for _i in T.Parallel(_BT):
-                s_db_cur[_i] = s_db_cur[_i] + s_db_row[_i]
-            T.copy(s_db_cur, b_db)
+                b_db[_i] = b_db[_i] + f_db_row[_i]
 
             # ========== 4h. dgk += col_sum(k * dk) ==========
-            s_q = T.alloc_shared((_BT, _BK), _dtype)
-            T.copy(q[i_b, t_s:t_s + _BT, i_h, k_off:k_off + _BK], s_q)
-
-            s_kdk = T.alloc_shared((_BT, _BK), T.float32)
+            f_kdk = T.alloc_fragment((_BT, _BK), T.float32)
             for _i, _j in T.Parallel(_BT, _BK):
-                s_kdk[_i, _j] = T.cast(s_k[_i, _j], T.float32) * s_dk[_i, _j]
+                f_kdk[_i, _j] = T.cast(s_k[_i, _j], T.float32) * s_dk[_i, _j]
             # Column sum of kdk -> (BK,) via transpose then row-reduce
-            s_kdk_t = T.alloc_shared((_BK, _BT), T.float32)
-            for _i, _j in T.Parallel(_BK, _BT):
-                s_kdk_t[_i, _j] = s_kdk[_j, _i]
             f_kdk_t = T.alloc_fragment((_BK, _BT), T.float32)
-            T.copy(s_kdk_t, f_kdk_t)
+            for _i, _j in T.Parallel(_BK, _BT):
+                f_kdk_t[_i, _j] = f_kdk[_j, _i]
             f_kdk_col = T.alloc_fragment((_BK,), T.float32)
             T.reduce_sum(f_kdk_t, f_kdk_col, dim=1)
             s_kdk_col = T.alloc_shared((_BK,), T.float32)
@@ -326,14 +291,14 @@ def _build_kda_bwd_kernel(
             s_dg_out = T.alloc_shared((_BT, _BK), T.float32)
             m_last_pos = T.max(0, T.min(_BT, T_seq - i_t_local * _BT) - 1)
             for _i, _j in T.Parallel(_BT, _BK):
-                q_dq = T.cast(s_q[_i, _j], T.float32) * s_dq[_i, _j]
+                q_dq = T.cast(q[i_b, t_s + _i, i_h, k_off + _j], T.float32) * s_dq[_i, _j]
                 last_term = T.if_then_else(_i == m_last_pos, s_dgk[_j], 0.0)
-                beta_term = T.cast(s_kg[_i, _j], T.float32) * s_dkgb[_i, _j] * s_beta[_i]
-                s_dg_out[_i, _j] = q_dq - s_kdk[_i, _j] + last_term + beta_term
+                beta_term = T.cast(s_kg[_i, _j], T.float32) * b_dkgb[_i, _j] * s_beta[_i]
+                s_dg_out[_i, _j] = q_dq - f_kdk[_i, _j] + last_term + beta_term
 
             # ========== 4j. dk += dkgb * gb where gb = exp2(g) * beta ==========
             for _i, _j in T.Parallel(_BT, _BK):
-                s_dk[_i, _j] = s_dk[_i, _j] + s_dkgb[_i, _j] * T.exp2(s_g[_i, _j]) * s_beta[_i]
+                s_dk[_i, _j] = s_dk[_i, _j] + b_dkgb[_i, _j] * T.exp2(s_g[_i, _j]) * s_beta[_i]
 
             # ========== 4k. Store dq, dk, dg for this K-block ==========
             for _i, _j in T.Parallel(_BT, _BK):
@@ -372,36 +337,28 @@ def _build_kda_bwd_kernel(
         T.gemm(s_dA_dtype, s_A, b_dA2)
 
         # dA = A @ dA
-        s_dA2 = T.alloc_shared((_BT, _BT), _dtype)
-        f_dA2 = T.alloc_fragment((_BT, _BT), _dtype)
+        # Reuse s_dA_dtype for the second cast
         for _i, _j in T.Parallel(_BT, _BT):
-            f_dA2[_i, _j] = T.cast(b_dA2[_i, _j], _dtype)
-        T.copy(f_dA2, s_dA2)
+            s_dA_dtype[_i, _j] = T.cast(b_dA2[_i, _j], _dtype)
 
         b_dA3 = T.alloc_fragment((_BT, _BT), T.float32)
         T.clear(b_dA3)
-        T.gemm(s_A, s_dA2, b_dA3)
+        T.gemm(s_A, s_dA_dtype, b_dA3)
 
-        # Apply mask and negate
-        s_dA_final = T.alloc_shared((_BT, _BT), T.float32)
-        T.copy(b_dA3, s_dA_final)
-
+        # Apply mask and negate, reuse s_dA buffer
         for _i, _j in T.Parallel(_BT, _BT):
             m_valid = ((i_t_local * _BT + _i) < T_seq) & ((i_t_local * _BT + _j) < T_seq)
             m_upper = (_i > _j) & m_valid
-            s_dA_final[_i, _j] = T.if_then_else(m_upper, -s_dA_final[_i, _j], 0.0)
+            s_dA[_i, _j] = T.if_then_else(m_upper, -b_dA3[_i, _j], 0.0)
 
         for _i, _j in T.Parallel(_BT, _BT):
             if (i_t_local * _BT + _i) < T_seq:
-                dA[i_b, t_s + _i, i_h, _j] = s_dA_final[_i, _j]
+                dA[i_b, t_s + _i, i_h, _j] = s_dA[_i, _j]
 
         # ========== 6. Store db ==========
-        s_db_final = T.alloc_shared((_BT,), T.float32)
-        T.copy(b_db, s_db_final)
-
         for _i in T.Parallel(_BT):
             if (i_t_local * _BT + _i) < T_seq:
-                db[i_b, t_s + _i, i_h] = s_db_final[_i]
+                db[i_b, t_s + _i, i_h] = b_db[_i]
 
     # ========== Kernel entry points ==========
     if _VAR:
@@ -474,8 +431,6 @@ def chunk_kda_bwd_wy_dqkg_fused_tilelang(
     IS_VARLEN = cu_seqlens is not None
 
     CONST_TILING = 64 if check_shared_mem() else 32
-    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
-    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     if scale is None:
         scale = K ** -0.5
 
@@ -493,8 +448,8 @@ def chunk_kda_bwd_wy_dqkg_fused_tilelang(
     dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}[q.dtype]
 
     # Static tiling config
-    BK = min(max(triton.next_power_of_2(K), 16), 64)
-    BV = min(max(triton.next_power_of_2(V), 16), 64)
+    BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
+    BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     num_warps = 8 if K <= 64 else 4
 
     kernel = _build_kda_bwd_kernel(
