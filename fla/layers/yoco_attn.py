@@ -143,8 +143,8 @@ class YOCOGatedRetention(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         del output_attentions
 
-        if attention_mask is not None:
-            assert len(attention_mask.shape) == 2, (
+        if attention_mask is not None and attention_mask.dim() != 2:
+            raise ValueError(
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
@@ -267,8 +267,8 @@ class YOCOSharedKVBuilder(nn.Module):
         use_cache: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, Cache | None]:
-        if attention_mask is not None:
-            assert len(attention_mask.shape) == 2, (
+        if attention_mask is not None and attention_mask.dim() != 2:
+            raise ValueError(
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
@@ -365,8 +365,8 @@ class YOCOCrossAttention(nn.Module):
         output_attentions: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if attention_mask is not None:
-            assert len(attention_mask.shape) == 2, (
+        if attention_mask is not None and attention_mask.dim() != 2:
+            raise ValueError(
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
@@ -447,5 +447,5 @@ class YOCOCrossAttention(nn.Module):
             o = pad_input(o.squeeze(0), pad_indices, batch_size, q_len)
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
-        attentions = None if not output_attentions else None
+        attentions = None
         return o, attentions

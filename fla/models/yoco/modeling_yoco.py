@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import math
-import warnings
 from typing import TYPE_CHECKING
 
 import torch
@@ -406,7 +405,7 @@ class YOCOModel(YOCOPreTrainedModel):
         **kwargs: Unpack[dict]
     ) -> tuple | BaseModelOutputWithPast:
         if output_attentions:
-            warnings.warn("`YOCOModel` does not `output_attentions` now, setting it to `False`.")
+            logger.warning_once("`YOCOModel` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
