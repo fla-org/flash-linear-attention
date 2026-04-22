@@ -23,6 +23,7 @@ from fla.layers import (
     LinearAttention,
     LogLinearMamba2,
     MesaNet,
+    MoBA,
     MomAttention,
     MultiheadLatentAttention,
     MultiScaleRetention,
@@ -66,6 +67,8 @@ from fla.models import (
     MesaNetModel,
     MLAForCausalLM,
     MLAModel,
+    MoBAForCausalLM,
+    MoBAModel,
     MomForCausalLM,
     MomModel,
     NSAForCausalLM,
@@ -82,6 +85,8 @@ from fla.models import (
     RWKV7Model,
     TransformerForCausalLM,
     TransformerModel,
+    YOCOForCausalLM,
+    YOCOModel,
 )
 
 __all__ = [
@@ -134,6 +139,9 @@ __all__ = [
     "MesaNet",
     "MesaNetForCausalLM",
     "MesaNetModel",
+    "MoBA",
+    "MoBAForCausalLM",
+    "MoBAModel",
     "MomAttention",
     "MomForCausalLM",
     "MomModel",
@@ -159,6 +167,8 @@ __all__ = [
     "RodimusModel",
     "TransformerForCausalLM",
     "TransformerModel",
+    "YOCOForCausalLM",
+    "YOCOModel",
 ]
 
 __version__ = "0.5.0"
