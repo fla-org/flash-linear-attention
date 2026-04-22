@@ -14,6 +14,7 @@ from fla.ops.backends import dispatch
 from fla.ops.cp import FLACPContext
 from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
+from fla.ops.kda.gate import beta_sigmoid_bwd, fused_beta_sigmoid
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -36,6 +37,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
+        use_beta_sigmoid_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
@@ -52,6 +54,10 @@ class ChunkKDAFunction(torch.autograd.Function):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
+
+        beta_raw = beta
+        if use_beta_sigmoid_in_kernel:
+            beta = fused_beta_sigmoid(beta_raw)
 
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
@@ -87,7 +93,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             return o.type_as(q), final_state, h
 
         ctx.save_for_backward(
-            q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta, A_log, dt_bias, Aqk, Akk,
+            q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta_raw, beta, A_log, dt_bias, Aqk, Akk,
             w, u, qg, kg, v_new, h,
             initial_state, cu_seqlens, chunk_indices
         )
@@ -97,6 +103,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.lower_bound = lower_bound
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.use_gate_in_kernel = use_gate_in_kernel
+        ctx.use_beta_sigmoid_in_kernel = use_beta_sigmoid_in_kernel
         ctx.disable_recompute = disable_recompute
         ctx.cp_context = cp_context
         ctx.transpose_state_layout = transpose_state_layout
@@ -110,7 +117,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        (q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta, A_log, dt_bias, Aqk, Akk,
+        (q, q_rstd, k, k_rstd, v, g_cumsum, g_input, beta_raw, beta, A_log, dt_bias, Aqk, Akk,
          w, u, qg, kg, v_new, h,
          initial_state, cu_seqlens, chunk_indices) = (
             ctx.saved_tensors
@@ -143,9 +150,11 @@ class ChunkKDAFunction(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
+        if ctx.use_beta_sigmoid_in_kernel:
+            db = beta_sigmoid_bwd(beta_raw, db)
 
-        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None, None)
+        return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
+                None, None, None, None, None, None, None, None, None, None, None, None)
 
 
 @dispatch('kda')
@@ -161,6 +170,7 @@ def chunk_kda(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
+    use_beta_sigmoid_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     safe_gate: bool = False,
@@ -198,6 +208,11 @@ def chunk_kda(
             Whether to output the final state of shape ``[N, HV, K, V]``. Default: ``False``.
         use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q,k tensor internally. Default: ``False``.
+        use_beta_sigmoid_in_kernel (bool):
+            Whether to apply ``torch.sigmoid(beta)`` before launching the chunk kernel.
+            - If ``True``, the passed ``beta`` acts as the raw beta logits.
+            - If ``False``, ``beta`` is expected to already be in post-sigmoid space.
+            Default: ``False``.
         use_gate_in_kernel (bool):
             Whether to compute the log-space KDA decay internally.
             - If ``True``:
@@ -374,6 +389,7 @@ def chunk_kda(
         output_final_state,
         use_qk_l2norm_in_kernel,
         use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel,
         cu_seqlens,
         cu_seqlens_cpu,
         safe_gate,
