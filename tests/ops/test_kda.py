@@ -150,6 +150,63 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (2, 256, 4, 64, torch.float),
+            (1, 512, 3, 60, torch.float),
+        ]
+    ],
+)
+def test_fused_recurrent_use_beta_sigmoid_in_kernel(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float))
+    beta_post = torch.randn(B, T, H, dtype=dtype).sigmoid()
+    beta_raw = torch.logit(beta_post.float().clamp_(1e-4, 1 - 1e-4)).to(dtype)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q, k, v, g, beta_post, beta_raw, h0 = map(
+        lambda x: x.to(device),
+        (q, k, v, g, beta_post, beta_raw, h0),
+    )
+
+    ref, ref_ht = fused_recurrent_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta_post.clone(),
+        scale=None,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=False,
+    )
+    tri, tri_ht = fused_recurrent_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta_raw.clone(),
+        scale=None,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=False,
+        use_beta_sigmoid_in_kernel=True,
+    )
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize(
     ("B", "T", "H", "D", "scale", "gate_logit_normalizer", "dtype"),
     [
         pytest.param(
@@ -633,6 +690,86 @@ def test_chunk_transpose_state(
     assert_close("dg", ref_dg, tri_dg, 1e-4)
     assert_close("db", ref_db, tri_db, 1e-4)
     assert_close("dh0", ref_dh0, tri_dh0.transpose(-1, -2), 1e-4)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (1, 8192, 96, 128, torch.bfloat16),
+            (2, 96, 2, 64, torch.float16),
+        ]
+    ],
+)
+def test_chunk_use_beta_sigmoid_in_kernel(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    g = F.logsigmoid(torch.randn(B, T, H, D, dtype=torch.float))
+    beta_raw = torch.randn(B, T, H, dtype=dtype)
+    beta_post = beta_raw.float().sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+
+    q, k, v, g, beta_post, beta_raw, h0 = map(
+        lambda x: x.to(device).requires_grad_(True),
+        (q, k, v, g, beta_post, beta_raw, h0),
+    )
+
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    ref, ref_ht = chunk_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta_post.clone(),
+        scale=None,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = (
+        q.grad, k.grad, v.grad, g.grad, beta_post.grad, h0.grad
+    )
+    q.grad = k.grad = v.grad = g.grad = beta_post.grad = h0.grad = None
+
+    tri, tri_ht = chunk_kda(
+        q=F.normalize(q.clone(), p=2, dim=-1),
+        k=F.normalize(k.clone(), p=2, dim=-1),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta_raw.clone(),
+        scale=None,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_beta_sigmoid_in_kernel=True,
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_db_raw, tri_dh0 = (
+        q.grad, k.grad, v.grad, g.grad, beta_raw.grad, h0.grad
+    )
+
+    ref_db_raw = ref_db * beta_post.detach().float() * (1 - beta_post.detach().float())
+    ref_db_raw = ref_db_raw.to(tri_db_raw.dtype)
+
+    rtol = 1e-4
+    assert_close("o", ref, tri, rtol)
+    assert_close("ht", ref_ht, tri_ht, rtol)
+    assert_close("dq", ref_dq, tri_dq, rtol)
+    assert_close("dk", ref_dk, tri_dk, rtol)
+    assert_close("dv", ref_dv, tri_dv, rtol)
+    assert_close("dg", ref_dg, tri_dg, rtol)
+    assert_close("db_raw", ref_db_raw, tri_db_raw, rtol)
+    assert_close("dh0", ref_dh0, tri_dh0, rtol)
 
 
 @pytest.mark.parametrize(
