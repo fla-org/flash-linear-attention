@@ -99,9 +99,7 @@ class Mamba3PreTrainedModel(PreTrainedModel):
         module: nn.Module,
         num_residuals_per_layer: int = 1,
     ) -> None:
-        """Initialise weights following the Mamba-3 reference implementation."""
         if isinstance(module, Mamba3) and next(module.parameters()).device.type != 'meta':
-            # --- dt_bias: inv_softplus of uniform-in-log dt ---
             if not getattr(module.dt_bias, '_is_hf_initialized', False):
                 dt = torch.exp(
                     torch.rand(self.config.num_heads)
@@ -114,18 +112,14 @@ class Mamba3PreTrainedModel(PreTrainedModel):
             module.dt_bias._no_reinit = True
             module.dt_bias._no_weight_decay = True
 
-            # --- D: all ones ---
             if not getattr(module.D, '_is_hf_initialized', False):
                 nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
-            # --- B_bias, C_bias: all ones (input-independent bias) ---
-            if not getattr(module.B_bias, '_is_hf_initialized', False):
-                nn.init.ones_(module.B_bias)
-            if not getattr(module.C_bias, '_is_hf_initialized', False):
-                nn.init.ones_(module.C_bias)
+            for p in (module.B_bias, module.C_bias):
+                if not getattr(p, '_is_hf_initialized', False):
+                    nn.init.ones_(p)
 
-            # --- MIMO projections ---
             if module.is_mimo:
                 if not getattr(module.mimo_x, '_is_hf_initialized', False):
                     with torch.no_grad():
@@ -148,7 +142,7 @@ class Mamba3PreTrainedModel(PreTrainedModel):
             module.reset_parameters()
 
         if self.config.rescale_prenorm_residual:
-            # GPT-2 style scaling of the residual branch weights by 1/sqrt(N)
+            # GPT-2 residual scaling: 1/sqrt(N) over the depth.
             p = None
             if hasattr(module, 'o_proj'):
                 raise ValueError("This is not supposed to happen")

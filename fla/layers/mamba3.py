@@ -4,9 +4,6 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
-#
-# Port of Mamba-3 (Dao AI Lab, Goombalab) into the FLA layout.
-# Reference: mamba_ssm/modules/mamba3.py in https://github.com/state-spaces/mamba
 
 from __future__ import annotations
 
@@ -60,10 +57,9 @@ class Mamba3(nn.Module):
     """
     Mamba-3 selective state-space layer.
 
-    Compared to Mamba-2, Mamba-3 drops the causal 1D convolution, introduces
-    input-independent per-head B/C biases, normalises B and C with RMSNorm, and
-    applies a blockwise rotary transform to Q/K before the SSM scan. It also
-    optionally supports a low-rank MIMO projection for V and the output gate.
+    Differences from Mamba-2: no causal conv1d; input-independent per-head B/C
+    bias; RMSNorm on B and C; blockwise rotary on Q/K before the SSM scan;
+    optional low-rank MIMO projection on V and the output gate.
     """
 
     def __init__(
@@ -118,9 +114,7 @@ class Mamba3(nn.Module):
 
         if self.is_mimo and mamba3_mimo_combined is None:
             logger.warning_once(
-                "Mamba-3 MIMO kernels are unavailable. Please install TileLang "
-                "to enable `is_mimo=True`. Falling back to SISO is not possible "
-                "once the layer is constructed in MIMO mode."
+                "Mamba-3 MIMO kernels are unavailable. Install TileLang to enable `is_mimo=True`."
             )
 
         if rope_fraction not in (0.5, 1.0):
@@ -135,7 +129,7 @@ class Mamba3(nn.Module):
         if self.num_rope_angles <= 0:
             raise ValueError("`state_size * rope_fraction` is too small to produce any rotary angle.")
 
-        # projection order: [z, x, B, C, dd_dt, dd_A, trap, angles]
+        # in_proj layout: [z, x, B, C, dd_dt, dd_A, trap, angles]
         self.d_in_proj = (
             2 * self.intermediate_size
             + 2 * self.ssm_state_size * self.n_groups * self.mimo_rank
@@ -144,7 +138,7 @@ class Mamba3(nn.Module):
         )
         self.in_proj = nn.Linear(self.hidden_size, self.d_in_proj, bias=use_bias, **factory_kwargs)
 
-        # dt bias parameterisation (inverse of softplus on sampled dt)
+        # dt_bias = inv_softplus(dt), dt sampled log-uniform in [dt_min, dt_max]
         dt = torch.exp(
             torch.rand(self.num_heads, device=device, dtype=torch.float32)
             * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
@@ -154,15 +148,10 @@ class Mamba3(nn.Module):
         self.dt_bias = nn.Parameter(inv_dt)
         self.dt_bias._no_weight_decay = True
 
-        # input-independent per-head B and C biases (initialised to 1)
-        self.B_bias = nn.Parameter(
-            torch.ones(self.num_heads, self.mimo_rank, self.ssm_state_size, device=device, dtype=torch.float32)
-        )
-        self.C_bias = nn.Parameter(
-            torch.ones(self.num_heads, self.mimo_rank, self.ssm_state_size, device=device, dtype=torch.float32)
-        )
+        bias_shape = (self.num_heads, self.mimo_rank, self.ssm_state_size)
+        self.B_bias = nn.Parameter(torch.ones(bias_shape, device=device, dtype=torch.float32))
+        self.C_bias = nn.Parameter(torch.ones(bias_shape, device=device, dtype=torch.float32))
 
-        # RMSNorm applied to B and C before the SSM scan
         self.B_norm = RMSNormGated(self.ssm_state_size, eps=norm_eps, **factory_kwargs)
         self.C_norm = RMSNormGated(self.ssm_state_size, eps=norm_eps, **factory_kwargs)
 
@@ -220,31 +209,22 @@ class Mamba3(nn.Module):
         use_cache: bool = False,
         cu_seqlens: torch.Tensor | None = None,
     ):
-        # Gate kernel availability per active mode so the SISO path works even
-        # without MIMO kernels (and vice versa).
-        if self.is_mimo:
-            if mamba3_mimo_combined is None:
-                raise RuntimeError(
-                    "Mamba-3 MIMO kernels are unavailable. Install TileLang to enable `is_mimo=True`."
-                )
-        else:
-            if mamba3_siso_combined is None:
-                raise RuntimeError(
-                    "Mamba-3 SISO kernels are unavailable. Please install `mamba_ssm` with Mamba-3 support."
-                )
-
-        if last_state is not None and hidden_states.shape[1] != 1:
-            raise ValueError("Mamba-3 cached decoding only supports a single new token per step.")
+        if self.is_mimo and mamba3_mimo_combined is None:
+            raise RuntimeError(
+                "Mamba-3 MIMO kernels are unavailable. Install TileLang to enable `is_mimo=True`."
+            )
+        if not self.is_mimo and mamba3_siso_combined is None:
+            raise RuntimeError(
+                "Mamba-3 SISO kernels are unavailable. Install `mamba_ssm` with Mamba-3 support."
+            )
 
         if last_state is not None:
+            if hidden_states.shape[1] != 1:
+                raise ValueError("Mamba-3 cached decoding only supports a single new token per step.")
             angle_state, ssm_state, k_state, v_state = last_state['recurrent_state']
-            out = self.step(
-                hidden_states,
-                angle_state=angle_state,
-                ssm_state=ssm_state,
-                k_state=k_state,
-                v_state=v_state,
-            )
+            out = self.step(hidden_states, angle_state, ssm_state, k_state, v_state)
+            # `step` mutates the cached states in place; return them so the cache
+            # offset advances by one.
             return out, (angle_state, ssm_state, k_state, v_state)
 
         z, x, B, C, dd_dt, dd_A, trap, angles = self._project_and_split(hidden_states)
@@ -254,19 +234,17 @@ class Mamba3(nn.Module):
         C = rearrange(C, "b l (r g n) -> b l r g n", r=self.mimo_rank, g=self.n_groups)
         trap = rearrange(trap, "b l h -> b h l")
 
-        A = -F.softplus(dd_A.to(torch.float32))
-        A = torch.clamp(A, max=-self.A_floor)
+        A = -F.softplus(dd_A.to(torch.float32)).clamp(max=-self.A_floor)
         DT = F.softplus(dd_dt + self.dt_bias)
         ADT = A * DT
         DT = rearrange(DT, "b l n -> b n l")
         ADT = rearrange(ADT, "b l n -> b n l")
 
+        # Kernels expect angles as fp32 broadcast over heads.
         angles = angles.unsqueeze(-2).expand(-1, -1, self.num_heads, -1).to(torch.float32)
 
         B = self.B_norm(B)
         C = self.C_norm(C)
-
-        return_state = use_cache
 
         if self.is_mimo:
             y = mamba3_mimo_combined(
@@ -287,12 +265,12 @@ class Mamba3(nn.Module):
                 chunk_size=self.chunk_size,
                 rotary_dim_divisor=self.rotary_dim_divisor,
                 dtype=x.dtype,
-                return_state=return_state,
+                return_state=use_cache,
                 cu_seqlens=cu_seqlens,
             )
             last_angle = last_ssm = last_k = last_v = None
-            if return_state:
-                y, last_angle, last_ssm, last_k, last_v, *_ = y
+            if use_cache:
+                y, last_angle, last_ssm, last_k, last_v = y
             if self.is_outproj_norm:
                 z_r = torch.einsum("blhp,hrp->blrhp", z.float(), self.mimo_z)
                 z_r = rearrange(z_r, "b l r h p -> b l r (h p)")
@@ -316,37 +294,31 @@ class Mamba3(nn.Module):
                 Z=z if not self.is_outproj_norm else None,
                 chunk_size=self.chunk_size,
                 Input_States=None,
-                return_final_states=return_state,
+                return_final_states=use_cache,
                 cu_seqlens=cu_seqlens,
             )
             last_angle = last_ssm = last_k = last_v = None
-            if return_state:
-                y, last_angle, last_ssm, last_k, last_v, *_ = y
+            if use_cache:
+                y, last_angle, last_ssm, last_k, last_v = y
+                # SISO returns K state without rank dim; align with step() layout.
                 last_k = last_k.unsqueeze(1)
             y = rearrange(y, "b l h p -> b l (h p)")
             if self.is_outproj_norm:
-                z_flat = rearrange(z, "b l h p -> b l (h p)")
-                y = self.norm(y, z_flat)
+                y = self.norm(y, rearrange(z, "b l h p -> b l (h p)"))
 
         out = self.out_proj(y.to(x.dtype))
-
-        new_state = None
-        if return_state:
-            new_state = (last_angle, last_ssm, last_k, last_v)
+        new_state = (last_angle, last_ssm, last_k, last_v) if use_cache else None
         return out, new_state
 
     def _preprocess_step(self, dd_A, dd_dt, B, C, x, z, trap_proj, angle_proj):
-        A = -F.softplus(dd_A.to(torch.float32))
-        A = torch.clamp(A, max=-self.A_floor)
+        A = -F.softplus(dd_A.to(torch.float32)).clamp(max=-self.A_floor)
         DT = F.softplus(dd_dt + self.dt_bias)
         trap = torch.sigmoid(trap_proj)
 
         B = rearrange(B, "b (r g s) -> b r g s", g=self.n_groups, r=self.mimo_rank)
         C = rearrange(C, "b (r g s) -> b r g s", g=self.n_groups, r=self.mimo_rank)
-        B = self.B_norm(B)
-        C = self.C_norm(C)
-        B = B.expand(-1, -1, self.num_heads, -1)
-        C = C.expand(-1, -1, self.num_heads, -1)
+        B = self.B_norm(B).expand(-1, -1, self.num_heads, -1)
+        C = self.C_norm(C).expand(-1, -1, self.num_heads, -1)
 
         x = rearrange(x, "b (h p) -> b h p", p=self.head_dim)
         z = rearrange(z, "b (h p) -> b h p", p=self.head_dim)
@@ -354,14 +326,17 @@ class Mamba3(nn.Module):
         angles = angle_proj.unsqueeze(-2).expand(-1, self.num_heads, -1)
         return DT, B, C, x, z, trap, A, angles
 
-    def _postprocess_mimo_outproj_norm(self, y, z, zproj, outproj):
-        z_r = torch.einsum("bhp,rhp->brhp", z.float(), zproj)
-        z_r = rearrange(z_r, "b r h p -> b r (h p)")
-        y = rearrange(y, "b r h p -> b r (h p)").float()
-        y = self.norm(y, z_r)
-        y = rearrange(y, "b r (h p) -> b r h p", p=self.head_dim)
-        y = torch.einsum("brhp,rhp->bhp", y, outproj)
-        return y
+    def _step_mimo_projections(self, x_dtype: torch.dtype, z_dtype: torch.dtype):
+        if self.is_mimo:
+            xpj = rearrange(self.mimo_x, "h r p -> r h p", p=self.head_dim).contiguous()
+            zpj = rearrange(self.mimo_z, "h r p -> r h p", p=self.head_dim).contiguous()
+            outpj = rearrange(self.mimo_o, "h r p -> r h p", p=self.head_dim).contiguous()
+            return xpj, zpj, outpj
+        # SISO: pass identity-style ones tensors so the kernel signature stays uniform.
+        shape = (self.mimo_rank, self.num_heads, self.head_dim)
+        xpj = torch.ones(shape, device=self.in_proj.weight.device, dtype=x_dtype)
+        zpj = torch.ones(shape, device=self.in_proj.weight.device, dtype=z_dtype)
+        return xpj, zpj, xpj
 
     def step(
         self,
@@ -374,50 +349,39 @@ class Mamba3(nn.Module):
         if mamba3_step_fn is None or apply_rotary_qk_inference_fwd is None:
             raise RuntimeError(
                 "Mamba-3 decode kernels are not available. "
-                "Please install `nvidia-cutlass-dsl` and `quack-kernels`."
+                "Install `nvidia-cutlass-dsl` and `quack-kernels`."
             )
         if hidden_states.shape[1] != 1:
             raise ValueError("Mamba-3 cached decoding only supports a single new token per step.")
 
-        u = hidden_states.squeeze(1)
-        z, x, B, C, dd_dt, dd_A, trap, angles = self._project_and_split(u)
-
-        DT, B, C, x, z, trap, A, angles = self._preprocess_step(
-            dd_A, dd_dt, B, C, x, z, trap, angles,
-        )
+        z, x, B, C, dd_dt, dd_A, trap, angles = self._project_and_split(hidden_states.squeeze(1))
+        DT, B, C, x, z, trap, A, angles = self._preprocess_step(dd_A, dd_dt, B, C, x, z, trap, angles)
 
         bias_q = rearrange(self.C_bias, "h r n -> r h n")
         bias_k = rearrange(self.B_bias, "h r n -> r h n")
-
-        rotate_pairwise = not self.is_mimo
+        # MIMO TileLang kernel rotates the (i, i+N//2) pair instead of (i, i+1).
         C, B, nxt_angle_state = apply_rotary_qk_inference_fwd(
             q=C, k=B, angle_state=angle_state,
             angle_proj=angles, dt=DT, bias_q=bias_q, bias_k=bias_k,
             conjugate=False, inplace=False,
-            rotate_pairwise=rotate_pairwise,
+            rotate_pairwise=not self.is_mimo,
         )
 
-        nxt_v_state = x
-        nxt_k_state = B
-
-        if self.is_mimo:
-            xpj = rearrange(self.mimo_x, "h r p -> r h p", p=self.head_dim).contiguous()
-            zpj = rearrange(self.mimo_z, "h r p -> r h p", p=self.head_dim).contiguous()
-            outpj = rearrange(self.mimo_o, "h r p -> r h p", p=self.head_dim).contiguous()
-        else:
-            xpj = torch.ones(self.mimo_rank, self.num_heads, self.head_dim, device=x.device, dtype=x.dtype)
-            zpj = torch.ones(self.mimo_rank, self.num_heads, self.head_dim, device=z.device, dtype=z.dtype)
-            outpj = torch.ones(self.mimo_rank, self.num_heads, self.head_dim, device=x.device, dtype=x.dtype)
+        nxt_k_state, nxt_v_state = B, x
+        xpj, zpj, outpj = self._step_mimo_projections(x.dtype, z.dtype)
 
         if self.is_outproj_norm:
-            batch = x.shape[0]
-            y = torch.empty(batch, self.mimo_rank, self.num_heads, self.head_dim, device=x.device, dtype=x.dtype)
+            y = torch.empty(x.shape[0], self.mimo_rank, self.num_heads, self.head_dim,
+                            device=x.device, dtype=x.dtype)
             mamba3_step_fn(
                 ssm_state, k_state, v_state, A, B, C, self.D, x, DT, trap, xpj,
                 outproj=None, state_out=None, out=y, z=None, zproj=None,
                 tile_D=64, num_warps=4,
             )
-            y = self._postprocess_mimo_outproj_norm(y, z, zpj, outpj)
+            z_r = rearrange(torch.einsum("bhp,rhp->brhp", z.float(), zpj), "b r h p -> b r (h p)")
+            y = self.norm(rearrange(y, "b r h p -> b r (h p)").float(), z_r)
+            y = rearrange(y, "b r (h p) -> b r h p", p=self.head_dim)
+            y = torch.einsum("brhp,rhp->bhp", y, outpj)
         else:
             y = torch.empty_like(x)
             mamba3_step_fn(
@@ -426,9 +390,7 @@ class Mamba3(nn.Module):
                 tile_D=64, num_warps=4,
             )
 
-        out = rearrange(y, "b h p -> b (h p)")
-        out = self.out_proj(out.to(x.dtype))
-
+        out = self.out_proj(rearrange(y, "b h p -> b (h p)").to(x.dtype))
         angle_state.copy_(nxt_angle_state)
         k_state.copy_(nxt_k_state)
         v_state.copy_(nxt_v_state)
@@ -444,34 +406,24 @@ class Mamba3(nn.Module):
         cu_seqlens: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
-        last_state = get_layer_cache(self, past_key_values)
-
         if "cuda" not in self.in_proj.weight.device.type:
             raise NotImplementedError("Mamba-3 currently requires a CUDA device.")
 
-        if attention_mask is not None:
-            assert attention_mask.dim() == 2, (
-                "Expected attention_mask as a 0/1 tensor with shape [batch_size, seq_len] "
-                "for padding purposes. Arbitrary 3-D masks are not supported."
+        if attention_mask is not None and attention_mask.dim() != 2:
+            raise ValueError(
+                "Expected attention_mask of shape [batch_size, seq_len]; arbitrary masks are not supported."
             )
 
+        last_state = get_layer_cache(self, past_key_values)
         batch_size, q_len, _ = hidden_states.shape
 
-        # Decode step (q_len == 1) is handled inside cuda_kernels_forward and does
-        # not need unpadding; only prefill takes the varlen packing path.
+        # Prefill with padding mask: pack [B, T, D] -> [1, sum(lens), D] so the
+        # upstream varlen kernels (which require batch=1) can consume it.
         indices_q = None
-        if (
-            last_state is None
-            and cu_seqlens is None
-            and attention_mask is not None
-            and q_len > 1
-        ):
-            # Upstream SISO/MIMO kernels require batch=1 plus cu_seqlens in
-            # varlen mode; pack [B, T, D] -> [1, total_valid_tokens, D].
+        if last_state is None and cu_seqlens is None and attention_mask is not None and q_len > 1:
             indices_q, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(
-                rearrange(hidden_states, "b s ... -> (b s) ..."),
-                indices_q,
+                rearrange(hidden_states, "b s ... -> (b s) ..."), indices_q,
             ).unsqueeze(0)
 
         output, new_state = self.cuda_kernels_forward(
@@ -482,12 +434,7 @@ class Mamba3(nn.Module):
         )
 
         if new_state is not None:
-            update_layer_cache(
-                self,
-                past_key_values,
-                recurrent_state=new_state,
-                offset=q_len,
-            )
+            update_layer_cache(self, past_key_values, recurrent_state=new_state, offset=q_len)
 
         if indices_q is not None:
             output = pad_input(output.squeeze(0), indices_q, batch_size, q_len)
@@ -501,19 +448,13 @@ class Mamba3(nn.Module):
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
-        device = self.in_proj.weight.device if device is None else device
-        dtype = self.in_proj.weight.dtype if dtype is None else dtype
-
-        angle_state = torch.zeros(
-            (batch_size, self.num_heads, self.num_rope_angles), device=device, dtype=torch.float32,
-        )
-        ssm_state = torch.zeros(
-            (batch_size, self.num_heads, self.head_dim, self.ssm_state_size), device=device, dtype=torch.float32,
-        )
-        k_state = torch.zeros(
-            (batch_size, self.mimo_rank, self.num_heads, self.ssm_state_size), device=device, dtype=dtype,
-        )
-        v_state = torch.zeros(
-            (batch_size, self.num_heads, self.head_dim), device=device, dtype=dtype,
-        )
+        device = device or self.in_proj.weight.device
+        dtype = dtype or self.in_proj.weight.dtype
+        angle_state = torch.zeros(batch_size, self.num_heads, self.num_rope_angles,
+                                  device=device, dtype=torch.float32)
+        ssm_state = torch.zeros(batch_size, self.num_heads, self.head_dim, self.ssm_state_size,
+                                device=device, dtype=torch.float32)
+        k_state = torch.zeros(batch_size, self.mimo_rank, self.num_heads, self.ssm_state_size,
+                              device=device, dtype=dtype)
+        v_state = torch.zeros(batch_size, self.num_heads, self.head_dim, device=device, dtype=dtype)
         return angle_state, ssm_state, k_state, v_state
