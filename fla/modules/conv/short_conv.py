@@ -210,7 +210,7 @@ class ShortConvolution(nn.Conv1d):
 
         B, _, D, W = *x.shape, self.kernel_size[0]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
-        if output_final_state and cache is None:
+        if cache is None:
             cache = x.new_zeros(N, D, W)
         # NOTE: we follow the fast mode that updates the cache in-place
         if self.backend == 'triton':
