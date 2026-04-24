@@ -225,7 +225,7 @@ class ShortConvolution(nn.Conv1d):
                 bias=self.bias,
                 activation=self.activation,
             )
-            return y, cache if output_final_state else None
+            return y, (cache if output_final_state else None)
 
         shape = x.shape
         x = x.squeeze(0) if cu_seqlens is not None else x.squeeze(1)
@@ -243,7 +243,7 @@ class ShortConvolution(nn.Conv1d):
         y = y.view(shape)
         if residual is not None:
             y.add_(residual)
-        return y, cache if output_final_state else None
+        return y, (cache if output_final_state else None)
 
     @property
     def state_size(self) -> int:
