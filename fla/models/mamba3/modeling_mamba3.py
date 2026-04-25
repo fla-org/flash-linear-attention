@@ -135,7 +135,7 @@ class Mamba3PreTrainedModel(PreTrainedModel):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
                 if hasattr(module.bias, "_no_reinit"):
-                    raise ValueError("This is not supposed to happen")
+                raise ValueError(f"Bias of {module} has '_no_reinit' attribute, which is unexpected during initialization.")
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
         elif hasattr(module, 'reset_parameters'):
