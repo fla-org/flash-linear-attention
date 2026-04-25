@@ -145,7 +145,7 @@ class Mamba3PreTrainedModel(PreTrainedModel):
             # GPT-2 residual scaling: 1/sqrt(N) over the depth.
             p = None
             if hasattr(module, 'o_proj'):
-                raise ValueError("This is not supposed to happen")
+                raise ValueError(f"Module {module} unexpectedly has 'o_proj' attribute; Mamba-3 should use 'out_proj'.")
             elif hasattr(module, 'out_proj'):
                 p = module.out_proj.weight
             elif hasattr(module, 'down_proj'):
