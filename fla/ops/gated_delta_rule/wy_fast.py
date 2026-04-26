@@ -202,6 +202,9 @@ def prepare_wy_repr_bwd_kernel(
             b_dk = b_dkbg * (b_g_exp * b_b)[:, None]
             b_db += tl.sum(b_dkbg * b_k * b_g_exp[:, None], 1)
             b_dg += tl.sum(b_dkbg * b_kbg, 1)
+        else:
+            b_dk = b_dkbg * b_b[:, None]
+            b_db += tl.sum(b_dkbg * b_k, 1)
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 
     for i_v in range(tl.cdiv(V, BV)):
