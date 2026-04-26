@@ -56,7 +56,7 @@ def fused_recurrent_simple_gla(
             Whether to use the transposed `[N, H, V, K]` layout for the hidden state,
             instead of the default `[N, H, K, V]`.
             Useful for inference backends that expect a V-major state.
-            `initial_state`, `output_final_state`, and `dh0`/`dht` all follow the chosen layout.
+            `initial_state`, `final_state`, and `dh0`/`dht` all follow the chosen layout.
             Default: `False`.
 
     Returns:
