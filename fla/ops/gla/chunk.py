@@ -23,7 +23,7 @@ BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BK': BK}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64]
@@ -98,7 +98,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
@@ -173,7 +173,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
@@ -250,7 +250,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=1),
         triton.Config({}, num_warps=2),
@@ -396,7 +396,7 @@ def chunk_gla_fwd_kernel_o(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
@@ -532,7 +532,7 @@ def chunk_gla_bwd_kernel_intra(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
@@ -583,7 +583,7 @@ def chunk_gla_bwd_kernel_dA(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in BK_LIST
@@ -661,7 +661,7 @@ def chunk_gla_bwd_kernel_dv(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
         for BK in BK_LIST
