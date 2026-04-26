@@ -257,6 +257,7 @@ jobs:
     if: (success() || failure()) && inputs.skip_models_tests == false
     env:
       FLA_CI_ENV: 1
+      FLA_DISABLE_BACKEND_DISPATCH: "1"
 
     steps:
       - name: Check out repo
@@ -383,8 +384,6 @@ jobs:
               if [[ "${{ inputs.runner }}" == nvidia-h100* ]]; then
                 echo "Installing flash-attn for NVIDIA"
                 $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
-                echo "Installing tilelang for NVIDIA H100"
-                $CONDA_BIN_PATH/pip install "apache-tvm-ffi<=0.1.9" tilelang -f https://tile-ai.github.io/whl/nightly
               fi
             fi
           elif [ "${{ inputs.gpu_type }}" = "intel" ]; then
