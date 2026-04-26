@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable)
 
 
+_DISPATCH_DISABLED = os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1"
+if _DISPATCH_DISABLED:
+    logger.info("[FLA Backend] FLA_DISABLE_BACKEND_DISPATCH=1 — all dispatch bypassed")
+
+
 class BaseBackend:
     """Base class for operation-specific backends.
 
@@ -138,6 +143,8 @@ def dispatch(operation: str):
     that passes the verifier for the given function call.
     """
     def decorator(func: F) -> F:
+        if _DISPATCH_DISABLED:
+            return func
         func_name = func.__name__
 
         @wraps(func)
@@ -157,8 +164,15 @@ def dispatch(operation: str):
                 if not be.can_use():
                     continue
 
-                can_use, _ = be.verify(func_name, *args, **kwargs)
+                can_use, reason = be.verify(func_name, *args, **kwargs)
                 if not can_use:
+                    fail_key = f"{operation}:{func_name}:{be.backend_type}:fail"
+                    if fail_key not in registry._logged:
+                        registry._logged.add(fail_key)
+                        logger.info(
+                            f"[FLA Backend] {operation}.{func_name} -> {be.backend_type} "
+                            f"rejected: {reason}"
+                        )
                     continue
 
                 impl = getattr(be, func_name, None)
@@ -169,10 +183,8 @@ def dispatch(operation: str):
 
                 log_key = f"{operation}:{func_name}:{be.backend_type}"
                 if log_key not in registry._logged:
-                    with registry._lock:
-                        if log_key not in registry._logged:
-                            registry._logged.add(log_key)
-                            logger.info(f"[FLA Backend] {operation}.{func_name} -> {be.backend_type}")
+                    registry._logged.add(log_key)
+                    logger.info(f"[FLA Backend] {operation}.{func_name} -> {be.backend_type}")
 
                 return result
 

@@ -22,6 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]
 benchmark = ["matplotlib", "datasets>=3.3.0"]
 test = ["pytest"]
@@ -88,6 +89,14 @@ extend-select = ["RUF022"]
 [tool.ruff.lint.isort]
 known-first-party = ["fla"]
 force-sort-within-sections = false
+
+[tool.isort]
+profile = "black"
+line_length = 127
+known_first_party = ["fla"]
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]

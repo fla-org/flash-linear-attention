@@ -13,7 +13,6 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.utils import input_guard
 
 from .kernels import (
-    STATIC_WARPS,
     causal_conv1d_bwd_kernel,
     causal_conv1d_fwd_kernel,
     causal_conv1d_states_fwd_kernel,
@@ -289,7 +288,6 @@ def causal_conv1d_update(
     D = x.shape[-1]
     N = x.numel() // D
     W = weight.shape[1] if weight is not None else None
-    BD = 8
     BW = triton.next_power_of_2(W)
 
     if x.dim() == 2:
@@ -334,10 +332,8 @@ def causal_conv1d_update(
         stride_y_d=stride_y_d,
         D=D,
         W=W,
-        BD=BD,
         BW=BW,
         ACTIVATION=activation,
-        num_warps=STATIC_WARPS,
     )
     return y.view(shape), cache
 

@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
@@ -73,7 +74,7 @@ def naive_kda_lowerbound_gate(
     "HAS_BETA": lambda args: args["beta"] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({"BT": BT}, num_warps=num_warps, num_stages=num_stages)
         for BT in BT_LIST_AUTOTUNE
@@ -130,7 +131,7 @@ def kda_gate_fwd_kernel(
     "HAS_BETA": lambda args: args["beta"] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS_AUTOTUNE
@@ -343,13 +344,101 @@ def fused_kda_gate(
     return KDAGateFunction.apply(g, A_log, dt_bias, lower_bound, output_dtype)
 
 
+@triton.jit
+def beta_sigmoid_fwd_kernel(
+    x,
+    y,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    mask = offs < n_elements
+    b_x = tl.load(x + offs, mask=mask, other=0).to(tl.float32)
+    b_y = tl.sigmoid(b_x)
+    tl.store(y + offs, b_y.to(y.dtype.element_ty), mask=mask)
+
+
+@triton.jit
+def beta_sigmoid_bwd_kernel(
+    x,
+    dy,
+    dx,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    mask = offs < n_elements
+    b_x = tl.load(x + offs, mask=mask, other=0).to(tl.float32)
+    b_dy = tl.load(dy + offs, mask=mask, other=0).to(tl.float32)
+    b_y = tl.sigmoid(b_x)
+    b_dx = b_dy * b_y * (1.0 - b_y)
+    tl.store(dx + offs, b_dx.to(dx.dtype.element_ty), mask=mask)
+
+
+_BETA_SIGMOID_BLOCK_SIZE = 2048
+_BETA_SIGMOID_NUM_WARPS = 8
+
+
+def beta_sigmoid_fwd(x: torch.Tensor) -> torch.Tensor:
+    y = torch.empty_like(x, dtype=torch.float32)
+    n_elements = x.numel()
+    grid = (triton.cdiv(n_elements, _BETA_SIGMOID_BLOCK_SIZE),)
+    beta_sigmoid_fwd_kernel[grid](
+        x,
+        y,
+        n_elements,
+        BLOCK_SIZE=_BETA_SIGMOID_BLOCK_SIZE,
+        num_warps=_BETA_SIGMOID_NUM_WARPS,
+    )
+    return y
+
+
+def beta_sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
+    dx = torch.empty_like(x)
+    n_elements = x.numel()
+    grid = (triton.cdiv(n_elements, _BETA_SIGMOID_BLOCK_SIZE),)
+    beta_sigmoid_bwd_kernel[grid](
+        x,
+        dy,
+        dx,
+        n_elements,
+        BLOCK_SIZE=_BETA_SIGMOID_BLOCK_SIZE,
+        num_warps=_BETA_SIGMOID_NUM_WARPS,
+    )
+    return dx
+
+
+class BetaSigmoidFunction(torch.autograd.Function):
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        y = beta_sigmoid_fwd(x)
+        ctx.save_for_backward(x)
+        return y
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    def backward(ctx, dy: torch.Tensor):
+        (x,) = ctx.saved_tensors
+        dx = beta_sigmoid_bwd(x, dy)
+        return dx.type_as(x)
+
+
+def fused_beta_sigmoid(x: torch.Tensor) -> torch.Tensor:
+    return BetaSigmoidFunction.apply(x)
+
+
 @triton.heuristics({
     "HAS_BIAS": lambda args: args["dt_bias"] is not None,
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BS': BS}, num_warps=num_warps)
         for BS in BS_LIST

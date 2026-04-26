@@ -22,6 +22,7 @@ from fla.layers import (
     LightNetAttention,
     LinearAttention,
     LogLinearMamba2,
+    Mamba3,
     MesaNet,
     MoBA,
     MomAttention,
@@ -63,6 +64,8 @@ from fla.models import (
     LinearAttentionModel,
     LogLinearMamba2ForCausalLM,
     LogLinearMamba2Model,
+    Mamba3ForCausalLM,
+    Mamba3Model,
     MesaNetForCausalLM,
     MesaNetModel,
     MLAForCausalLM,
@@ -136,6 +139,9 @@ __all__ = [
     "LogLinearMamba2Model",
     "MLAForCausalLM",
     "MLAModel",
+    "Mamba3",
+    "Mamba3ForCausalLM",
+    "Mamba3Model",
     "MesaNet",
     "MesaNetForCausalLM",
     "MesaNetModel",
@@ -171,4 +177,4 @@ __all__ = [
     "YOCOModel",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"

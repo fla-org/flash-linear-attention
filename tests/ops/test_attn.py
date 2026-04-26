@@ -65,6 +65,57 @@ def test_parallel(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'scale'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 1.0),
+            (3, 111, 2, 2, 100, 1.0),
+            (3, 1024, 2, 8, 60, 0.1),
+        ]
+    ],
+)
+def test_parallel_with_g(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    D: int,
+    scale: float,
+):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shard mem")
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    g = torch.randn((B, T, HQ), dtype=torch.float16, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device)
+
+    ref, _ = naive_parallel_attn(q=q.float(), k=k.float(), v=v.float(), g=g.float(), scale=scale)
+    ref = ref.to(q.dtype)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dg, g.grad = g.grad.clone(), None
+
+    tri = parallel_attn(q=q, k=k, v=v, g=g, scale=scale)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dg, g.grad = g.grad.clone(), None
+
+    assert_close(" o", ref, tri, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.005)
+    assert_close("dk", ref_dk, tri_dk, 0.005)
+    assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close("dg", ref_dg, tri_dg, 0.005)
+
+
+@pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'cu_seqlens'),
     [
         pytest.param(*test, id="H{}-HQ{}-D{}-cu_seqlens{}".format(*test))
@@ -169,6 +220,51 @@ def test_parallel_swa(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64),
+            (3, 111, 2, 2, 100),
+            (3, 1024, 2, 8, 128),
+        ]
+    ],
+)
+def test_parallel_sink(B: int, T: int, H: int, HQ: int, D: int):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shard mem")
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    q = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=torch.float16, device=device).requires_grad_(True)
+    sink_bias = torch.randn((HQ,), dtype=torch.float32, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=torch.float16, device=device)
+
+    ref, _ = naive_parallel_attn(
+        q=q.float(), k=k.float(), v=v.float(), sink_bias=sink_bias)
+    ref = ref.to(q.dtype)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+    ref_dsink, sink_bias.grad = sink_bias.grad.clone(), None
+
+    tri = parallel_attn(q=q, k=k, v=v, sink_bias=sink_bias)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+    tri_dsink, sink_bias.grad = sink_bias.grad.clone(), None
+
+    assert_close(" o", ref, tri, 0.005)
+    assert_close("dq", ref_dq, tri_dq, 0.005)
+    assert_close("dk", ref_dk, tri_dk, 0.005)
+    assert_close("dv", ref_dv, tri_dv, 0.005)
+    assert_close("dsink", ref_dsink, tri_dsink, 0.005)
+
+
+@pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'W', 'cu_seqlens'),
     [
         pytest.param(*test, id="H{}-HQ{}-D{}-W{}-cu_seqlens{}".format(*test))
@@ -225,3 +321,31 @@ def test_parallel_swa_varlen(
     assert_close("dq", ref_dq, tri_dq, 0.005)
     assert_close("dk", ref_dk, tri_dk, 0.005)
     assert_close("dv", ref_dv, tri_dv, 0.005)
+
+
+@pytest.mark.parametrize('D', [64, 100, 128])
+@pytest.mark.parametrize('cu_seqlens', [
+    [0, 15, 30],        # two short seqs
+    [0, 200, 400],      # two medium seqs
+])
+def test_varlen_d_debug(cu_seqlens, D):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    H, HQ = 2, 2
+    T = cu_seqlens[-1]
+    cu = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    dtype = torch.float16
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_()
+
+    ref = q.new_empty(1, T, HQ, D)
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
+        ref[:, bos:eos], _ = naive_parallel_attn(
+            q=q[:, bos:eos].float(),
+            k=k[:, bos:eos].float(),
+            v=v[:, bos:eos].float(),
+        )
+    ref = ref.to(dtype)
+    tri = parallel_attn(q=q, k=k, v=v, cu_seqlens=cu)
+    assert_close(" o", ref, tri, 0.005)

@@ -7,6 +7,8 @@
 
 """End-to-end cache tests for intracard CP via chunk_kda."""
 
+import os
+
 import pytest
 import torch
 
@@ -23,6 +25,7 @@ def clear_intracard_cache():
     _intracard_cache.clear()
 
 
+@pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_chunk_kda_intracard_cache_hit_same_cu_seqlens_object(monkeypatch):
     """E2E: chunk_kda should reuse intracard precompute cache on second call.
@@ -123,6 +126,7 @@ def test_intracard_backend_enabled_when_env_var_is_one(monkeypatch):
     assert IntraCardCPBackend.is_enabled() is True
 
 
+@pytest.mark.skipif(os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") == "1", reason="backend dispatch disabled")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_chunk_gdn_intracard_gqa(monkeypatch):
     """E2E: chunk_gated_delta_rule intracard path produces correct results with GQA (Hq < H).

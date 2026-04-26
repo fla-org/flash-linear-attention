@@ -7,6 +7,7 @@
 
 import ast
 import os
+import re
 import sys
 from collections import defaultdict
 from functools import cache
@@ -63,6 +64,67 @@ def get_imports_from_tree(tree) -> set:
                 asname = alias.asname
                 imports.add((module, asname or name))
     return imports
+
+
+def is_backend_class(node) -> bool:
+    """Check if an AST node is a class inheriting from BaseBackend."""
+    if not isinstance(node, ast.ClassDef):
+        return False
+    for base in node.bases:
+        if isinstance(base, ast.Name) and base.id == 'BaseBackend':
+            return True
+        if isinstance(base, ast.Attribute) and base.attr == 'BaseBackend':
+            return True
+    return False
+
+
+def get_backend_methods_from_dir(backend_dir: Path) -> set:
+    """Scan all .py files in a backend directory to find dispatch method names."""
+    methods = set()
+    for py_file in backend_dir.rglob('*.py'):
+        tree = parse_file(py_file)
+        if not tree:
+            continue
+        for node in ast.walk(tree):
+            if is_backend_class(node):
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        name = item.name
+                        if name.endswith('_verifier'):
+                            methods.add(name[:-9])
+                        elif not name.startswith('_') and name not in (
+                            'is_available', 'is_enabled', 'can_use', 'verify'
+                        ):
+                            methods.add(name)
+    return methods
+
+
+def find_dispatch_op_files(methods: set, project_root: Path) -> list:
+    """Find all files in fla/ that define a function with @dispatch and name in methods."""
+    op_files = []
+    fla_dir = project_root / 'fla'
+    if not fla_dir.exists():
+        return op_files
+    for py_file in fla_dir.rglob('*.py'):
+        if 'backends' in py_file.parts:
+            continue
+        tree = parse_file(py_file)
+        if not tree:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name in methods:
+                    has_dispatch = False
+                    for dec in node.decorator_list:
+                        if isinstance(dec, ast.Call):
+                            if isinstance(dec.func, ast.Name) and dec.func.id == 'dispatch':
+                                has_dispatch = True
+                        elif isinstance(dec, ast.Name) and dec.id == 'dispatch':
+                            has_dispatch = True
+                    if has_dispatch:
+                        op_files.append(str(py_file.relative_to(project_root)))
+                        break
+    return op_files
 
 
 def file_to_module_path(file_path: Path, project_root: Path) -> str:
@@ -281,6 +343,23 @@ if __name__ == "__main__":
     test_dir = current_dir.parent / "tests"
     search_dir = current_dir.parent / "fla"
     project_root = current_dir.parent
+
+    # If a backend file is changed, map it to the dispatched op files so that
+    # regression tests for the original operation are also triggered.
+    backend_pattern = re.compile(r'^fla/ops/([^/]+)/backends/')
+    additional_files = []
+    for file in changed_files:
+        match = backend_pattern.match(file)
+        if match:
+            operation = match.group(1)
+            backend_dir = project_root / "fla" / "ops" / operation / "backends"
+            if backend_dir.exists():
+                methods = get_backend_methods_from_dir(backend_dir)
+                if methods:
+                    op_files = find_dispatch_op_files(methods, project_root)
+                    additional_files.extend(op_files)
+    if additional_files:
+        changed_files = list(dict.fromkeys(changed_files + additional_files))
 
     finder = DependencyFinder(search_dirs=[search_dir], test_dir=test_dir, project_root=project_root)
     dependent_tests = finder.find_dependent_tests(changed_files)
