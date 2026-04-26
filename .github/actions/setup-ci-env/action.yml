@@ -1,0 +1,188 @@
+name: Setup CI Environment
+description: >
+  Checkout repo, check skip keyword, discover conda, install dependencies,
+  verify environment/GPU, and optionally get changed files.
+
+inputs:
+  runner_name:
+    description: 'The GitHub runner name (e.g. nvidia-h100-1)'
+    required: true
+    type: string
+  conda_env_name:
+    description: 'Base conda environment name'
+    required: true
+    type: string
+  pytorch_version:
+    description: 'The PyTorch version to install (e.g., 2.7.0, nightly)'
+    required: true
+    type: string
+  gpu_type:
+    description: 'The type of GPU (nvidia or intel)'
+    required: true
+    type: string
+  pytorch_cuda_version:
+    description: 'The PyTorch CUDA version (e.g., cu128)'
+    required: false
+    type: string
+    default: 'cu128'
+  nvcc_toolkit_version:
+    description: 'The NVCC toolkit version (e.g., 12.8.1)'
+    required: false
+    type: string
+    default: '12.8.1'
+  install_tilelang:
+    description: 'Whether to install tilelang on H100 runners'
+    required: false
+    type: string
+    default: 'false'
+  skip_gpu_check:
+    description: 'Whether to skip the GPU check'
+    required: false
+    type: string
+    default: 'false'
+
+outputs:
+  skip_tests:
+    description: 'Whether tests should be skipped'
+    value: ${{ steps.check_skip.outputs.skip_tests }}
+  all_changed_files:
+    description: 'Space-separated list of changed files'
+    value: ${{ steps.changed-files.outputs.all_changed_files }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check skip keyword in LATEST commit
+      id: check_skip
+      shell: bash
+      run: |
+        if [ -n "$GITHUB_HEAD_REF" ]; then
+          PR_NUMBER=$(echo "$GITHUB_REF" | awk -F/ '{print $3}')
+          if [ -n "$PR_NUMBER" ] && git fetch origin "refs/pull/${PR_NUMBER}/head" --depth=1 2>/dev/null; then
+            COMMIT_MSG=$(git log -1 --pretty=%s FETCH_HEAD)
+          else
+            echo "Could not fetch PR head ref, falling back to merge commit"
+            COMMIT_MSG=$(git log -1 --pretty=%s HEAD)
+          fi
+        else
+          COMMIT_MSG=$(git log -1 --pretty=%s HEAD)
+        fi
+        echo "Latest commit message: $COMMIT_MSG"
+        if echo "$COMMIT_MSG" | grep -qF "[skip test]"; then
+          echo "::notice::Tests skipped by commit message"
+          echo "skip_tests=true" >> $GITHUB_OUTPUT
+        else
+          echo "skip_tests=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Discover Conda Path and Set Env Vars
+      if: steps.check_skip.outputs.skip_tests == 'false'
+      id: find_conda
+      shell: bash
+      run: |
+        set -e
+
+        TARGET_CONDA_ENV=""
+        if [[ "${{ inputs.runner_name }}" == "nvidia-h100-1" ]]; then
+          TARGET_CONDA_ENV="${{ inputs.conda_env_name }}"
+        elif [[ "${{ inputs.runner_name }}" == "nvidia-h100-2" ]]; then
+          TARGET_CONDA_ENV="${{ inputs.conda_env_name }}_1"
+        elif [[ "${{ inputs.runner_name }}" == "nvidia-h100-3" && ! "${{ inputs.conda_env_name }}" == *"nightly"* ]]; then
+          TARGET_CONDA_ENV="${{ inputs.conda_env_name }}_2"
+        else
+          TARGET_CONDA_ENV="${{ inputs.conda_env_name }}"
+        fi
+        echo "--> Runner is '${{ inputs.runner_name }}', selected environment is '${TARGET_CONDA_ENV}'"
+
+        CONDA_BASE=$(conda info --base 2>/dev/null || true)
+        if [ -z "$CONDA_BASE" ]; then
+          for name in miniforge3 miniconda3 anaconda3; do
+            if [ -d "$HOME/$name" ] && [ -x "$HOME/$name/bin/conda" ]; then
+              CONDA_BASE="$HOME/$name"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$CONDA_BASE" ]; then
+          echo "::error::Could not find Conda installation."
+          exit 1
+        fi
+
+        echo "CONDA=${CONDA_BASE}" >> $GITHUB_ENV
+        echo "CONDA_BIN_PATH=${CONDA_BASE}/envs/${TARGET_CONDA_ENV}/bin" >> $GITHUB_ENV
+        echo "CONDA_ENV_NAME=${TARGET_CONDA_ENV}" >> $GITHUB_ENV
+        echo "CONDA = ${CONDA_BASE}"
+        echo "CONDA_ENV_NAME = ${TARGET_CONDA_ENV}"
+        echo "CONDA_BIN_PATH = ${CONDA_BASE}/envs/${TARGET_CONDA_ENV}/bin"
+
+    - name: Install/Update Dependencies
+      if: steps.check_skip.outputs.skip_tests == 'false'
+      shell: bash
+      run: |
+        $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
+        $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
+
+        echo "Installing PyTorch version: ${{ inputs.pytorch_version }} for GPU: ${{ inputs.gpu_type }}"
+
+        if [ "${{ inputs.gpu_type }}" = "nvidia" ]; then
+          $CONDA/bin/conda install -n $CONDA_ENV_NAME nvidia/label/cuda-${{ inputs.nvcc_toolkit_version }}::cuda-nvcc -y
+          if [ "${{ inputs.pytorch_version }}" = "nightly" ]; then
+            NIGHTLY_URL="https://download.pytorch.org/whl/nightly/${{ inputs.pytorch_cuda_version }}"
+            echo "Using nightly index URL: $NIGHTLY_URL"
+            $CONDA_BIN_PATH/pip install -U torch pytorch-triton --index-url $NIGHTLY_URL
+            $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
+            $CONDA_BIN_PATH/pip install --no-deps .
+          else
+            STABLE_URL="https://download.pytorch.org/whl/${{ inputs.pytorch_cuda_version }}"
+            echo "Using stable index URL: $STABLE_URL"
+            $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} triton --index-url $STABLE_URL
+            $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
+            $CONDA_BIN_PATH/pip install .
+            if [[ "${{ inputs.runner_name }}" == nvidia-h100* ]]; then
+              echo "Installing flash-attn for NVIDIA"
+              $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
+              if [ "${{ inputs.install_tilelang }}" = "true" ]; then
+                echo "Installing tilelang for NVIDIA H100"
+                $CONDA_BIN_PATH/pip uninstall tilelang -y
+                $CONDA_BIN_PATH/pip install tilelang -f https://tile-ai.github.io/whl/nightly
+              fi
+            fi
+          fi
+        elif [ "${{ inputs.gpu_type }}" = "intel" ]; then
+          XPU_URL="https://download.pytorch.org/whl/xpu"
+          echo "Using XPU index URL: $XPU_URL"
+          $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} pytorch-triton-xpu --index-url $XPU_URL
+          $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
+          $CONDA_BIN_PATH/pip install .
+        else
+          echo "::error::Unsupported GPU type: ${{ inputs.gpu_type }}"
+          exit 1
+        fi
+
+    - name: Verify Environment and GPU
+      if: steps.check_skip.outputs.skip_tests == 'false'
+      shell: bash
+      run: |
+        echo "Python executable path: $CONDA_BIN_PATH/python"
+        echo "PyTorch version: $($CONDA_BIN_PATH/python -c 'import torch; print(torch.__version__)')"
+        if [ "${{ inputs.skip_gpu_check }}" = "true" ]; then
+          echo "Skipping GPU check as per input parameter."
+        else
+          echo "Running GPU check..."
+          if $CONDA_BIN_PATH/python -c "import fla; print('FLA imported successfully')"; then
+            echo "FLA is available. Running GPU check."
+            $CONDA_BIN_PATH/python scripts/check_gpu.py
+            if [ $? -ne 0 ]; then
+              echo "::error::GPU is occupied. Stopping the workflow."
+              exit 1
+            fi
+          else
+            echo "::warning::FLA not found or import failed. Skipping dependent GPU check."
+          fi
+        fi
+
+    - name: Get changed files
+      if: steps.check_skip.outputs.skip_tests == 'false'
+      id: changed-files
+      uses: tj-actions/changed-files@v47.0.0
