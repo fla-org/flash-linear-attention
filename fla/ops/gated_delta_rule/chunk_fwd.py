@@ -11,6 +11,7 @@ import triton.language as tl
 
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp, exp2
 from fla.utils import IS_TF32_SUPPORTED, autotune_cache_kwargs
 
@@ -24,7 +25,7 @@ else:
     'USE_G': lambda args: args['g'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BK': BK}, num_warps=num_warps)
         for BK in [32, 64]

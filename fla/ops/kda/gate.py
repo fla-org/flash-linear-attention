@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
@@ -73,7 +74,7 @@ def naive_kda_lowerbound_gate(
     "HAS_BETA": lambda args: args["beta"] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({"BT": BT}, num_warps=num_warps, num_stages=num_stages)
         for BT in BT_LIST_AUTOTUNE
@@ -130,7 +131,7 @@ def kda_gate_fwd_kernel(
     "HAS_BETA": lambda args: args["beta"] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS_AUTOTUNE
@@ -437,7 +438,7 @@ def fused_beta_sigmoid(x: torch.Tensor) -> torch.Tensor:
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_LOWER_BOUND': lambda args: args['lower_bound'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BS': BS}, num_warps=num_warps)
         for BS in BS_LIST

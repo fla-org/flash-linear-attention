@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
@@ -19,7 +20,7 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
@@ -73,7 +74,7 @@ def chunk_local_cumsum_scalar_kernel(
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BS': BS}, num_warps=num_warps)
         for BS in BS_LIST
