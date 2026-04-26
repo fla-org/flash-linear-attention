@@ -31,6 +31,7 @@ With the bug:  all heads read head 0's gk (=0 in both A and B) → dh identical
 With the fix:  heads 1+ read their own gk → dh very different between A and B
 """
 
+import logging
 import os
 import tempfile
 
