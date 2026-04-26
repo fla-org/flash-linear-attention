@@ -31,6 +31,7 @@ With the bug:  all heads read head 0's gk (=0 in both A and B) → dh identical
 With the fix:  heads 1+ read their own gk → dh very different between A and B
 """
 
+import logging
 import os
 import tempfile
 
@@ -41,7 +42,7 @@ import triton
 from fla.ops.cp.chunk_delta_h import pre_process_bwd_kernel_merged
 from fla.utils import device
 
-os.environ["FLA_ALWAYS_CHECK_CACHE"] = "1"
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
 class TestBwdGkOffset:
