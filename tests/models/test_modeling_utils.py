@@ -30,6 +30,7 @@ GENERATION_UNSUPPORTED = [
     "ABCConfig",
     "NSAConfig",
     "DeltaFormerConfig",
+    "MoBAConfig",
 ]
 
 

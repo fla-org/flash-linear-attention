@@ -9,10 +9,11 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.common.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp, exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
@@ -275,7 +276,6 @@ def chunk_bwd_kernel_dqkwg(
     m_t = o_t < T
     m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
     if USE_G:
-        b_dg = tl.zeros([BT], dtype=tl.float32)
         g += bos * HV + i_h
         dg += bos * HV + i_h
         p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
@@ -287,27 +287,25 @@ def chunk_bwd_kernel_dqkwg(
         else:
             b_dg_last *= exp(b_g_last)
             b_dq = b_dq * exp(b_g)[:, None] * scale
-        b_dg += tl.sum(b_dq * b_q, axis=1)
 
         if USE_EXP2:
             b_dk = b_dk * tl.where(m_t, exp2(-b_g + b_g_last), 0)[:, None]
         else:
             b_dk = b_dk * tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None]
-        b_dg -= tl.sum(b_k * b_dk, axis=1)
         b_dg_last += tl.sum(b_dk * b_k)
 
         if USE_EXP2:
             b_ds = tl.where(m_A, b_ds * exp2(b_g[:, None] - b_g[None, :]), 0) * scale
         else:
             b_ds = tl.where(m_A, b_ds * exp(b_g[:, None] - b_g[None, :]), 0) * scale
-        b_ds2 = b_ds * tl.dot(b_q, tl.trans(b_k))
-        b_dg += tl.sum(b_ds2, axis=1)
-        b_dg -= tl.sum(b_ds2, axis=0)
 
         b_ds = b_ds.to(b_k.dtype)
         # [BT, BK]
         b_dq += tl.dot(b_ds, b_k)
         b_dk += tl.dot(tl.trans(b_ds), b_q)
+
+        b_dg = tl.sum(b_dq * b_q, axis=1) - tl.sum(b_dk * b_k, axis=1)
+
         p_dg = tl.make_block_ptr(dg, (T,), (HV,), (i_t * BT,), (BT,), (0,))
         # (SY 09/21) revcumsum in a separate kernel due to strange triton compiler issue
         # b_dg = tl.dot(tl.where(o_t[:, None] <= o_t[None, :], 1., 0.), b_dg, allow_tf32=False) + b_dg_last)
@@ -696,6 +694,7 @@ def chunk_bwd_dv_local(
     return dv
 
 
+@dispatch('common')
 def chunk_bwd_dqkwg(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -714,6 +713,12 @@ def chunk_bwd_dqkwg(
     use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if g is not None and IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0:
+        raise RuntimeError(
+            "Triton >= 3.4.0 on Hopper GPUs produces incorrect results for "
+            "gated chunk_bwd_dqkwg (see #640). Please install tilelang: "
+            "`pip install tilelang`"
+        )
 
     B, T, H, K, V, HV = *k.shape, v.shape[-1], v.shape[2]
     BT = chunk_size

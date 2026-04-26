@@ -19,7 +19,6 @@ from torch.nn import functional as F
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
-from fla.ops.gated_delta_rule.gate import fused_gdn_gate
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -224,7 +223,7 @@ class GatedDeltaNet(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
@@ -279,17 +278,19 @@ class GatedDeltaNet(nn.Module):
                 dt_bias=self.dt_bias,
             )
         elif mode == 'fused_recurrent':
-            g = fused_gdn_gate(g=self.a_proj(hidden_states), A_log=self.A_log, dt_bias=self.dt_bias)
             o, recurrent_state = fused_recurrent_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
-                g=g,
+                g=self.a_proj(hidden_states),
                 beta=beta,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

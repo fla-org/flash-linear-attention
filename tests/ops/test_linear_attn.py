@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
-from fla.ops.linear_attn.naive import naive_recurrent_linear_attn
+from fla.ops.linear_attn.naive import naive_chunk_linear_attn, naive_recurrent_linear_attn
 from fla.utils import assert_close, device
 
 
@@ -64,6 +64,37 @@ def test_fused_recurrent(
     assert_close('dk', ref_dk, tri_dk, 0.001)
     assert_close('dv', ref_dv, tri_dv, 0.001)
     assert_close('dh0', ref_dh0, tri_dh0, 0.001)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'normalize', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-norm{}-{}".format(*test))
+        for test in [
+            (1, 128, 2, 64, False, torch.float),
+            (2, 256, 4, 60, False, torch.float),
+            (1, 128, 2, 64, True, torch.float),
+            (2, 256, 4, 60, True, torch.float),
+        ]
+    ],
+)
+def test_naive_chunk(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    normalize: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device)
+
+    ref, _ = naive_recurrent_linear_attn(q, k, v, normalize=normalize)
+    tri = naive_chunk_linear_attn(q, k, v, normalize=normalize)
+
+    assert_close('o', ref, tri, 1e-3)
 
 
 @pytest.mark.parametrize(
@@ -192,3 +223,37 @@ def test_fused_chunk(
     assert_close('dk', ref_dk, tri_dk, 0.001)
     assert_close('dv', ref_dv, tri_dv, 0.001)
     assert_close('dh0', ref_dh0, tri_dh0, 0.001)
+
+
+@pytest.mark.parametrize(
+    ('fn', 'B', 'T', 'split', 'H', 'D'),
+    [
+        pytest.param(fn, 2, 256, 128, 4, 64, id=f"{name}-split128")
+        for fn, name in [
+            (fused_recurrent_linear_attn, 'fused_recurrent'),
+            (fused_chunk_linear_attn, 'fused_chunk'),
+            (chunk_linear_attn, 'chunk'),
+        ]
+    ],
+)
+def test_normalize_split_resume(fn, B: int, T: int, split: int, H: int, D: int):
+    """Splitting at `split` and resuming via the returned (kv_state, z_state)
+    must reproduce the single-call output when normalize=True."""
+    torch.manual_seed(42)
+    q = torch.randn((B, T, H, D), dtype=torch.float32, device=device)
+    k = torch.randn((B, T, H, D), dtype=torch.float32, device=device)
+    v = torch.randn((B, T, H, D), dtype=torch.float32, device=device)
+
+    o_full, _ = fn(q=q, k=k, v=v, output_final_state=True, normalize=True)
+
+    o_a, state_a = fn(
+        q=q[:, :split], k=k[:, :split], v=v[:, :split],
+        output_final_state=True, normalize=True,
+    )
+    o_b, _ = fn(
+        q=q[:, split:], k=k[:, split:], v=v[:, split:],
+        initial_state=state_a, output_final_state=True, normalize=True,
+    )
+    o_split = torch.cat([o_a, o_b], dim=1)
+
+    assert_close('o', o_full, o_split, 0.002)

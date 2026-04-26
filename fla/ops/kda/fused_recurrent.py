@@ -67,6 +67,7 @@ def fused_recurrent_kda_fwd_kernel(
     HAS_DT_BIAS: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    APPLY_BETA_SIGMOID: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     num_stages: tl.constexpr,
 ):
@@ -154,10 +155,10 @@ def fused_recurrent_kda_fwd_kernel(
         b_g = tl.load(p_g, eviction_policy='evict_last').to(tl.float32)
 
         if USE_GATE_IN_KERNEL:
-            b_A = tl.load(A_log + i_h).to(tl.float32)
+            b_A = tl.load(A_log + i_hv).to(tl.float32)
 
             if HAS_DT_BIAS:
-                b_bias = tl.load(dt_bias + i_h * K + o_k, mask=mask_k, other=0).to(tl.float32)
+                b_bias = tl.load(dt_bias + i_hv * K + o_k, mask=mask_k, other=0).to(tl.float32)
                 b_g = b_g + b_bias
 
             if USE_LOWER_BOUND:
@@ -180,6 +181,8 @@ def fused_recurrent_kda_fwd_kernel(
             b_beta = tl.load(p_beta, mask=mask_v, other=0, eviction_policy='evict_first').to(tl.float32)
         else:
             b_beta = tl.load(p_beta, eviction_policy='evict_last').to(tl.float32)
+        if APPLY_BETA_SIGMOID:
+            b_beta = tl.sigmoid(b_beta)
         b_v *= b_beta
         if TRANSPOSE_STATE:
             b_h += b_v[:, None] * b_k[None, :]
@@ -240,6 +243,7 @@ def fused_recurrent_kda_fwd(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
+    use_beta_sigmoid_in_kernel: bool = False,
     lower_bound: float | None = None,
     out: torch.Tensor | None = None,
     transpose_state_layout: bool = False,
@@ -312,6 +316,7 @@ def fused_recurrent_kda_fwd(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
+        APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         TRANSPOSE_STATE=transpose_state_layout,
         num_warps=4,
         num_stages=2,
@@ -334,6 +339,7 @@ def fused_recurrent_kda(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
+    use_beta_sigmoid_in_kernel: bool = False,
     lower_bound: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     transpose_state_layout: bool = False,
@@ -363,6 +369,11 @@ def fused_recurrent_kda(
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (Optional[bool]):
             Whether to use L2 normalization in the kernel. Default: `False`.
+        use_beta_sigmoid_in_kernel (Optional[bool]):
+            Whether to apply `torch.sigmoid(beta)` inside the kernel.
+            - If `True`, the passed `beta` acts as the raw beta logits.
+            - If `False`, `beta` is expected to already be in post-sigmoid space.
+            Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -433,6 +444,7 @@ def fused_recurrent_kda(
         output_final_state=output_final_state,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
         transpose_state_layout=transpose_state_layout,

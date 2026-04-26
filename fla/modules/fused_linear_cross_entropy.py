@@ -206,7 +206,7 @@ def cross_entropy_kernel(
 
         tl.debug_barrier()
 
-    # Orginal loss = H(q, p),  with label smoothing regularization = H(q', p) and (label_smoothing / V) = eps
+    # Original loss = H(q, p),  with label smoothing regularization = H(q', p) and (label_smoothing / V) = eps
     # H(q', p) = (1 - label_smoothing) * H(q, p) + label_smoothing * H(u, p)
     #          = (1 - label_smoothing) * H(q, p) + eps * sum(logsoftmax(x_i))
     # By using m (global max of xi) and d (sum of e^(xi-m)), we can simplify as:

@@ -43,6 +43,8 @@ jobs:
     runs-on: ${{ inputs.runner }}
     env:
       FLA_CI_ENV: 1
+      # Disable all backend dispatch (TileLang etc.) — benchmark measures Triton baseline only
+      FLA_DISABLE_BACKEND_DISPATCH: 1
       # Longer Triton timing windows + pause between commits reduce clock/thermal variance.
       FLA_BENCH_WARMUP_MS: 40
       FLA_BENCH_REP_MS: 200
@@ -127,115 +129,37 @@ jobs:
             --no-fail-on-regression \
             --output benchmark_results.json
 
+      - name: Write benchmark metadata
+        if: always() && steps.check_skip.outputs.skip_bench == 'false'
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUNNER: ${{ inputs.runner }}
+          THRESHOLD: ${{ inputs.threshold }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -e
+          PR_JSON="null"
+          if [ -n "${PR_NUMBER:-}" ]; then
+            PR_JSON="${PR_NUMBER}"
+          fi
+          cat > benchmark_meta.json <<EOF
+          {
+            "pr_number": ${PR_JSON},
+            "runner": "${RUNNER}",
+            "threshold": ${THRESHOLD},
+            "event_name": "${EVENT_NAME}"
+          }
+          EOF
+          cat benchmark_meta.json
+
       - name: Upload benchmark results
         if: always() && steps.check_skip.outputs.skip_bench == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results-${{ inputs.runner }}
-          path: benchmark_results.json
+          path: |
+            benchmark_results.json
+            benchmark_meta.json
           if-no-files-found: ignore
           retention-days: 30
-
-      - name: Post benchmark results to PR
-        if: steps.check_skip.outputs.skip_bench == 'false' && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = 'benchmark_results.json';
-
-            if (!fs.existsSync(path)) {
-              console.log('No benchmark results file found');
-              return;
-            }
-
-            const data = JSON.parse(fs.readFileSync(path, 'utf8'));
-            const { base_sha, head_sha, machine_info, regressions, speedups, has_regression, has_speedup } = data;
-
-            const gpuName = machine_info?.gpu_name || 'Unknown';
-            const cudaVersion = machine_info?.cuda_version || 'Unknown';
-            const pytorchVersion = machine_info?.pytorch_version || 'Unknown';
-            const runnerName = '${{ inputs.runner }}';
-
-            // Format the summary table
-            let summary = '';
-            if (has_regression || has_speedup) {
-              summary = '| Op | Mode | B | T | H | D | Base (ms) | Head (ms) | Change |\n';
-              summary += '|:---|:---:|---:|---:|---:|---:|---:|---:|---:|\n';
-
-              // Add regressions
-              if (regressions && regressions.length > 0) {
-                for (const r of regressions) {
-                  const change = `+${r.change_pct.toFixed(1)}% 🔴`;
-                  summary += `| ${r.op} | ${r.mode} | ${r.B} | ${r.T} | ${r.H} | ${r.D} | ${r.base_ms.toFixed(3)} | ${r.head_ms.toFixed(3)} | ${change} |\n`;
-                }
-              }
-
-              // Add speedups
-              if (speedups && speedups.length > 0) {
-                for (const s of speedups) {
-                  const change = `${s.change_pct.toFixed(1)}% 🟢`;
-                  summary += `| ${s.op} | ${s.mode} | ${s.B} | ${s.T} | ${s.H} | ${s.D} | ${s.base_ms.toFixed(3)} | ${s.head_ms.toFixed(3)} | ${change} |\n`;
-                }
-              }
-            }
-
-            // Build the comment body
-            const statusEmoji = has_regression ? '⚠️' : '✅';
-            const statusText = has_regression
-              ? `${regressions.length} regression(s) detected`
-              : 'No significant performance regressions detected';
-
-            let body = `## ${statusEmoji} Benchmark Results (${runnerName.toUpperCase()})\n\n`;
-            body += `**Status:** ${statusText}\n\n`;
-            body += `| | |\n`;
-            body += `|:---|:---|\n`;
-            body += `| **GPU** | ${gpuName} |\n`;
-            body += `| **CUDA** | ${cudaVersion} |\n`;
-            body += `| **PyTorch** | ${pytorchVersion} |\n`;
-            body += `| **Base** | \`${base_sha}\` |\n`;
-            body += `| **Head** | \`${head_sha}\` |\n`;
-            body += `| **Threshold** | ${{ inputs.threshold }}% |\n\n`;
-
-            if (has_regression || has_speedup) {
-              body += `<details>\n<summary>📊 View Details (${(regressions?.length || 0) + (speedups?.length || 0)} significant changes)</summary>\n\n`;
-              body += summary;
-              body += '\n</details>\n';
-            } else {
-              body += '> All benchmarked operations are within the performance threshold.\n';
-            }
-
-            body += '\n---\n';
-            body += '*This comment is automatically updated with the latest benchmark results.*';
-
-            // Find existing comment
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-
-            const botComment = comments.find(comment =>
-              comment.user.type === 'Bot' &&
-              comment.body.includes(`Benchmark Results (${runnerName.toUpperCase()})`)
-            );
-
-            if (botComment) {
-              // Update existing comment
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: body,
-              });
-              console.log(`Updated existing benchmark comment for ${runnerName}`);
-            } else {
-              // Create new comment
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body,
-              });
-              console.log(`Created new benchmark comment for ${runnerName}`);
-            }

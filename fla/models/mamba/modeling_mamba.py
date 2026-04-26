@@ -116,13 +116,15 @@ class MambaPreTrainedModel(PreTrainedModel):
                     nn.init.zeros_(module.bias)
         elif isinstance(module, Mamba) and next(module.parameters()).device.type != 'meta':
             # S4D real initialization
-            A = torch.arange(1, module.ssm_state_size + 1, dtype=torch.float32)[None, :]
-            A = A.expand(module.intermediate_size, -1).contiguous()
-            with torch.no_grad():
-                module.A_log.copy_(torch.log(A))
+            if not getattr(module.A_log, '_is_hf_initialized', False):
+                A = torch.arange(1, module.ssm_state_size + 1, dtype=torch.float32)[None, :]
+                A = A.expand(module.intermediate_size, -1).contiguous()
+                with torch.no_grad():
+                    module.A_log.copy_(torch.log(A))
             module.A_log._no_weight_decay = True
 
-            nn.init.ones_(module.D)
+            if not getattr(module.D, '_is_hf_initialized', False):
+                nn.init.ones_(module.D)
             module.D._no_weight_decay = True
 
             dt_init_std = self.config.dt_rank**-0.5 * self.config.dt_scale
@@ -132,15 +134,16 @@ class MambaPreTrainedModel(PreTrainedModel):
                 nn.init.uniform_(module.dt_proj.weight, -dt_init_std, dt_init_std)
             module.dt_proj.weight._no_reinit = True
 
-            dt = torch.exp(
-                torch.rand(self.config.intermediate_size)
-                * (math.log(self.config.dt_max) - math.log(self.config.dt_min))
-                + math.log(self.config.dt_min),
-            ).clamp(min=self.config.dt_init_floor)
-            # # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-            inv_dt = dt + torch.log(-torch.expm1(-dt))
-            with torch.no_grad():
-                module.dt_proj.bias.data = nn.Parameter(inv_dt.to(module.dt_proj.bias.device))
+            if not getattr(module.dt_proj.bias, '_is_hf_initialized', False):
+                dt = torch.exp(
+                    torch.rand(self.config.intermediate_size)
+                    * (math.log(self.config.dt_max) - math.log(self.config.dt_min))
+                    + math.log(self.config.dt_min),
+                ).clamp(min=self.config.dt_init_floor)
+                # # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                inv_dt = dt + torch.log(-torch.expm1(-dt))
+                with torch.no_grad():
+                    module.dt_proj.bias.data = nn.Parameter(inv_dt.to(module.dt_proj.bias.device))
             module.dt_proj.bias._no_reinit = True
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, std=self.config.initializer_range)

@@ -85,7 +85,7 @@ class ReBasedLinearAttention(nn.Module):
         )
         q, k = self.feature_map(q, flatten=(mode != 'parallel')), self.feature_map(k, flatten=(mode != 'parallel'))
         if mode == "fused_chunk":
-            o = fused_chunk_linear_attn(
+            o, _ = fused_chunk_linear_attn(
                 q=q,
                 k=k,
                 v=v,
@@ -93,7 +93,7 @@ class ReBasedLinearAttention(nn.Module):
                 scale=1,
             )
         elif mode == 'chunk':
-            o = chunk_linear_attn(
+            o, _ = chunk_linear_attn(
                 q=q,
                 k=k,
                 v=v,

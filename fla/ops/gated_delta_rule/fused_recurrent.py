@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard
 
 
@@ -20,6 +21,8 @@ from fla.utils import input_guard
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'USE_GATE_IN_KERNEL': lambda args: args['A_log'] is not None,
+    'HAS_DT_BIAS': lambda args: args['dt_bias'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
@@ -30,6 +33,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     gk,
     gv,
     beta,
+    A_log,
+    dt_bias,
     o,
     h0,
     ht,
@@ -52,6 +57,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     USE_EXP2: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GATE_IN_KERNEL: tl.constexpr,
+    HAS_DT_BIAS: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -114,7 +121,13 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
-            if USE_EXP2:
+            if USE_GATE_IN_KERNEL:
+                b_A = tl.load(A_log + i_hv).to(tl.float32)
+                if HAS_DT_BIAS:
+                    b_g = b_g + tl.load(dt_bias + i_hv).to(tl.float32)
+                b_g = -exp(b_A) * softplus(b_g)
+                b_h *= exp(b_g)
+            elif USE_EXP2:
                 b_h *= exp2(b_g)
             else:
                 b_h *= exp(b_g)
@@ -183,6 +196,8 @@ def fused_recurrent_gated_delta_rule_fwd(
     gk: torch.Tensor | None = None,
     gv: torch.Tensor | None = None,
     beta: torch.Tensor | None = None,
+    A_log: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
@@ -216,6 +231,8 @@ def fused_recurrent_gated_delta_rule_fwd(
         gk=gk,
         gv=gv,
         beta=beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
         o=o,
         h0=initial_state,
         ht=final_state,
@@ -251,6 +268,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
         gk: torch.Tensor | None = None,
         gv: torch.Tensor | None = None,
         beta: torch.Tensor | None = None,
+        A_log: torch.Tensor | None = None,
+        dt_bias: torch.Tensor | None = None,
         scale: float = None,
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
@@ -267,6 +286,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
             gk=gk,
             gv=gv,
             beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
@@ -300,6 +321,9 @@ def fused_recurrent_gated_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    use_gate_in_kernel: bool = False,
+    A_log: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     use_exp2: bool = False,
     transpose_state_layout: bool = False,
@@ -315,6 +339,9 @@ def fused_recurrent_gated_delta_rule(
             GVA (Grouped Value Attention) is applied if `HV > H`, where `HV` must be divisible by `H`.
         g (torch.Tensor):
             g (decays) of shape `[B, T, HV]`. Default: `None`.
+            When `use_gate_in_kernel=False` (default), `g` must be in log space (pre-computed decay).
+            When `use_gate_in_kernel=True`, `g` is the raw pre-activation input; the kernel fuses
+            `-exp(A_log) * softplus(g + dt_bias)` internally per step.
         gk (torch.Tensor):
             gk (decays) of shape `[B, T, HV, K]`. Default: `None`.
         gv (torch.Tensor):
@@ -332,6 +359,15 @@ def fused_recurrent_gated_delta_rule(
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (Optional[bool]):
             Whether to use L2 normalization in the kernel. Default: `False`.
+        use_gate_in_kernel (bool):
+            Whether to compute the log-space GDN decay internally.
+            When `True`, `g` is the raw input and `A_log` must be provided; the kernel fuses
+            gate activation into the recurrence. Default: `False`.
+        A_log (Optional[torch.Tensor]):
+            Decay parameter of shape `[HV]`. Required when `use_gate_in_kernel=True`.
+        dt_bias (Optional[torch.Tensor]):
+            Bias added to `g` before activation, of shape `[HV]`.
+            Only used when `use_gate_in_kernel=True`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -388,6 +424,16 @@ def fused_recurrent_gated_delta_rule(
         scale = k.shape[-1] ** -0.5
     if beta is None:
         beta = torch.ones_like(q[..., 0])
+    if use_gate_in_kernel:
+        if A_log is None:
+            raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True`.")
+        if g is None:
+            raise ValueError("`g` (raw pre-activation) must be provided when `use_gate_in_kernel=True`.")
+        if use_exp2:
+            raise ValueError("`use_exp2=True` is not supported together with `use_gate_in_kernel=True`.")
+    else:
+        A_log = None
+        dt_bias = None
 
     o, final_state = FusedRecurrentFunction.apply(
         q,
@@ -397,6 +443,8 @@ def fused_recurrent_gated_delta_rule(
         gk,
         gv,
         beta,
+        A_log,
+        dt_bias,
         scale,
         initial_state,
         output_final_state,
