@@ -15,6 +15,7 @@ from einops import repeat
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
+from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
@@ -961,3 +962,54 @@ def test_gate(
     assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}".format(*test))
+        for test in [
+            (1, 128, 1, 1, 64),
+            (2, 256, 2, 4, 64),
+        ]
+    ],
+)
+@pytest.mark.skipif(IS_INTEL_ALCHEMIST, reason='Skipped on Intel Alchemist')
+def test_prepare_wy_repr_bwd_no_g(B: int, T: int, H: int, HV: int, D: int):
+    """
+    Regression for #862: prepare_wy_repr_bwd previously left b_dk uninitialized
+    and missed the dk-side contribution to db when g is None. With g=zeros, the
+    USE_G=True path is exp(0)=1 throughout, so the no-g path must produce the
+    same dk/dv/db.
+    """
+    torch.manual_seed(0)
+    BT = 64
+    dtype = torch.float32
+
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
+    g_zero = torch.zeros(B, T, HV, dtype=dtype, device=device)
+
+    # Random unit-lower-triangular A — the bwd kernel just does linear algebra
+    # against whatever A is supplied and does not require it to be the WY inverse.
+    A = torch.randn(B, T, HV, BT, dtype=dtype, device=device)
+    A = torch.tril(A, diagonal=-1)
+    A = A + torch.eye(BT, dtype=dtype, device=device)
+    # Forward smoke check that the no-g path also runs.
+    _, _ = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g=None)
+
+    dw = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    du = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+
+    dk_no_g, dv_no_g, db_no_g, dg_no_g = prepare_wy_repr_bwd(
+        k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=None,
+    )
+    dk_zero_g, dv_zero_g, db_zero_g, dg_zero_g = prepare_wy_repr_bwd(
+        k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=g_zero,
+    )
+
+    assert dg_no_g is None
+    assert_close('dk', dk_zero_g, dk_no_g, 1e-4)
+    assert_close('dv', dv_zero_g, dv_no_g, 1e-4)
+    assert_close('db', db_zero_g, db_no_g, 1e-4)
