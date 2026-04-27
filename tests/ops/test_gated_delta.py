@@ -980,7 +980,9 @@ def test_prepare_wy_repr_bwd_no_g(B: int, T: int, H: int, HV: int, D: int):
     Regression for #862: prepare_wy_repr_bwd previously left b_dk uninitialized
     and missed the dk-side contribution to db when g is None. With g=zeros, the
     USE_G=True path is exp(0)=1 throughout, so the no-g path must produce the
-    same dk/dv/db.
+    same dk/dv/db. The public chunk_gated_delta_rule does not currently accept
+    g=None (its bwd assumes g is a tensor), so the bug is only reachable
+    through the helper and is exercised here directly.
     """
     torch.manual_seed(0)
     BT = 64
