@@ -991,11 +991,12 @@ def test_prepare_wy_repr_bwd_no_g(B: int, T: int, H: int, HV: int, D: int):
     beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
     g_zero = torch.zeros(B, T, HV, dtype=dtype, device=device)
 
-    # Random unit-lower-triangular A — the bwd kernel just does linear algebra
+    # Per-chunk unit-lower-triangular A — the bwd kernel just does linear algebra
     # against whatever A is supplied and does not require it to be the WY inverse.
-    A = torch.randn(B, T, HV, BT, dtype=dtype, device=device)
-    A = torch.tril(A, diagonal=-1)
-    A = A + torch.eye(BT, dtype=dtype, device=device)
+    NT = T // BT
+    A = torch.randn(B, NT, HV, BT, BT, dtype=dtype, device=device)
+    A = torch.tril(A, diagonal=-1) + torch.eye(BT, dtype=dtype, device=device)
+    A = A.permute(0, 1, 3, 2, 4).reshape(B, T, HV, BT).contiguous()
     # Forward smoke check that the no-g path also runs.
     _, _ = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g=None)
 
