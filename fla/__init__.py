@@ -88,6 +88,8 @@ from fla.models import (
     RWKV7Model,
     TransformerForCausalLM,
     TransformerModel,
+    YOCOForCausalLM,
+    YOCOModel,
 )
 
 __all__ = [
@@ -171,6 +173,8 @@ __all__ = [
     "RodimusModel",
     "TransformerForCausalLM",
     "TransformerModel",
+    "YOCOForCausalLM",
+    "YOCOModel",
 ]
 
 __version__ = "0.5.1"

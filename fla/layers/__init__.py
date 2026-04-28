@@ -37,6 +37,7 @@ from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
+from .yoco_attn import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
 
 __all__ = [
     'ABCAttention',
@@ -72,4 +73,7 @@ __all__ = [
     'ReBasedLinearAttention',
     'RodimusAttention',
     'SlidingWindowSharedKeyAttention',
+    'YOCOCrossAttention',
+    'YOCOGatedRetention',
+    'YOCOSharedKVBuilder',
 ]
