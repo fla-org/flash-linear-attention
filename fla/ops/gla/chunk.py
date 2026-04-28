@@ -663,10 +663,11 @@ def chunk_gla_bwd_kernel_dv(
 })
 @fla_cache_autotune(
     configs=[
-        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in BK_LIST
         for BV in BV_LIST
         for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
     key=['BT'],
     **autotune_cache_kwargs,

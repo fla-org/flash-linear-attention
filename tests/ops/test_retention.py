@@ -312,3 +312,57 @@ def test_parallel(
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'K', 'expand_ratio', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-K{}-expand_ratio{}-{}".format(*test))
+        for test in [
+            (2, 256, 4, 64, 1, torch.float16),
+            (2, 1024, 4, 128, 2, torch.float16),
+        ]
+    ],
+)
+def test_fused_recurrent_transpose_state(
+    B: int,
+    T: int,
+    H: int,
+    K: int,
+    expand_ratio: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    V = K * expand_ratio
+
+    q = torch.randn((B, T, H, K), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, K), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device)
+    h0 = torch.randn((B, H, K, V), dtype=dtype, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run(transpose: bool):
+        q_, k_, v_ = (x.detach().clone().requires_grad_() for x in (q, k, v))
+        h0_in = h0.transpose(-1, -2).contiguous() if transpose else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if transpose else dht
+        h0_in = h0_in.requires_grad_()
+        out, ht = fused_recurrent_retention(
+            q_, k_, v_,
+            initial_state=h0_in,
+            output_final_state=True,
+            transpose_state_layout=transpose,
+        )
+        ((out * do).sum() + (ht * dht_in).sum()).backward()
+        return out, ht, q_.grad, k_.grad, v_.grad, h0_in.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dh0 = run(False)
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dh0 = run(True)
+
+    assert tri_ht.shape == (B, H, V, K)
+    assert_close('o', ref_o, tri_o, 0.005)
+    assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)

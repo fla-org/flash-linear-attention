@@ -19,6 +19,7 @@ def fused_recurrent_retention(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -42,5 +43,6 @@ def fused_recurrent_retention(
         output_final_state=output_final_state,
         reverse=reverse,
         cu_seqlens=cu_seqlens,
+        transpose_state_layout=transpose_state_layout,
     )
     return o, final_state
