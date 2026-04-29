@@ -91,6 +91,10 @@ def pre_process_fwd_kernel_merged(
         bg += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     else:
         w += ((bos * HV + i_h) * K).to(tl.int64)
+    if USE_G:
+        g += (bos * HV + i_h).to(tl.int64)
+    if USE_GK:
+        gk += ((bos * HV + i_h) * K).to(tl.int64)
     stride_k = H * K
     stride_w = H * K if USE_BG else HV * K
 
@@ -147,8 +151,8 @@ def pre_process_fwd_kernel_merged(
             # Apply g decay
             if USE_G:
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                b_g_last = tl.load(g + bos * HV + last_idx * HV + i_h).to(tl.float32)
-                p_g = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
                 b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
@@ -163,22 +167,20 @@ def pre_process_fwd_kernel_merged(
             # Apply gk decay
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
-                b_gk_last1 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
+                p_gk_last = gk + last_idx * HV * K
+                b_gk_last1 = tl.load(p_gk_last + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
                 b_h1 *= exp2(b_gk_last1)[:, None]
                 if K > 64:
                     o_k2 = 64 + o_k1
-                    b_gk_last2 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
+                    b_gk_last2 = tl.load(p_gk_last + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
                     b_h2 *= exp2(b_gk_last2)[:, None]
                 if K > 128:
                     o_k3 = 128 + o_k1
-                    b_gk_last3 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
+                    b_gk_last3 = tl.load(p_gk_last + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
                     b_h3 *= exp2(b_gk_last3)[:, None]
                 if K > 192:
                     o_k4 = 192 + o_k1
-                    b_gk_last4 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
+                    b_gk_last4 = tl.load(p_gk_last + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
                     b_h4 *= exp2(b_gk_last4)[:, None]
             b_v = b_v.to(k.dtype.element_ty)
 
@@ -270,14 +272,14 @@ def pre_process_fwd_kernel_merged(
 
             if USE_G:
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                b_g_last = tl.load(g + bos * HV + last_idx * HV + i_h).to(tl.float32)
-                p_g = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
                 b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_g_last, 0.0)
             elif USE_GK:
-                b_gk_last = tl.load(gk + (bos + last_idx) * HV * K + i_h * K + row, mask=(row < K), other=0.).to(tl.float32)
+                b_gk_last = tl.load(gk + last_idx * HV * K + row, mask=(row < K), other=0.).to(tl.float32)
                 b_gk_last = exp2(b_gk_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_gk_last[:, None], 0.0)
             else:
@@ -524,6 +526,10 @@ def pre_process_bwd_kernel_merged(
         w += ((bos * H + i_h // (HV // H)) * K).to(tl.int64)
     else:
         w += ((bos * HV + i_h) * K).to(tl.int64)
+    if USE_G:
+        g += (bos * HV + i_h).to(tl.int64)
+    if USE_GK:
+        gk += ((bos * HV + i_h) * K).to(tl.int64)
     dhm += i_h * K * (V + K)
     stride_qk = H * K
     stride_w = H * K if USE_BG else HV * K
@@ -551,9 +557,9 @@ def pre_process_bwd_kernel_merged(
             if USE_G:
                 # Note: pre_process_bwd_kernel_stage1 always uses exp for USE_G,
                 # regardless of USE_EXP2. This is for consistency with the original design.
-                bg_last = tl.load(g + (bos + last_idx) * HV + i_h).to(tl.float32)
+                bg_last = tl.load(g + last_idx * HV).to(tl.float32)
                 bg_last_exp = exp(bg_last)
-                p_g = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
                 b_g_exp = exp(b_g)
 
@@ -566,8 +572,8 @@ def pre_process_bwd_kernel_merged(
             b_k = tl.load(p_k, boundary_check=(0, 1))
             if USE_GK:
                 o_k1 = tl.arange(0, 64)
-                b_gk_last1 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                     o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
+                p_gk_last = gk + last_idx * HV * K
+                b_gk_last1 = tl.load(p_gk_last + o_k1, mask=(o_k1 < K), other=0.).to(tl.float32)
             b_dv = tl.dot(b_k, b_dh1.to(b_k.dtype))
 
             if K > 64:
@@ -575,8 +581,7 @@ def pre_process_bwd_kernel_merged(
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k2 = 64 + o_k1
-                    b_gk_last2 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
+                    b_gk_last2 = tl.load(p_gk_last + o_k2, mask=(o_k2 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh2.to(b_k.dtype))
 
             if K > 128:
@@ -584,8 +589,7 @@ def pre_process_bwd_kernel_merged(
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k3 = 128 + o_k1
-                    b_gk_last3 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
+                    b_gk_last3 = tl.load(p_gk_last + o_k3, mask=(o_k3 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh3.to(b_k.dtype))
 
             if K > 192:
@@ -593,8 +597,7 @@ def pre_process_bwd_kernel_merged(
                 b_k = tl.load(p_k, boundary_check=(0, 1))
                 if USE_GK:
                     o_k4 = 192 + o_k1
-                    b_gk_last4 = tl.load(gk + (bos + last_idx) * HV * K + i_h * K +
-                                         o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
+                    b_gk_last4 = tl.load(p_gk_last + o_k4, mask=(o_k4 < K), other=0.).to(tl.float32)
                 b_dv += tl.dot(b_k, b_dh4.to(b_k.dtype))
 
             if USE_G:
@@ -704,14 +707,14 @@ def pre_process_bwd_kernel_merged(
 
             if USE_G:
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                b_g_last = tl.load(g + bos * HV + last_idx * HV + i_h).to(tl.float32)
-                p_g = tl.make_block_ptr(g + bos * HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
+                b_g_last = tl.load(g + last_idx * HV).to(tl.float32)
+                p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
                 b_k = b_k * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
                 b_g_last = exp2(b_g_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_g_last, 0.0)
             elif USE_GK:
-                b_gk_last = tl.load(gk + (bos + last_idx) * HV * K + i_h * K + row, mask=(row < K), other=0.).to(tl.float32)
+                b_gk_last = tl.load(gk + last_idx * HV * K + row, mask=(row < K), other=0.).to(tl.float32)
                 b_gk_last = exp2(b_gk_last)
                 b_diag = tl.where(row[:, None] == row[None, :], b_gk_last[:, None], 0.0)
             else:
