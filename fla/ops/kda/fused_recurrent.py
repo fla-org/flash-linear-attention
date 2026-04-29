@@ -13,7 +13,7 @@ import triton.language as tl
 
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import IS_AMD, input_guard
+from fla.utils import input_guard
 
 
 @triton.heuristics(
