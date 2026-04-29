@@ -147,6 +147,10 @@ def causal_conv1d_bwd(
     B, T, D = x.shape
     W = weight.shape[1] if weight is not None else None
 
+    # The bwd kernel reads dy with hardcoded stride (D, 1), so dy must be contiguous.
+    # Non-contiguous dy can arise from e.g. torch.cat backward (split produces views).
+    dy = dy.contiguous()
+
     stride_x_n, stride_x_t, stride_x_d = x.stride()
 
     BW = triton.next_power_of_2(W)

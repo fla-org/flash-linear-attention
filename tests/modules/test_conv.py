@@ -1373,3 +1373,47 @@ def test_conv_varlen_non_contiguous_qkv(
 
     assert_close("dx", ref_k_state.grad, k_state.grad, 1e-3)
     assert_close("dh0", ref_initial_state.grad, tri_initial_state.grad, 1e-3)
+
+
+@pytest.mark.parametrize("B", [1, 4])
+@pytest.mark.parametrize("T", [15, 64, 300])
+@pytest.mark.parametrize("D", [32, 64, 128])
+@pytest.mark.parametrize("W", [2, 4])
+@pytest.mark.parametrize("activation", [None, "silu"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
+    """Test that backward produces correct gradients when dy is non-contiguous.
+
+    This simulates the split -> conv -> cat pattern used in fused-QKV attention,
+    where torch.cat backward produces non-contiguous dy views via split.
+    """
+    torch.manual_seed(42)
+
+    weight = torch.randn(D, W, device=device, dtype=dtype).requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+
+    # --- Reference: contiguous path ---
+    x_ref = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
+    y_ref, _ = causal_conv1d(x_ref, weight_ref, activation=activation)
+    dy = torch.randn_like(y_ref)
+    y_ref.backward(dy)
+
+    # --- Test: non-contiguous dy via cat/split pattern ---
+    x_test = x_ref.detach().clone().requires_grad_(True)
+    weight_test = weight.detach().clone().requires_grad_(True)
+
+    # Forward through conv
+    y_test, _ = causal_conv1d(x_test, weight_test, activation=activation)
+
+    # Simulate non-contiguous dy: cat into [B, T, 3D] then split back
+    dummy = torch.zeros_like(dy)
+    dy_cat = torch.cat([dy, dummy, dummy], dim=-1)   # [B, T, 3D]
+    dy_nc = dy_cat[:, :, :D]                          # non-contiguous view
+
+    assert not dy_nc.is_contiguous(), "dy should be non-contiguous for this test"
+    assert torch.equal(dy_nc.contiguous(), dy), "dy content should match"
+
+    y_test.backward(dy_nc)
+
+    assert_close(" dx", x_ref.grad, x_test.grad, 1e-3)
+    assert_close(" dw", weight_ref.grad, weight_test.grad, 1e-3)
