@@ -16,11 +16,12 @@ from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, input_guard
+from fla.utils import IS_ROCM, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, input_guard
 
 BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BT_LIST_AUTOTUNE = [32, 64, 128]
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_ROCM else [4, 8, 16, 32]
+_GATE_NUM_STAGES_LIST = [1] if IS_ROCM else [2, 3]
 
 
 def naive_kda_gate(
@@ -79,7 +80,7 @@ def naive_kda_lowerbound_gate(
         triton.Config({"BT": BT}, num_warps=num_warps, num_stages=num_stages)
         for BT in BT_LIST_AUTOTUNE
         for num_warps in NUM_WARPS_AUTOTUNE
-        for num_stages in [2, 3]
+        for num_stages in _GATE_NUM_STAGES_LIST
     ],
     key=["H", "D"],
     **autotune_cache_kwargs,
@@ -135,7 +136,7 @@ def kda_gate_fwd_kernel(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS_AUTOTUNE
-        for num_stages in [2, 3]
+        for num_stages in _GATE_NUM_STAGES_LIST
     ],
     key=["H", "D"],
     **autotune_cache_kwargs,

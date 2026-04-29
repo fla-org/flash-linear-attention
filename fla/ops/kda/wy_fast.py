@@ -12,7 +12,10 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_ROCM, autotune_cache_kwargs, check_shared_mem
+
+# ROCM optimization: use fewer pipeline stages on AMD GPUs
+_WY_NUM_STAGES_LIST = [2, 3] if IS_ROCM else [2, 3, 4]
 
 
 @triton.heuristics({
@@ -24,7 +27,7 @@ from fla.utils import autotune_cache_kwargs, check_shared_mem
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in _WY_NUM_STAGES_LIST
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,
@@ -127,7 +130,7 @@ def recompute_w_u_fwd_kda_kernel(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_stages in _WY_NUM_STAGES_LIST
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
     **autotune_cache_kwargs,

@@ -20,11 +20,19 @@ from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_NVIDIA_HOPPER, IS_ROCM, autotune_cache_kwargs, check_shared_mem
 
-BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
-BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
-NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+# ROCM optimizations: use larger block sizes and more warps for AMD GPUs
+if IS_ROCM:
+    BK_LIST = [32, 64, 128] if check_shared_mem() else [32, 64]
+    BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
+    NUM_WARPS = [2, 4, 8, 16]
+    _NUM_STAGES_LIST = [1, 2, 3]
+else:
+    BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
+    BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
+    NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+    _NUM_STAGES_LIST = [2, 3, 4]
 
 
 @triton.heuristics({
@@ -34,7 +42,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
+        for num_stages in _NUM_STAGES_LIST
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV'],
     **autotune_cache_kwargs,
@@ -116,7 +124,7 @@ def chunk_kda_bwd_kernel_dAv(
         for BK in BK_LIST
         for BV in BV_LIST
         for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
+        for num_stages in _NUM_STAGES_LIST
         if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
     ],
     key=['BT', 'HV', 'TRANSPOSE_STATE'],

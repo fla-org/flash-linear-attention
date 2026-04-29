@@ -460,6 +460,7 @@ device_platform = get_available_device()
 device_name = map_triton_backend_to_torch_device()
 
 IS_AMD = (device_platform == 'hip')
+IS_ROCM = IS_AMD
 IS_INTEL = (device_platform == 'xpu')
 IS_NVIDIA = (device_platform == 'cuda')
 IS_INTEL_ALCHEMIST = (IS_INTEL and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
@@ -550,6 +551,7 @@ def _register_aliases():
     current_module = sys.modules[__name__]
     for key in (
         'IS_AMD',
+        'IS_ROCM',
         'IS_INTEL',
         'IS_NVIDIA',
         'IS_INTEL_ALCHEMIST',
