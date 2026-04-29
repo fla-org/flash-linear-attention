@@ -1024,8 +1024,14 @@ def chunk_rwkv6_fwd(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    gi, ge = chunk_rwkv6_fwd_cumsum(g, chunk_size=chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     # gi/ge are pre-scaled by RCP_LN2 inside the cumsum kernel; downstream uses exp2.
+    gi, ge = chunk_rwkv6_fwd_cumsum(
+        g,
+        chunk_size=chunk_size,
+        scale=RCP_LN2,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
     h, ht = chunk_fwd_h(
         k=k,
         v=v,
@@ -1081,7 +1087,13 @@ def chunk_rwkv6_bwd(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ):
-    gi, ge = chunk_rwkv6_fwd_cumsum(g, chunk_size=chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    gi, ge = chunk_rwkv6_fwd_cumsum(
+        g,
+        chunk_size=chunk_size,
+        scale=RCP_LN2,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
     h, _ = chunk_fwd_h(
         k=k,
         v=v,
