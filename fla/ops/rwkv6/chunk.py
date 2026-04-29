@@ -12,7 +12,8 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd_dA, chunk_gla_bwd_dv, chunk_gla_fwd_o_gk
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.ops.utils.constant import RCP_LN2
+from fla.ops.utils.op import exp2
 from fla.utils import (
     USE_CUDA_GRAPH,
     autocast_custom_bwd,
@@ -27,6 +28,7 @@ BV_LIST = [32, 64] if check_shared_mem() else [16, 32]
 
 
 @triton.heuristics({
+    'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
@@ -36,7 +38,7 @@ BV_LIST = [32, 64] if check_shared_mem() else [16, 32]
         for num_warps in [4, 8, 16]
         for num_stages in [2, 3, 4]
     ],
-    key=['S', 'BT'],
+    key=['S', 'BT', 'HAS_SCALE'],
     use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
@@ -45,6 +47,7 @@ def chunk_rwkv6_fwd_cumsum_kernel(
     s,
     oi,
     oe,
+    scale,
     cu_seqlens,
     chunk_indices,
     T,
@@ -52,6 +55,7 @@ def chunk_rwkv6_fwd_cumsum_kernel(
     S: tl.constexpr,
     BT: tl.constexpr,
     BS: tl.constexpr,
+    HAS_SCALE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -74,6 +78,10 @@ def chunk_rwkv6_fwd_cumsum_kernel(
     b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
     b_oi = tl.dot(m_i, b_s)
     b_oe = tl.dot(m_e, b_s)
+    if HAS_SCALE:
+        # Pre-scale by RCP_LN2 so downstream kernels can use exp2 directly.
+        b_oi = b_oi * scale
+        b_oe = b_oe * scale
     tl.store(p_oi, b_oi.to(p_oi.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_oe, b_oe.to(p_oe.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
 
@@ -81,6 +89,7 @@ def chunk_rwkv6_fwd_cumsum_kernel(
 def chunk_rwkv6_fwd_cumsum(
     g: torch.Tensor,
     chunk_size: int,
+    scale: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -97,6 +106,7 @@ def chunk_rwkv6_fwd_cumsum(
         g,
         gi,
         ge,
+        scale,
         cu_seqlens,
         chunk_indices,
         T=T,
@@ -173,11 +183,11 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
         # [BC, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_gq = tl.where(m_i[:, None] & m_k, tl.load(p_gq, boundary_check=(0, 1)), float('-inf'))
-        b_qg = b_q * exp(b_gq - b_gn[None, :]) * scale
+        b_qg = b_q * exp2(b_gq - b_gn[None, :]) * scale
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_kg = b_k * exp(b_gn[:, None] - b_gk)
+        b_kg = b_k * exp2(b_gn[:, None] - b_gk)
         # [BC, BC] using tf32 to improve precision here.
         b_A += tl.dot(b_qg, b_kg)
 
@@ -249,7 +259,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
         b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
         b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_A = tl.sum(b_q * b_kj[None, :] * exp(b_g - b_gk[None, :]), 1)
+        b_A = tl.sum(b_q * b_kj[None, :] * exp2(b_g - b_gk[None, :]), 1)
         b_A = tl.where(o_i > j, b_A * scale, 0.)
         b_A = tl.where(o_i != j, b_A, tl.sum(b_qj * b_kj * b_u * scale))
         tl.store(A + o_A + j, b_A, mask=m_A)
@@ -330,7 +340,7 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
         b_qj = tl.load(p_qj, mask=m_k, other=0).to(tl.float32)
         b_kj = tl.load(p_kj, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_A = tl.sum(b_q * b_kj[None, :] * exp(b_g - b_gk[None, :]), 1)
+        b_A = tl.sum(b_q * b_kj[None, :] * exp2(b_g - b_gk[None, :]), 1)
         b_A = tl.where(o_i > j, b_A * scale, 0.)
         b_A = tl.where(o_i != j, b_A, tl.sum(b_qj * b_kj * b_u * scale))
         tl.store(A + o_A + j, b_A, mask=m_A)
@@ -465,9 +475,9 @@ def chunk_rwkv6_bwd_kernel_dh(
         p_gk_last = gi + (bos + last_idx) * H*K + i_h * K + i_k * BK + tl.arange(0, BK)
 
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_q = (b_q * exp(b_gk) * scale).to(b_q.dtype)
+        b_q = (b_q * exp2(b_gk) * scale).to(b_q.dtype)
         b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
-        b_dh *= exp(b_gk_last)[:, None]
+        b_dh *= exp2(b_gk_last)[:, None]
         b_dh += tl.dot(b_q, b_do)
 
     if STORE_INITIAL_STATE_GRADIENT:
@@ -537,12 +547,12 @@ def chunk_rwkv6_bwd_kernel_intra(
             # [BC, BK]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kg = b_k * exp(b_gn[None, :] - b_gk)
+            b_kg = b_k * exp2(b_gn[None, :] - b_gk)
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]
             b_dq += tl.dot(b_dA, b_kg)
-        b_dq *= exp(b_ge - b_gn[None, :])
+        b_dq *= exp2(b_ge - b_gn[None, :])
 
     o_i = tl.arange(0, BC)
     m_dA = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
@@ -561,7 +571,7 @@ def chunk_rwkv6_bwd_kernel_intra(
         m_i = o_i[:, None] > j
         # [BC, BK]
         # (SY 09/17) important to not use bf16 here to have a good precision.
-        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp(b_ge - b_gkj[None, :]), 0.)
+        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp2(b_ge - b_gkj[None, :]), 0.)
         p_kj += H*K
         p_gkj += H*K
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
@@ -589,13 +599,13 @@ def chunk_rwkv6_bwd_kernel_intra(
             # [BC, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_gq = tl.where(m_j[:, None] & m_k, tl.load(p_gq, boundary_check=(0, 1)), float('-inf'))
-            b_qg = b_q * exp(b_gq - b_gn[None, :])
+            b_qg = b_q * exp2(b_gq - b_gn[None, :])
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dk += tl.dot(b_dA, b_qg)
-        b_dk *= exp(b_gn[None, :] - b_gk)
+        b_dk *= exp2(b_gn[None, :] - b_gk)
     o_dA = bos*H*BT + (i_t * BT + i_i * BC) * H*BT + i_h * BT + i_i * BC + tl.arange(0, BC)
     p_qj = q + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
     p_gqj = ge + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
@@ -608,7 +618,7 @@ def chunk_rwkv6_bwd_kernel_intra(
         b_gqj = tl.load(p_gqj, mask=m_k, other=0).to(tl.float32)
         # [BC, BK]
         m_i = o_i[:, None] < j
-        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp(b_gqj[None, :] - b_gk), 0.)
+        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp2(b_gqj[None, :] - b_gk), 0.)
         p_qj += H*K
         p_gqj += H*K
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -698,12 +708,12 @@ def chunk_rwkv6_bwd_kernel_inter(
         # [BT, BK]
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
-    b_dgk *= exp(b_gn)
+    b_dgk *= exp2(b_gn)
     b_dq *= scale
     b_gk = tl.load(p_gk, boundary_check=(0, 1))
     b_gi = tl.load(p_gi, boundary_check=(0, 1))
-    b_dq = b_dq * exp(b_gk)
-    b_dk = b_dk * exp(b_gn[None, :] - b_gi)
+    b_dq = b_dq * exp2(b_gk)
+    b_dk = b_dk * exp2(b_gn[None, :] - b_gi)
 
     o_i = tl.arange(0, BT)
     p_q = tl.make_block_ptr(q + (bos*H+i_h)*K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -1014,7 +1024,8 @@ def chunk_rwkv6_fwd(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    gi, ge = chunk_rwkv6_fwd_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    gi, ge = chunk_rwkv6_fwd_cumsum(g, chunk_size=chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    # gi/ge are pre-scaled by RCP_LN2 inside the cumsum kernel; downstream uses exp2.
     h, ht = chunk_fwd_h(
         k=k,
         v=v,
@@ -1025,6 +1036,7 @@ def chunk_rwkv6_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        use_exp2=True,
         states_in_fp32=True,
     )
     A = chunk_rwkv6_fwd_intra(
@@ -1049,6 +1061,7 @@ def chunk_rwkv6_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        use_exp2=True,
     )
     return A, h, ht, o
 
@@ -1068,7 +1081,7 @@ def chunk_rwkv6_bwd(
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
 ):
-    gi, ge = chunk_rwkv6_fwd_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    gi, ge = chunk_rwkv6_fwd_cumsum(g, chunk_size=chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     h, _ = chunk_fwd_h(
         k=k,
         v=v,
@@ -1079,6 +1092,7 @@ def chunk_rwkv6_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        use_exp2=True,
         states_in_fp32=True,
     )
     dh, dh0 = chunk_rwkv6_bwd_dh(
@@ -1113,6 +1127,7 @@ def chunk_rwkv6_bwd(
         dh=dh,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        use_exp2=True,
     )
     dq, dk = chunk_rwkv6_bwd_dqk_intra(
         q=q,
