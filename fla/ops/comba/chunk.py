@@ -74,7 +74,6 @@ def chunk_comba_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     o = chunk_fwd_o(
         q=q,
@@ -85,7 +84,6 @@ def chunk_comba_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     return g0, g, o, A, final_state
 
@@ -125,7 +123,6 @@ def chunk_comba_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -135,7 +132,6 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
         q=q,
@@ -149,7 +145,6 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
@@ -164,7 +159,6 @@ def chunk_comba_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dk2, dv, dp, db, dg0, dg2 = prepare_wy_repr_bwd(
         k=k,

@@ -53,7 +53,6 @@ def chunk_simple_gla_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     return o, ht
 
@@ -117,7 +116,6 @@ def chunk_simple_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     dv = chunk_bwd_dv(
         q=q,
@@ -130,7 +128,6 @@ def chunk_simple_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     return dq, dk, dv, dg, dh0
 

@@ -84,7 +84,6 @@ def chunk_gated_delta_rule_fwd(
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,
             context=cp_context,
-            use_exp2=use_exp2,
             transpose_state_layout=transpose_state_layout,
         )
 
@@ -97,7 +96,6 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
 
@@ -113,7 +111,6 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
     return g, o, A, final_state, initial_state, g_input
@@ -163,7 +160,6 @@ def chunk_gated_delta_rule_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
     dv = chunk_bwd_dv_local(
@@ -174,7 +170,6 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
 
     if cp_context is not None:
@@ -192,7 +187,6 @@ def chunk_gated_delta_rule_bwd(
             dht=dht,
             initial_state=initial_state,
             context=cp_context,
-            use_exp2=use_exp2,
             transpose_state_layout=transpose_state_layout,
         )
 
@@ -208,7 +202,6 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
@@ -224,7 +217,6 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
     dk2, dv, db, dg2 = prepare_wy_repr_bwd(
