@@ -187,7 +187,7 @@ class GroupNormRef(nn.Module):
         for BT in [32, 64, 128]
         for num_warps in [2, 4, 8]
     ],
-    key=['D', 'NB', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
+    key=['D', 'HAS_RESIDUAL', 'STORE_RESIDUAL_OUT', 'IS_RMS_NORM'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -334,7 +334,7 @@ def layer_norm_fwd_kernel1(
         for BT in [32, 64]
         for num_warps in [2, 4, 8]
     ],
-    key=['D', 'NB', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM'],
+    key=['D', 'HAS_DRESIDUAL', 'STORE_DRESIDUAL', 'IS_RMS_NORM'],
     **autotune_cache_kwargs,
 )
 @triton.jit
@@ -654,11 +654,16 @@ def layer_norm_bwd(
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # each program handles one group only.
-    # cap per-group program count to T // G so no program is completely idle.
-    # without this, high-SM GPUs (e.g. B200, 160 SMs) with small T would
-    # launch idle programs whose make_block_ptr offsets exceed the tensor shape.
-    NS = min(triton.cdiv(get_multiprocessor_count(x.device.index), G), T // G) * G
-    BS = triton.cdiv(T, NS)
+    # Ensure BS >= max autotuned BT (64) so that each program's
+    # make_block_ptr write region doesn't overlap with adjacent
+    # programs. On high-SM GPUs with small T, BS < BT causes
+    # overlapping writes on dx that corrupt GPU memory.
+    _MAX_BT = 64  # largest BT in autotuner configs
+    T_per_group = T // G
+    NS = triton.cdiv(get_multiprocessor_count(x.device.index), G) * G
+    max_ns = max(T_per_group // _MAX_BT, 1) * G
+    NS = min(NS, max_ns)
+    BS = triton.cdiv(T_per_group, NS // G)
     GS = NS // G
 
     dw = torch.empty((NS, D), dtype=torch.float, device=weight.device) if weight is not None else None
