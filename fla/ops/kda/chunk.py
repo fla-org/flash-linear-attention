@@ -44,7 +44,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
         lower_bound: float | None = None,
-        disable_recompute: bool = False,
+        disable_recompute: bool = True,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
         transpose_state_layout: bool = False,
@@ -186,7 +186,7 @@ def chunk_kda(
     cu_seqlens_cpu: torch.LongTensor | None = None,
     safe_gate: bool = False,
     lower_bound: float | None = None,
-    disable_recompute: bool = False,
+    disable_recompute: bool = True,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext = None,
     transpose_state_layout: bool = False,
@@ -253,7 +253,7 @@ def chunk_kda(
         disable_recompute (bool):
             Whether to disable gradient recomputation in the kernel. When ``True``, the kernel
             will save all intermediate activations for backward pass, which is beneficial
-            for training small models at the cost of increased memory usage. Default: ``False``.
+            for training small models at the cost of increased memory usage. Default: ``True``.
         return_intermediate_states (bool):
             If True, returns intermediate state ``h`` for inference scenarios (e.g., vLLM).
             Must be used within ``torch.inference_mode()`` and will return a 3-tuple instead of 2-tuple.
