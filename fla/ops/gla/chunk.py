@@ -14,7 +14,7 @@ from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -50,7 +50,6 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -84,18 +83,11 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         # [BC, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        if USE_EXP2:
-            b_qg = b_q * exp2(b_g - b_gn[None, :]) * scale
-        else:
-            b_qg = b_q * exp(b_g - b_gn[None, :]) * scale
+        b_qg = b_q * exp2(b_g - b_gn[None, :]) * scale
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        if USE_EXP2:
-            b_kg = b_k * exp2(b_gn[:, None] - b_gk)
-        else:
-            b_kg = b_k * exp(b_gn[:, None] - b_gk)
-
+        b_kg = b_k * exp2(b_gn[:, None] - b_gk)
         # [BC, BC] using tf32 to improve precision here.
         b_A += tl.dot(b_qg, b_kg)
 
@@ -130,7 +122,6 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     BT: tl.constexpr,
     BC: tl.constexpr,
     BK: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -168,11 +159,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        if USE_EXP2:
-            b_A = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
-        else:
-            b_A = tl.sum(b_q * b_k[None, :] * exp(b_g - b_gk[None, :]), 1) * scale
-
+        b_A = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
         tl.store(A + o_A + j, b_A, mask=m_A)
         p_k += H*K
         p_gk += H*K
@@ -210,7 +197,6 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_k, i_tc, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -250,10 +236,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        if USE_EXP2:
-            b_A = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
-        else:
-            b_A = tl.sum(b_q * b_k[None, :] * exp(b_g - b_gk[None, :]), 1) * scale
+        b_A = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
         tl.store(A + o_A + j, b_A, mask=m_A)
         p_k += H*K
         p_gk += H*K
@@ -345,7 +328,6 @@ def chunk_gla_fwd_kernel_o(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -386,10 +368,7 @@ def chunk_gla_fwd_kernel_o(
         # [BT, BK]
         b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
         # [BT, BK]
-        if USE_EXP2:
-            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
-        else:
-            b_qg = (b_q * exp(b_g)).to(b_q.dtype)
+        b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
         b_h = tl.load(p_h, boundary_check=(0, 1))
         if i_k >= 0:
             if TRANSPOSE_STATE:
@@ -438,7 +417,6 @@ def chunk_gla_bwd_kernel_intra(
     BC: tl.constexpr,
     BK: tl.constexpr,
     NC: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -472,19 +450,12 @@ def chunk_gla_bwd_kernel_intra(
             # [BC, BK]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            if USE_EXP2:
-                b_kg = b_k * exp2(b_gn[None, :] - b_gk)
-            else:
-                b_kg = b_k * exp(b_gn[None, :] - b_gk)
+            b_kg = b_k * exp2(b_gn[None, :] - b_gk)
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
 
             b_dq += tl.dot(b_dA, b_kg)
-        if USE_EXP2:
-            b_dq *= exp2(b_g - b_gn[None, :])
-        else:
-            b_dq *= exp(b_g - b_gn[None, :])
-
+        b_dq *= exp2(b_g - b_gn[None, :])
     o_i = tl.arange(0, BC)
     m_dA = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
     o_dA = bos*H*BT + (i_t * BT + i_i * BC + tl.arange(0, BC)) * H*BT + i_h * BT + i_i * BC
@@ -502,10 +473,7 @@ def chunk_gla_bwd_kernel_intra(
         m_i = o_i[:, None] >= j
         # [BC, BK]
         # (SY 09/17) important to not use bf16 here to have a good precision.
-        if USE_EXP2:
-            b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp2(b_g - b_gkj[None, :]), 0.)
-        else:
-            b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp(b_g - b_gkj[None, :]), 0.)
+        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp2(b_g - b_gkj[None, :]), 0.)
         p_kj += H*K
         p_gkj += H*K
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
@@ -530,19 +498,13 @@ def chunk_gla_bwd_kernel_intra(
             # [BC, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_gq = tl.load(p_gq, boundary_check=(0, 1))
-            if USE_EXP2:
-                b_qg = b_q * tl.where(m_j[:, None], exp2(b_gq - b_gn[None, :]), 0)
-            else:
-                b_qg = b_q * tl.where(m_j[:, None], exp(b_gq - b_gn[None, :]), 0)
+            b_qg = b_q * tl.where(m_j[:, None], exp2(b_gq - b_gn[None, :]), 0)
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dk += tl.dot(b_dA, b_qg)
-        if USE_EXP2:
-            b_dk *= exp2(b_gn[None, :] - b_g)
-        else:
-            b_dk *= exp(b_gn[None, :] - b_g)
+        b_dk *= exp2(b_gn[None, :] - b_g)
     o_dA = bos*H*BT + (i_t * BT + i_i * BC) * H*BT + i_h * BT + i_i * BC + tl.arange(0, BC)
     p_qj = q + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
     p_gqj = g + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
@@ -555,10 +517,7 @@ def chunk_gla_bwd_kernel_intra(
         b_gqj = tl.load(p_gqj, mask=m_k, other=0).to(tl.float32)
         # [BC, BK]
         m_i = o_i[:, None] <= j
-        if USE_EXP2:
-            b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp2(b_gqj[None, :] - b_g), 0.)
-        else:
-            b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp(b_gqj[None, :] - b_g), 0.)
+        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp2(b_gqj[None, :] - b_g), 0.)
         p_qj += H*K
         p_gqj += H*K
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -646,7 +605,6 @@ def chunk_gla_bwd_kernel_dv(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -685,10 +643,7 @@ def chunk_gla_bwd_kernel_dv(
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
 
-        if USE_EXP2:
-            b_gn = exp2(tl.load(p_gn, mask=m_k, other=0)[None, :] - b_gk)
-        else:
-            b_gn = exp(tl.load(p_gn, mask=m_k, other=0)[None, :] - b_gk)
+        b_gn = exp2(tl.load(p_gn, mask=m_k, other=0)[None, :] - b_gk)
         b_k = (b_k * b_gn).to(b_k.dtype)
         # [BT, BV]
         # (SY 09/17) it is ok to have bf16 interchunk gradient contribution here
@@ -735,7 +690,6 @@ def chunk_gla_bwd_kernel_inter(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -792,17 +746,10 @@ def chunk_gla_bwd_kernel_inter(
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
 
-    if USE_EXP2:
-        b_dgk *= exp2(b_gn)
-        b_dq *= scale
-        b_dq = b_dq * exp2(b_gk)
-        b_dk = b_dk * exp2(b_gn[None, :] - b_gk)
-    else:
-        b_dgk *= exp(b_gn)
-        b_dq *= scale
-        b_dq = b_dq * exp(b_gk)
-        b_dk = b_dk * exp(b_gn[None, :] - b_gk)
-
+    b_dgk *= exp2(b_gn)
+    b_dq *= scale
+    b_dq = b_dq * exp2(b_gk)
+    b_dk = b_dk * exp2(b_gn[None, :] - b_gk)
     p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -834,7 +781,6 @@ def chunk_gla_fwd_intra_gk(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ):
     B, T, H, K = k.shape
     BT = chunk_size
@@ -861,7 +807,6 @@ def chunk_gla_fwd_intra_gk(
         BT=BT,
         BC=BC,
         NC=NC,
-        USE_EXP2=use_exp2,
     )
 
     grid = (NT, NC, B * H)
@@ -882,7 +827,6 @@ def chunk_gla_fwd_intra_gk(
             BT=BT,
             BC=BC,
             BK=BK,
-            USE_EXP2=use_exp2,
         )
     # split then merge
     else:
@@ -907,7 +851,6 @@ def chunk_gla_fwd_intra_gk(
             BC=BC,
             BK=BK,
             NC=NC,
-            USE_EXP2=use_exp2,
         )
 
         grid = (NT, NC, B * H)
@@ -936,7 +879,6 @@ def chunk_gla_fwd_o_gk(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ):
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
@@ -965,7 +907,6 @@ def chunk_gla_fwd_o_gk(
         K=K,
         V=V,
         BT=BT,
-        USE_EXP2=use_exp2,
         TRANSPOSE_STATE=transpose_state_layout,
     )
     return o
@@ -1014,7 +955,6 @@ def chunk_gla_bwd_dv(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ):
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
@@ -1039,7 +979,6 @@ def chunk_gla_bwd_dv(
         K=K,
         V=V,
         BT=BT,
-        USE_EXP2=use_exp2,
     )
     return dv
 
@@ -1052,7 +991,6 @@ def chunk_gla_bwd_dqk_intra(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ):
     B, T, H, K = q.shape
     BT = chunk_size
@@ -1084,7 +1022,6 @@ def chunk_gla_bwd_dqk_intra(
         BC=BC,
         BK=BK,
         NC=NC,
-        USE_EXP2=use_exp2,
     )
     return dq, dk
 
@@ -1103,7 +1040,6 @@ def chunk_gla_bwd_dqkg(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -1137,7 +1073,6 @@ def chunk_gla_bwd_dqkg(
         K=K,
         V=V,
         BT=BT,
-        USE_EXP2=use_exp2,
     )
     return dq2, dk2, dg
 
@@ -1154,13 +1089,12 @@ def chunk_gla_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if g_cumsum is None:
         g_cumsum = chunk_local_cumsum(
             g,
             chunk_size,
-            scale=RCP_LN2 if use_exp2 else None,
+            scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
         )
 
@@ -1174,7 +1108,7 @@ def chunk_gla_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=use_exp2,
+        use_exp2=True,
         states_in_fp32=False,
     )
 
@@ -1188,7 +1122,6 @@ def chunk_gla_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
     o = chunk_gla_fwd_o_gk(
         q=q,
@@ -1200,7 +1133,6 @@ def chunk_gla_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
     return g_cumsum, A, h, ht, o
 
@@ -1220,13 +1152,12 @@ def chunk_gla_bwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ):
     if g_cumsum is None:
         g_cumsum = chunk_local_cumsum(
             g,
             chunk_size,
-            scale=RCP_LN2 if use_exp2 else None,
+            scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
         )
 
@@ -1241,7 +1172,7 @@ def chunk_gla_bwd(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
-            use_exp2=use_exp2,
+            use_exp2=True,
             states_in_fp32=True,
         )
     dh, dh0 = chunk_bwd_dh(
@@ -1257,7 +1188,7 @@ def chunk_gla_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=use_exp2,
+        use_exp2=True,
         states_in_fp32=True,
     )
 
@@ -1270,7 +1201,6 @@ def chunk_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
 
     # dq dk in fp32
@@ -1290,7 +1220,6 @@ def chunk_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
     dq, dk, dg = chunk_gla_bwd_dqkg(
         q=q,
@@ -1306,7 +1235,6 @@ def chunk_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
     )
     return dq, dk, dv, dg, dh0
 
@@ -1343,7 +1271,6 @@ class ChunkGLAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            use_exp2=True,
         )
         # recompute g_cumsum in bwd pass
         if g.dtype != torch.float:
@@ -1376,7 +1303,6 @@ class ChunkGLAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            use_exp2=True,
         )
         return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None, None
 

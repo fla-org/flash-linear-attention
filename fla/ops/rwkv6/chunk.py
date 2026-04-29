@@ -1067,7 +1067,6 @@ def chunk_rwkv6_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     return A, h, ht, o
 
@@ -1139,7 +1138,6 @@ def chunk_rwkv6_bwd(
         dh=dh,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=True,
     )
     dq, dk = chunk_rwkv6_bwd_dqk_intra(
         q=q,

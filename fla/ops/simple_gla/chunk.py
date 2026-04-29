@@ -27,7 +27,6 @@ def chunk_simple_gla_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     h, ht = chunk_fwd_h(
         k=k,
@@ -40,7 +39,7 @@ def chunk_simple_gla_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=use_exp2,
+        use_exp2=True,
         states_in_fp32=False,
     )
     o = chunk_fwd_o(
@@ -54,7 +53,7 @@ def chunk_simple_gla_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
+        use_exp2=True,
     )
     return o, ht
 
@@ -72,7 +71,6 @@ def chunk_simple_gla_bwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # (SY 09/22) states_in_fp32 seems not affecting the error of dg but for safety, set to True
     h, _ = chunk_fwd_h(
@@ -86,7 +84,7 @@ def chunk_simple_gla_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=use_exp2,
+        use_exp2=True,
         states_in_fp32=True,
     )
     dh, dh0 = chunk_bwd_dh(
@@ -103,7 +101,7 @@ def chunk_simple_gla_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=use_exp2,
+        use_exp2=True,
         states_in_fp32=True,
     )
     dq, dk, _, dg = chunk_bwd_dqkwg(
@@ -119,7 +117,7 @@ def chunk_simple_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
+        use_exp2=True,
     )
     dv = chunk_bwd_dv(
         q=q,
@@ -132,7 +130,7 @@ def chunk_simple_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=use_exp2,
+        use_exp2=True,
     )
     return dq, dk, dv, dg, dh0
 
@@ -184,7 +182,6 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            use_exp2=True,
         )
         ctx.save_for_backward(q, k, v, g, g_gamma, initial_state, chunk_indices)
         ctx.chunk_size = chunk_size
@@ -211,7 +208,6 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
-            use_exp2=True,
         )
         if g is not None:
             dg = chunk_local_cumsum(

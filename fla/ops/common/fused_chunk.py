@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp2
 from fla.utils import (
     IS_NVIDIA_HOPPER,
     autocast_custom_bwd,
@@ -39,7 +39,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'USE_EXP2'],
+    key=['H', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -64,7 +64,6 @@ def fused_chunk_fwd_kernel(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -87,14 +86,9 @@ def fused_chunk_fwd_kernel(
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (o_i + 1)
         b_g_last = b_gamma * BT
-        if USE_EXP2:
-            b_gq = exp2(b_g)
-            b_gk = exp2(b_g_last - b_g)
-            b_gn = exp2(b_g_last)
-        else:
-            b_gq = exp(b_g)
-            b_gk = exp(b_g_last - b_g)
-            b_gn = exp(b_g_last)
+        b_gq = exp2(b_g)
+        b_gk = exp2(b_g_last - b_g)
+        b_gn = exp2(b_g_last)
 
     # [BT, BT]
     m_s = o_i[:, None] >= o_i[None, :]
@@ -136,27 +130,15 @@ def fused_chunk_fwd_kernel(
             b_g = tl.load(p_g, mask=(o_t < T), other=0.)
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
 
-            if USE_EXP2:
-                b_gq = exp2(b_g)
-                b_gk = exp2(b_g_last - b_g)
-                b_gn = exp2(b_g_last)
-            else:
-                b_gq = exp(b_g)
-                b_gk = exp(b_g_last - b_g)
-                b_gn = exp(b_g_last)
+            b_gq = exp2(b_g)
+            b_gk = exp2(b_g_last - b_g)
+            b_gn = exp2(b_g_last)
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t * BT)
-            if USE_EXP2:
-                b_gk = exp2(b_g_last - b_g)
-                b_gn = exp2(b_g_last)
-            else:
-                b_gk = exp(b_g_last - b_g)
-                b_gn = exp(b_g_last)
+            b_gk = exp2(b_g_last - b_g)
+            b_gn = exp2(b_g_last)
         if USE_G or USE_G_GAMMA:
-            if USE_EXP2:
-                b_gs = tl.where(m_s & m_t, exp2(b_g[:, None] - b_g[None, :]), 0)
-            else:
-                b_gs = tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)
+            b_gs = tl.where(m_s & m_t, exp2(b_g[:, None] - b_g[None, :]), 0)
             # [BT, BT]
             b_s *= b_gs
             # [BT, BV]
@@ -191,7 +173,7 @@ def fused_chunk_fwd_kernel(
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'K', 'V', 'BT', 'USE_EXP2'],
+    key=['H', 'K', 'V', 'BT'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -221,7 +203,6 @@ def fused_chunk_bwd_kernel(
     BV: tl.constexpr,
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE: tl.constexpr,
@@ -243,14 +224,9 @@ def fused_chunk_bwd_kernel(
         b_gamma = tl.load(g_gamma + i_h)
         b_g = b_gamma * (o_i + 1)
         b_g_last = b_gamma * BT
-        if USE_EXP2:
-            b_gq = exp2(b_g)
-            b_gk = exp2(b_g_last - b_g)
-            b_gn = exp2(b_g_last)
-        else:
-            b_gq = exp(b_g)
-            b_gk = exp(b_g_last - b_g)
-            b_gn = exp(b_g_last)
+        b_gq = exp2(b_g)
+        b_gk = exp2(b_g_last - b_g)
+        b_gn = exp2(b_g_last)
 
     m_s = o_i[:, None] >= o_i[None, :]
 
@@ -294,21 +270,13 @@ def fused_chunk_bwd_kernel(
             b_g = tl.load(p_g, mask=(o_t < T), other=0.)
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
 
-            if USE_EXP2:
-                b_gq = exp2(b_g)
-                b_gk = exp2(b_g_last - b_g)
-                b_gn = exp2(b_g_last)
-            else:
-                b_gq = exp(b_g)
-                b_gk = exp(b_g_last - b_g)
-                b_gn = exp(b_g_last)
+            b_gq = exp2(b_g)
+            b_gk = exp2(b_g_last - b_g)
+            b_gn = exp2(b_g_last)
 
             p_dg = dg + ((i_k * NV + i_v) * all + (bos + o_t)).to(tl.int64) * H + i_h
             # [BT, BT]
-            if USE_EXP2:
-                b_gs = tl.where(m_s & m_t, exp2(b_g[:, None] - b_g[None, :]), 0)
-            else:
-                b_gs = tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)
+            b_gs = tl.where(m_s & m_t, exp2(b_g[:, None] - b_g[None, :]), 0)
             b_ds = b_ds * b_gs
             # [BT, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -321,18 +289,11 @@ def fused_chunk_bwd_kernel(
 
         elif USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t * BT)
-            if USE_EXP2:
-                b_gk = exp2(b_g_last - b_g)
-                b_gn = exp2(b_g_last)
-            else:
-                b_gk = exp(b_g_last - b_g)
-                b_gn = exp(b_g_last)
+            b_gk = exp2(b_g_last - b_g)
+            b_gn = exp2(b_g_last)
 
             # [BT, BT]
-            if USE_EXP2:
-                b_gs = tl.where(m_s & m_t, exp2(b_g[:, None] - b_g[None, :]), 0)
-            else:
-                b_gs = tl.where(m_s & m_t, exp(b_g[:, None] - b_g[None, :]), 0)
+            b_gs = tl.where(m_s & m_t, exp2(b_g[:, None] - b_g[None, :]), 0)
             b_ds = b_ds * b_gs
             # [BT, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
@@ -392,16 +353,10 @@ def fused_chunk_bwd_kernel(
             b_g = tl.load(p_g, mask=m_t, other=0.)
             b_g_last = tl.load(g + (bos + last_idx) * H + i_h)
 
-            if USE_EXP2:
-                b_gq = exp2(b_g)
-                b_gk = exp2(b_g_last - b_g)
-                b_gn = exp2(b_g_last)
-                b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp2(b_g[:, None] - b_g[None, :]), 0)) * scale
-            else:
-                b_gq = exp(b_g)
-                b_gk = exp(b_g_last - b_g)
-                b_gn = exp(b_g_last)
-                b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp(b_g[:, None] - b_g[None, :]), 0)) * scale
+            b_gq = exp2(b_g)
+            b_gk = exp2(b_g_last - b_g)
+            b_gn = exp2(b_g_last)
+            b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp2(b_g[:, None] - b_g[None, :]), 0)) * scale
 
             b_s = b_s * b_gs
             b_ds = b_ds * b_gs
@@ -423,14 +378,9 @@ def fused_chunk_bwd_kernel(
 
         elif USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t * BT)
-            if USE_EXP2:
-                b_gk = exp2(b_g_last - b_g)
-                b_gn = exp2(b_g_last)
-                b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp2(b_g[:, None] - b_g[None, :]), 0)) * scale
-            else:
-                b_gk = exp(b_g_last - b_g)
-                b_gn = exp(b_g_last)
-                b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp(b_g[:, None] - b_g[None, :]), 0)) * scale
+            b_gk = exp2(b_g_last - b_g)
+            b_gn = exp2(b_g_last)
+            b_gs = tl.trans(tl.where(m_s & (m_t[:, None] & m_t), exp2(b_g[:, None] - b_g[None, :]), 0)) * scale
 
             b_s = b_s * b_gs
             b_ds = b_ds * b_gs
@@ -471,7 +421,6 @@ def fused_chunk_fwd(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-    use_exp2: bool = False,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     BT = chunk_size
@@ -500,7 +449,6 @@ def fused_chunk_fwd(
         V=V,
         BT=BT,
         BK=BK,
-        USE_EXP2=use_exp2,
     )
     if NK > 1:
         o = o.sum(0).to(v)
@@ -519,7 +467,6 @@ def fused_chunk_bwd(
     dht: torch.Tensor,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-    use_exp2: bool = False,
 ):
     B, T, H, K, V = *q.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -559,7 +506,6 @@ def fused_chunk_bwd(
         BT=BT,
         BK=BK,
         BV=BV,
-        USE_EXP2=use_exp2,
     )
     dq = dq.sum(0) if NV > 1 else dq
     dk = dk.sum(0) if NV > 1 else dk
@@ -609,7 +555,6 @@ class FusedChunkFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
-            use_exp2=True,
         )
 
         ctx.save_for_backward(q, k, v, g, g_gamma, initial_state)
@@ -636,7 +581,6 @@ class FusedChunkFunction(torch.autograd.Function):
             dht=dht,
             cu_seqlens=ctx.cu_seqlens,
             chunk_size=ctx.chunk_size,
-            use_exp2=True,
         )
         if g is not None:
             dg = dg.to(g)

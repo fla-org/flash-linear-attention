@@ -122,7 +122,6 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=True,
         transpose_state_layout=transpose_state_layout,
     )
     if disable_recompute is False:

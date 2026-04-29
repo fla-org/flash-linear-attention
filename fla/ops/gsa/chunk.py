@@ -540,7 +540,6 @@ def chunk_gsa_fwd_v(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     return A, h, ht, o
 
@@ -658,7 +657,6 @@ def chunk_gsa_bwd_v(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        use_exp2=True,
     )
     return dq, dk, dv, dg, dh0
 
