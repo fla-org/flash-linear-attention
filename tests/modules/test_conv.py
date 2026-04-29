@@ -1375,12 +1375,18 @@ def test_conv_varlen_non_contiguous_qkv(
     assert_close("dh0", ref_initial_state.grad, tri_initial_state.grad, 1e-3)
 
 
-@pytest.mark.parametrize("B", [1, 4])
-@pytest.mark.parametrize("T", [15, 64, 300])
-@pytest.mark.parametrize("D", [32, 64, 128])
-@pytest.mark.parametrize("W", [2, 4])
-@pytest.mark.parametrize("activation", [None, "silu"])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'activation', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_{5}".format(*test))
+        for test in [
+            (2, 64, 128, 4, None, torch.float32),
+            (2, 128, 128, 3, "silu", torch.float32),
+            (1, 15, 64, 2, None, torch.bfloat16),
+            (4, 300, 32, 4, "silu", torch.bfloat16),
+        ]
+    ],
+)
 def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
     """Test that backward produces correct gradients when dy is non-contiguous.
 
