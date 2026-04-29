@@ -16,7 +16,7 @@ from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
 from fla.ops.kda.gate import beta_sigmoid_bwd, fused_beta_sigmoid
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 class ChunkKDAFunction(torch.autograd.Function):
@@ -48,6 +48,10 @@ class ChunkKDAFunction(torch.autograd.Function):
         transpose_state_layout: bool = False,
     ):
         chunk_size = 64
+
+        # AMD: force non-transposed state layout for kernel compatibility
+        if IS_AMD:
+            transpose_state_layout = False
 
         # Apply l2norm
         q_rstd, k_rstd = None, None

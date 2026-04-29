@@ -13,7 +13,7 @@ from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp, exp2
-from fla.utils import IS_NVIDIA_HOPPER, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_AMD, IS_NVIDIA_HOPPER, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 
@@ -29,9 +29,9 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 @fla_cache_autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in ([2, 3, 4] if check_shared_mem('ampere') else [2, 1])
-        for BV in ([32, 64] if check_shared_mem('ada') else [32])
+        for num_warps in ([2, 4, 8, 16] if IS_AMD else [2, 4])
+        for num_stages in ([1, 2] if IS_AMD else ([2, 3, 4] if check_shared_mem('ampere') else [2, 1]))
+        for BV in (([16, 32, 64, 128] if check_shared_mem('ada') else [16, 32, 64]) if IS_AMD else ([32, 64] if check_shared_mem('ada') else [32]))
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'USE_EXP2', 'TRANSPOSE_STATE'],
     use_cuda_graph=USE_CUDA_GRAPH,
@@ -334,9 +334,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 @fla_cache_autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in ([2, 3, 4] if check_shared_mem('ampere') else [1])
-        for BV in ([32, 64] if check_shared_mem('ada') else [32])
+        for num_warps in ([2, 4, 8, 16] if IS_AMD else [2, 4])
+        for num_stages in ([1, 2] if IS_AMD else ([2, 3, 4] if check_shared_mem('ampere') else [1]))
+        for BV in (([16, 32, 64, 128] if check_shared_mem('ada') else [16, 32, 64]) if IS_AMD else ([32, 64] if check_shared_mem('ada') else [32]))
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BV', 'USE_G', 'USE_EXP2', 'TRANSPOSE_STATE'],
     use_cuda_graph=USE_CUDA_GRAPH,
@@ -688,37 +688,77 @@ def chunk_gated_delta_rule_fwd_h(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    if transpose_state_layout:
-        h = k.new_empty(B, NT, HV, V, K)
-        final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
-    else:
+    if IS_AMD:
+        # AMD: force non-transposed layout in kernel, handle transpose at Python level
         h = k.new_empty(B, NT, HV, K, V)
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
-    v_new = torch.empty_like(u) if save_new_value else None
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
-    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
-        k=k,
-        v=u,
-        w=w,
-        v_new=v_new,
-        g=g,
-        gk=gk,
-        h=h,
-        h0=initial_state,
-        ht=final_state,
-        cu_seqlens=cu_seqlens,
-        chunk_offsets=chunk_offsets,
-        T=T,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BT=BT,
-        USE_EXP2=use_exp2,
-        TRANSPOSE_STATE=transpose_state_layout,
-    )
-    return h, v_new, final_state
+        # Handle transpose_state_layout at Python level for AMD
+        h0_for_kernel = initial_state
+        if transpose_state_layout and initial_state is not None:
+            h0_for_kernel = initial_state.transpose(-1, -2).contiguous()
+
+        v_new = torch.empty_like(u) if save_new_value else None
+        def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
+        chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+            k=k,
+            v=u,
+            w=w,
+            v_new=v_new,
+            g=g,
+            gk=gk,
+            h=h,
+            h0=h0_for_kernel,
+            ht=final_state,
+            cu_seqlens=cu_seqlens,
+            chunk_offsets=chunk_offsets,
+            T=T,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BT=BT,
+            USE_EXP2=use_exp2,
+            TRANSPOSE_STATE=False,
+        )
+
+        if transpose_state_layout:
+            h = h.transpose(-1, -2).contiguous()
+            if final_state is not None:
+                final_state = final_state.transpose(-1, -2).contiguous()
+        return h, v_new, final_state
+    else:
+        if transpose_state_layout:
+            h = k.new_empty(B, NT, HV, V, K)
+            final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
+        else:
+            h = k.new_empty(B, NT, HV, K, V)
+            final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
+
+        v_new = torch.empty_like(u) if save_new_value else None
+        def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
+        chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+            k=k,
+            v=u,
+            w=w,
+            v_new=v_new,
+            g=g,
+            gk=gk,
+            h=h,
+            h0=initial_state,
+            ht=final_state,
+            cu_seqlens=cu_seqlens,
+            chunk_offsets=chunk_offsets,
+            T=T,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BT=BT,
+            USE_EXP2=use_exp2,
+            TRANSPOSE_STATE=transpose_state_layout,
+        )
+        return h, v_new, final_state
 
 
 def chunk_gated_delta_rule_bwd_dhu(
@@ -750,36 +790,69 @@ def chunk_gated_delta_rule_bwd_dhu(
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
-    if transpose_state_layout:
-        dh = q.new_empty(B, NT, HV, V, K)
-    else:
+    if IS_AMD:
+        # AMD: force non-transposed layout in kernel
         dh = q.new_empty(B, NT, HV, K, V)
-    dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
-    dv2 = torch.empty_like(dv)
+        dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
+        dv2 = torch.empty_like(dv)
 
-    def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
-    chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64[grid](
-        q=q,
-        k=k,
-        w=w,
-        g=g,
-        gk=gk,
-        dht=dht,
-        dh0=dh0,
-        do=do,
-        dh=dh,
-        dv=dv,
-        dv2=dv2,
-        cu_seqlens=cu_seqlens,
-        chunk_offsets=chunk_offsets,
-        scale=scale,
-        T=T,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BT=BT,
-        USE_EXP2=use_exp2,
-        TRANSPOSE_STATE=transpose_state_layout,
-    )
-    return dh, dh0, dv2
+        def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
+        chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64[grid](
+            q=q,
+            k=k,
+            w=w,
+            g=g,
+            gk=gk,
+            dht=dht,
+            dh0=dh0,
+            do=do,
+            dh=dh,
+            dv=dv,
+            dv2=dv2,
+            cu_seqlens=cu_seqlens,
+            chunk_offsets=chunk_offsets,
+            scale=scale,
+            T=T,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BT=BT,
+            USE_EXP2=use_exp2,
+            TRANSPOSE_STATE=False,
+        )
+        return dh, dh0, dv2
+    else:
+        if transpose_state_layout:
+            dh = q.new_empty(B, NT, HV, V, K)
+        else:
+            dh = q.new_empty(B, NT, HV, K, V)
+        dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
+        dv2 = torch.empty_like(dv)
+
+        def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
+        chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64[grid](
+            q=q,
+            k=k,
+            w=w,
+            g=g,
+            gk=gk,
+            dht=dht,
+            dh0=dh0,
+            do=do,
+            dh=dh,
+            dv=dv,
+            dv2=dv2,
+            cu_seqlens=cu_seqlens,
+            chunk_offsets=chunk_offsets,
+            scale=scale,
+            T=T,
+            H=H,
+            HV=HV,
+            K=K,
+            V=V,
+            BT=BT,
+            USE_EXP2=use_exp2,
+            TRANSPOSE_STATE=transpose_state_layout,
+        )
+        return dh, dh0, dv2
