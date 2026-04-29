@@ -105,51 +105,37 @@ def _raw_chunk_gated_delta_rule_fwd_h(
 
     if IS_AMD:
         # AMD: force non-transposed layout in kernel, handle transpose at Python level
-        h = k.new_empty(B, NT, HV, K, V)
-        final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
-        v_new = torch.empty_like(u) if save_new_value else None
-
-        # Handle transpose_state_layout at Python level for AMD
         h0_for_kernel = initial_state
         if transpose_state_layout and initial_state is not None:
             h0_for_kernel = initial_state.transpose(-1, -2).contiguous()
-
-        def grid(meta):
-            return (triton.cdiv(V, meta['BV']), N * HV)
-
-        chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
-            k=k, v=u, w=w, v_new=v_new,
-            g=g, gk=gk, h=h, h0=h0_for_kernel, ht=final_state,
-            cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
-            T=T, HV=HV, H=H, K=K, V=V, BT=BT, USE_EXP2=use_exp2,
-            TRANSPOSE_STATE=False,
-        )
-
-        if transpose_state_layout:
-            h = h.transpose(-1, -2).contiguous()
-            if final_state is not None:
-                final_state = final_state.transpose(-1, -2).contiguous()
-        return h, v_new, final_state
+        kernel_transpose = False
+        h_shape, fs_shape = (B, NT, HV, K, V), (N, HV, K, V)
     else:
+        h0_for_kernel, kernel_transpose = initial_state, transpose_state_layout
         if transpose_state_layout:
-            h = k.new_empty(B, NT, HV, V, K)
-            final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
+            h_shape, fs_shape = (B, NT, HV, V, K), (N, HV, V, K)
         else:
-            h = k.new_empty(B, NT, HV, K, V)
-            final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
-        v_new = torch.empty_like(u) if save_new_value else None
+            h_shape, fs_shape = (B, NT, HV, K, V), (N, HV, K, V)
 
-        def grid(meta):
-            return (triton.cdiv(V, meta['BV']), N * HV)
+    h = k.new_empty(*h_shape)
+    final_state = k.new_zeros(*fs_shape, dtype=torch.float32) if output_final_state else None
+    v_new = torch.empty_like(u) if save_new_value else None
 
-        chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
-            k=k, v=u, w=w, v_new=v_new,
-            g=g, gk=gk, h=h, h0=initial_state, ht=final_state,
-            cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
-            T=T, HV=HV, H=H, K=K, V=V, BT=BT, USE_EXP2=use_exp2,
-            TRANSPOSE_STATE=transpose_state_layout,
-        )
-        return h, v_new, final_state
+    def grid(meta):
+        return (triton.cdiv(V, meta['BV']), N * HV)
+
+    chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
+        k=k, v=u, w=w, v_new=v_new,
+        g=g, gk=gk, h=h, h0=h0_for_kernel, ht=final_state,
+        cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
+        T=T, HV=HV, H=H, K=K, V=V, BT=BT, USE_EXP2=use_exp2,
+        TRANSPOSE_STATE=kernel_transpose,
+    )
+    if IS_AMD and transpose_state_layout:
+        h = h.transpose(-1, -2).contiguous()
+        if final_state is not None:
+            final_state = final_state.transpose(-1, -2).contiguous()
+    return h, v_new, final_state
 
 
 def compute_subseq_len(

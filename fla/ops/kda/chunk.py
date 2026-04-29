@@ -7,6 +7,8 @@
 
 # Related files are modified and supported by the Moonshot AI Team
 
+import warnings
+
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -50,7 +52,12 @@ class ChunkKDAFunction(torch.autograd.Function):
         chunk_size = 64
 
         # AMD: force non-transposed state layout for kernel compatibility
-        if IS_AMD:
+        if IS_AMD and transpose_state_layout:
+            warnings.warn(
+                "transpose_state_layout=True is not supported on AMD/ROCm for KDA kernels. "
+                "Falling back to transpose_state_layout=False.",
+                stacklevel=2,
+            )
             transpose_state_layout = False
 
         # Apply l2norm
