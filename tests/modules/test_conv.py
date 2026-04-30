@@ -1373,3 +1373,53 @@ def test_conv_varlen_non_contiguous_qkv(
 
     assert_close("dx", ref_k_state.grad, k_state.grad, 1e-3)
     assert_close("dh0", ref_initial_state.grad, tri_initial_state.grad, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'W', 'activation', 'dtype'),
+    [
+        pytest.param(*test, id="B{0}_T{1}_D{2}_W{3}_activation{4}_{5}".format(*test))
+        for test in [
+            (2, 64, 128, 4, None, torch.float32),
+            (2, 128, 128, 3, "silu", torch.float32),
+            (1, 15, 64, 2, None, torch.bfloat16),
+            (4, 300, 32, 4, "silu", torch.bfloat16),
+        ]
+    ],
+)
+def test_conv_non_contiguous_dy(B, T, D, W, activation, dtype):
+    """Test that backward produces correct gradients when dy is non-contiguous.
+
+    This simulates the split -> conv -> cat pattern used in fused-QKV attention,
+    where torch.cat backward produces non-contiguous dy views via split.
+    """
+    torch.manual_seed(42)
+
+    weight = torch.randn(D, W, device=device, dtype=dtype).requires_grad_(True)
+    weight_ref = weight.detach().clone().requires_grad_(True)
+
+    # --- Reference: contiguous path ---
+    x_ref = torch.randn(B, T, D, device=device, dtype=dtype, requires_grad=True)
+    y_ref, _ = causal_conv1d(x_ref, weight_ref, activation=activation)
+    dy = torch.randn_like(y_ref)
+    y_ref.backward(dy)
+
+    # --- Test: non-contiguous dy via cat/split pattern ---
+    x_test = x_ref.detach().clone().requires_grad_(True)
+    weight_test = weight.detach().clone().requires_grad_(True)
+
+    # Forward through conv
+    y_test, _ = causal_conv1d(x_test, weight_test, activation=activation)
+
+    # Simulate non-contiguous dy: cat into [B, T, 3D] then split back
+    dummy = torch.zeros_like(dy)
+    dy_cat = torch.cat([dy, dummy, dummy], dim=-1)   # [B, T, 3D]
+    dy_nc = dy_cat[:, :, :D]                          # non-contiguous view
+
+    assert not dy_nc.is_contiguous(), "dy should be non-contiguous for this test"
+    assert torch.equal(dy_nc.contiguous(), dy), "dy content should match"
+
+    y_test.backward(dy_nc)
+
+    assert_close(" dx", x_ref.grad, x_test.grad, 1e-3)
+    assert_close(" dw", weight_ref.grad, weight_test.grad, 1e-3)
