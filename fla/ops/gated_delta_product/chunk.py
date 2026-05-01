@@ -17,6 +17,7 @@ from fla.ops.gated_delta_product.chunk_deltaproduct_o import chunk_gated_delta_p
 from fla.ops.gated_delta_rule.chunk import chunk_gated_delta_rule_bwd
 from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd as gdn_recompute_w_u_fwd
 from fla.ops.utils import chunk_local_cumsum, solve_tril
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -40,10 +41,21 @@ def chunk_gated_delta_product_fwd(
         g_interleaved = g.new_zeros(g.shape[0], g.shape[1], num_householder, g.shape[2], dtype=torch.float32)
         g_interleaved[:, :, 0] = g
         g_interleaved = rearrange(g_interleaved, 'b l n h -> b (l n) h').contiguous()
-        g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens,
-                               output_dtype=torch.float32, chunk_indices=chunk_indices)
+        g = chunk_local_cumsum(
+            g,
+            chunk_size=64,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+            output_dtype=torch.float32,
+            chunk_indices=chunk_indices,
+        )
         g_interleaved = chunk_local_cumsum(
-            g_interleaved, chunk_size=64, cu_seqlens=cu_seqlens_dp, output_dtype=torch.float32, chunk_indices=chunk_indices_dp
+            g_interleaved,
+            chunk_size=64,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens_dp,
+            output_dtype=torch.float32,
+            chunk_indices=chunk_indices_dp,
         )
     else:
         g_interleaved = None
@@ -56,12 +68,13 @@ def chunk_gated_delta_product_fwd(
         cu_seqlens=cu_seqlens_dp,
         output_dtype=torch.float32,
         chunk_indices=chunk_indices_dp,
+        use_exp2=True,
     )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens_dp,
-        output_dtype=k.dtype,
         chunk_indices=chunk_indices_dp,
+        output_dtype=k.dtype,
     )
     if g is not None:
         w, u = gdn_recompute_w_u_fwd(
@@ -72,6 +85,7 @@ def chunk_gated_delta_product_fwd(
             g=g_interleaved,
             cu_seqlens=cu_seqlens_dp,
             chunk_indices=chunk_indices_dp,
+            use_exp2=True,
         )
     else:
         w, u = dn_recompute_w_u_fwd(
@@ -192,7 +206,7 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
                 dht=dht,
                 cu_seqlens=cu_seqlens * ctx.num_householder if cu_seqlens is not None else None,
                 chunk_indices=chunk_indices_dp,
-                use_exp2=False,
+                use_exp2=True,
             )
             dg = rearrange(dg, 'b (l n) h  -> b l n h ', n=ctx.num_householder)[:, :, 0].contiguous().to(g)
         else:
