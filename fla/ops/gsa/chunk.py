@@ -13,8 +13,9 @@ from einops import reduce
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.gla.chunk import chunk_gla_bwd, chunk_gla_fwd
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 from fla.ops.utils.softmax import softmax_bwd, softmax_fwd
 from fla.utils import autotune_cache_kwargs, input_guard
 
@@ -95,7 +96,7 @@ def chunk_gsa_fwd_k_kernel_inter(
     p_A = tl.make_block_ptr(A + (bos * HQ + i_hq) * BT, (T, BT), (HQ*BT, 1), (i_t * BT, 0), (BT, BT), (1, 0))
     # [BT, BV]
     b_g = tl.load(p_g, boundary_check=(0, 1))
-    b_o = b_o * exp(b_g)
+    b_o = b_o * exp2(b_g)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
     # [BT, BT]
@@ -157,13 +158,13 @@ def chunk_gsa_fwd_k_kernel_intra(
         # [BC, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
-        b_vg = (b_v * exp(b_gn[None, :] - b_gv)).to(b_v.dtype)
+        b_vg = (b_v * exp2(b_gn[None, :] - b_gv)).to(b_v.dtype)
         # [BC, BC]
         b_A = tl.load(p_A, boundary_check=(0, 1))
         b_o += tl.dot(b_A, b_vg)
     # [BC, BV]
     b_g = tl.load(p_g, boundary_check=(0, 1))
-    b_o *= exp(b_g - b_gn[None, :])
+    b_o *= exp2(b_g - b_gn[None, :])
 
     o_A = (bos + i_t * BT + i_i * BC + tl.arange(0, BC)) * HQ*BT + i_hq * BT + i_i * BC
     m_A = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
@@ -176,7 +177,7 @@ def chunk_gsa_fwd_k_kernel_intra(
         b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
         b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
         # [BC, BV]
-        b_vg = b_v[None, :] * exp(b_g - b_gv[None, :])
+        b_vg = b_v[None, :] * exp2(b_g - b_gv[None, :])
         # avoid 0 * inf = inf
         b_o += tl.where(o_i[:, None] >= j, b_A[:, None] * b_vg, 0.)
     p_o = tl.make_block_ptr(o + (bos*HQ + i_hq) * V, (T, V), (HQ*V, 1), (i_t * BT + i_i * BC, i_v * BV), (BC, BV), (1, 0))
@@ -250,11 +251,11 @@ def chunk_gsa_bwd_k_kernel_dA(
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * exp(b_g - b_gn[None, :])).to(b_do.dtype)
+        b_do = (b_do * exp2(b_g - b_gn[None, :])).to(b_do.dtype)
         # [BV, BC]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_gv = tl.load(p_gv, boundary_check=(0, 1))
-        b_vg = (b_v * exp(b_gn[:, None] - b_gv)).to(b_v.dtype)
+        b_vg = (b_v * exp2(b_gn[:, None] - b_gv)).to(b_v.dtype)
         # [BC, BC]
         b_dA = tl.dot(b_do, b_vg) * scale
     elif i_i == i_j:
@@ -275,7 +276,7 @@ def chunk_gsa_bwd_k_kernel_dA(
             b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
             b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
             # [BC,]
-            b_dAj = tl.sum(b_do * b_v[None, :] * exp(b_g - b_gv[None, :]), 1)
+            b_dAj = tl.sum(b_do * b_v[None, :] * exp2(b_g - b_gv[None, :]), 1)
             b_dA = tl.where((o_i == j)[None, :], b_dAj[:, None], b_dA)
 
             p_v += H*V
@@ -379,16 +380,16 @@ def chunk_gsa_bwd_k_kernel_dqkvg(
         # [BT, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_gv = exp(b_gn[None, :] - b_g)
+        b_gv = exp2(b_gn[None, :] - b_g)
         # [BV, BK]
         b_h = tl.load(p_h, boundary_check=(0, 1))
         # [BT, BV]
         b_do = tl.load(p_do, boundary_check=(0, 1))
-        b_do = (b_do * exp(b_g)).to(b_do.dtype)
+        b_do = (b_do * exp2(b_g)).to(b_do.dtype)
         # [BK, BV]
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
         # [BV]
-        b_dg = tl.sum(tl.trans(b_h) * b_dh, 0) * exp(b_gn)
+        b_dg = tl.sum(tl.trans(b_h) * b_dh, 0) * exp2(b_gn)
 
         b_dh = b_dh.to(b_k.dtype)
         # [BT, BK]
@@ -477,12 +478,12 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         m_j = (i_t * BT + i_j * BC + o_i) < T
         # [BC, BV]
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_do = tl.load(p_do, boundary_check=(0, 1)) * tl.where(m_j[:, None], exp(b_g - b_gn[None, :]), 0)
+        b_do = tl.load(p_do, boundary_check=(0, 1)) * tl.where(m_j[:, None], exp2(b_g - b_gn[None, :]), 0)
         # [BC, BC]
         b_A = tl.load(p_A, boundary_check=(0, 1))
         # [BC, BV]
         b_dv += tl.dot(b_A, b_do.to(b_A.dtype))
-    b_dv *= exp(b_gn[None, :] - b_gv)
+    b_dv *= exp2(b_gn[None, :] - b_gv)
 
     p_g = g + (bos + i_t * BT + i_i * BC) * H*V + i_h * V + o_v
     p_A = A + (bos + i_t*BT + i_i*BC) * HQ*BT + i_hq * BT + i_i * BC + o_i
@@ -495,7 +496,7 @@ def chunk_gsa_bwd_k_kernel_intra_dvg(
         b_do = tl.load(p_do, mask=m_v, other=0)
         # [BC, BV]
         m_i = o_i[:, None] <= j
-        b_dv += tl.where(m_i, exp(b_g[None, :] - b_gv) * b_A[:, None] * b_do[None, :], 0.)
+        b_dv += tl.where(m_i, exp2(b_g[None, :] - b_gv) * b_A[:, None] * b_do[None, :], 0.)
 
         p_g += H * V
         p_A += HQ * BT
@@ -577,6 +578,7 @@ def chunk_gsa_fwd_k(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
+        use_exp2=True,
         states_in_fp32=False,
     )
     o = v.new_empty(B, T, HQ, V)
@@ -701,6 +703,7 @@ def chunk_gsa_bwd_k(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
+            use_exp2=True,
             states_in_fp32=False,
         )
     dh, dh0 = chunk_bwd_dh(
@@ -716,6 +719,7 @@ def chunk_gsa_bwd_k(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
+        use_exp2=True,
         states_in_fp32=True,
     )
     dA = q.new_empty(NV, B, T, HQ, BT)
@@ -952,7 +956,8 @@ class ChunkGSAFunction(torch.autograd.Function):
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
 
-        g_org, g = g, chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+        # Pre-scale by RCP_LN2 so downstream kernels can use exp2 directly.
+        g_org, g = g, chunk_local_cumsum(g, chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
         Ak, hk, hkt, ok, p, Av, hv, hvt, ov = chunk_gsa_fwd(
             q=q,
             k=k,
@@ -993,7 +998,7 @@ class ChunkGSAFunction(torch.autograd.Function):
         chunk_size = ctx.chunk_size
 
         if ctx.checkpoint_level >= 1:
-            g = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+            g = chunk_local_cumsum(g, chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
         dq, dk, dv, ds, dg, dhk0, dhv0 = chunk_gsa_bwd(
             q=q,
             k=k,

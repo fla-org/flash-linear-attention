@@ -11,6 +11,7 @@ import triton
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv, chunk_fwd_o
 from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -36,9 +37,10 @@ def chunk_simple_gla_fwd(
         gv=None,
         h0=initial_state,
         output_final_state=output_final_state,
-        states_in_fp32=False,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        use_exp2=True,
+        states_in_fp32=False,
     )
     o = chunk_fwd_o(
         q=q,
@@ -79,9 +81,10 @@ def chunk_simple_gla_bwd(
         gv=None,
         h0=initial_state,
         output_final_state=False,
-        states_in_fp32=True,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        use_exp2=True,
+        states_in_fp32=True,
     )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -95,9 +98,10 @@ def chunk_simple_gla_bwd(
         h0=initial_state,
         dht=dht,
         scale=scale,
-        states_in_fp32=True,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        use_exp2=True,
+        states_in_fp32=True,
     )
     dq, dk, _, dg = chunk_bwd_dqkwg(
         q=q,
@@ -152,8 +156,17 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
 
-        g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens,
-                               chunk_indices=chunk_indices) if g is not None else None
+        # Pre-scale by RCP_LN2 so downstream kernels can use exp2 directly.
+        if g is not None:
+            g = chunk_local_cumsum(
+                g,
+                chunk_size=chunk_size,
+                scale=RCP_LN2,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+            )
+        if g_gamma is not None:
+            g_gamma = g_gamma * RCP_LN2
         o, ht = chunk_simple_gla_fwd(
             q=q,
             k=k,
@@ -194,8 +207,13 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
         )
         if g is not None:
-            dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens,
-                                    chunk_indices=chunk_indices).to(g)
+            dg = chunk_local_cumsum(
+                dg,
+                chunk_size=chunk_size,
+                reverse=True,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+            ).to(g)
         else:
             dg = None
         return dq.to(q), dk.to(k), dv.to(v), dg, None, None, dh0, None, None, None

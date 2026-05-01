@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_HOPPER, USE_CUDA_GRAPH, autotune_cache_kwargs
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
@@ -156,8 +156,8 @@ def chunk_gated_delta_product_fwd_kernel_h_blockdim64(
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_v_new = b_v_new * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
-            b_g_last = exp(b_g_last)
+            b_v_new = b_v_new * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+            b_g_last = exp2(b_g_last)
             b_h1 = b_h1 * b_g_last
             if K > 64:
                 b_h2 = b_h2 * b_g_last
@@ -305,10 +305,10 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
         if USE_G:
             last_idx = min((i_t + 1) * BT, T) - 1
             bg_last = tl.load(g + (bos + last_idx) * H + i_h)
-            bg_last_exp = exp(bg_last)
+            bg_last_exp = exp2(bg_last)
             p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_g_exp = exp(b_g)
+            b_g_exp = exp2(b_g)
         else:
             bg_last = None
             last_idx = None
@@ -344,7 +344,7 @@ def chunk_gated_delta_product_bwd_kernel_dhu_blockdim64(
 
         if USE_G:
             m_t = (i_t * BT + tl.arange(0, BT)) < T
-            b_dv *= tl.where(m_t, exp(bg_last - b_g), 0)[:, None]
+            b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
         b_dv += tl.load(p_dv, boundary_check=(0, 1))
 
         tl.store(p_dv2, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
