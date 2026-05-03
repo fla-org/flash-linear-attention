@@ -57,14 +57,13 @@ class NormalizeWithZState(torch.autograd.Function):
         dk_cum = ddenom * scale * q
 
         if dz_state is not None:
-            dk_cum = dk_cum.clone()
             if cu_seqlens is not None:
                 idx = (cu_seqlens[:-1] if reverse else cu_seqlens[1:] - 1).to(torch.long)
                 dk_cum[0].index_add_(0, idx, dz_state.squeeze(1).to(dk_cum.dtype))
             elif reverse:
-                dk_cum[:, :1] = dk_cum[:, :1] + dz_state.to(dk_cum.dtype)
+                dk_cum[:, :1].add_(dz_state.to(dk_cum.dtype))
             else:
-                dk_cum[:, -1:] = dk_cum[:, -1:] + dz_state.to(dk_cum.dtype)
+                dk_cum[:, -1:].add_(dz_state.to(dk_cum.dtype))
 
         dz_init = None
         if ctx.has_z_init:
