@@ -280,7 +280,7 @@ def test_normalize_grad(fn, B: int, T: int, H: int, D: int):
     Uses strictly-positive q, k ( normalize=True is designed for);
     """
     torch.manual_seed(42)
-    eps = 0.1
+    eps = 0.01
     q = (torch.randn((B, T, H, D), dtype=torch.float32, device=device).abs() + eps).requires_grad_()
     k = (torch.randn((B, T, H, D), dtype=torch.float32, device=device).abs() + eps).requires_grad_()
     v = torch.randn((B, T, H, D), dtype=torch.float32, device=device).requires_grad_()
@@ -320,7 +320,7 @@ def test_normalize_zinit_grad(fn, B: int, T: int, split: int, H: int, D: int):
     `split` and resuming with the prior `z_state` as `z_init` must produce the
     same q/k/v gradients as a single-call run."""
     torch.manual_seed(42)
-    eps = 0.1
+    eps = 0.01
     q = (torch.randn((B, T, H, D), dtype=torch.float32, device=device).abs() + eps).requires_grad_()
     k = (torch.randn((B, T, H, D), dtype=torch.float32, device=device).abs() + eps).requires_grad_()
     v = torch.randn((B, T, H, D), dtype=torch.float32, device=device).requires_grad_()
