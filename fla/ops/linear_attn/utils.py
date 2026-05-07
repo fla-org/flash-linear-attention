@@ -10,7 +10,7 @@ import torch
 from fla.ops.utils.cumsum import chunk_global_cumsum
 
 
-class NormalizeWithZState(torch.autograd.Function):
+class StatefulNormalizeFunction(torch.autograd.Function):
     """Normalized linear-attention divide step with a hand-written backward.
 
     Forward computes the running key-cumsum z_t and divides ``o`` by ``<q_t, z_t>``.
@@ -103,4 +103,4 @@ def normalize_with_z_state(
     boundary needed to chain into the next chunk. Varlen path broadcasts z_init and
     extracts the boundary per-sequence.
     """
-    return NormalizeWithZState.apply(o, q, k, scale, z_init, reverse, cu_seqlens)
+    return StatefulNormalizeFunction.apply(o, q, k, scale, z_init, reverse, cu_seqlens)
