@@ -18,12 +18,21 @@ from fla.utils import assert_close, device, device_platform
 @pytest.mark.parametrize("D", [1024, 2048])
 @pytest.mark.parametrize("V", [32000, 100000])
 @pytest.mark.parametrize("reduction", ["batchmean"])
+@pytest.mark.parametrize("accumulate_grad_in_fp32", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 @pytest.mark.skipif(
     device_platform == 'intel',
     reason="Intel Triton Failure",
 )
-def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtype):
+def test_fused(
+    B: int,
+    T: int,
+    D: int,
+    V: int,
+    reduction: str,
+    accumulate_grad_in_fp32: bool,
+    dtype: torch.dtype,
+):
     torch.manual_seed(42)
     x = torch.randn(B * T, D).to(device).to(dtype=dtype).requires_grad_()
     x_weight = torch.randn(V, D).to(device).to(dtype=dtype).requires_grad_()
@@ -40,7 +49,10 @@ def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtyp
     ref_dx, x.grad = x.grad.clone(), None
     ref_dw, x_weight.grad = x_weight.grad.clone(), None
 
-    tri = FusedKLDivLoss(reduction)(x, target_x, x_weight, target_weight).to(dtype=dtype)
+    tri = FusedKLDivLoss(
+        reduction=reduction,
+        accumulate_grad_in_fp32=accumulate_grad_in_fp32,
+    )(x, target_x, x_weight, target_weight).to(dtype=dtype)
     tri.backward(do)
     tri_dx, x.grad = x.grad.clone(), None
     tri_dw, x_weight.grad = x_weight.grad.clone(), None
@@ -48,3 +60,19 @@ def test_fused(B: int, T: int, D: int, V: int, reduction: str, dtype: torch.dtyp
     assert_close("  o", ref, tri, 1e-2)
     assert_close(" dx", ref_dx, tri_dx, 1e-2)
     assert_close(" dw", ref_dw, tri_dw, 1e-2)
+
+
+def test_fused_rejects_trainable_teacher():
+    torch.manual_seed(42)
+    x = torch.randn(2, 4)
+    weight = torch.randn(8, 4)
+    target_x = torch.randn(2, 4, requires_grad=True)
+    target_weight = torch.randn(8, 4)
+
+    with pytest.raises(RuntimeError, match="frozen teacher"):
+        FusedKLDivLoss()(x, target_x, weight, target_weight)
+
+    target_x = target_x.detach()
+    target_weight = target_weight.requires_grad_()
+    with pytest.raises(RuntimeError, match="frozen teacher"):
+        FusedKLDivLoss()(x, target_x, weight, target_weight)

@@ -12,8 +12,9 @@ import triton.language as tl
 from fla.ops.common.chunk_h import chunk_bwd_dh, chunk_fwd_h
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
+from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_local_cumsum
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
@@ -30,7 +31,7 @@ BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=["BC"],
+    key=['BC'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -82,12 +83,11 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         # [BC, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_qg = b_q * exp(b_g - b_gn[None, :]) * scale
+        b_qg = b_q * exp2(b_g - b_gn[None, :]) * scale
         # [BK, BC]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_kg = b_k * exp(b_gn[:, None] - b_gk)
-
+        b_kg = b_k * exp2(b_gn[:, None] - b_gk)
         # [BC, BC] using tf32 to improve precision here.
         b_A += tl.dot(b_qg, b_kg)
 
@@ -104,7 +104,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3]
     ],
-    key=["BK", "BT"],
+    key=['BK', 'BT'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -159,8 +159,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra(
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_A = tl.sum(b_q * b_k[None, :] * exp(b_g - b_gk[None, :]), 1) * scale
-
+        b_A = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
         tl.store(A + o_A + j, b_A, mask=m_A)
         p_k += H*K
         p_gk += H*K
@@ -237,7 +236,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_intra_split(
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_A = tl.sum(b_q * b_k[None, :] * exp(b_g - b_gk[None, :]), 1) * scale
+        b_A = tl.sum(b_q * b_k[None, :] * exp2(b_g - b_gk[None, :]), 1) * scale
         tl.store(A + o_A + j, b_A, mask=m_A)
         p_k += H*K
         p_gk += H*K
@@ -329,7 +328,6 @@ def chunk_gla_fwd_kernel_o(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
@@ -370,10 +368,7 @@ def chunk_gla_fwd_kernel_o(
         # [BT, BK]
         b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
         # [BT, BK]
-        if USE_EXP2:
-            b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
-        else:
-            b_qg = (b_q * exp(b_g)).to(b_q.dtype)
+        b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
         b_h = tl.load(p_h, boundary_check=(0, 1))
         if i_k >= 0:
             if TRANSPOSE_STATE:
@@ -455,13 +450,12 @@ def chunk_gla_bwd_kernel_intra(
             # [BC, BK]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            b_kg = b_k * exp(b_gn[None, :] - b_gk)
+            b_kg = b_k * exp2(b_gn[None, :] - b_gk)
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
 
             b_dq += tl.dot(b_dA, b_kg)
-        b_dq *= exp(b_g - b_gn[None, :])
-
+        b_dq *= exp2(b_g - b_gn[None, :])
     o_i = tl.arange(0, BC)
     m_dA = (i_t * BT + i_i * BC + tl.arange(0, BC)) < T
     o_dA = bos*H*BT + (i_t * BT + i_i * BC + tl.arange(0, BC)) * H*BT + i_h * BT + i_i * BC
@@ -479,7 +473,7 @@ def chunk_gla_bwd_kernel_intra(
         m_i = o_i[:, None] >= j
         # [BC, BK]
         # (SY 09/17) important to not use bf16 here to have a good precision.
-        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp(b_g - b_gkj[None, :]), 0.)
+        b_dq += tl.where(m_i, b_dA[:, None] * b_kj[None, :] * exp2(b_g - b_gkj[None, :]), 0.)
         p_kj += H*K
         p_gkj += H*K
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
@@ -504,13 +498,13 @@ def chunk_gla_bwd_kernel_intra(
             # [BC, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_gq = tl.load(p_gq, boundary_check=(0, 1))
-            b_qg = b_q * tl.where(m_j[:, None], exp(b_gq - b_gn[None, :]), 0)
+            b_qg = b_q * tl.where(m_j[:, None], exp2(b_gq - b_gn[None, :]), 0)
             # [BC, BC]
             b_dA = tl.load(p_dA, boundary_check=(0, 1))
             # [BC, BK]
             # (SY 09/17) important to not use bf16 here to have a good precision.
             b_dk += tl.dot(b_dA, b_qg)
-        b_dk *= exp(b_gn[None, :] - b_g)
+        b_dk *= exp2(b_gn[None, :] - b_g)
     o_dA = bos*H*BT + (i_t * BT + i_i * BC) * H*BT + i_h * BT + i_i * BC + tl.arange(0, BC)
     p_qj = q + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
     p_gqj = g + (bos + i_t * BT + i_i * BC) * H*K + i_h * K + o_k
@@ -523,7 +517,7 @@ def chunk_gla_bwd_kernel_intra(
         b_gqj = tl.load(p_gqj, mask=m_k, other=0).to(tl.float32)
         # [BC, BK]
         m_i = o_i[:, None] <= j
-        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp(b_gqj[None, :] - b_g), 0.)
+        b_dk += tl.where(m_i, b_dA[:, None] * b_qj[None, :] * exp2(b_gqj[None, :] - b_g), 0.)
         p_qj += H*K
         p_gqj += H*K
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
@@ -649,7 +643,7 @@ def chunk_gla_bwd_kernel_dv(
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
         b_dh = tl.load(p_dh, boundary_check=(0, 1))
 
-        b_gn = exp(tl.load(p_gn, mask=m_k, other=0)[None, :] - b_gk)
+        b_gn = exp2(tl.load(p_gn, mask=m_k, other=0)[None, :] - b_gk)
         b_k = (b_k * b_gn).to(b_k.dtype)
         # [BT, BV]
         # (SY 09/17) it is ok to have bf16 interchunk gradient contribution here
@@ -663,10 +657,11 @@ def chunk_gla_bwd_kernel_dv(
 })
 @fla_cache_autotune(
     configs=[
-        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps)
+        triton.Config({'BK': BK, 'BV': BV}, num_warps=num_warps, num_stages=num_stages)
         for BK in BK_LIST
         for BV in BV_LIST
         for num_warps in [2, 4, 8]
+        for num_stages in [2, 3, 4]
     ],
     key=['BT'],
     **autotune_cache_kwargs,
@@ -751,11 +746,10 @@ def chunk_gla_bwd_kernel_inter(
         b_dq += tl.dot(b_do, b_h.to(b_do.dtype))
         b_dk += tl.dot(b_v, b_dh.to(b_v.dtype))
 
-    b_dgk *= exp(b_gn)
+    b_dgk *= exp2(b_gn)
     b_dq *= scale
-    b_dq = b_dq * exp(b_gk)
-    b_dk = b_dk * exp(b_gn[None, :] - b_gk)
-
+    b_dq = b_dq * exp2(b_gk)
+    b_dk = b_dk * exp2(b_gn[None, :] - b_gk)
     p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
@@ -885,7 +879,6 @@ def chunk_gla_fwd_o_gk(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ):
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
@@ -914,7 +907,6 @@ def chunk_gla_fwd_o_gk(
         K=K,
         V=V,
         BT=BT,
-        USE_EXP2=use_exp2,
         TRANSPOSE_STATE=transpose_state_layout,
     )
     return o
@@ -1099,7 +1091,12 @@ def chunk_gla_fwd(
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if g_cumsum is None:
-        g_cumsum = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
+        g_cumsum = chunk_local_cumsum(
+            g,
+            chunk_size,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+        )
 
     h, ht = chunk_fwd_h(
         k=k,
@@ -1109,9 +1106,9 @@ def chunk_gla_fwd(
         gv=None,
         h0=initial_state,
         output_final_state=output_final_state,
-        states_in_fp32=False,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        states_in_fp32=False,
     )
 
     # the intra A is kept in fp32
@@ -1156,7 +1153,12 @@ def chunk_gla_bwd(
     chunk_indices: torch.LongTensor | None = None,
 ):
     if g_cumsum is None:
-        g_cumsum = chunk_local_cumsum(g, chunk_size, cu_seqlens=cu_seqlens)
+        g_cumsum = chunk_local_cumsum(
+            g,
+            chunk_size,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+        )
 
     if h is None:
         h, _ = chunk_fwd_h(
@@ -1251,8 +1253,14 @@ class ChunkGLAFunction(torch.autograd.Function):
         cu_seqlens_cpu,
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(
+                cu_seqlens,
+                chunk_size,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
+        else:
+            chunk_indices = None
 
         g_cumsum, A, _, ht, o = chunk_gla_fwd(
             q=q,
@@ -1388,5 +1396,15 @@ def chunk_gla(
         assert initial_state.dtype == torch.float32, "initial_state must be in float32."
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
-    o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu)
+    o, final_state = ChunkGLAFunction.apply(
+        q,
+        k,
+        v,
+        g,
+        scale,
+        initial_state,
+        output_final_state,
+        cu_seqlens,
+        cu_seqlens_cpu,
+    )
     return o, final_state

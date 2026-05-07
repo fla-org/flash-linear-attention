@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard
 
@@ -54,7 +54,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
@@ -126,37 +125,21 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 if HAS_DT_BIAS:
                     b_g = b_g + tl.load(dt_bias + i_hv).to(tl.float32)
                 b_g = -exp(b_A) * softplus(b_g)
-                b_h *= exp(b_g)
-            elif USE_EXP2:
-                b_h *= exp2(b_g)
-            else:
-                b_h *= exp(b_g)
+            b_h *= exp(b_g)
 
         if USE_GK:
             b_gk = tl.load(p_gk).to(tl.float32)
-            if USE_EXP2:
-                if TRANSPOSE_STATE:
-                    b_h *= exp2(b_gk[None, :])
-                else:
-                    b_h *= exp2(b_gk[:, None])
+            if TRANSPOSE_STATE:
+                b_h *= exp(b_gk[None, :])
             else:
-                if TRANSPOSE_STATE:
-                    b_h *= exp(b_gk[None, :])
-                else:
-                    b_h *= exp(b_gk[:, None])
+                b_h *= exp(b_gk[:, None])
 
         if USE_GV:
             b_gv = tl.load(p_gv).to(tl.float32)
-            if USE_EXP2:
-                if TRANSPOSE_STATE:
-                    b_h *= exp2(b_gv[:, None])
-                else:
-                    b_h *= exp2(b_gv[None, :])
+            if TRANSPOSE_STATE:
+                b_h *= exp(b_gv[:, None])
             else:
-                if TRANSPOSE_STATE:
-                    b_h *= exp(b_gv[:, None])
-                else:
-                    b_h *= exp(b_gv[None, :])
+                b_h *= exp(b_gv[None, :])
 
         if TRANSPOSE_STATE:
             b_v = b_beta * (b_v - tl.sum(b_h * b_k[None, :], 1))
@@ -203,7 +186,6 @@ def fused_recurrent_gated_delta_rule_fwd(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -247,7 +229,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim != v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        USE_EXP2=use_exp2,
         TRANSPOSE_STATE=transpose_state_layout,
         num_warps=1,
         num_stages=3,
@@ -275,7 +256,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
-        use_exp2: bool = False,
         transpose_state_layout: bool = False,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
@@ -293,7 +273,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
-            use_exp2=use_exp2,
             transpose_state_layout=transpose_state_layout,
         )
 
@@ -325,7 +304,6 @@ def fused_recurrent_gated_delta_rule(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -429,8 +407,6 @@ def fused_recurrent_gated_delta_rule(
             raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True`.")
         if g is None:
             raise ValueError("`g` (raw pre-activation) must be provided when `use_gate_in_kernel=True`.")
-        if use_exp2:
-            raise ValueError("`use_exp2=True` is not supported together with `use_gate_in_kernel=True`.")
     else:
         A_log = None
         dt_bias = None
@@ -450,7 +426,6 @@ def fused_recurrent_gated_delta_rule(
         output_final_state,
         use_qk_l2norm_in_kernel,
         cu_seqlens,
-        use_exp2,
         transpose_state_layout,
     )
     return o, final_state
