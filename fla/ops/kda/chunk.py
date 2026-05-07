@@ -7,6 +7,8 @@
 
 # Related files are modified and supported by the Moonshot AI Team
 
+import warnings
+
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -16,7 +18,7 @@ from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
 from fla.ops.kda.gate import beta_sigmoid_bwd, fused_beta_sigmoid
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 class ChunkKDAFunction(torch.autograd.Function):
@@ -48,6 +50,19 @@ class ChunkKDAFunction(torch.autograd.Function):
         transpose_state_layout: bool = False,
     ):
         chunk_size = 64
+
+        # AMD: disable recompute by default for better performance
+        if IS_AMD and not disable_recompute:
+            disable_recompute = True
+
+        # AMD: force non-transposed state layout for kernel compatibility
+        if IS_AMD and transpose_state_layout:
+            warnings.warn(
+                "transpose_state_layout=True is not supported on AMD/ROCm for KDA kernels. "
+                "Falling back to transpose_state_layout=False.",
+                stacklevel=2,
+            )
+            transpose_state_layout = False
 
         # Apply l2norm
         q_rstd, k_rstd = None, None
@@ -243,6 +258,7 @@ def chunk_kda(
             Whether to disable gradient recomputation in the kernel. When ``True``, the kernel
             will save all intermediate activations for backward pass, which is beneficial
             for training small models at the cost of increased memory usage. Default: ``False``.
+            On AMD/ROCm, this is automatically set to ``True`` for better performance.
         return_intermediate_states (bool):
             If True, returns intermediate state ``h`` for inference scenarios (e.g., vLLM).
             Must be used within ``torch.inference_mode()`` and will return a 3-tuple instead of 2-tuple.

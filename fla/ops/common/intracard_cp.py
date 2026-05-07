@@ -26,7 +26,7 @@ import triton
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
 from fla.ops.cp.chunk_delta_h import pre_process_fwd_kernel_merged
 from fla.ops.utils.index import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import get_multiprocessor_count
+from fla.utils import IS_AMD, get_multiprocessor_count
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +103,22 @@ def _raw_chunk_gated_delta_rule_fwd_h(
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
-    if transpose_state_layout:
-        h = k.new_empty(B, NT, HV, V, K)
-        final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
+    if IS_AMD:
+        # AMD: force non-transposed layout in kernel, handle transpose at Python level
+        h0_for_kernel = initial_state
+        if transpose_state_layout and initial_state is not None:
+            h0_for_kernel = initial_state.transpose(-1, -2).contiguous()
+        kernel_transpose = False
+        h_shape, fs_shape = (B, NT, HV, K, V), (N, HV, K, V)
     else:
-        h = k.new_empty(B, NT, HV, K, V)
-        final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
+        h0_for_kernel, kernel_transpose = initial_state, transpose_state_layout
+        if transpose_state_layout:
+            h_shape, fs_shape = (B, NT, HV, V, K), (N, HV, V, K)
+        else:
+            h_shape, fs_shape = (B, NT, HV, K, V), (N, HV, K, V)
+
+    h = k.new_empty(*h_shape)
+    final_state = k.new_zeros(*fs_shape, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u) if save_new_value else None
 
     def grid(meta):
@@ -116,11 +126,15 @@ def _raw_chunk_gated_delta_rule_fwd_h(
 
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k, v=u, w=w, v_new=v_new,
-        g=g, gk=gk, h=h, h0=initial_state, ht=final_state,
+        g=g, gk=gk, h=h, h0=h0_for_kernel, ht=final_state,
         cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
         T=T, HV=HV, H=H, K=K, V=V, BT=BT, USE_EXP2=use_exp2,
-        TRANSPOSE_STATE=transpose_state_layout,
+        TRANSPOSE_STATE=kernel_transpose,
     )
+    if IS_AMD and transpose_state_layout:
+        h = h.transpose(-1, -2).contiguous()
+        if final_state is not None:
+            final_state = final_state.transpose(-1, -2).contiguous()
     return h, v_new, final_state
 
 

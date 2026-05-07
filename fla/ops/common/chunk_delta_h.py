@@ -13,9 +13,18 @@ from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp, exp2
-from fla.utils import IS_NVIDIA_HOPPER, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_AMD, IS_NVIDIA_HOPPER, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
 
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
+
+# Autotune configuration lists for chunk_delta_h kernels
+CHUNK_DELTA_H_NUM_WARPS = [2, 4, 8, 16] if IS_AMD else [2, 4]
+CHUNK_DELTA_H_NUM_STAGES_FWD = [1, 2] if IS_AMD else ([2, 3, 4] if check_shared_mem('ampere') else [2, 1])
+CHUNK_DELTA_H_NUM_STAGES_BWD = [1, 2] if IS_AMD else ([2, 3, 4] if check_shared_mem('ampere') else [1])
+if IS_AMD:
+    CHUNK_DELTA_H_BV = [16, 32, 64, 128] if check_shared_mem('ada') else [16, 32, 64]
+else:
+    CHUNK_DELTA_H_BV = [32, 64] if check_shared_mem('ada') else [32]
 
 
 @triton.heuristics({
@@ -29,9 +38,9 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8, 16]
 @fla_cache_autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in ([2, 3, 4] if check_shared_mem('ampere') else [2, 1])
-        for BV in ([32, 64] if check_shared_mem('ada') else [32])
+        for num_warps in CHUNK_DELTA_H_NUM_WARPS
+        for num_stages in CHUNK_DELTA_H_NUM_STAGES_FWD
+        for BV in CHUNK_DELTA_H_BV
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'USE_EXP2', 'TRANSPOSE_STATE'],
     use_cuda_graph=USE_CUDA_GRAPH,
@@ -334,9 +343,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
 @fla_cache_autotune(
     configs=[
         triton.Config({'BV': BV}, num_warps=num_warps, num_stages=num_stages)
-        for num_warps in [2, 4]
-        for num_stages in ([2, 3, 4] if check_shared_mem('ampere') else [1])
-        for BV in ([32, 64] if check_shared_mem('ada') else [32])
+        for num_warps in CHUNK_DELTA_H_NUM_WARPS
+        for num_stages in CHUNK_DELTA_H_NUM_STAGES_BWD
+        for BV in CHUNK_DELTA_H_BV
     ],
     key=['H', 'HV', 'K', 'V', 'BT', 'BV', 'USE_G', 'USE_EXP2', 'TRANSPOSE_STATE'],
     use_cuda_graph=USE_CUDA_GRAPH,
@@ -688,13 +697,22 @@ def chunk_gated_delta_rule_fwd_h(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    if transpose_state_layout:
-        h = k.new_empty(B, NT, HV, V, K)
-        final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
+    if IS_AMD:
+        # AMD: force non-transposed layout in kernel, handle transpose at Python level
+        h0_for_kernel = initial_state
+        if transpose_state_layout and initial_state is not None:
+            h0_for_kernel = initial_state.transpose(-1, -2).contiguous()
+        kernel_transpose = False
+        h_shape, fs_shape = (B, NT, HV, K, V), (N, HV, K, V)
     else:
-        h = k.new_empty(B, NT, HV, K, V)
-        final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
+        h0_for_kernel, kernel_transpose = initial_state, transpose_state_layout
+        if transpose_state_layout:
+            h_shape, fs_shape = (B, NT, HV, V, K), (N, HV, V, K)
+        else:
+            h_shape, fs_shape = (B, NT, HV, K, V), (N, HV, K, V)
 
+    h = k.new_empty(*h_shape)
+    final_state = k.new_zeros(*fs_shape, dtype=torch.float32) if output_final_state else None
     v_new = torch.empty_like(u) if save_new_value else None
     def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
@@ -705,7 +723,7 @@ def chunk_gated_delta_rule_fwd_h(
         g=g,
         gk=gk,
         h=h,
-        h0=initial_state,
+        h0=h0_for_kernel,
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
@@ -716,8 +734,12 @@ def chunk_gated_delta_rule_fwd_h(
         V=V,
         BT=BT,
         USE_EXP2=use_exp2,
-        TRANSPOSE_STATE=transpose_state_layout,
+        TRANSPOSE_STATE=kernel_transpose,
     )
+    if IS_AMD and transpose_state_layout:
+        h = h.transpose(-1, -2).contiguous()
+        if final_state is not None:
+            final_state = final_state.transpose(-1, -2).contiguous()
     return h, v_new, final_state
 
 
@@ -750,10 +772,15 @@ def chunk_gated_delta_rule_bwd_dhu(
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
-    if transpose_state_layout:
-        dh = q.new_empty(B, NT, HV, V, K)
+    if IS_AMD:
+        # AMD: force non-transposed layout in kernel
+        kernel_transpose = False
+        dh_shape = (B, NT, HV, K, V)
     else:
-        dh = q.new_empty(B, NT, HV, K, V)
+        kernel_transpose = transpose_state_layout
+        dh_shape = (B, NT, HV, V, K) if transpose_state_layout else (B, NT, HV, K, V)
+
+    dh = q.new_empty(*dh_shape)
     dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
     dv2 = torch.empty_like(dv)
 
@@ -780,6 +807,6 @@ def chunk_gated_delta_rule_bwd_dhu(
         V=V,
         BT=BT,
         USE_EXP2=use_exp2,
-        TRANSPOSE_STATE=transpose_state_layout,
+        TRANSPOSE_STATE=kernel_transpose,
     )
     return dh, dh0, dv2
