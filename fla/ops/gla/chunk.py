@@ -31,7 +31,7 @@ BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=["BC"],
+    key=['BC'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -104,7 +104,7 @@ def chunk_gla_fwd_A_kernel_intra_sub_inter(
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3]
     ],
-    key=["BK", "BT"],
+    key=['BK', 'BT'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -1186,7 +1186,6 @@ def chunk_gla_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=True,
         states_in_fp32=True,
     )
 
@@ -1254,8 +1253,14 @@ class ChunkGLAFunction(torch.autograd.Function):
         cu_seqlens_cpu,
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(
+                cu_seqlens,
+                chunk_size,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
+        else:
+            chunk_indices = None
 
         g_cumsum, A, _, ht, o = chunk_gla_fwd(
             q=q,
@@ -1391,5 +1396,15 @@ def chunk_gla(
         assert initial_state.dtype == torch.float32, "initial_state must be in float32."
     assert q.shape == k.shape == g.shape, "q, k, g must have the same shape."
     assert v.shape == (*q.shape[:3], v.shape[-1]), "v must be of shape (batch size, seq len, num of head, head dim)."
-    o, final_state = ChunkGLAFunction.apply(q, k, v, g, scale, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu)
+    o, final_state = ChunkGLAFunction.apply(
+        q,
+        k,
+        v,
+        g,
+        scale,
+        initial_state,
+        output_final_state,
+        cu_seqlens,
+        cu_seqlens_cpu,
+    )
     return o, final_state

@@ -193,7 +193,7 @@ def chunk_gsa_fwd_k_kernel_intra(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [2, 4, 8]
     ],
-    key=["BT"],
+    key=['BT'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -563,7 +563,10 @@ def chunk_gsa_fwd_k(
     HQ = q.shape[2]
 
     if chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        else:
+            chunk_indices = None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NG = HQ // H
@@ -684,7 +687,10 @@ def chunk_gsa_bwd_k(
     HQ = q.shape[2]
 
     if chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+        else:
+            chunk_indices = None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
@@ -717,7 +723,6 @@ def chunk_gsa_bwd_k(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
-        use_exp2=True,
         states_in_fp32=True,
     )
     dA = q.new_empty(NV, B, T, HQ, BT)
@@ -805,7 +810,15 @@ def chunk_gsa_bwd_k(
         num_warps=4,
         num_stages=2,
     )
-    dg = dgv.add_(chunk_local_cumsum(dg, chunk_size=BT, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices))
+    dg = dgv.add_(
+        chunk_local_cumsum(
+            dg,
+            chunk_size=BT,
+            reverse=True,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+    )
 
     return dq, dk, dv, dg, dh0
 
@@ -951,11 +964,24 @@ class ChunkGSAFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
 
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(
+                cu_seqlens,
+                chunk_size,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
+        else:
+            chunk_indices = None
 
         # Pre-scale by RCP_LN2 so downstream kernels can use exp2 directly.
-        g_org, g = g, chunk_local_cumsum(g, chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+        g_org = g
+        g = chunk_local_cumsum(
+            g,
+            chunk_size,
+            scale=RCP_LN2,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
         Ak, hk, hkt, ok, p, Av, hv, hvt, ov = chunk_gsa_fwd(
             q=q,
             k=k,
@@ -980,7 +1006,21 @@ class ChunkGSAFunction(torch.autograd.Function):
         else:
             hk0, hv0 = None, None
 
-        ctx.save_for_backward(q, k, v, s, g, ok, p, Av, hk0, hv0, hk, hv, chunk_indices)
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            s,
+            g,
+            ok,
+            p,
+            Av,
+            hk0,
+            hv0,
+            hk,
+            hv,
+            chunk_indices,
+        )
         ctx.checkpoint_level = checkpoint_level
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
@@ -990,13 +1030,33 @@ class ChunkGSAFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, dov, dhkt=None, dhvt=None):
-        q, k, v, s, g, ok, p, Av, hk0, hv0, hk, hv, chunk_indices = ctx.saved_tensors
+        (
+            q,
+            k,
+            v,
+            s,
+            g,
+            ok,
+            p,
+            Av,
+            hk0,
+            hv0,
+            hk,
+            hv,
+            chunk_indices,
+        ) = ctx.saved_tensors
         scale = ctx.scale
         cu_seqlens = ctx.cu_seqlens
         chunk_size = ctx.chunk_size
 
         if ctx.checkpoint_level >= 1:
-            g = chunk_local_cumsum(g, chunk_size, scale=RCP_LN2, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+            g = chunk_local_cumsum(
+                g,
+                chunk_size,
+                scale=RCP_LN2,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+            )
         dq, dk, dv, ds, dg, dhk0, dhv0 = chunk_gsa_bwd(
             q=q,
             k=k,

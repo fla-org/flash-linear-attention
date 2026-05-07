@@ -98,7 +98,6 @@ def chunk_simple_gla_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=True,
         states_in_fp32=True,
     )
     dq, dk, _, dg = chunk_bwd_dqkwg(
@@ -151,8 +150,14 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         T = q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
 
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(
+                cu_seqlens,
+                chunk_size,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
+        else:
+            chunk_indices = None
 
         # Pre-scale by RCP_LN2 so downstream kernels can use exp2 directly.
         if g is not None:
