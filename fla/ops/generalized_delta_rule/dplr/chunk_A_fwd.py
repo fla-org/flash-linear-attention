@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp, gather
+from fla.ops.utils.op import exp2, gather
 from fla.utils import IS_AMD, IS_GATHER_SUPPORTED, USE_CUDA_GRAPH, autotune_cache_kwargs
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
@@ -97,12 +97,12 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
     b_ge = tl.load(p_ge, boundary_check=(0, 1)).to(tl.float32)
 
     # deal with decay term.
-    g_exp = exp(b_gi)
-    g_exp_inv = exp(-b_gi + b_g_last[None, :])
+    g_exp = exp2(b_gi)
+    g_exp_inv = exp2(-b_gi + b_g_last[None, :])
     b_qg = b_q * g_exp
     b_kg = b_k * g_exp_inv
     b_bg = b_b * g_exp_inv
-    b_ag = b_a * exp(b_ge)
+    b_ag = b_a * exp2(b_ge)
     tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_bg, b_bg.to(p_bg.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
     tl.store(p_ag, b_ag.to(p_ag.dtype.element_ty, fp_downcast_rounding="rtne"), boundary_check=(0, 1))
@@ -124,13 +124,13 @@ def chunk_dplr_fwd_A_kernel_intra_sub_intra(
             b_k_j = tl.sum(tl.where(mask[:, None], b_k, 0), 0)[None, :]
             b_gk_j = tl.sum(tl.where(mask[:, None], b_gi, 0), 0)[None, :]
             b_b_j = tl.sum(tl.where(mask[:, None], b_b, 0), 0)[None, :]
-        tmp = exp(b_gi - b_gk_j)
+        tmp = exp2(b_gi - b_gk_j)
         b_A_qk = tl.sum(b_q * b_k_j * tmp, 1)
         m_i = (o_i >= j).to(tl.float32)
         b_A_qk = b_A_qk * m_i
         b_A_qb = tl.sum(b_q * b_b_j * tmp, 1)
         b_A_qb = b_A_qb * m_i
-        tmp2 = exp(b_ge - b_gk_j)
+        tmp2 = exp2(b_ge - b_gk_j)
         b_A_ak = tl.sum(b_a * b_k_j * tmp2, 1)
         m_i2 = (o_i > j).to(tl.float32)
         b_A_ak = b_A_ak * m_i2
@@ -231,11 +231,11 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     b_ge_val = b_ge_val - b_offset[None, :]
 
     # Apply decay factors (now numerically safe)
-    # q_term ~ exp(gi - offset)
-    # k_term ~ exp(-gi + offset)
-    exp_gi = tl.exp(b_gi_val)
-    inv_exp_gi = tl.exp(-b_gi_val)
-    exp_ge = tl.exp(b_ge_val)
+    # q_term ~ exp2(gi - offset)
+    # k_term ~ exp2(-gi + offset)
+    exp_gi = exp2(b_gi_val)
+    inv_exp_gi = exp2(-b_gi_val)
+    exp_ge = exp2(b_ge_val)
 
     b_q = (b_q * scale).to(tl.float32)
 
@@ -251,9 +251,9 @@ def chunk_dplr_fwd_A_kernel_intra_tensorcore(
     p_g_last = gi + offset_base + last_idx * H * K + tl.arange(0, BK)
     b_g_last = tl.load(p_g_last, mask=m_k, other=0.0)
 
-    exp_offset = tl.exp(b_offset)
+    exp_offset = exp2(b_offset)
     b_g_centered = b_g_last - b_offset
-    exp_g_centered = tl.exp(b_g_centered)
+    exp_g_centered = exp2(b_g_centered)
 
     # Create pointers for writing
     p_qg = tl.make_block_ptr(qg + offset_base, (T_len, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))

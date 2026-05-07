@@ -465,8 +465,7 @@ def test_fused_recurrent_vllm_decode(
         num_accepted_tokens=None,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
-        use_exp2=False,
-        lower_bound=lower_bound
+        lower_bound=lower_bound,
     )
 
     # Verify results
