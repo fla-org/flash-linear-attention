@@ -68,7 +68,6 @@ def chunk_gated_delta_product_fwd(
         cu_seqlens=cu_seqlens_dp,
         output_dtype=torch.float32,
         chunk_indices=chunk_indices_dp,
-        use_exp2=True,
     )
     A = solve_tril(
         A=A,
@@ -85,7 +84,6 @@ def chunk_gated_delta_product_fwd(
             g=g_interleaved,
             cu_seqlens=cu_seqlens_dp,
             chunk_indices=chunk_indices_dp,
-            use_exp2=True,
         )
     else:
         w, u = dn_recompute_w_u_fwd(
@@ -147,13 +145,16 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
 
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu
-        ) if cu_seqlens is not None else None
-        cu_seqlens_cpu_dp = cu_seqlens_cpu * num_householder if cu_seqlens_cpu is not None else None
-        chunk_indices_dp = prepare_chunk_indices(
-            cu_seqlens * num_householder, 64, cu_seqlens_cpu=cu_seqlens_cpu_dp
-        ) if cu_seqlens is not None else None
+        chunk_indices = None
+        chunk_indices_dp = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
+            cu_seqlens_cpu_dp = None
+            if cu_seqlens_cpu is not None:
+                cu_seqlens_cpu_dp = cu_seqlens_cpu * num_householder
+            chunk_indices_dp = prepare_chunk_indices(
+                cu_seqlens * num_householder, 64, cu_seqlens_cpu=cu_seqlens_cpu_dp
+            )
 
         g, g_interleaved, o, A, final_state = chunk_gated_delta_product_fwd(
             q=q,
@@ -169,7 +170,19 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             chunk_indices_dp=chunk_indices_dp,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g_interleaved, beta, A, initial_state, cu_seqlens, chunk_indices_dp)
+        ctx.save_for_backward(
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            v,
+            g_interleaved,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices_dp,
+        )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.num_householder = num_householder
@@ -183,7 +196,19 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
         do: torch.Tensor,
         dht: torch.Tensor,
     ):
-        q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens, chunk_indices_dp = ctx.saved_tensors
+        (
+            q,
+            q_rstd,
+            k,
+            k_rstd,
+            v,
+            g,
+            beta,
+            A,
+            initial_state,
+            cu_seqlens,
+            chunk_indices_dp,
+        ) = ctx.saved_tensors
         q_new = q.new_zeros(q.shape[0], q.shape[1], ctx.num_householder, q.shape[2], q.shape[3])
         q_new[:, :, -1] = q
         do_new = do.new_zeros(do.shape[0], do.shape[1], ctx.num_householder, do.shape[2], do.shape[3])
@@ -206,7 +231,6 @@ class ChunkGatedDeltaProductFunction(torch.autograd.Function):
                 dht=dht,
                 cu_seqlens=cu_seqlens * ctx.num_householder if cu_seqlens is not None else None,
                 chunk_indices=chunk_indices_dp,
-                use_exp2=True,
             )
             dg = rearrange(dg, 'b (l n) h  -> b l n h ', n=ctx.num_householder)[:, :, 0].contiguous().to(g)
         else:

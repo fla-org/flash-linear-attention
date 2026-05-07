@@ -26,6 +26,7 @@ from fla.ops.generalized_delta_rule.dplr.wy_fast_bwd import chunk_dplr_bwd_wy
 from fla.ops.generalized_delta_rule.dplr.wy_fast_fwd import prepare_wy_repr_fwd
 from fla.ops.rwkv6.chunk import chunk_rwkv6_fwd_cumsum
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import TRITON_ABOVE_3_4_0, autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -46,7 +47,13 @@ def chunk_dplr_fwd(
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
 ):
-    gi, ge = chunk_rwkv6_fwd_cumsum(gk, chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    gi, ge = chunk_rwkv6_fwd_cumsum(
+        gk,
+        chunk_size,
+        scale=RCP_LN2,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+    )
 
     A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
         q=q,
@@ -162,8 +169,9 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
                 stacklevel=2,
             )
             chunk_size = 16
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        chunk_indices = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
 
         # chunk_dplr_fwd returns the possibly CP-merged + compressed initial_state;
         # for CP this is the [1, HV, K, V] state we must save for backward so the
@@ -188,8 +196,28 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
 
         if disable_recompute:
             gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv = cache
-            ctx.save_for_backward(q, k, v, a, b, gk, initial_state, gi, ge, A_qk,
-                                  A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv)
+            ctx.save_for_backward(
+                q,
+                k,
+                v,
+                a,
+                b,
+                gk,
+                initial_state,
+                gi,
+                ge,
+                A_qk,
+                A_qb,
+                A_ak,
+                qg,
+                kg,
+                ag,
+                bg,
+                w,
+                h,
+                v_new,
+                A_ab_inv,
+            )
         else:
             ctx.save_for_backward(q, k, v, a, b, gk, initial_state)
         ctx.cu_seqlens = cu_seqlens
@@ -211,8 +239,26 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
     ):
         if ctx.disable_recompute:
             (
-                q, k, v, a, b, gk, initial_state,
-                gi, ge, A_qk, A_qb, A_ak, qg, kg, ag, bg, w, h, v_new, A_ab_inv,
+                q,
+                k,
+                v,
+                a,
+                b,
+                gk,
+                initial_state,
+                gi,
+                ge,
+                A_qk,
+                A_qb,
+                A_ak,
+                qg,
+                kg,
+                ag,
+                bg,
+                w,
+                h,
+                v_new,
+                A_ab_inv,
             ) = ctx.saved_tensors
         else:
             q, k, v, a, b, gk, initial_state = ctx.saved_tensors
@@ -230,7 +276,13 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
 
         if not ctx.disable_recompute:
             # ******* start recomputing everything, otherwise i believe the gpu memory will be exhausted *******
-            gi, ge = chunk_rwkv6_fwd_cumsum(gk, chunk_size, cu_seqlens=cu_seqlens, chunk_indices=ctx.chunk_indices)
+            gi, ge = chunk_rwkv6_fwd_cumsum(
+                gk,
+                chunk_size,
+                scale=RCP_LN2,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=ctx.chunk_indices,
+            )
 
             A_ab, A_qk, A_ak, A_qb, qg, kg, ag, bg = chunk_dplr_fwd_intra(
                 q=q,

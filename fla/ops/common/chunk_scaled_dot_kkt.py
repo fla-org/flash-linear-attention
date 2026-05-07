@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp2
 from fla.utils import autotune_cache_kwargs
 
 
@@ -25,7 +25,7 @@ from fla.utils import autotune_cache_kwargs
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'HV', 'K', 'BT', 'IS_VARLEN', 'USE_EXP2'],
+    key=['H', 'HV', 'K', 'BT', 'IS_VARLEN'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -44,7 +44,6 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
-    USE_EXP2: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // HV, i_bh % HV
@@ -70,10 +69,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         p_g = tl.make_block_ptr(g + bos*HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_diff = b_g[:, None] - b_g[None, :]
-        if USE_EXP2:
-            b_A *= exp2(b_g_diff)
-        else:
-            b_A *= exp(b_g_diff)
+        b_A *= exp2(b_g_diff)
     b_A *= b_b[:, None]
 
     m_A = (o_t[:, None] > o_t[None, :]) & (m_t[:, None] & m_t)
@@ -90,7 +86,6 @@ def chunk_scaled_dot_kkt_fwd(
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -111,9 +106,6 @@ def chunk_scaled_dot_kkt_fwd(
             The dtype of the output tensor. Default: `torch.float32`
         chunk_indices (torch.LongTensor):
             The chunk indices of the input tensor. Default: None.
-        use_exp2 (bool):
-            Whether `g` is stored in log2 units and should be applied with `exp2`. Default: `False`.
-
     Returns:
         beta * K * K^T of shape `[B, T, HV, BT]` where `BT` is the chunk size.
         For GVA, H < HV and HV % H == 0. For standard attention, H == HV.
@@ -136,6 +128,5 @@ def chunk_scaled_dot_kkt_fwd(
         HV=HV,
         K=K,
         BT=BT,
-        USE_EXP2=use_exp2,
     )
     return A

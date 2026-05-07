@@ -578,7 +578,6 @@ def chunk_gsa_fwd_k(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=BT,
-        use_exp2=True,
         states_in_fp32=False,
     )
     o = v.new_empty(B, T, HQ, V)
@@ -703,7 +702,6 @@ def chunk_gsa_bwd_k(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_size=BT,
-            use_exp2=True,
             states_in_fp32=False,
         )
     dh, dh0 = chunk_bwd_dh(

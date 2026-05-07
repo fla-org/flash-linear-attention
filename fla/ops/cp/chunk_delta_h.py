@@ -15,7 +15,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.cp.comm import all_gather_into_tensor
-from fla.ops.utils.op import exp, exp2
+from fla.ops.utils.op import exp2
 from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
 
 if TYPE_CHECKING:
@@ -555,13 +555,11 @@ def pre_process_bwd_kernel_merged(
             last_idx = min((i_t + 1) * BT, T) - 1
 
             if USE_G:
-                # Note: pre_process_bwd_kernel_stage1 always uses exp for USE_G,
-                # regardless of USE_EXP2. This is for consistency with the original design.
                 bg_last = tl.load(g + last_idx * HV).to(tl.float32)
-                bg_last_exp = exp(bg_last)
                 p_g = tl.make_block_ptr(g, (T,), (HV,), (i_t * BT,), (BT,), (0,))
                 b_g = tl.load(p_g, boundary_check=(0,)).to(tl.float32)
-                b_g_exp = exp(b_g)
+                bg_last_exp = exp2(bg_last)
+                b_g_exp = exp2(b_g)
 
             p_dv = tl.make_block_ptr(dv, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
             p_do = tl.make_block_ptr(do, (T, V), (stride_v, 1), (i_t * BT, i_v * BLOCK_SIZE), (BT, BLOCK_SIZE), (1, 0))
@@ -602,8 +600,7 @@ def pre_process_bwd_kernel_merged(
 
             if USE_G:
                 m_t = (i_t * BT + tl.arange(0, BT)) < T
-                # Note: pre_process_bwd_kernel_stage1 always uses exp for USE_G
-                b_dv *= tl.where(m_t, exp(bg_last - b_g), 0)[:, None]
+                b_dv *= tl.where(m_t, exp2(bg_last - b_g), 0)[:, None]
             b_dv += tl.load(p_dv, boundary_check=(0, 1))
 
             # Update dh

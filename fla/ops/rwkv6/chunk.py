@@ -1042,7 +1042,6 @@ def chunk_rwkv6_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=True,
         states_in_fp32=True,
     )
     A = chunk_rwkv6_fwd_intra(
@@ -1103,7 +1102,6 @@ def chunk_rwkv6_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=True,
         states_in_fp32=True,
     )
     dh, dh0 = chunk_rwkv6_bwd_dh(

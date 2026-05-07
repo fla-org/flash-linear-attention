@@ -48,7 +48,6 @@ class TileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
-        use_exp2: bool = False,
         transpose_state_layout: bool = False,
     ) -> tuple[bool, str | None]:
         if g is None:
@@ -83,18 +82,27 @@ class TileLangBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
-        use_exp2: bool = False,
         transpose_state_layout: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         from fla.ops.common.backends.tilelang.chunk_bwd import (
             chunk_bwd_dqkwg_tilelang,
         )
         return chunk_bwd_dqkwg_tilelang(
-            q=q, k=k, v=v, do=do, h=h, dh=dh,
-            w=w, g=g, g_gamma=g_gamma, dv=dv,
-            scale=scale, cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size, chunk_indices=chunk_indices,
-            use_exp2=use_exp2, transpose_state_layout=transpose_state_layout,
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            h=h,
+            dh=dh,
+            w=w,
+            g=g,
+            g_gamma=g_gamma,
+            dv=dv,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
+            transpose_state_layout=transpose_state_layout,
         )
 
     def parallel_attn_fwd_verifier(

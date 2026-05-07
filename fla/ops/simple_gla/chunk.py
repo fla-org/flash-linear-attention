@@ -39,7 +39,6 @@ def chunk_simple_gla_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=True,
         states_in_fp32=False,
     )
     o = chunk_fwd_o(
@@ -83,7 +82,6 @@ def chunk_simple_gla_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
-        use_exp2=True,
         states_in_fp32=True,
     )
     dh, dh0 = chunk_bwd_dh(

@@ -29,7 +29,7 @@ BKV_LIST = [32, 64] if check_shared_mem() else [16, 32]
         for num_warps in [1, 2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'USE_G', 'USE_GK', 'USE_GV', 'USE_EXP2'],
+    key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -57,7 +57,6 @@ def chunk_fwd_kernel_h(
     USE_G_GAMMA: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_GV: tl.constexpr,
-    USE_EXP2: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
@@ -107,21 +106,13 @@ def chunk_fwd_kernel_h(
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = g + bos*H + (i_t * BT + tl.arange(0, BT)) * H + i_h
             b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
-            if USE_EXP2:
-                b_h *= exp2(b_g_last)
-                b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
-            else:
-                b_h *= exp(b_g_last)
-                b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
+            b_h *= exp2(b_g_last)
+            b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         if USE_G_GAMMA:
             b_g_last = b_gamma * min(BT, T - i_t * BT)
-            if USE_EXP2:
-                b_h *= exp2(b_g_last)
-                b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
-            else:
-                b_h *= exp(b_g_last)
-                b_v = (b_v * exp(b_g_last - b_g)[:, None]).to(b_v.dtype)
+            b_h *= exp2(b_g_last)
+            b_v = (b_v * exp2(b_g_last - b_g)[:, None]).to(b_v.dtype)
 
         # vector decay, h = Diag(gk) @ h
         if USE_GK:
@@ -130,12 +121,8 @@ def chunk_fwd_kernel_h(
 
             b_gk_last = tl.load(p_gk_last, mask=(i_k * BK + tl.arange(0, BK) < K), other=0.)
             b_gk = tl.load(p_gk, boundary_check=(0, 1))
-            if USE_EXP2:
-                b_h *= exp2(b_gk_last)[:, None]
-                b_k = (b_k * exp2(b_gk_last[:, None] - b_gk)).to(b_k.dtype)
-            else:
-                b_h *= exp(b_gk_last)[:, None]
-                b_k = (b_k * exp(b_gk_last[:, None] - b_gk)).to(b_k.dtype)
+            b_h *= exp2(b_gk_last)[:, None]
+            b_k = (b_k * exp2(b_gk_last[:, None] - b_gk)).to(b_k.dtype)
 
         # vector decay, h = h @ Diag(gv)
         if USE_GV:
@@ -144,12 +131,8 @@ def chunk_fwd_kernel_h(
 
             b_gv_last = tl.load(p_gv_last, mask=(i_v * BV + tl.arange(0, BV) < V), other=0.)
             b_gv = tl.load(p_gv, boundary_check=(0, 1))
-            if USE_EXP2:
-                b_h *= exp2(b_gv_last)[None, :]
-                b_v = (b_v * exp2(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
-            else:
-                b_h *= exp(b_gv_last)[None, :]
-                b_v = (b_v * exp(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
+            b_h *= exp2(b_gv_last)[None, :]
+            b_v = (b_v * exp2(b_gv_last[None, :] - b_gv)).to(b_v.dtype)
 
         b_h += tl.dot(b_k, b_v)
 
@@ -313,7 +296,6 @@ def chunk_fwd_h(
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     split_size: int | None = None,
-    use_exp2: bool = False,
     states_in_fp32: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -352,7 +334,6 @@ def chunk_fwd_h(
         USE_G_GAMMA=g_gamma is not None,
         USE_GK=gk is not None,
         USE_GV=gv is not None,
-        USE_EXP2=use_exp2,
     )
     return h, ht
 
