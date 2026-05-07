@@ -480,6 +480,7 @@ def chunk_kda_bwd(
             output_final_state=False,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
+            chunk_size=chunk_size,
             transpose_state_layout=transpose_state_layout,
         )
     else:
@@ -518,6 +519,7 @@ def chunk_kda_bwd(
             dht=dht,
             initial_state=initial_state,
             context=cp_context,
+            chunk_size=chunk_size,
             transpose_state_layout=transpose_state_layout,
         )
 
@@ -532,6 +534,7 @@ def chunk_kda_bwd(
         dv=dv,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
         chunk_indices=chunk_indices,
         transpose_state_layout=transpose_state_layout,
     )

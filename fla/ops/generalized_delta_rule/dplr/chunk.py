@@ -349,6 +349,7 @@ class ChunkDPLRDeltaRuleFunction(torch.autograd.Function):
                 dht=dht,
                 initial_state=initial_state,
                 context=cp_context,
+                chunk_size=chunk_size,
             )
 
         dh, dh0, dv_new = chunk_dplr_bwd_dhu(
