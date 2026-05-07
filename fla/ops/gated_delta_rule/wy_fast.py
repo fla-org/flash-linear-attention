@@ -12,33 +12,7 @@ import triton.language as tl
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_BLACKWELL, autotune_cache_kwargs, check_shared_mem
-
-if IS_NVIDIA_BLACKWELL:
-    """
-    Compute tl.dot with SM100 workaround.
-
-    On SM100 (Blackwell) GPUs, wraps the result in inline assembly to prevent
-    the TritonGPUHoistTMEMAlloc pass from incorrectly fusing add and dot operations.
-    See: https://github.com/fla-org/flash-linear-attention/issues/638
-
-    TODO: Remove this workaround once the Triton compiler bug is fixed.
-    Track upstream issue at: https://github.com/triton-lang/triton/issues/8695
-    """
-    @triton.jit
-    def safe_dot(a, b):
-        return tl.inline_asm_elementwise(
-            asm="mov.f32 $0, $1;",
-            constraints="=r,r",
-            args=[tl.dot(a, b)],
-            dtype=tl.float32,
-            is_pure=True,
-            pack=1,
-        )
-else:
-    @triton.jit
-    def safe_dot(a, b):
-        return tl.dot(a, b)
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 
 @triton.heuristics({
