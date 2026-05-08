@@ -11,6 +11,7 @@ import triton.language as tl
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils import prepare_chunk_indices
+from fla.ops.utils.op import safe_dot
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
@@ -173,7 +174,7 @@ def prepare_wy_repr_bwd_kernel(
 
         b_dk_beta = tl.dot(b_dA, b_k, allow_tf32=False)
         b_dbeta += tl.sum(b_dk_beta * b_k, 1)
-        b_dk += tl.dot(tl.trans(b_dA), b_k_beta, allow_tf32=False)
+        b_dk += safe_dot(tl.trans(b_dA), b_k_beta, allow_tf32=False)
         b_dk += b_dk_beta * b_beta[:, None]
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
 

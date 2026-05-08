@@ -249,7 +249,7 @@ The following examples show how CP integrates with the existing kernel interface
 ### GDN Forward
 
 ```python
-g = chunk_local_cumsum(g, chunk_size=64)
+g = chunk_local_cumsum(g, chunk_size=64, scale=RCP_LN2)
 w, u = recompute_w_u_fwd(k, v, beta, A, g=g)
 
 # CP pre-process: original k, scalar g
@@ -295,7 +295,7 @@ w, u, qg, kg, Aqk, Akk = chunk_kda_fwd_intra(q, k, v, gk=g, beta, ...)
 
 # 2. CP pre-process: pre-gated kg, per-dim gk=g
 initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
-    k=kg, w=w, u=u, gk=g,     # USE_G=False, USE_GK=True, use_exp2=True
+    k=kg, w=w, u=u, gk=g,     # USE_G=False, USE_GK=True
     context=cp_context,
 )
 
@@ -303,7 +303,6 @@ initial_state = chunk_gated_delta_rule_fwd_h_pre_process(
 h, v_new, _ = chunk_gated_delta_rule_fwd_h(
     k=kg, w=w, u=u, gk=g,
     initial_state=initial_state,
-    use_exp2=True,
 )
 ```
 
@@ -322,7 +321,7 @@ dAqk, dv = chunk_kda_bwd_dAv(q, k, v=v_new, do, A=Aqk, ...)
 
 # 4. CP pre-process: pre-gated qg, kg, per-dim gk=g
 dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
-    q=qg, k=kg, w=w, do=do, dv=dv, gk=g,  # USE_G=False, USE_GK=True, use_exp2=True
+    q=qg, k=kg, w=w, do=do, dv=dv, gk=g,  # USE_G=False, USE_GK=True
     context=cp_context,
 )
 
@@ -330,7 +329,6 @@ dht, initial_state = chunk_gated_delta_rule_bwd_dhu_pre_process(
 dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
     q=qg, k=kg, w=w, gk=g,
     dht=dht, ...
-    use_exp2=True,
 )
 ```
 

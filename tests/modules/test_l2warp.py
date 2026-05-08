@@ -41,6 +41,7 @@ def test_fused_linear_cross_entropy_l2_warp(
 
     ignore_index = -100
     shift_labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], ignore_index)), 1)
+    shift_labels[:, ::2] = ignore_index
 
     ref_criterion = nn.CrossEntropyLoss()
 

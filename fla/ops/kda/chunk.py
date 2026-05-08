@@ -42,13 +42,12 @@ class ChunkKDAFunction(torch.autograd.Function):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
         lower_bound: float | None = None,
+        chunk_size: int = 64,
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
         transpose_state_layout: bool = False,
     ):
-        chunk_size = 64
-
         # Apply l2norm
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -59,8 +58,13 @@ class ChunkKDAFunction(torch.autograd.Function):
         if use_beta_sigmoid_in_kernel:
             beta = fused_beta_sigmoid(beta_raw)
 
-        chunk_indices = prepare_chunk_indices(
-            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+        chunk_indices = None
+        if cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(
+                cu_seqlens,
+                chunk_size,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
 
         g_input = g
 
@@ -81,6 +85,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             use_gate_in_kernel=use_gate_in_kernel,
             A_log=A_log,
             dt_bias=dt_bias,
+            chunk_size=chunk_size,
             disable_recompute=disable_recompute,
             return_intermediate_states=return_intermediate_states,
             cp_context=cp_context,
@@ -154,7 +159,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             db = beta_sigmoid_bwd(beta_raw, db)
 
         return (dq.to(q), dk.to(k), dv.to(v), dg.to(g_input), db.to(beta_raw), dA, dbias, None, dh0,
-                None, None, None, None, None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None, None, None, None)
 
 
 @dispatch('kda')
@@ -357,6 +362,10 @@ def chunk_kda(
         assert "A_log" in kwargs, "A_log must be provided when use_gate_in_kernel=True."
         A_log, dt_bias = kwargs["A_log"], kwargs.get("dt_bias")
 
+    chunk_size = kwargs.pop("chunk_size", 64)
+    if chunk_size not in (32, 64):
+        raise ValueError(f"`chunk_size` must be either 32 or 64 for KDA, got {chunk_size}.")
+
     if safe_gate and use_gate_in_kernel:
         if lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` and `use_gate_in_kernel=True`.")
@@ -394,6 +403,7 @@ def chunk_kda(
         cu_seqlens_cpu,
         safe_gate,
         lower_bound,
+        chunk_size,
         disable_recompute,
         return_intermediate_states,
         cp_context,

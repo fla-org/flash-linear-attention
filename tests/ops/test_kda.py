@@ -465,8 +465,7 @@ def test_fused_recurrent_vllm_decode(
         num_accepted_tokens=None,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
-        use_exp2=False,
-        lower_bound=lower_bound
+        lower_bound=lower_bound,
     )
 
     # Verify results
@@ -493,26 +492,30 @@ def test_fused_recurrent_vllm_decode(
         "dtype",
         "safe_gate",
         "disable_recompute",
+        "chunk_size",
     ),
     [
         pytest.param(
             *test,
-            id=("B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}"
-                "-use_qk_l2norm{}-use_gate{}-{}-safe_gate{}-disable_recompute{}").format(*test),
+            id=(
+                "B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}"
+                "-use_qk_l2norm{}-use_gate{}-{}-safe_gate{}-disable_recompute{}-chunk_size{}"
+            ).format(*test),
         )
         for test in [
-            (1, 63, 1, 1, 64, 1, 1, 0, False, False, torch.float16, True, False),
-            (2, 500, 3, 3, 60, 1, 1, 0, False, False, torch.float16, True, True),
-            (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True),
-            (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False),
-            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True),
-            (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False),
-            (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True),
-            (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True),
+            (1, 63, 1, 1, 64, 1, 1, 0, False, False, torch.float16, True, False, 64),
+            (2, 500, 3, 3, 60, 1, 1, 0, False, False, torch.float16, True, True, 64),
+            (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, False, torch.float16, False, True, 64),
+            (3, 1024, 4, 4, 100, 1, 0.1, 0, False, False, torch.float16, False, False, 64),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, False, False, torch.float16, True, True, 64),
+            (4, 1024, 4, 4, 128, 0.1, 1, 0, True, False, torch.float16, True, False, 64),
+            (2, 1500, 4, 4, 128, 0.1, 10, 0, False, True, torch.float16, False, True, 64),
+            (4, 2048, 8, 8, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 64),
 
-            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, False, torch.float16, False, False),
-            (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False),
-            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False),
+            (2, 1024, 2, 4, 64, 0.1, 1, 0, False, False, torch.float16, False, False, 64),
+            (2, 1024, 2, 8, 64, 0.1, 1, 0, False, True, torch.float16, False, False, 64),
+            (2, 1024, 4, 8, 128, 0.1, 1, 0, True, True, torch.float16, False, False, 64),
+            (2, 160, 2, 4, 64, 0.1, 1, 0, False, True, torch.float16, True, True, 32),
         ]
     ],
 )
@@ -530,6 +533,7 @@ def test_chunk(
     dtype: torch.dtype,
     safe_gate: bool,
     disable_recompute: bool,
+    chunk_size: int,
 ):
     torch.manual_seed(42)
     q = torch.rand(B, T, H, D, dtype=dtype)
@@ -592,7 +596,8 @@ def test_chunk(
         use_gate_in_kernel=use_gate_in_kernel,
         safe_gate=safe_gate,
         lower_bound=lower_bound,
-        disable_recompute=disable_recompute
+        disable_recompute=disable_recompute,
+        chunk_size=chunk_size,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     if use_gate_in_kernel:
@@ -774,15 +779,32 @@ def test_chunk_use_beta_sigmoid_in_kernel(
 
 
 @pytest.mark.parametrize(
-    ("H", "D", "mask_p", "cu_seqlens", "dtype", "use_gate_in_kernel", "safe_gate", "disable_recompute"),
+    (
+        "H",
+        "D",
+        "mask_p",
+        "cu_seqlens",
+        "dtype",
+        "use_gate_in_kernel",
+        "safe_gate",
+        "disable_recompute",
+        "chunk_size",
+    ),
     [
-        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}-safe_gate{}-disable_recompute{}".format(*test))
+        pytest.param(
+            *test,
+            id=(
+                "H{}-D{}-mask_p{}-cu_seqlens{}-{}-gate{}"
+                "-safe_gate{}-disable_recompute{}-chunk_size{}"
+            ).format(*test),
+        )
         for test in [
-            (4, 60, 0.1, [0, 15], torch.float16, True, False, False),
-            (4, 64, 0.9, [0, 256, 500, 1000], torch.float16, True, False, False),
-            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, False, False),
-            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, False, False),
-            (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False, True, True),
+            (4, 60, 0.1, [0, 15], torch.float16, True, False, False, 64),
+            (4, 64, 0.9, [0, 256, 500, 1000], torch.float16, True, False, False, 64),
+            (4, 128, 0.5, [0, 256, 500, 1000], torch.float16, False, False, False, 64),
+            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16, True, False, False, 64),
+            (4, 256, 0, [0, 100, 300, 1200, 3000, 4096], torch.float16, False, True, True, 64),
+            (4, 60, 0.1, [0, 31, 96, 160], torch.float16, True, False, True, 32),
         ]
     ],
 )
@@ -795,6 +817,7 @@ def test_chunk_varlen(
     use_gate_in_kernel: bool,
     safe_gate: bool,
     disable_recompute: bool,
+    chunk_size: int,
 ):
     if FLA_CACHE_MODE.uses_default_config() and D in (64, 256):
         pytest.skip(reason="Skipping D=64/256 varlen KDA case with default_config")
@@ -845,7 +868,8 @@ def test_chunk_varlen(
         cu_seqlens_cpu=cu_seqlens_cpu,
         use_gate_in_kernel=use_gate_in_kernel,
         safe_gate=safe_gate,
-        disable_recompute=disable_recompute
+        disable_recompute=disable_recompute,
+        chunk_size=chunk_size,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad

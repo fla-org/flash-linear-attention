@@ -21,6 +21,7 @@ def fused_recurrent_simple_gla(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
+    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -51,6 +52,12 @@ def fused_recurrent_simple_gla(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        transpose_state_layout (Optional[bool]):
+            Whether to use the transposed `[N, H, V, K]` layout for the hidden state,
+            instead of the default `[N, H, K, V]`.
+            Useful for inference backends that expect a V-major state.
+            `initial_state`, `final_state`, and `dh0`/`dht` all follow the chosen layout.
+            Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -110,5 +117,6 @@ def fused_recurrent_simple_gla(
         output_final_state=output_final_state,
         reverse=reverse,
         cu_seqlens=cu_seqlens,
+        transpose_state_layout=transpose_state_layout,
     )
     return o, final_state

@@ -94,6 +94,63 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (2, 256, 4, 64, torch.float),
+            (2, 1024, 4, 128, torch.float16),
+        ]
+    ],
+)
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_fused_recurrent_transpose_state(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    q = torch.rand((B, T, H, D), dtype=dtype, device=device)
+    k = torch.rand((B, T, H, D), dtype=dtype, device=device)
+    v = torch.rand((B, T, H, D), dtype=dtype, device=device)
+    g = F.logsigmoid(torch.rand((B, T, H, D), dtype=dtype, device=device))
+    h0 = torch.rand(B, H, D, D, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run(transpose: bool):
+        q_, k_, v_, g_ = (x.detach().clone().requires_grad_() for x in (q, k, v, g))
+        h0_in = h0.transpose(-1, -2).contiguous() if transpose else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if transpose else dht
+        h0_in = h0_in.requires_grad_()
+        out, ht = fused_recurrent_gla(
+            q=q_, k=k_, v=v_, gk=g_,
+            initial_state=h0_in,
+            output_final_state=True,
+            transpose_state_layout=transpose,
+        )
+        ((out * do).sum() + (ht * dht_in).sum()).backward()
+        return out, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_in.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dg, ref_dh0 = run(False)
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dg, tri_dh0 = run(True)
+
+    assert_close('o', ref_o, tri_o, 0.005)
+    assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.005)
+    assert_close('dk', ref_dk, tri_dk, 0.005)
+    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('dg', ref_dg, tri_dg, 0.005)
+    assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
+
+
+@pytest.mark.parametrize(
     ('H', 'D', 'cu_seqlens', 'dtype'),
     [
         pytest.param(*test, id="H{}-D{}-cu_seqlens{}-{}".format(*test))

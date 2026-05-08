@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
@@ -94,8 +94,8 @@ def chunk_fwd_kernel_o(
         p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         m_A = (o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)
-        b_m = tl.where(m_A, exp(b_g[:, None] - b_g[None, :]), 0)
-        b_o = b_o * exp(b_g)[:, None]
+        b_m = tl.where(m_A, exp2(b_g[:, None] - b_g[None, :]), 0)
+        b_o = b_o * exp2(b_g)[:, None]
     else:
         b_m = ((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t)).to(tl.float32)
 

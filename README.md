@@ -29,6 +29,7 @@ This repo provides efficient implementations for emerging model architectures, w
 
 ## News
 
+- [2026-04] 🐍 Add Mamba-3 implementation to `fla` ([paper](https://arxiv.org/abs/2603.15569)).
 - [2026-04] 🧱 Add [MoBA](https://arxiv.org/abs/2502.13189) (Mixture of Block Attention) implementation to `fla`, with [FlashMoBA](https://github.com/mit-han-lab/flash-moba) backend support.
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
 - [2026-04] 🎯 Add [GPT-OSS](https://openai.com/index/introducing-gpt-oss/)-style attention sink support to `fla`'s attention kernels.
@@ -99,6 +100,7 @@ This repo provides efficient implementations for emerging model architectures, w
 | 2025 |         | DeltaFormer          | [Understanding Transformer from the Perspective of Associative Memory](https://arxiv.org/abs/2505.19488v1)                                    |                                                                                                 |     [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/deltaformer.py)      |
 | 2025 |         | KDA                  | [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)                                              |                                                                                                 |            [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/kda)             |
 | 2025 |         | MoBA                 | [MoBA: Mixture of Block Attention for Long-Context LLMs](https://arxiv.org/abs/2502.13189)                                                    | [official](https://github.com/MoonshotAI/MoBA)                                                  |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/moba.py)         |
+| 2026 |         | Mamba-3              | [Mamba-3: Improved Sequence Modeling using State Space Principles](https://arxiv.org/abs/2603.15569)                                          | [official](https://github.com/state-spaces/mamba)                                               |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba3)          |
 
 ## Installation
 
