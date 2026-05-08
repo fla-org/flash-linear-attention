@@ -151,7 +151,7 @@ class YOCOGatedRetention(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        mode = 'fused_recurrent' if past_key_values is not None and q_len == 1 else self.mode
+        mode = 'fused_recurrent' if q_len <= 64 else self.mode
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get('cu_seqlens')
