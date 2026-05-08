@@ -365,8 +365,8 @@ class YOCOCrossAttention(nn.Module):
         output_attentions: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if attention_mask is not None and attention_mask.dim() != 2:
-            raise ValueError(
+        if attention_mask is not None:
+            assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a 0-1 matrix with shape [batch_size, seq_len] "
                 "for padding purposes (0 indicating padding). "
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
@@ -382,15 +382,10 @@ class YOCOCrossAttention(nn.Module):
         rotary_cu_seqlens = cu_seqlens
         seqlen_offset = shared_k.shape[1] - q_len
         max_seqlen = shared_k.shape[1]
+
         if attention_mask is not None:
             seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
             max_seqlen = max(max_seqlen, q.shape[1] + max(seqlen_offset))
-        elif cu_seqlens is not None and q.shape[0] == 1 and q.shape[1] == cu_seqlens.numel() - 1:
-            # Packed one-step decoding keeps one query token per sequence, while
-            # shared_k/shared_v remain concatenated full-prefix KV states. RoPE
-            # therefore needs a per-sequence offset and a query-local cu_seqlens.
-            seqlen_offset = cu_seqlens[1:] - cu_seqlens[:-1] - 1
-            rotary_cu_seqlens = torch.arange(0, q.shape[1] + 1, dtype=torch.int32, device=q.device)
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
 
@@ -400,8 +395,6 @@ class YOCOCrossAttention(nn.Module):
             max_seqlen=max_seqlen,
             cu_seqlens=rotary_cu_seqlens,
         )
-        should_transform_output = False
-        pad_indices = None
 
         if attention_mask is not None:
             q, (shared_k, shared_v), indices_q, cu_seqlens, max_seq_lens = unpad_input(
@@ -413,38 +406,31 @@ class YOCOCrossAttention(nn.Module):
             )
             _, cu_seqlens = cu_seqlens
             max_seqlen_q, max_seqlen_k = max_seq_lens
-            is_decoding = max_seqlen_q != max_seqlen_k
-            pad_indices = indices_q
-        else:
-            is_decoding = q.shape[1] != shared_k.shape[1]
-
-        if is_decoding:
-            if attention_mask is not None:
+            if max_seqlen_q != max_seqlen_k:
                 assert max_seqlen_q == 1, "only support q_len == 1 for decoding"
-            elif cu_seqlens is not None:
-                assert q.shape[1] == cu_seqlens.numel() - 1, "expected one query per sequence for varlen decoding"
+                o = attn_decoding_one_step(q, shared_k, shared_v, cu_seqlens=cu_seqlens)
             else:
-                assert q.shape[1] == 1, "only support q_len == 1 for decoding"
-                cu_seqlens = torch.arange(
-                    0,
-                    (batch_size + 1) * shared_k.shape[1],
-                    shared_k.shape[1],
-                    dtype=torch.int32,
-                    device=q.device,
-                )
-                q = rearrange(q, 'b t h d -> t b h d').contiguous()
-                shared_k = rearrange(shared_k, 'b t h d -> 1 (b t) h d').contiguous()
-                shared_v = rearrange(shared_v, 'b t h d -> 1 (b t) h d').contiguous()
-                should_transform_output = True
-
-        if is_decoding:
+                o = parallel_attn(q, shared_k, shared_v, window_size=self.window_size, cu_seqlens=cu_seqlens)
+            o = pad_input(o.squeeze(0), indices_q, batch_size, q_len)
+        elif cu_seqlens is not None:
+            o = parallel_attn(q, shared_k, shared_v, window_size=self.window_size, cu_seqlens=cu_seqlens)
+        elif q.shape[1] != shared_k.shape[1]:
+            assert q.shape[1] == 1, "only support q_len == 1 for decoding"
+            cu_seqlens = torch.arange(
+                0,
+                (batch_size + 1) * shared_k.shape[1],
+                shared_k.shape[1],
+                dtype=torch.int32,
+                device=q.device,
+            )
+            q = rearrange(q, 'b t h d -> t b h d').contiguous()
+            shared_k = rearrange(shared_k, 'b t h d -> 1 (b t) h d').contiguous()
+            shared_v = rearrange(shared_v, 'b t h d -> 1 (b t) h d').contiguous()
             o = attn_decoding_one_step(q, shared_k, shared_v, cu_seqlens=cu_seqlens)
+            o = rearrange(o, 't b h d -> b t h d')
         else:
             o = parallel_attn(q, shared_k, shared_v, window_size=self.window_size, cu_seqlens=cu_seqlens)
-        if should_transform_output:
-            o = rearrange(o, 't b h d -> b t h d')
-        if pad_indices is not None:
-            o = pad_input(o.squeeze(0), pad_indices, batch_size, q_len)
+
         o = o.reshape(batch_size, q_len, -1)
         o = self.o_proj(o)
         attentions = None
