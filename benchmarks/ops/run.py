@@ -407,23 +407,29 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
 
     new_git = machine_info.get('git_label', 'new') if machine_info else 'new'
 
-    # mode_w = 2 (indent) + 7 (mode field) + 1 (space) = 10 chars before B column
+    # mode_w = 2 (indent) + 7 (mode field) + 1 (space) = 10 chars before first dim column
     mode_pad = ' ' * 10
+
+    # Show L column only when every row has an L axis (e.g., a pure
+    # AttnRes / mHC / layer-attn run). Mixed runs hide L for clarity.
+    has_l = bool(results) and all('L' in r for r in results)
+    l_col = f"{'L':>4s} " if has_l else ''
+    l_extra_w = 5 if has_l else 0
 
     if has_baseline:
         old_git = baseline_info.get('git_label', 'main') if baseline_info else 'main'
         old_hdr, new_hdr = _make_col_headers(old_git, new_git)
         col_w = max(len(old_hdr), len(new_hdr), 10)
-        inner_w = 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w + 1 + col_w + 1 + 8
-        inner_hdr = (f"{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
+        inner_w = l_extra_w + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w + 1 + col_w + 1 + 8
+        inner_hdr = (f"{l_col}{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
                      f"  {old_hdr:>{col_w}s} {new_hdr:>{col_w}s} {'speedup':>8s}")
     else:
         new_hdr = _truncate_branch(new_git.split('[')[0]) if '[' in new_git else new_git
         suffix = '[' + new_git.split('[', 1)[1] + '(ms)' if '[' in new_git else '(ms)'
         new_hdr = new_hdr + suffix
         col_w = max(len(new_hdr), 10)
-        inner_w = 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w
-        inner_hdr = (f"{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
+        inner_w = l_extra_w + 4 + 1 + 6 + 1 + 4 + 1 + 4 + 2 + 28 + 2 + col_w
+        inner_hdr = (f"{l_col}{'B':>4s} {'T':>6s} {'H':>4s} {'D':>4s}  {'op':<28s}"
                      f"  {new_hdr:>{col_w}s}")
 
     width = 10 + inner_w
@@ -437,10 +443,18 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
         pytorch = machine_info.get('pytorch_version', 'N/A')
         print(f"  Machine: {gpu} | CUDA {cuda} | PyTorch {pytorch}")
 
+    def _l_cell(r, blank=False):
+        if not has_l:
+            return ''
+        if blank:
+            return f"{'':>4s} "
+        v = r.get('L')
+        return f"{v:>4d} " if v is not None else f"{'-':>4s} "
+
     prev_shape = None
     prev_mode = None
     for r in results:
-        cur_shape = (r['B'], r['T'], r['H'], r['D'])
+        cur_shape = (r.get('L'), r['B'], r['T'], r['H'], r['D'])
         cur_mode = r['mode']
 
         # Show mode label + column header when mode changes; just a dash line between shapes
@@ -451,11 +465,11 @@ def print_results_table(results: list[dict], machine_info: dict | None = None,
         elif cur_shape != prev_shape:
             print(dash_line)
 
-        # Show B/T/H/D on first row of each shape group
+        # Show shape columns on first row of each shape group
         if cur_mode != prev_mode or cur_shape != prev_shape:
-            shape_str = f"{r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}"
+            shape_str = f"{_l_cell(r)}{r['B']:>4d} {r['T']:>6d} {r['H']:>4d} {r['D']:>4d}"
         else:
-            shape_str = f"{'':>4s} {'':>6s} {'':>4s} {'':>4s}"
+            shape_str = f"{_l_cell(r, blank=True)}{'':>4s} {'':>6s} {'':>4s} {'':>4s}"
 
         prev_shape = cur_shape
         prev_mode = cur_mode
@@ -642,9 +656,14 @@ def main():
         baseline, baseline_info = _bench_at_ref(
             base_ref, op_names, shape_configs, args.modes)
 
-    # Sort by (mode, B, T, H, D, op) so the table groups by mode first
+    # Sort by (mode, L, B, T, H, D, op) so the table groups by mode first
+    # and (when present) by L so different residual-source counts cluster.
     mode_order = {'fwd': 0, 'fwdbwd': 1}
-    all_results.sort(key=lambda r: (mode_order.get(r['mode'], 9), r['B'], r['T'], r['H'], r['D'], r['op']))
+    all_results.sort(key=lambda r: (
+        mode_order.get(r['mode'], 9),
+        r.get('L', 0),
+        r['B'], r['T'], r['H'], r['D'], r['op'],
+    ))
 
     print_results_table(all_results, machine_info, baseline=baseline, baseline_info=baseline_info)
 

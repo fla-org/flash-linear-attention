@@ -452,26 +452,39 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
-# --- M: AttnRes (per-layer pseudo-query attends over L stacked residual sources) ---
-# Uses an extra `L` shape key (number of residual sources, paper §3.1/3.2)
-# so it doesn't share dims with q/k/v ops.
+# --- M: layer-axis residual aggregation (AttnRes, mHC, ...) ---
+# These ops attend / aggregate over an `L` axis of stacked residual sources.
+# Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
+
+_layer_default_shapes = {
+    'L8_B1_T8K_D2K':   {'L': 8,  'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
+    'L8_B1_T32K_D2K':  {'L': 8,  'B': 1, 'T': 32768, 'H': 1, 'D': 2048},
+    'L10_B1_T8K_D4K':  {'L': 10, 'B': 1, 'T': 8192,  'H': 1, 'D': 4096},
+    'L10_B1_T32K_D4K': {'L': 10, 'B': 1, 'T': 32768, 'H': 1, 'D': 4096},
+    'L32_B1_T8K_D2K':  {'L': 64, 'B': 1, 'T': 8192,  'H': 1, 'D': 8192},
+}
+
+
+_attnres_inputs = {
+    'query': TensorSpec(shape_D),
+    'residuals': TensorSpec(shape_LBTD),
+    'rms_weight': TensorSpec(shape_D),
+}
 
 register_op(OpConfig(
     name='fused_attnres',
     import_path='fla.ops.attnres',
-    inputs={
-        'query': TensorSpec(shape_D),
-        'residuals': TensorSpec(shape_LBTD),
-        'rms_weight': TensorSpec(shape_D),
-    },
+    inputs=_attnres_inputs,
     output_is_tuple=False,
-    default_shapes={
-        'L8_B1_T8K_D2K':   {'L': 8,  'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
-        'L10_B1_T8K_D4K':  {'L': 10, 'B': 1, 'T': 8192,  'H': 1, 'D': 4096},
-        'L8_B1_T32K_D2K':  {'L': 8,  'B': 1, 'T': 32768, 'H': 1, 'D': 2048},
-        'L10_B1_T32K_D4K': {'L': 10, 'B': 1, 'T': 32768, 'H': 1, 'D': 4096},
-        'L32_B1_T8K_D2K':  {'L': 32, 'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
-        'L64_B1_T8K_D2K':  {'L': 64, 'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
-    },
-    category='attnres',
+    default_shapes=_layer_default_shapes,
+    category='fused_attnres',
+))
+
+register_op(OpConfig(
+    name='naive_attnres',
+    import_path='fla.ops.attnres',
+    inputs=_attnres_inputs,
+    output_is_tuple=False,
+    default_shapes=_layer_default_shapes,
+    category='naive_attnres',
 ))
