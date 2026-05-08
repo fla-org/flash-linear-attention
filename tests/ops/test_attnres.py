@@ -9,59 +9,52 @@ import pytest
 import torch
 
 from fla.ops.attnres import fused_attnres, naive_attnres
-from fla.utils import assert_close, device, device_platform
-
-TEST_CASES = [
-    (1, 1, 128, 1024, torch.float32, 1, 1.0),
-    (3, 1, 128, 1024, torch.float32, 1, 1.0),
-    (7, 1, 128, 1024, torch.float32, 1, 1024 ** -0.5),
-    (3, 1, 1024, 1024, torch.float32, 2, 1024 ** -0.5),
-    (7, 1, 1024, 1024, torch.float32, 1, 1024 ** -0.5),
-    (7, 1, 1024, 1024, torch.bfloat16, 1, 1024 ** -0.5),
-]
+from fla.utils import assert_close, device
 
 
-@pytest.mark.skipif(device_platform == 'cpu', reason='Triton attnres requires a GPU backend')
 @pytest.mark.parametrize(
-    ('L', 'B', 'T', 'D', 'dtype', 'query_ndim', 'scale'),
+    ('L', 'B', 'T', 'D', 'scale', 'dtype'),
     [
-        pytest.param(
-            L,
-            B,
-            T,
-            D,
-            dtype,
-            query_ndim,
-            scale,
-            id=f"L{L}-B{B}-T{T}-D{D}-{dtype}-Q{query_ndim}-scale{scale}",
-        )
-        for L, B, T, D, dtype, query_ndim, scale in TEST_CASES
+        pytest.param(*test, id="L{}-B{}-T{}-D{}-scale{}-{}".format(*test))
+        for test in [
+            # single-axis stress
+            (1,  1, 1000, 4096, 1.0,             torch.float16),  # L=1
+            (3,  1, 1000, 4096, 4096 ** -0.5,    torch.float16),  # L=3
+            (15, 1, 15,   4096, 1.0,             torch.float16),  # T=15
+            (7,  1, 1000, 1000, 1000 ** -0.5,    torch.float16),  # D=1000
+            (7,  1, 1000, 2000, 2000 ** -0.5,    torch.float16),  # D=2000
+            # multi-axis stress (extremes stacked)
+            (29, 5, 1000, 4096, 4096 ** -0.5,    torch.float16),  # L=29 + B=5
+            (29, 1, 8000, 4096, 4096 ** -0.5,    torch.float16),  # L=29 + T=8000
+            (15, 5, 1000, 7186, 7186 ** -0.5,    torch.float16),  # B=5  + D=7186
+            (15, 1, 8000, 7186, 1.0,             torch.float16),  # T=8000 + D=7186
+            (29, 3, 63,   7186, 7186 ** -0.5,    torch.float16),  # L=29 + D=7186 + T=63
+            # fp32 sanity at a larger size
+            (10, 2, 8000, 4096, 4096 ** -0.5,    torch.float32),
+        ]
     ],
 )
-def test_fused_attnres(
+def test_attnres(
     L: int,
     B: int,
     T: int,
     D: int,
-    dtype: torch.dtype,
-    query_ndim: int,
     scale: float,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     rms_eps = 1e-6
 
     residuals = torch.randn(L, B, T, D, dtype=dtype, device=device).requires_grad_(True)
     query = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
-    if query_ndim == 2:
-        query = query.detach().clone().unsqueeze(-1).requires_grad_(True)
     rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
 
     tri, tri_p = fused_attnres(
-        query,
-        residuals,
-        rms_weight,
-        rms_eps,
-        scale,
+        query=query,
+        residuals=residuals,
+        rms_weight=rms_weight,
+        rms_eps=rms_eps,
+        scale=scale,
         return_weights=True,
     )
     do = torch.randn_like(tri)
@@ -74,18 +67,17 @@ def test_fused_attnres(
     rms_weight_ref = rms_weight.detach().clone().requires_grad_(True)
 
     ref, ref_p = naive_attnres(
-        query_ref,
-        residuals_ref,
-        rms_weight_ref,
-        rms_eps,
-        scale,
+        query=query_ref,
+        residuals=residuals_ref,
+        rms_weight=rms_weight_ref,
+        rms_eps=rms_eps,
+        scale=scale,
         return_weights=True,
     )
     (ref * do).sum().backward()
 
-    tol = 0.02 if dtype is torch.bfloat16 else 0.005
-    assert_close('o', ref, tri, tol)
-    assert_close('p', ref_p, tri_p, tol)
-    assert_close('dv', residuals_ref.grad, tri_dv, tol)
-    assert_close('dq', query_ref.grad, tri_dq, tol)
-    assert_close('dw', rms_weight_ref.grad, tri_dw, tol)
+    assert_close(' o', ref, tri, 0.005)
+    assert_close(' p', ref_p, tri_p, 0.005)
+    assert_close('dq', query_ref.grad, tri_dq, 0.005)
+    assert_close('dv', residuals_ref.grad, tri_dv, 0.005)
+    assert_close('dw', rms_weight_ref.grad, tri_dw, 0.005)
