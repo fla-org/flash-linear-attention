@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp
 from fla.utils import (
     autocast_custom_bwd,
@@ -34,7 +35,7 @@ ATTNRES_DW_CONFIGS = [
 ]
 
 
-@triton.autotune(
+@fla_cache_autotune(
     configs=ATTNRES_FWD_BWD_CONFIGS,
     key=['L', 'D'],
     **autotune_cache_kwargs,
@@ -100,21 +101,21 @@ def attnres_fwd_kernel(
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
 
 
-@triton.autotune(
+@fla_cache_autotune(
     configs=ATTNRES_FWD_BWD_CONFIGS,
     key=['L', 'D'],
     **autotune_cache_kwargs,
 )
 @triton.jit
 def attnres_bwd_kernel_dv(
-    dv,
-    base,
-    do,
     q,
-    w,
     v,
+    w,
     rstd,
     p,
+    do,
+    dv,
+    dqw,
     N,
     scale: tl.constexpr,
     L: tl.constexpr,
@@ -124,11 +125,11 @@ def attnres_bwd_kernel_dv(
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
-    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
     p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
+    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
     # [BL]
-    b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
     b_p = tl.load(p_p, boundary_check=(0,), padding_option="zero").to(tl.float32)
+    b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
 
     # [BL]
     b_dp = tl.zeros([BL], dtype=tl.float32)
@@ -180,24 +181,24 @@ def attnres_bwd_kernel_dv(
         )
 
         p_dv = tl.make_block_ptr(dv + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
-        p_base = tl.make_block_ptr(base + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+        p_base = tl.make_block_ptr(dqw + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         tl.store(p_dv, b_dv.to(dv.dtype.element_ty), boundary_check=(0, 1))
         # [BD]
         tl.store(p_base, tl.sum(b_ds[:, None] * b_xhat, axis=0), boundary_check=(0,))
 
 
-@triton.autotune(
+@fla_cache_autotune(
     configs=ATTNRES_DW_CONFIGS,
     key=['N', 'D'],
     **autotune_cache_kwargs,
 )
 @triton.jit
 def attnres_bwd_kernel_dqdw(
-    dq,
-    dw,
     q,
     w,
-    base,
+    dqw,
+    dq,
+    dw,
     N,
     D: tl.constexpr,
     BN: tl.constexpr,
@@ -212,7 +213,7 @@ def attnres_bwd_kernel_dqdw(
     # [BD]
     b_acc = tl.zeros([BD], dtype=tl.float32)
     for i_n in range(0, N, BN):
-        p_base = tl.make_block_ptr(base, (N, D), (D, 1), (i_n, i_d * BD), (BN, BD), (1, 0))
+        p_base = tl.make_block_ptr(dqw, (N, D), (D, 1), (i_n, i_d * BD), (BN, BD), (1, 0))
         # [BN, BD]
         b_base = tl.load(p_base, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
         b_acc += tl.sum(b_base, axis=0)
@@ -288,20 +289,20 @@ def fused_attnres_bwd(
 
     do = do.view(N, D)
     dv = torch.empty((L, N, D), dtype=do.dtype, device=do.device)
-    base = torch.empty((N, D), dtype=torch.float32, device=do.device)
+    dqw = torch.empty((N, D), dtype=torch.float32, device=do.device)
     dq = torch.empty_like(q)
     dw = torch.empty_like(w)
 
     BL = max(8, triton.next_power_of_2(L))
     attnres_bwd_kernel_dv[(N,)](
-        dv=dv,
-        base=base,
-        do=do,
         q=q,
-        w=w,
         v=v,
+        w=w,
         rstd=rstd,
         p=p,
+        do=do,
+        dv=dv,
+        dqw=dqw,
         N=N,
         scale=scale,
         L=L,
@@ -311,11 +312,11 @@ def fused_attnres_bwd(
 
     def grid(meta): return (triton.cdiv(D, meta['BD']),)
     attnres_bwd_kernel_dqdw[grid](
-        dq=dq,
-        dw=dw,
         q=q,
         w=w,
-        base=base,
+        dqw=dqw,
+        dq=dq,
+        dw=dw,
         N=N,
         D=D,
     )
