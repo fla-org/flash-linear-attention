@@ -1,0 +1,423 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import torch
+import triton
+import triton.language as tl
+
+from fla.ops.utils.op import exp
+from fla.utils import (
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    input_guard,
+)
+
+ATTNRES_FWD_BWD_CONFIGS = [
+    triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
+    for BD, num_warps in [(64, 1), (128, 2), (256, 4), (512, 4), (1024, 8)]
+    for num_stages in [3, 4]
+]
+
+ATTNRES_DW_CONFIGS = [
+    triton.Config({'BN': BN, 'BD': BD}, num_warps=num_warps, num_stages=num_stages)
+    for BN, BD, num_warps in [(1024, 16, 4), (2048, 32, 4), (2048, 32, 8), (4096, 32, 8), (4096, 64, 8)]
+    for num_stages in [3, 4]
+]
+
+
+@triton.autotune(
+    configs=ATTNRES_FWD_BWD_CONFIGS,
+    key=['L', 'D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit
+def attnres_fwd_kernel(
+    q,
+    res,
+    w,
+    o,
+    rstd,
+    p,
+    N,
+    L: tl.constexpr,
+    D: tl.constexpr,
+    eps: tl.constexpr,
+    scale: tl.constexpr,
+    BL: tl.constexpr,
+    BD: tl.constexpr,
+):
+    i_n = tl.program_id(0).to(tl.int64)
+
+    o_l = tl.arange(0, BL)
+    m_l = o_l < L
+
+    b_var = tl.zeros([BL], dtype=tl.float32)
+    for i_d in range(0, D, BD):
+        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        b_var += tl.sum(b_v * b_v, axis=1)
+    b_var = b_var / D
+    b_rstd = tl.rsqrt(b_var + eps)
+
+    b_logits = tl.zeros([BL], dtype=tl.float32)
+    for i_d in range(0, D, BD):
+        o_d = i_d + tl.arange(0, BD)
+        m_d = o_d < D
+        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+
+        b_xhat = b_v * b_rstd[:, None]
+        b_logits += tl.sum(b_xhat * (b_w * b_q)[None, :], axis=1)
+
+    b_logits *= scale
+    b_logits = tl.where(m_l, b_logits, -float("inf"))
+    b_logits = exp(b_logits - tl.max(b_logits, axis=0))
+    b_p = b_logits / tl.sum(b_logits, axis=0)
+
+    o_stats = o_l * N + i_n
+    tl.store(rstd + o_stats, b_rstd, mask=m_l)
+    tl.store(p + o_stats, b_p, mask=m_l)
+
+    p_o = o + i_n * D
+    for i_d in range(0, D, BD):
+        o_d = i_d + tl.arange(0, BD)
+        m_d = o_d < D
+        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        b_o = tl.sum(b_v * b_p[:, None], axis=0)
+        tl.store(p_o + o_d, b_o.to(o.dtype.element_ty), mask=m_d)
+
+
+@triton.autotune(
+    configs=ATTNRES_FWD_BWD_CONFIGS,
+    key=['L', 'D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit
+def attnres_bwd_kernel_dx(
+    dv,
+    base,
+    do,
+    q,
+    w,
+    res,
+    rstd,
+    p,
+    N,
+    scale: tl.constexpr,
+    L: tl.constexpr,
+    D: tl.constexpr,
+    BL: tl.constexpr,
+    BD: tl.constexpr,
+):
+    i_n = tl.program_id(0).to(tl.int64)
+
+    o_l = tl.arange(0, BL)
+    m_l = o_l < L
+
+    p_do = do + i_n * D
+    p_base = base + i_n * D
+
+    o_stats = o_l * N + i_n
+    b_rstd = tl.load(rstd + o_stats, mask=m_l, other=0.).to(tl.float32)
+    b_p = tl.load(p + o_stats, mask=m_l, other=0.).to(tl.float32)
+
+    b_dp = tl.zeros([BL], dtype=tl.float32)
+    b_logits = tl.zeros([BL], dtype=tl.float32)
+    for i_d in range(0, D, BD):
+        o_d = i_d + tl.arange(0, BD)
+        m_d = o_d < D
+        b_do = tl.load(p_do + o_d, mask=m_d, other=0.).to(tl.float32)
+        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+
+        b_xhat = b_v * b_rstd[:, None]
+        b_dp += tl.sum(b_v * b_do[None, :], axis=1)
+        b_logits += tl.sum(b_xhat * (b_w * b_q)[None, :], axis=1)
+
+    b_pp = tl.sum(b_p * b_dp, axis=0)
+    b_ds = b_p * (b_dp - b_pp) * scale
+    b_c = b_logits / D
+
+    for i_d in range(0, D, BD):
+        o_d = i_d + tl.arange(0, BD)
+        m_d = o_d < D
+        b_do = tl.load(p_do + o_d, mask=m_d, other=0.).to(tl.float32)
+        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+
+        b_xhat = b_v * b_rstd[:, None]
+        b_dv = b_p[:, None] * b_do[None, :] + b_ds[:, None] * b_rstd[:, None] * (
+            (b_w * b_q)[None, :] - b_xhat * b_c[:, None]
+        )
+
+        p_dv = tl.make_block_ptr(dv + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        tl.store(p_dv, b_dv.to(dv.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_base + o_d, tl.sum(b_ds[:, None] * b_xhat, axis=0), mask=m_d)
+
+
+@triton.autotune(
+    configs=ATTNRES_DW_CONFIGS,
+    key=['N', 'D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit
+def attnres_bwd_kernel_dw(
+    dq,
+    dw,
+    q,
+    w,
+    base,
+    N,
+    D: tl.constexpr,
+    BN: tl.constexpr,
+    BD: tl.constexpr,
+):
+    i_d = tl.program_id(0).to(tl.int32)
+
+    o_d = i_d * BD + tl.arange(0, BD)
+    m_d = o_d < D
+
+    b_acc = tl.zeros([BD], dtype=tl.float32)
+    for i_n in range(0, N, BN):
+        p_base = tl.make_block_ptr(base, (N, D), (D, 1), (i_n, i_d * BD), (BN, BD), (1, 0))
+        b_base = tl.load(p_base, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        b_acc += tl.sum(b_base, axis=0)
+
+    b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+    b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+
+    tl.store(dq + o_d, b_acc * b_w, mask=m_d)
+    tl.store(dw + o_d, b_acc * b_q, mask=m_d)
+
+
+def fused_attnres_fwd(
+    query: torch.Tensor,
+    residuals: torch.Tensor,
+    rms_weight: torch.Tensor,
+    rms_eps: float,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not residuals.is_cuda:
+        raise ValueError("Triton attnres requires CUDA tensors")
+    if residuals.shape[0] < 1:
+        raise ValueError("Triton attnres requires at least one residual source")
+
+    output_shape = residuals.shape[1:]
+    L, N, D = residuals.shape[0], residuals[0].numel() // residuals.shape[-1], residuals.shape[-1]
+    q, res, w = query.view(-1), residuals.view(L, N, D), rms_weight.view(-1)
+
+    o = torch.empty((N, D), device=residuals.device, dtype=residuals.dtype)
+    stats_shape = (L, *output_shape[:-1])
+    rstd = torch.empty((L, N), device=residuals.device, dtype=torch.float32)
+    p = torch.empty_like(rstd)
+
+    BL = max(8, triton.next_power_of_2(L))
+    grid = (N,)
+
+    attnres_fwd_kernel[grid](
+        q,
+        res,
+        w,
+        o,
+        rstd,
+        p,
+        N,
+        L,
+        D,
+        rms_eps,
+        scale,
+        BL=BL,
+    )
+    return o.view(output_shape), rstd.view(stats_shape), p.view(stats_shape)
+
+
+def fused_attnres_bwd(
+    do: torch.Tensor,
+    rstd: torch.Tensor,
+    p: torch.Tensor,
+    query: torch.Tensor,
+    residuals: torch.Tensor,
+    rms_weight: torch.Tensor,
+    scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    L, N, D = residuals.shape[0], do.numel() // do.shape[-1], do.shape[-1]
+    residuals_shape = residuals.shape
+    query_shape = query.shape
+    rms_weight_shape = rms_weight.shape
+
+    do = do.view(N, D)
+    res = residuals.view(L, N, D)
+    rstd = rstd.view(L, N)
+    p = p.view(L, N)
+    q = query.view(-1)
+    w = rms_weight.view(-1)
+
+    dv = torch.empty((L, N, D), dtype=do.dtype, device=do.device)
+    base = torch.empty((N, D), dtype=torch.float32, device=do.device)
+    dq = torch.empty_like(q)
+    dw = torch.empty_like(w)
+
+    BL = max(8, triton.next_power_of_2(L))
+    attnres_bwd_kernel_dx[(N,)](
+        dv,
+        base,
+        do,
+        q,
+        w,
+        res,
+        rstd,
+        p,
+        N,
+        scale,
+        L,
+        D,
+        BL=BL,
+    )
+
+    def grid(meta): return (triton.cdiv(D, meta['BD']),)
+    attnres_bwd_kernel_dw[grid](
+        dq,
+        dw,
+        q,
+        w,
+        base,
+        N,
+        D,
+    )
+
+    return dv.view(residuals_shape), dq.view(query_shape), dw.view(rms_weight_shape)
+
+
+class FusedAttnresFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(
+        ctx,
+        query: torch.Tensor,
+        residuals: torch.Tensor,
+        rms_weight: torch.Tensor,
+        rms_eps: float,
+        scale: float,
+        return_weights: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        o, rstd, p = fused_attnres_fwd(query, residuals, rms_weight, rms_eps, scale)
+        ctx.save_for_backward(rstd, p, query, residuals, rms_weight)
+        ctx.scale = scale
+        if return_weights:
+            ctx.mark_non_differentiable(p)
+            return o, p
+        return o
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    def backward(
+        ctx,
+        do: torch.Tensor,
+        dp: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None]:
+        del dp
+        rstd, p, query, residuals, rms_weight = ctx.saved_tensors
+        dv, dq, dw = fused_attnres_bwd(
+            do,
+            rstd,
+            p,
+            query,
+            residuals,
+            rms_weight,
+            ctx.scale,
+        )
+        return dq, dv, dw, None, None, None
+
+
+def fused_attnres(
+    query: torch.Tensor,
+    residuals: torch.Tensor | Sequence[torch.Tensor],
+    rms_weight: torch.Tensor,
+    rms_eps: float = 1e-6,
+    scale: float = 1.0,
+    return_weights: bool = False,
+    return_residuals: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, ...]:
+    r"""
+    Apply AttnRes residual aggregation.
+
+    AttnRes normalizes each residual source with RMSNorm, scores it against
+    `query`, applies softmax over the residual-source dimension, and returns
+    the weighted sum of residual sources.
+    See `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
+
+    Args:
+        query (torch.Tensor):
+            Per-layer pseudo-query of shape `[D]` or `[D, 1]`, where `D` is
+            the hidden size.
+        residuals (torch.Tensor or Sequence[torch.Tensor]):
+            Residual sources of shape `[L, ..., D]`, or a sequence of tensors
+            each with shape `[..., D]`, where `L` is the number of residual
+            sources.
+        rms_weight (torch.Tensor):
+            RMSNorm scale for key normalization of shape `[D]`.
+        rms_eps (float):
+            RMSNorm epsilon. Default: `1e-6`.
+        scale (float):
+            Scale factor applied to AttnRes logits before softmax. Default: `1.0`.
+        return_weights (bool):
+            Whether to return depth softmax probabilities. Default: `False`.
+        return_residuals (bool):
+            Whether to return tensor-form residual sources. Default: `False`.
+
+    Returns:
+        o (torch.Tensor):
+            Mixed residual of shape `[..., D]`.
+        p (torch.Tensor):
+            Depth softmax probabilities of shape `[L, ...]` if
+            `return_weights=True`, otherwise not returned.
+        residuals (torch.Tensor):
+            Tensor-form residual sources if `return_residuals=True`. List inputs
+            are returned after stacking as shape `[L, N, D]`, where `N` is the
+            flattened size of the `...` dimensions.
+    """
+    output_shape = None
+    if isinstance(residuals, Sequence) and not isinstance(residuals, torch.Tensor):
+        if len(residuals) == 0:
+            raise ValueError("residuals must contain at least one source")
+        output_shape = residuals[0].shape
+        D = output_shape[-1]
+        residuals = torch.stack(tuple(residual.view(-1, D) for residual in residuals), dim=0)
+
+    o = FusedAttnresFunction.apply(query, residuals, rms_weight, rms_eps, scale, return_weights)
+    p = None
+    if return_weights:
+        o, p = o
+    if output_shape is not None:
+        o = o.view(output_shape)
+        if p is not None:
+            p = p.view(len(residuals), *output_shape[:-1])
+
+    outputs = [o]
+    if return_weights:
+        outputs.append(p)
+    if return_residuals:
+        outputs.append(residuals)
+    return tuple(outputs) if len(outputs) > 1 else o
+
+
+__all__ = ["fused_attnres"]
