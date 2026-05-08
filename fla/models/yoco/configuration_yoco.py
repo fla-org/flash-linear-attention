@@ -95,7 +95,6 @@ class YOCOConfig(PretrainedConfig):
             'rope_inv_freq': cross_decoder_attn.get('rope_inv_freq', 'fla'),
         }
 
-
         if self.self_decoder_attn['type'] not in {'gated_deltanet', 'gated_retention', 'swa'}:
             raise ValueError(
                 "self_decoder_attn['type'] must be one of {'gated_deltanet', 'gated_retention', 'swa'}"
