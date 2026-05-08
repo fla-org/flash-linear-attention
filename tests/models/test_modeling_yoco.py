@@ -20,18 +20,24 @@ def _create_yoco_config(
     D: int,
     use_l2warp: bool = False,
     vocab_size: int = 1000,
+    self_decoder_attn_type: str = 'gated_deltanet',
 ):
+    self_decoder_attn = {
+        'type': self_decoder_attn_type,
+        'mode': 'chunk',
+        'num_heads': H,
+    }
+    if self_decoder_attn_type == 'gated_deltanet':
+        self_decoder_attn.update({
+            'num_v_heads': H,
+            'head_dim': D,
+        })
+
     return YOCOConfig(
         num_hidden_layers=L,
         num_self_decoder_layers=L // 2,
         hidden_size=H * D,
-        self_decoder_attn={
-            'type': 'gated_deltanet',
-            'mode': 'chunk',
-            'num_heads': H,
-            'num_v_heads': H,
-            'head_dim': D,
-        },
+        self_decoder_attn=self_decoder_attn,
         cross_decoder_attn={
             'num_heads': H,
             'num_kv_heads': H,
@@ -49,12 +55,13 @@ def _create_yoco_config(
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'self_decoder_attn_type', 'use_l2warp', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-use_l2warp{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-attn{}-use_l2warp{}-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, True, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 'gated_deltanet', True, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 'gated_deltanet', False, torch.bfloat16),
+            (4, 2, 32, 4, 32, 'gated_retention', False, torch.bfloat16),
         ]
     ],
 )
@@ -64,10 +71,17 @@ def test_modeling(
     T: int,
     H: int,
     D: int,
+    self_decoder_attn_type: str,
     use_l2warp: bool,
     dtype: torch.dtype,
 ):
-    config = _create_yoco_config(L, H, D, use_l2warp=use_l2warp)
+    config = _create_yoco_config(
+        L,
+        H,
+        D,
+        use_l2warp=use_l2warp,
+        self_decoder_attn_type=self_decoder_attn_type,
+    )
     model = YOCOForCausalLM(config).to(device=device, dtype=dtype)
     model.eval()
 
