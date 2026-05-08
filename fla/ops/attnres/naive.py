@@ -48,7 +48,9 @@ def naive_attnres(
         return_weights (bool):
             Whether to return depth softmax probabilities. Default: `False`.
         return_residuals (bool):
-            Whether to return tensor-form residual sources. Default: `False`.
+            Whether to return the stacked residual tensor. Useful when the
+            input was a list and the caller wants the materialized
+            `[L, ..., D]` tensor without re-stacking. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -57,9 +59,8 @@ def naive_attnres(
             Depth softmax probabilities of shape `[L, ...]` if
             `return_weights=True`, otherwise not returned.
         residuals (torch.Tensor):
-            Tensor-form residual sources if `return_residuals=True`. List inputs
-            are returned after stacking as shape `[L, N, D]`, where `N` is the
-            flattened size of the `...` dimensions.
+            Stacked residuals of shape `[L, ..., D]` if `return_residuals=True`,
+            otherwise not returned.
     """
     output_shape = None
     if isinstance(residuals, Sequence) and not isinstance(residuals, torch.Tensor):
@@ -75,12 +76,15 @@ def naive_attnres(
     o = einsum(p, v, "l ..., l ... d -> ... d").to(residuals.dtype)
     if output_shape is not None:
         o = o.view(output_shape)
-        p = p.view(len(residuals), *output_shape[:-1])
 
     outputs = [o]
     if return_weights:
+        if output_shape is not None:
+            p = p.view(residuals.shape[0], *output_shape[:-1])
         outputs.append(p)
     if return_residuals:
+        if output_shape is not None:
+            residuals = residuals.view(residuals.shape[0], *output_shape)
         outputs.append(residuals)
     return tuple(outputs) if len(outputs) > 1 else o
 

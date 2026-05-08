@@ -42,7 +42,7 @@ ATTNRES_DW_CONFIGS = [
 @triton.jit
 def attnres_fwd_kernel(
     q,
-    res,
+    v,
     w,
     o,
     rstd,
@@ -58,8 +58,7 @@ def attnres_fwd_kernel(
     i_n = tl.program_id(0).to(tl.int64)
 
     # [BL]
-    o_l = tl.arange(0, BL)
-    m_l = o_l < L
+    m_l = tl.arange(0, BL) < L
 
     # [BL]
     b_var = tl.zeros([BL], dtype=tl.float32)
@@ -68,7 +67,7 @@ def attnres_fwd_kernel(
         # [BD]
         o_d = i_d + tl.arange(0, BD)
         m_d = o_d < D
-        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        p_v = tl.make_block_ptr(v + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
         # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
         # [BD]
@@ -92,7 +91,7 @@ def attnres_fwd_kernel(
     tl.store(p_p, b_p.to(p_p.dtype.element_ty), boundary_check=(0,))
 
     for i_d in range(0, D, BD):
-        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        p_v = tl.make_block_ptr(v + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
         p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
@@ -107,13 +106,13 @@ def attnres_fwd_kernel(
     **autotune_cache_kwargs,
 )
 @triton.jit
-def attnres_bwd_kernel_dx(
+def attnres_bwd_kernel_dv(
     dv,
     base,
     do,
     q,
     w,
-    res,
+    v,
     rstd,
     p,
     N,
@@ -125,10 +124,6 @@ def attnres_bwd_kernel_dx(
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
-    # [BL]
-    o_l = tl.arange(0, BL)
-    m_l = o_l < L
-
     p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
     p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
     # [BL]
@@ -137,12 +132,12 @@ def attnres_bwd_kernel_dx(
 
     # [BL]
     b_dp = tl.zeros([BL], dtype=tl.float32)
-    b_logits = tl.zeros([BL], dtype=tl.float32)
+    b_z = tl.zeros([BL], dtype=tl.float32)
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
         m_d = o_d < D
-        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        p_v = tl.make_block_ptr(v + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
@@ -154,19 +149,22 @@ def attnres_bwd_kernel_dx(
         # [BL, BD]
         b_xhat = b_v * b_rstd[:, None]
         b_dp += tl.sum(b_v * b_do[None, :], axis=1)
-        b_logits += tl.sum(b_xhat * (b_w * b_q)[None, :], axis=1)
+        b_z += tl.sum(b_xhat * (b_w * b_q)[None, :], axis=1)
 
+    # softmax bwd via the standard delta trick: delta = sum_l p*dp = sum_d do*o
     # [1]
-    b_dpp = tl.sum(b_p * b_dp, axis=0)
+    b_delta = tl.sum(b_p * b_dp, axis=0)
     # [BL]
-    b_ds = b_p * (b_dp - b_dpp) * scale
-    b_c = b_logits / D
+    b_ds = b_p * (b_dp - b_delta) * scale
+    # rstd-coupling correction (same role as `c1` in layernorm bwd)
+    # [BL]
+    b_c1 = b_z / D
 
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
         m_d = o_d < D
-        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        p_v = tl.make_block_ptr(v + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
@@ -178,7 +176,7 @@ def attnres_bwd_kernel_dx(
         # [BL, BD]
         b_xhat = b_v * b_rstd[:, None]
         b_dv = b_p[:, None] * b_do[None, :] + b_ds[:, None] * b_rstd[:, None] * (
-            (b_w * b_q)[None, :] - b_xhat * b_c[:, None]
+            (b_w * b_q)[None, :] - b_xhat * b_c1[:, None]
         )
 
         p_dv = tl.make_block_ptr(dv + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
@@ -194,7 +192,7 @@ def attnres_bwd_kernel_dx(
     **autotune_cache_kwargs,
 )
 @triton.jit
-def attnres_bwd_kernel_dw(
+def attnres_bwd_kernel_dqdw(
     dq,
     dw,
     q,
@@ -241,7 +239,7 @@ def fused_attnres_fwd(
 
     output_shape = residuals.shape[1:]
     L, N, D = residuals.shape[0], residuals[0].numel() // residuals.shape[-1], residuals.shape[-1]
-    q, res, w = query.view(-1), residuals.view(L, N, D), rms_weight.view(-1)
+    q, v, w = query.view(-1), residuals.view(L, N, D), rms_weight.view(-1)
 
     o = torch.empty((N, D), device=residuals.device, dtype=residuals.dtype)
     stats_shape = (L, *output_shape[:-1])
@@ -252,17 +250,17 @@ def fused_attnres_fwd(
     grid = (N,)
 
     attnres_fwd_kernel[grid](
-        q,
-        res,
-        w,
-        o,
-        rstd,
-        p,
-        N,
-        L,
-        D,
-        rms_eps,
-        scale,
+        q=q,
+        v=v,
+        w=w,
+        o=o,
+        rstd=rstd,
+        p=p,
+        N=N,
+        L=L,
+        D=D,
+        eps=rms_eps,
+        scale=scale,
         BL=BL,
     )
     return o.view(output_shape), rstd.view(stats_shape), p.view(stats_shape)
@@ -282,44 +280,44 @@ def fused_attnres_bwd(
     query_shape = query.shape
     rms_weight_shape = rms_weight.shape
 
-    do = do.view(N, D)
-    res = residuals.view(L, N, D)
-    rstd = rstd.view(L, N)
-    p = p.view(L, N)
     q = query.view(-1)
+    v = residuals.view(L, N, D)
+    p = p.view(L, N)
     w = rms_weight.view(-1)
+    rstd = rstd.view(L, N)
 
+    do = do.view(N, D)
     dv = torch.empty((L, N, D), dtype=do.dtype, device=do.device)
     base = torch.empty((N, D), dtype=torch.float32, device=do.device)
     dq = torch.empty_like(q)
     dw = torch.empty_like(w)
 
     BL = max(8, triton.next_power_of_2(L))
-    attnres_bwd_kernel_dx[(N,)](
-        dv,
-        base,
-        do,
-        q,
-        w,
-        res,
-        rstd,
-        p,
-        N,
-        scale,
-        L,
-        D,
+    attnres_bwd_kernel_dv[(N,)](
+        dv=dv,
+        base=base,
+        do=do,
+        q=q,
+        w=w,
+        v=v,
+        rstd=rstd,
+        p=p,
+        N=N,
+        scale=scale,
+        L=L,
+        D=D,
         BL=BL,
     )
 
     def grid(meta): return (triton.cdiv(D, meta['BD']),)
-    attnres_bwd_kernel_dw[grid](
-        dq,
-        dw,
-        q,
-        w,
-        base,
-        N,
-        D,
+    attnres_bwd_kernel_dqdw[grid](
+        dq=dq,
+        dw=dw,
+        q=q,
+        w=w,
+        base=base,
+        N=N,
+        D=D,
     )
 
     return dv.view(residuals_shape), dq.view(query_shape), dw.view(rms_weight_shape)
@@ -337,15 +335,12 @@ class FusedAttnresFunction(torch.autograd.Function):
         rms_weight: torch.Tensor,
         rms_eps: float,
         scale: float,
-        return_weights: bool,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         o, rstd, p = fused_attnres_fwd(query, residuals, rms_weight, rms_eps, scale)
         ctx.save_for_backward(rstd, p, query, residuals, rms_weight)
         ctx.scale = scale
-        if return_weights:
-            ctx.mark_non_differentiable(p)
-            return o, p
-        return o
+        ctx.mark_non_differentiable(p)
+        return o, p
 
     @staticmethod
     @input_guard
@@ -354,7 +349,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         ctx,
         do: torch.Tensor,
         dp: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None]:
         del dp
         rstd, p, query, residuals, rms_weight = ctx.saved_tensors
         dv, dq, dw = fused_attnres_bwd(
@@ -366,7 +361,7 @@ class FusedAttnresFunction(torch.autograd.Function):
             rms_weight,
             ctx.scale,
         )
-        return dq, dv, dw, None, None, None
+        return dq, dv, dw, None, None
 
 
 def fused_attnres(
@@ -403,7 +398,9 @@ def fused_attnres(
         return_weights (bool):
             Whether to return depth softmax probabilities. Default: `False`.
         return_residuals (bool):
-            Whether to return tensor-form residual sources. Default: `False`.
+            Whether to return the stacked residual tensor. Useful when the
+            input was a list and the caller wants the materialized
+            `[L, ..., D]` tensor without re-stacking. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -412,9 +409,8 @@ def fused_attnres(
             Depth softmax probabilities of shape `[L, ...]` if
             `return_weights=True`, otherwise not returned.
         residuals (torch.Tensor):
-            Tensor-form residual sources if `return_residuals=True`. List inputs
-            are returned after stacking as shape `[L, N, D]`, where `N` is the
-            flattened size of the `...` dimensions.
+            Stacked residuals of shape `[L, ..., D]` if `return_residuals=True`,
+            otherwise not returned.
     """
     output_shape = None
     if isinstance(residuals, Sequence) and not isinstance(residuals, torch.Tensor):
@@ -424,19 +420,18 @@ def fused_attnres(
         D = output_shape[-1]
         residuals = torch.stack(tuple(residual.view(-1, D) for residual in residuals), dim=0)
 
-    o = FusedAttnresFunction.apply(query, residuals, rms_weight, rms_eps, scale, return_weights)
-    p = None
-    if return_weights:
-        o, p = o
+    o, p = FusedAttnresFunction.apply(query, residuals, rms_weight, rms_eps, scale)
     if output_shape is not None:
         o = o.view(output_shape)
-        if p is not None:
-            p = p.view(len(residuals), *output_shape[:-1])
 
     outputs = [o]
     if return_weights:
+        if output_shape is not None:
+            p = p.view(residuals.shape[0], *output_shape[:-1])
         outputs.append(p)
     if return_residuals:
+        if output_shape is not None:
+            residuals = residuals.view(residuals.shape[0], *output_shape)
         outputs.append(residuals)
     return tuple(outputs) if len(outputs) > 1 else o
 
