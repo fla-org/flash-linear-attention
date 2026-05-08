@@ -159,7 +159,6 @@ class YOCOCrossDecoderLayer(GradientCheckpointingLayer):
             num_kv_heads=cross_decoder_attn['num_kv_heads'],
             qkv_bias=cross_decoder_attn['qkv_bias'],
             qk_norm=cross_decoder_attn['qk_norm'],
-            window_size=cross_decoder_attn['window_size'],
             rope_theta=cross_decoder_attn['rope_theta'],
             rope_inv_freq=cross_decoder_attn['rope_inv_freq'],
             max_position_embeddings=config.max_position_embeddings,

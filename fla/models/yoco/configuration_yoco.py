@@ -91,13 +91,10 @@ class YOCOConfig(PretrainedConfig):
             'num_kv_heads': cross_decoder_attn_num_kv_heads,
             'qkv_bias': cross_decoder_attn.get('qkv_bias', False),
             'qk_norm': cross_decoder_attn.get('qk_norm', False),
-            'window_size': cross_decoder_attn.get('window_size', None),
             'rope_theta': cross_decoder_attn.get('rope_theta', 10000.0),
             'rope_inv_freq': cross_decoder_attn.get('rope_inv_freq', 'fla'),
         }
-        self.cross_decoder_attn.update({
-            key: value for key, value in cross_decoder_attn.items() if key not in self.cross_decoder_attn
-        })
+
 
         if self.self_decoder_attn['type'] not in {'gated_deltanet', 'gated_retention', 'swa'}:
             raise ValueError(

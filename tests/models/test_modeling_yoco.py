@@ -9,18 +9,17 @@ import pytest
 import torch
 
 from fla.models import YOCOConfig, YOCOForCausalLM
-from fla.utils import device
 
-from .test_modeling_base import run_test_generation
+from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
 
-def _create_yoco_config(
+def _create_yoco_config_kwargs(
     L: int,
     H: int,
     D: int,
-    use_l2warp: bool = False,
     vocab_size: int = 1000,
     self_decoder_attn_type: str = 'gated_deltanet',
+    self_window_size: int | None = None,
 ):
     self_decoder_attn = {
         'type': self_decoder_attn_type,
@@ -32,22 +31,45 @@ def _create_yoco_config(
             'num_v_heads': H,
             'head_dim': D,
         })
+    elif self_decoder_attn_type == 'swa':
+        self_decoder_attn['window_size'] = self_window_size if self_window_size is not None else 64
 
-    return YOCOConfig(
-        num_hidden_layers=L,
-        num_self_decoder_layers=L // 2,
-        hidden_size=H * D,
-        self_decoder_attn=self_decoder_attn,
-        cross_decoder_attn={
+    return {
+        'num_hidden_layers': L,
+        'num_self_decoder_layers': L // 2,
+        'hidden_size': H * D,
+        'self_decoder_attn': self_decoder_attn,
+        'cross_decoder_attn': {
             'num_heads': H,
             'num_kv_heads': H,
         },
-        intermediate_size=4 * H * D,
-        vocab_size=vocab_size,
+        'intermediate_size': 4 * H * D,
+        'vocab_size': vocab_size,
+        'fuse_norm': False,
+        'fuse_swiglu': False,
+        'fuse_cross_entropy': False,
+    }
+
+
+def _create_yoco_config(
+    L: int,
+    H: int,
+    D: int,
+    use_l2warp: bool = False,
+    vocab_size: int = 1000,
+    self_decoder_attn_type: str = 'gated_deltanet',
+    self_window_size: int | None = None,
+):
+    return YOCOConfig(
+        **_create_yoco_config_kwargs(
+            L,
+            H,
+            D,
+            vocab_size=vocab_size,
+            self_decoder_attn_type=self_decoder_attn_type,
+            self_window_size=self_window_size,
+        ),
         use_l2warp=use_l2warp,
-        fuse_norm=False,
-        fuse_swiglu=False,
-        fuse_cross_entropy=False,
     )
 
 
@@ -62,6 +84,8 @@ def _create_yoco_config(
             (4, 4, 1024, 4, 64, 'gated_deltanet', True, torch.bfloat16),
             (4, 4, 1024, 4, 64, 'gated_deltanet', False, torch.bfloat16),
             (4, 2, 32, 4, 32, 'gated_retention', False, torch.bfloat16),
+            (4, 2, 96, 4, 32, 'gated_retention', False, torch.bfloat16),
+            (4, 2, 128, 4, 32, 'swa', False, torch.bfloat16),
         ]
     ],
 )
@@ -75,31 +99,36 @@ def test_modeling(
     use_l2warp: bool,
     dtype: torch.dtype,
 ):
-    config = _create_yoco_config(
+    torch.manual_seed(42)
+    run_test_model_forward_backward(
         L,
+        B,
+        T,
         H,
         D,
+        YOCOConfig,
         use_l2warp=use_l2warp,
-        self_decoder_attn_type=self_decoder_attn_type,
+        dtype=dtype,
+        **_create_yoco_config_kwargs(
+            L,
+            H,
+            D,
+            self_decoder_attn_type=self_decoder_attn_type,
+        ),
     )
-    model = YOCOForCausalLM(config).to(device=device, dtype=dtype)
-    model.eval()
-
-    x = torch.randint(0, config.vocab_size, (B, T), device=device)
-    y = model(x)
-    assert y.logits.shape == (B, T, config.vocab_size)
-    y.logits.sum().backward()
 
 
 # ===================================================================================
 # Test for Generation
 # ===================================================================================
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'self_decoder_attn_type', 'dtype', 'tol'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-attn{}-{}".format(*test))
         for test in [
-            (4, 4, 2000, 8, 64, torch.float16),
+            (4, 4, 2000, 8, 64, 'gated_deltanet', torch.float16, 3e-3),
+            (4, 2, 256, 4, 32, 'gated_retention', torch.float16, 3e-3),
+            (4, 2, 256, 4, 32, 'swa', torch.float16, 3e-3),
         ]
     ],
 )
@@ -109,8 +138,16 @@ def test_generation(
     T: int,
     H: int,
     D: int,
+    self_decoder_attn_type: str,
     dtype: torch.dtype,
+    tol: float,
 ):
-    config = _create_yoco_config(L, H, D, vocab_size=128)
+    config = _create_yoco_config(
+        L,
+        H,
+        D,
+        vocab_size=128,
+        self_decoder_attn_type=self_decoder_attn_type,
+    )
     model = YOCOForCausalLM(config)
-    run_test_generation(L, B, T, H, D, YOCOConfig, dtype, model=model, config=config, tol=3e-3)
+    run_test_generation(L, B, T, H, D, YOCOConfig, dtype, model=model, config=config, tol=tol)
