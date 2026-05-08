@@ -43,6 +43,10 @@ def test_attnres(
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
+    # disable TF32 in the PyTorch reference path so the fp32 sanity case
+    # actually compares fp32 vs fp32 (otherwise einsum bwd uses cuBLAS TF32
+    # which only has 10-bit mantissa and inflates the diff)
+    torch.backends.cuda.matmul.allow_tf32 = False
     rms_eps = 1e-6
 
     residuals = torch.randn(L, B, T, D, dtype=dtype, device=device).requires_grad_(True)
