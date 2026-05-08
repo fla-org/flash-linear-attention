@@ -249,6 +249,10 @@ def benchmark_op(
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
 
+    # Per-op shape override (e.g., AttnRes uses an `L` axis not in B/T/H/D)
+    if config.default_shapes is not None:
+        shapes = config.default_shapes
+
     # Filter shapes by dim_constraints
     valid_shapes = {}
     for shape_name, shape_dict in shapes.items():
@@ -278,8 +282,9 @@ def benchmark_op(
     failed_shapes = set()
     for shape_name, shape_dict in valid_shapes.items():
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
+        extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device)
+            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
             out = op_fn(**inputs, **config.extra_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
             do = torch.randn_like(out_tensor)
@@ -302,8 +307,9 @@ def benchmark_op(
     results = []
     for shape_name, shape_dict in list(valid_shapes.items()):
         B, T, H, D = shape_dict['B'], shape_dict['T'], shape_dict['H'], shape_dict['D']
+        extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
-            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device)
+            inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
         except Exception as e:
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
@@ -334,6 +340,7 @@ def benchmark_op(
                 'op': op_name,
                 'mode': mode,
                 'B': B, 'T': T, 'H': H, 'D': D,
+                **extra_shape_kw,
                 'median_ms': ms[0],
                 'p20_ms': ms[1],
                 'p80_ms': ms[2],
@@ -342,8 +349,15 @@ def benchmark_op(
     return results
 
 
+_RESULT_RESERVED_KEYS = {'op', 'mode', 'B', 'T', 'H', 'D', 'median_ms', 'p20_ms', 'p80_ms'}
+
+
 def _make_result_key(r):
-    return (r['op'], r['mode'], r['B'], r['T'], r['H'], r['D'])
+    """Identify a result row. Include any extra shape dims (e.g., AttnRes `L`)
+    so per-op shape configs that share B/T/H/D but vary in extras don't collide.
+    """
+    extras = tuple(sorted((k, v) for k, v in r.items() if k not in _RESULT_RESERVED_KEYS))
+    return (r['op'], r['mode'], r['B'], r['T'], r['H'], r['D'], extras)
 
 
 def _truncate_branch(name: str, max_len: int = 8) -> str:
