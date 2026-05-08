@@ -57,46 +57,48 @@ def attnres_fwd_kernel(
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
+    # [BL]
     o_l = tl.arange(0, BL)
     m_l = o_l < L
 
+    # [BL]
     b_var = tl.zeros([BL], dtype=tl.float32)
-    for i_d in range(0, D, BD):
-        p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
-        b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-        b_var += tl.sum(b_v * b_v, axis=1)
-    b_var = b_var / D
-    b_rstd = tl.rsqrt(b_var + eps)
-
     b_logits = tl.zeros([BL], dtype=tl.float32)
     for i_d in range(0, D, BD):
+        # [BD]
         o_d = i_d + tl.arange(0, BD)
         m_d = o_d < D
         p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        # [BD]
         b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
         b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
 
-        b_xhat = b_v * b_rstd[:, None]
-        b_logits += tl.sum(b_xhat * (b_w * b_q)[None, :], axis=1)
+        b_var += tl.sum(b_v * b_v, axis=1)
+        b_logits += tl.sum(b_v * (b_w * b_q)[None, :], axis=1)
 
-    b_logits *= scale
+    # [BL]
+    b_rstd = tl.rsqrt(b_var / D + eps)
+    b_logits *= b_rstd * scale
     b_logits = tl.where(m_l, b_logits, -float("inf"))
     b_logits = exp(b_logits - tl.max(b_logits, axis=0))
+    # [BL]
     b_p = b_logits / tl.sum(b_logits, axis=0)
 
-    o_stats = o_l * N + i_n
-    tl.store(rstd + o_stats, b_rstd, mask=m_l)
-    tl.store(p + o_stats, b_p, mask=m_l)
+    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
+    p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
+    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_p, b_p.to(p_p.dtype.element_ty), boundary_check=(0,))
 
-    p_o = o + i_n * D
     for i_d in range(0, D, BD):
-        o_d = i_d + tl.arange(0, BD)
-        m_d = o_d < D
         p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+        # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        # [BD]
         b_o = tl.sum(b_v * b_p[:, None], axis=0)
-        tl.store(p_o + o_d, b_o.to(o.dtype.element_ty), mask=m_d)
+        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
 
 
 @triton.autotune(
@@ -123,52 +125,67 @@ def attnres_bwd_kernel_dx(
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
+    # [BL]
     o_l = tl.arange(0, BL)
     m_l = o_l < L
 
-    p_do = do + i_n * D
-    p_base = base + i_n * D
+    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
+    p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
+    # [BL]
+    b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
+    b_p = tl.load(p_p, boundary_check=(0,), padding_option="zero").to(tl.float32)
 
-    o_stats = o_l * N + i_n
-    b_rstd = tl.load(rstd + o_stats, mask=m_l, other=0.).to(tl.float32)
-    b_p = tl.load(p + o_stats, mask=m_l, other=0.).to(tl.float32)
-
+    # [BL]
     b_dp = tl.zeros([BL], dtype=tl.float32)
     b_logits = tl.zeros([BL], dtype=tl.float32)
     for i_d in range(0, D, BD):
+        # [BD]
         o_d = i_d + tl.arange(0, BD)
         m_d = o_d < D
-        b_do = tl.load(p_do + o_d, mask=m_d, other=0.).to(tl.float32)
         p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+        # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        # [BD]
+        b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
         b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
         b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
 
+        # [BL, BD]
         b_xhat = b_v * b_rstd[:, None]
         b_dp += tl.sum(b_v * b_do[None, :], axis=1)
         b_logits += tl.sum(b_xhat * (b_w * b_q)[None, :], axis=1)
 
-    b_pp = tl.sum(b_p * b_dp, axis=0)
-    b_ds = b_p * (b_dp - b_pp) * scale
+    # [1]
+    b_dpp = tl.sum(b_p * b_dp, axis=0)
+    # [BL]
+    b_ds = b_p * (b_dp - b_dpp) * scale
     b_c = b_logits / D
 
     for i_d in range(0, D, BD):
+        # [BD]
         o_d = i_d + tl.arange(0, BD)
         m_d = o_d < D
-        b_do = tl.load(p_do + o_d, mask=m_d, other=0.).to(tl.float32)
         p_v = tl.make_block_ptr(res + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+        # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
+        # [BD]
+        b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
         b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
         b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
 
+        # [BL, BD]
         b_xhat = b_v * b_rstd[:, None]
         b_dv = b_p[:, None] * b_do[None, :] + b_ds[:, None] * b_rstd[:, None] * (
             (b_w * b_q)[None, :] - b_xhat * b_c[:, None]
         )
 
         p_dv = tl.make_block_ptr(dv + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
+        p_base = tl.make_block_ptr(base + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         tl.store(p_dv, b_dv.to(dv.dtype.element_ty), boundary_check=(0, 1))
-        tl.store(p_base + o_d, tl.sum(b_ds[:, None] * b_xhat, axis=0), mask=m_d)
+        # [BD]
+        tl.store(p_base, tl.sum(b_ds[:, None] * b_xhat, axis=0), boundary_check=(0,))
 
 
 @triton.autotune(
@@ -190,15 +207,19 @@ def attnres_bwd_kernel_dw(
 ):
     i_d = tl.program_id(0).to(tl.int32)
 
+    # [BD]
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
 
+    # [BD]
     b_acc = tl.zeros([BD], dtype=tl.float32)
     for i_n in range(0, N, BN):
         p_base = tl.make_block_ptr(base, (N, D), (D, 1), (i_n, i_d * BD), (BN, BD), (1, 0))
+        # [BN, BD]
         b_base = tl.load(p_base, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
         b_acc += tl.sum(b_base, axis=0)
 
+    # [BD]
     b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
     b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 

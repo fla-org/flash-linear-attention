@@ -69,10 +69,10 @@ def naive_attnres(
         D = output_shape[-1]
         residuals = torch.stack(tuple(residual.view(-1, D) for residual in residuals), dim=0)
 
-    v_float = residuals.float()
-    k = F.rms_norm(v_float, (residuals.shape[-1],), rms_weight.flatten().float(), rms_eps)
+    v = residuals.float()
+    k = F.rms_norm(v, (residuals.shape[-1],), rms_weight.flatten().float(), rms_eps)
     p = (einsum(k, query.flatten().float() * scale, "l ... d, d -> l ...")).softmax(dim=0)
-    o = einsum(p, v_float, "l ..., l ... d -> ... d").to(residuals.dtype)
+    o = einsum(p, v, "l ..., l ... d -> ... d").to(residuals.dtype)
     if output_shape is not None:
         o = o.view(output_shape)
         p = p.view(len(residuals), *output_shape[:-1])
