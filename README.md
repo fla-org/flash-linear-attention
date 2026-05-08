@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-04] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
 - [2026-04] 🐍 Add Mamba-3 implementation to `fla` ([paper](https://arxiv.org/abs/2603.15569)).
 - [2026-04] 🧱 Add [MoBA](https://arxiv.org/abs/2502.13189) (Mixture of Block Attention) implementation to `fla`, with [FlashMoBA](https://github.com/mit-han-lab/flash-moba) backend support.
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
@@ -43,11 +44,11 @@
 - [2025-07] 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
 - [2025-06] 🎉 Add MesaNet implementation to `fla` ([paper](https://arxiv.org/abs/2506.05233)).
 - [2025-06] 🐍 Add Comba implementation to `fla` ([paper](https://arxiv.org/abs/2506.02475)).
-- [2025-05] 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
 
 <details>
 <summary>Older news</summary>
 
+- [2025-05] 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
 - [2025-04] 🎉 Add DeltaProduct implementation to `fla` ([paper](https://arxiv.org/abs/2502.10297)).
 - [2025-04] 🎉 Add FoX implementation to `fla` ([paper](https://arxiv.org/abs/2503.02130)).
 - [2025-03] ~~We have changed the default `initializer_range` to the magic 🐳 0.006~~ The `initializer_range` was rolled back to the default value of 0.02. For actual training, we recommend trying both.
@@ -597,13 +598,22 @@ If you find this repository helpful, please cite our work:
   year   = {2024}
 }
 
+@misc{chen2026attnres,
+  title         = {Attention Residuals},
+  author        = {Chen, Guangyu  and Zhang, Yu  and Su, Jianlin  and Xu, Weixin  and Pan, Siyuan  and Wang, Yaoyu  and Wang, Yucheng  and Chen, Guanduo  and Yin, Bohong  and Chen, Yutian  and Yan, Junjie  and Wei, Ming  and Zhang, Y.  and Meng, Fanqing  and Hong, Chao  and Xie, Xiaotong  and Liu, Shaowei  and Lu, Enzhe  and Tai, Yunpeng  and Chen, Yanru  and Men, Xin  and Guo, Haiqing  and Charles, Y.  and Lu, Haoyu  and Sui, Lin  and Zhu, Jinguo  and Zhou, Zaida  and He, Weiran  and Huang, Weixiao  and Xu, Xinran  and Wang, Yuzhi  and Lai, Guokun  and Du, Yulun  and Wu, Yuxin  and Yang, Zhilin  and Zhou, Xinyu},
+  year          = {2026},
+  archiveprefix = {arXiv},
+  eprint        = {2603.15031},
+  primaryclass  = {cs.CL}
+}
+
 @misc{zhang2025kda,
-    title         = {Kimi Linear: An Expressive, Efficient Attention Architecture},
-    author        = {Zhang, Yu  and Lin, Zongyu  and Yao, Xingcheng  and Hu, Jiaxi  and Meng, Fanqing  and Liu, Chengyin  and Men, Xin  and Yang, Songlin  and Li, Zhiyuan  and Li, Wentao  and Lu, Enzhe  and Liu, Weizhou  and Chen, Yanru  and Xu, Weixin  and Yu, Longhui  and Wang, Yejie  and Fan, Yu  and Zhong, Longguang  and Yuan, Enming  and Zhang, Dehao  and Zhang, Yizhi  and T. Liu, Y.  and Wang, Haiming  and Fang, Shengjun  and He, Weiran  and Liu, Shaowei  and Li, Yiwei  and Su, Jianlin  and Qiu, Jiezhong  and Pang, Bo  and Yan, Junjie  and Jiang, Zhejun  and Huang, Weixiao  and Yin, Bohong  and You, Jiacheng  and Wei, Chu  and Wang, Zhengtao  and Hong, Chao  and Chen, Yutian  and Chen, Guanduo  and Wang, Yucheng  and Zheng, Huabin  and Wang, Feng  and Liu, Yibo  and Dong, Mengnan  and Zhang, Zheng  and Pan, Siyuan  and Wu, Wenhao  and Wu, Yuhao  and Guan, Longyu  and Tao, Jiawen  and Fu, Guohong  and Xu, Xinran  and Wang, Yuzhi  and Lai, Guokun  and Wu, Yuxin  and Zhou, Xinyu  and Yang, Zhilin  and Du, Yulun},
-    year          = {2025},
-    eprint        = {2510.26692},
-    archivePrefix = {arXiv},
-    primaryClass  = {cs.CL}
+  title         = {Kimi Linear: An Expressive, Efficient Attention Architecture},
+  author        = {Zhang, Yu  and Lin, Zongyu  and Yao, Xingcheng  and Hu, Jiaxi  and Meng, Fanqing  and Liu, Chengyin  and Men, Xin  and Yang, Songlin  and Li, Zhiyuan  and Li, Wentao  and Lu, Enzhe  and Liu, Weizhou  and Chen, Yanru  and Xu, Weixin  and Yu, Longhui  and Wang, Yejie  and Fan, Yu  and Zhong, Longguang  and Yuan, Enming  and Zhang, Dehao  and Zhang, Yizhi  and T. Liu, Y.  and Wang, Haiming  and Fang, Shengjun  and He, Weiran  and Liu, Shaowei  and Li, Yiwei  and Su, Jianlin  and Qiu, Jiezhong  and Pang, Bo  and Yan, Junjie  and Jiang, Zhejun  and Huang, Weixiao  and Yin, Bohong  and You, Jiacheng  and Wei, Chu  and Wang, Zhengtao  and Hong, Chao  and Chen, Yutian  and Chen, Guanduo  and Wang, Yucheng  and Zheng, Huabin  and Wang, Feng  and Liu, Yibo  and Dong, Mengnan  and Zhang, Zheng  and Pan, Siyuan  and Wu, Wenhao  and Wu, Yuhao  and Guan, Longyu  and Tao, Jiawen  and Fu, Guohong  and Xu, Xinran  and Wang, Yuzhi  and Lai, Guokun  and Wu, Yuxin  and Zhou, Xinyu  and Yang, Zhilin  and Du, Yulun},
+  year          = {2025},
+  eprint        = {2510.26692},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CL}
 }
 
 @inproceedings{yang2025path,
