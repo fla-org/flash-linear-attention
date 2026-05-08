@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-04] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
 - [2026-04] 🐍 Add Mamba-3 implementation to `fla` ([paper](https://arxiv.org/abs/2603.15569)).
 - [2026-04] 🧱 Add [MoBA](https://arxiv.org/abs/2502.13189) (Mixture of Block Attention) implementation to `fla`, with [FlashMoBA](https://github.com/mit-han-lab/flash-moba) backend support.
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
@@ -43,11 +44,11 @@
 - [2025-07] 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
 - [2025-06] 🎉 Add MesaNet implementation to `fla` ([paper](https://arxiv.org/abs/2506.05233)).
 - [2025-06] 🐍 Add Comba implementation to `fla` ([paper](https://arxiv.org/abs/2506.02475)).
-- [2025-05] 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
 
 <details>
 <summary>Older news</summary>
 
+- [2025-05] 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
 - [2025-04] 🎉 Add DeltaProduct implementation to `fla` ([paper](https://arxiv.org/abs/2502.10297)).
 - [2025-04] 🎉 Add FoX implementation to `fla` ([paper](https://arxiv.org/abs/2503.02130)).
 - [2025-03] ~~We have changed the default `initializer_range` to the magic 🐳 0.006~~ The `initializer_range` was rolled back to the default value of 0.02. For actual training, we recommend trying both.
