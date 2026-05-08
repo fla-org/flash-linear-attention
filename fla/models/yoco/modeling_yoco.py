@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-import torch.utils.checkpoint
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -27,54 +26,16 @@ from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSN
 from fla.modules import GatedMLP as YOCOMLP
 from fla.modules.l2warp import l2_warp
 
-try:
-    from torch.distributed.tensor import DTensor
-except (ImportError, AttributeError):
-    DTensor = None
-
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
 
 
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ImportError:
+    from fla.models.modeling_layers import GradientCheckpointingLayer
+
 logger = logging.get_logger(__name__)
-
-
-def _checkpointed_yoco_self_layer_forward(
-    layer: YOCOSelfDecoderLayer,
-    hidden_states: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-    past_key_values: Cache | list[torch.FloatTensor] | None,
-    use_cache: bool,
-    output_attentions: bool,
-    model_kwargs: dict,
-):
-    return layer(
-        hidden_states,
-        attention_mask=attention_mask,
-        past_key_values=past_key_values,
-        use_cache=use_cache,
-        output_attentions=output_attentions,
-        **model_kwargs,
-    )
-
-
-def _checkpointed_yoco_cross_layer_forward(
-    layer: YOCOCrossDecoderLayer,
-    hidden_states: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-    shared_k: torch.Tensor,
-    shared_v: torch.Tensor,
-    output_attentions: bool,
-    model_kwargs: dict,
-):
-    return layer(
-        hidden_states,
-        shared_k=shared_k,
-        shared_v=shared_v,
-        attention_mask=attention_mask,
-        output_attentions=output_attentions,
-        **model_kwargs,
-    )
 
 
 def _select_last_query_hidden_states(
@@ -90,7 +51,7 @@ def _select_last_query_hidden_states(
     return hidden_states[batch_indices, last_token_offsets].unsqueeze(1)
 
 
-class YOCOSelfDecoderLayer(nn.Module):
+class YOCOSelfDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: YOCOConfig, layer_idx: int):
         super().__init__()
 
@@ -184,7 +145,7 @@ class YOCOSelfDecoderLayer(nn.Module):
         return hidden_states, attentions, past_key_values
 
 
-class YOCOCrossDecoderLayer(nn.Module):
+class YOCOCrossDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: YOCOConfig, layer_idx: int):
         super().__init__()
 
@@ -274,30 +235,18 @@ class YOCOPreTrainedModel(PreTrainedModel):
         prenorm_residual_strategy: str | None = None,
         num_residuals_per_layer: int = 2,
     ):
-        if isinstance(module, GatedDeltaNet):
-            A = torch.empty(module.num_v_heads, dtype=torch.float32).uniform_(0, 16)
+        if isinstance(module, GatedDeltaNet) and next(module.parameters()).device.type != 'meta':
             with torch.no_grad():
-                if not isinstance(module.A_log, DTensor):
-                    module.A_log.copy_(torch.log(A))
-                else:
-                    logger.warning_once("`A_log` is a DTensor, skipping initialization")
-            module.A_log._no_weight_decay = True
-
-            dt_min = 0.001
-            dt_max = 0.1
-            dt_init_floor = 1e-4
-            dt = torch.exp(
-                torch.rand(module.num_v_heads) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
-            )
-            dt = torch.clamp(dt, min=dt_init_floor)
-            inv_dt = dt + torch.log(-torch.expm1(-dt))
-            with torch.no_grad():
-                if not isinstance(module.dt_bias, DTensor):
+                if not getattr(module.A_log, '_is_hf_initialized', False):
+                    module.A_log.copy_(nn.init.uniform_(module.A_log, a=0, b=16).log())
+                module.A_log._no_weight_decay = True
+                if not getattr(module.dt_bias, '_is_hf_initialized', False):
+                    dt = torch.exp(
+                        nn.init.uniform_(module.dt_bias) * (math.log(0.1) - math.log(0.001)) + math.log(0.001),
+                    ).clamp(min=1e-4)
+                    inv_dt = dt + torch.log(-torch.expm1(-dt))
                     module.dt_bias.copy_(inv_dt)
-                else:
-                    logger.warning_once("`dt_bias` is a DTensor, skipping initialization")
-            module.dt_bias._no_weight_decay = True
-            module.dt_bias._no_reinit = True
+                module.dt_bias._no_weight_decay = True
 
         elif isinstance(module, YOCOMLP):
             self._init_yoco_linear(module.gate_proj)
@@ -442,27 +391,14 @@ class YOCOModel(YOCOPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            use_checkpoint = self.gradient_checkpointing and self.training
-            if use_checkpoint:
-                hidden_states, attentions, past_key_values = self._gradient_checkpointing_func(
-                    _checkpointed_yoco_self_layer_forward,
-                    layer,
-                    hidden_states,
-                    attention_mask,
-                    past_key_values,
-                    use_cache,
-                    output_attentions,
-                    kwargs,
-                )
-            else:
-                hidden_states, attentions, past_key_values = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    **kwargs,
-                )
+            hidden_states, attentions, past_key_values = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
 
             if output_attentions:
                 all_attns += (attentions,)
@@ -486,27 +422,14 @@ class YOCOModel(YOCOPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            use_checkpoint = self.gradient_checkpointing and self.training
-            if use_checkpoint:
-                hidden_states, attentions = self._gradient_checkpointing_func(
-                    _checkpointed_yoco_cross_layer_forward,
-                    layer,
-                    hidden_states,
-                    attention_mask,
-                    shared_k,
-                    shared_v,
-                    output_attentions,
-                    kwargs,
-                )
-            else:
-                hidden_states, attentions = layer(
-                    hidden_states,
-                    shared_k=shared_k,
-                    shared_v=shared_v,
-                    attention_mask=attention_mask,
-                    output_attentions=output_attentions,
-                    **kwargs,
-                )
+            hidden_states, attentions = layer(
+                hidden_states,
+                shared_k,
+                shared_v,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                **kwargs,
+            )
 
             if output_attentions:
                 all_attns += (attentions,)
