@@ -60,7 +60,7 @@ class YOCORotaryEmbedding(RotaryEmbedding):
             )
         raise ValueError(f"Unsupported YOCO rope_inv_freq: {self.rope_inv_freq}")
 
-    def forward_states(
+    def forward(
         self,
         states: torch.Tensor,
         seqlen_offset: int | torch.Tensor = 0,
@@ -178,8 +178,8 @@ class YOCOGatedRetention(nn.Module):
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
 
-        q = self.rotary.forward_states(q, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
-        k = self.rotary.forward_states(k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        q = self.rotary.forward(q, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        k = self.rotary.forward(k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
@@ -294,7 +294,7 @@ class YOCOSharedKVBuilder(nn.Module):
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
 
-        k = self.rotary.forward_states(k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        k = self.rotary.forward(k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if use_cache and past_key_values is not None:
             cache_state = past_key_values.update(
@@ -394,7 +394,7 @@ class YOCOCrossAttention(nn.Module):
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
 
-        q = self.rotary.forward_states(
+        q = self.rotary.forward(
             q,
             seqlen_offset=seqlen_offset,
             max_seqlen=max_seqlen,

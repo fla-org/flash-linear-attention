@@ -400,7 +400,7 @@ def test_cross_attention_decode_without_attention_mask_uses_one_step(monkeypatch
     shared_k = torch.randn(batch_size, seq_len, num_heads, head_dim)
     shared_v = torch.randn(batch_size, seq_len, num_heads, head_dim)
 
-    monkeypatch.setattr(cross_attn.rotary, 'forward_states', lambda states, **kwargs: states)
+    monkeypatch.setattr(cross_attn.rotary, 'forward', lambda states, **kwargs: states)
 
     calls = {'decoding': 0}
 
@@ -463,7 +463,7 @@ def test_cross_attention_varlen_decode_uses_per_sequence_rope_offsets(monkeypatc
         assert torch.equal(cu_seqlens, torch.tensor([0, 2, 5], dtype=torch.int32, device=q.device))
         return torch.zeros(1, num_sequences, num_heads, head_dim, dtype=q.dtype, device=q.device)
 
-    monkeypatch.setattr(cross_attn.rotary, 'forward_states', capture_rotary)
+    monkeypatch.setattr(cross_attn.rotary, 'forward', capture_rotary)
     monkeypatch.setattr(yoco_attn_mod, 'attn_decoding_one_step', fake_attn_decoding_one_step)
 
     outputs, attentions = cross_attn(
