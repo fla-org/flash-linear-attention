@@ -105,21 +105,10 @@ class YOCOConfig(PretrainedConfig):
             )
         if self.self_decoder_attn['rope_inv_freq'] not in {'fla', 'yoco'}:
             raise ValueError("self_decoder_attn['rope_inv_freq'] must be one of {'fla', 'yoco'}")
-        if self.cross_decoder_attn['rope_inv_freq'] not in {'fla', 'yoco'}:
-            raise ValueError("cross_decoder_attn['rope_inv_freq'] must be one of {'fla', 'yoco'}")
-        if self.num_self_decoder_layers < 0 or self.num_self_decoder_layers > self.num_hidden_layers:
-            raise ValueError("num_self_decoder_layers must be between 0 and num_hidden_layers")
-        if self.self_decoder_attn['window_size'] is not None and self.self_decoder_attn['window_size'] <= 0:
-            raise ValueError("self_decoder_attn['window_size'] must be a positive integer")
-        if self.cross_decoder_attn['window_size'] is not None and self.cross_decoder_attn['window_size'] <= 0:
-            raise ValueError("cross_decoder_attn['window_size'] must be a positive integer")
         if self.self_decoder_attn['type'] == 'swa' and self.self_decoder_attn['window_size'] is None:
             raise ValueError("self_decoder_attn['window_size'] must be set when self_decoder_attn['type']='swa'")
-        if self.self_decoder_attn['type'] == 'gated_retention' and self.self_decoder_attn['mode'] == 'fused_chunk':
-            raise ValueError(
-                "self_decoder_attn['mode']='fused_chunk' is not supported when self_decoder_attn['type']='gated_retention'"
-            )
-
+        if self.cross_decoder_attn['rope_inv_freq'] not in {'fla', 'yoco'}:
+            raise ValueError("cross_decoder_attn['rope_inv_freq'] must be one of {'fla', 'yoco'}")
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
