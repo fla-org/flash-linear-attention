@@ -172,16 +172,7 @@ class TransformerBlock(GradientCheckpointingLayer):
         else:
             hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (attentions,)
-
-        if use_cache:
-            outputs += (past_key_values,)
-
-        if self.use_attnres:
-            outputs += (attnres_states,)
+        outputs = (hidden_states, attentions, past_key_values, attnres_states)
 
         return outputs
 
@@ -243,10 +234,7 @@ class TransformerPreTrainedModel(PreTrainedModel):
 
 class TransformerModel(TransformerPreTrainedModel):
 
-    def __init__(
-        self,
-        config: TransformerConfig,
-    ) -> TransformerModel:
+    def __init__(self, config: TransformerConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -283,7 +271,7 @@ class TransformerModel(TransformerPreTrainedModel):
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
         **kwargs: Unpack[Any],
-    ) -> tuple | CausalLMOutputWithPast:
+    ) -> tuple | BaseModelOutputWithPast:
         if output_attentions:
             warnings.warn(
                 "`TransformerModel` does not support output attention weights now, so `output_attentions` is set to `False`.",
@@ -297,7 +285,7 @@ class TransformerModel(TransformerPreTrainedModel):
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        elif input_ids is None and inputs_embeds is None:
+        if input_ids is None and inputs_embeds is None:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
         if use_cache and not isinstance(past_key_values, Cache):
@@ -309,20 +297,18 @@ class TransformerModel(TransformerPreTrainedModel):
         # embed positions
         hidden_states = inputs_embeds
 
-        all_hidden_states = () if output_hidden_states else None
-        all_attns = () if output_attentions else None
-        next_cache = None
-
         # block-residual stack of shape `[L, B, T, D]` (only completed block
         # summaries; the running `prefix_sum` rides on `hidden_states` itself,
         # so pp transmits a single tensor + a stacked block-residual tensor)
         attnres_states: torch.Tensor | None = None
 
+        all_hidden_states = () if output_hidden_states else None
+        all_attns = () if output_attentions else None
         for layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            layer_outputs = layer(
+            hidden_states, attentions, past_key_values, attnres_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
@@ -332,16 +318,8 @@ class TransformerModel(TransformerPreTrainedModel):
                 **kwargs,
             )
 
-            hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_cache = layer_outputs[2 if output_attentions else 1]
-
             if output_attentions:
-                all_attns += (layer_outputs[1],)
-
-            if self.use_attnres:
-                attnres_states = layer_outputs[-1]
+                all_attns += (attentions,)
 
         if self.use_attnres:
             # top-level attnres aggregation; `self.norm` still applies afterward
@@ -365,11 +343,11 @@ class TransformerModel(TransformerPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_attns] if v is not None)
+            return tuple(v for v in [hidden_states, past_key_values, all_hidden_states, all_attns] if v is not None)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
+            past_key_values=past_key_values,
             hidden_states=all_hidden_states,
             attentions=all_attns,
         )
@@ -442,9 +420,9 @@ class TransformerForCausalLM(TransformerPreTrainedModel, FLAGenerationMixin):
 
         hidden_states = outputs[0]
 
-        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
-
-        loss = None
+        loss, logits = None, None
+        if not self.config.fuse_linear_cross_entropy or labels is None:
+            logits = self.lm_head(hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:])
         if labels is not None:
             if getattr(self, 'criterion', None) is None:
                 if self.config.fuse_linear_cross_entropy:

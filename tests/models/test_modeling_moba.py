@@ -17,18 +17,21 @@ from .test_modeling_base import run_test_generation, run_test_model_forward_back
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'qk_norm', 'use_output_gate', 'moba_topk', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'qk_norm', 'use_output_gate', 'moba_topk', 'attnres_block_size', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-qkn{}-og{}-k{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-qkn{}-og{}-k{}-bs{}-{}".format(*test))
         for test in [
             # baseline
-            (4, 4, 1024, 4, 64, False, False, True, 3, torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, False, True,  3, None, torch.bfloat16),
             # D=128 + l2warp (exercises Hopper head-dim and the l2warp branch)
-            (4, 4, 1024, 4, 128, True, False, True, 3, torch.bfloat16),
+            (4, 4, 1024, 4, 128, True,  False, True,  3, None, torch.bfloat16),
             # qk_norm + no output gate (covers both layer variants in one case)
-            (2, 4, 1024, 4, 64, False, True, False, 3, torch.bfloat16),
+            (2, 4, 1024, 4, 64,  False, True,  False, 3, None, torch.bfloat16),
             # topk=1 triggers the full-attn short-circuit inside `parallel_moba`
-            (2, 4, 1024, 4, 64, False, False, True, 1, torch.bfloat16),
+            (2, 4, 1024, 4, 64,  False, False, True,  1, None, torch.bfloat16),
+            # attnres rows
+            (4, 4, 1024, 4, 64,  False, False, True,  3, 1,    torch.bfloat16),
+            (4, 4, 1024, 4, 64,  False, False, True,  3, 4,    torch.bfloat16),
         ]
     ],
 )
@@ -42,6 +45,7 @@ def test_modeling(
     qk_norm: bool,
     use_output_gate: bool,
     moba_topk: int,
+    attnres_block_size: int | None,
     dtype: torch.dtype,
 ):
     run_test_model_forward_backward(
@@ -51,6 +55,7 @@ def test_modeling(
         use_output_gate=use_output_gate,
         moba_chunk_size=128,
         moba_topk=moba_topk,
+        attnres_block_size=attnres_block_size,
     )
 
 
