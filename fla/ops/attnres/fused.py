@@ -48,6 +48,9 @@ def attnres_fwd_kernel(
     o,
     rstd,
     p,
+    ow,        # output rms weight, [D]; None when HAS_ONORM=False
+    o_pre,      # un-normed mix saved for bwd, [N, D]; None when HAS_ONORM=False
+    o_rstd,     # output rstd, [N]; None when HAS_ONORM=False
     N,
     L: tl.constexpr,
     D: tl.constexpr,
@@ -55,6 +58,7 @@ def attnres_fwd_kernel(
     scale: tl.constexpr,
     BL: tl.constexpr,
     BD: tl.constexpr,
+    HAS_ONORM: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
@@ -91,14 +95,39 @@ def attnres_fwd_kernel(
     tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
     tl.store(p_p, b_p.to(p_p.dtype.element_ty), boundary_check=(0,))
 
+    # Second pass: compute mix `b_o = sum_l p_l * v_l`. Without output norm
+    # we write straight to `o`; with it we stage into `o_pre` (saved for bwd)
+    # while accumulating the squared L2 needed for the output rstd.
+    b_var_o = tl.zeros([], dtype=tl.float32)
     for i_d in range(0, D, BD):
+        o_d = i_d + tl.arange(0, BD)
+        m_d = o_d < D
         p_v = tl.make_block_ptr(v + i_n * D, (L, D), (N * D, 1), (0, i_d), (BL, BD), (1, 0))
-        p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
         b_v = tl.load(p_v, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
         # [BD]
         b_o = tl.sum(b_v * b_p[:, None], axis=0)
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+        if HAS_ONORM:
+            p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+            tl.store(p_o_pre, b_o.to(p_o_pre.dtype.element_ty), boundary_check=(0,))
+            b_var_o += tl.sum(tl.where(m_d, b_o * b_o, 0.0), axis=0)
+        else:
+            p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+            tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+
+    if HAS_ONORM:
+        b_rstd_o = tl.rsqrt(b_var_o / D + eps)
+        tl.store(o_rstd + i_n, b_rstd_o)
+        # Third pass: load staged `o_pre`, apply RMSNorm with `ow`, write `o`.
+        for i_d in range(0, D, BD):
+            o_d = i_d + tl.arange(0, BD)
+            m_d = o_d < D
+            p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+            p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+            # [BD]
+            b_o = tl.load(p_o_pre, boundary_check=(0,)).to(tl.float32)
+            b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
+            tl.store(p_o, (b_o * b_rstd_o * b_ow).to(p_o.dtype.element_ty), boundary_check=(0,))
 
 
 @fla_cache_autotune(
@@ -239,14 +268,26 @@ def fused_attnres_fwd(
     if residuals.shape[0] < 1:
         raise ValueError("Triton attnres requires at least one residual source")
 
-    output_shape = residuals.shape[1:]
     L, N, D = residuals.shape[0], residuals[0].numel() // residuals.shape[-1], residuals.shape[-1]
-    q, v, w = query.view(-1), residuals.view(L, N, D), rms_weight.view(-1)
-
-    o = torch.empty((N, D), device=residuals.device, dtype=residuals.dtype)
+    output_shape = residuals.shape[1:]
     stats_shape = (L, *output_shape[:-1])
+
+    q, v, w = query.view(-1), residuals.view(L, N, D), rms_weight.view(-1)
+    o = torch.empty((N, D), device=residuals.device, dtype=residuals.dtype)
     rstd = torch.empty((L, N), device=residuals.device, dtype=torch.float32)
     p = torch.empty_like(rstd)
+
+    # Optional output RMSNorm is folded into the kernel itself: the kernel
+    # stages the un-normed mix into `o_pre` (saved for bwd), accumulates its
+    # squared L2 to derive `o_rstd`, then sweeps `D` once more to write the
+    # normed output into `o`.
+    has_onorm = output_rms_weight is not None
+    if has_onorm:
+        o_pre = torch.empty((N, D), device=residuals.device, dtype=residuals.dtype)
+        o_rstd = torch.empty((N,), device=residuals.device, dtype=torch.float32)
+        ow = output_rms_weight.view(-1)
+    else:
+        o_pre = o_rstd = ow = None
 
     BL = max(8, triton.next_power_of_2(L))
     grid = (N,)
@@ -258,29 +299,21 @@ def fused_attnres_fwd(
         o=o,
         rstd=rstd,
         p=p,
+        ow=ow,
+        o_pre=o_pre,
+        o_rstd=o_rstd,
         N=N,
         L=L,
         D=D,
         eps=rms_eps,
         scale=scale,
         BL=BL,
+        HAS_ONORM=has_onorm,
     )
-    o = o.view(output_shape)
 
-    # Optional output RMSNorm — folded here so its `o_rstd` can be reused in
-    # backward (mirrors `fla.modules.layernorm.LayerNormFunction`).
-    o_pre, o_rstd = None, None
-    if output_rms_weight is not None:
-        from fla.modules.layernorm import layer_norm_fwd
-        o_pre = o
-        o_normed_2d, _, o_rstd, _ = layer_norm_fwd(
-            x=o_pre.reshape(-1, D),
-            weight=output_rms_weight,
-            bias=None,
-            eps=rms_eps,
-            is_rms_norm=True,
-        )
-        o = o_normed_2d.view(output_shape)
+    o = o.view(output_shape)
+    if has_onorm:
+        o_pre = o_pre.view(output_shape)
 
     return o, rstd.view(stats_shape), p.view(stats_shape), o_pre, o_rstd
 
