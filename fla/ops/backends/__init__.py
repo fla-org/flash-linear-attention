@@ -14,7 +14,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
-from functools import wraps
+from functools import wraps, cache
 from importlib.util import find_spec
 from typing import Any, ClassVar, TypeVar
 
@@ -60,6 +60,7 @@ class BaseBackend:
         return os.environ.get(cls.env_var, default_value) != "0"
 
     @classmethod
+    @cache
     def can_use(cls) -> bool:
         return cls.is_available() and cls.is_enabled()
 
