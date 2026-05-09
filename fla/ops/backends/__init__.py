@@ -14,7 +14,7 @@ import logging
 import os
 import threading
 from collections.abc import Callable
-from functools import wraps, cache
+from functools import cache, wraps
 from importlib.util import find_spec
 from typing import Any, ClassVar, TypeVar
 
