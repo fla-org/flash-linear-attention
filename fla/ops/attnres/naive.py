@@ -18,6 +18,7 @@ def naive_attnres(
     query: torch.Tensor,
     residuals: torch.Tensor | Sequence[torch.Tensor],
     rms_weight: torch.Tensor,
+    output_rms_weight: torch.Tensor | None = None,
     rms_eps: float = 1e-6,
     scale: float = 1.0,
     return_weights: bool = False,
@@ -41,8 +42,14 @@ def naive_attnres(
             sources.
         rms_weight (torch.Tensor):
             RMSNorm scale for key normalization of shape `[D]`.
+        output_rms_weight (torch.Tensor, optional):
+            If set, an extra RMSNorm with this weight is applied to the mixed
+            residual before returning, fusing the prenorm that would otherwise
+            follow the AttnRes call (e.g. `attn_norm` / `mlp_norm`). Default:
+            `None`.
         rms_eps (float):
-            RMSNorm epsilon. Default: `1e-6`.
+            RMSNorm epsilon (also used for `output_rms_weight` when set).
+            Default: `1e-6`.
         scale (float):
             Scale factor applied to AttnRes logits before softmax. Default: `1.0`.
         return_weights (bool):
@@ -76,6 +83,9 @@ def naive_attnres(
     o = einsum(p, v, "l ..., l ... d -> ... d").to(residuals.dtype)
     if output_shape is not None:
         o = o.view(output_shape)
+
+    if output_rms_weight is not None:
+        o = F.rms_norm(o, (o.shape[-1],), output_rms_weight, rms_eps)
 
     outputs = [o]
     if return_weights:

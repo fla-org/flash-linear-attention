@@ -230,9 +230,10 @@ def fused_attnres_fwd(
     query: torch.Tensor,
     residuals: torch.Tensor,
     rms_weight: torch.Tensor,
+    output_rms_weight: torch.Tensor | None,
     rms_eps: float,
     scale: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     if not residuals.is_cuda:
         raise ValueError("Triton attnres requires CUDA tensors")
     if residuals.shape[0] < 1:
@@ -264,7 +265,24 @@ def fused_attnres_fwd(
         scale=scale,
         BL=BL,
     )
-    return o.view(output_shape), rstd.view(stats_shape), p.view(stats_shape)
+    o = o.view(output_shape)
+
+    # Optional output RMSNorm — folded here so its `o_rstd` can be reused in
+    # backward (mirrors `fla.modules.layernorm.LayerNormFunction`).
+    o_pre, o_rstd = None, None
+    if output_rms_weight is not None:
+        from fla.modules.layernorm import layer_norm_fwd
+        o_pre = o
+        o_normed_2d, _, o_rstd, _ = layer_norm_fwd(
+            x=o_pre.reshape(-1, D),
+            weight=output_rms_weight,
+            bias=None,
+            eps=rms_eps,
+            is_rms_norm=True,
+        )
+        o = o_normed_2d.view(output_shape)
+
+    return o, rstd.view(stats_shape), p.view(stats_shape), o_pre, o_rstd
 
 
 def fused_attnres_bwd(
@@ -274,12 +292,35 @@ def fused_attnres_bwd(
     query: torch.Tensor,
     residuals: torch.Tensor,
     rms_weight: torch.Tensor,
+    output_rms_weight: torch.Tensor | None,
+    o_pre: torch.Tensor | None,
+    o_rstd: torch.Tensor | None,
     scale: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     L, N, D = residuals.shape[0], do.numel() // do.shape[-1], do.shape[-1]
     residuals_shape = residuals.shape
     query_shape = query.shape
     rms_weight_shape = rms_weight.shape
+
+    # Optional output RMSNorm bwd — produces `do` w.r.t. the un-normed mixed
+    # residual that the attnres kernels expect, plus `dw_out` for the caller.
+    if output_rms_weight is not None:
+        from fla.modules.layernorm import layer_norm_bwd
+        do_pre_2d, dw_out, _, _ = layer_norm_bwd(
+            dy=do.reshape(-1, D),
+            x=o_pre.reshape(-1, D),
+            weight=output_rms_weight,
+            bias=None,
+            mean=None,
+            rstd=o_rstd,
+            dres=None,
+            has_residual=False,
+            is_rms_norm=True,
+            x_dtype=o_pre.dtype,
+        )
+        do = do_pre_2d.view_as(o_pre)
+    else:
+        dw_out = None
 
     q = query.view(-1)
     v = residuals.view(L, N, D)
@@ -321,7 +362,7 @@ def fused_attnres_bwd(
         D=D,
     )
 
-    return dv.view(residuals_shape), dq.view(query_shape), dw.view(rms_weight_shape)
+    return dv.view(residuals_shape), dq.view(query_shape), dw.view(rms_weight_shape), dw_out
 
 
 class FusedAttnresFunction(torch.autograd.Function):
@@ -334,11 +375,19 @@ class FusedAttnresFunction(torch.autograd.Function):
         query: torch.Tensor,
         residuals: torch.Tensor,
         rms_weight: torch.Tensor,
+        output_rms_weight: torch.Tensor | None,
         rms_eps: float,
         scale: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        o, rstd, p = fused_attnres_fwd(query, residuals, rms_weight, rms_eps, scale)
-        ctx.save_for_backward(rstd, p, query, residuals, rms_weight)
+        o, rstd, p, o_pre, o_rstd = fused_attnres_fwd(
+            query=query,
+            residuals=residuals,
+            rms_weight=rms_weight,
+            output_rms_weight=output_rms_weight,
+            rms_eps=rms_eps,
+            scale=scale,
+        )
+        ctx.save_for_backward(query, residuals, rstd, p, rms_weight, output_rms_weight, o_pre, o_rstd)
         ctx.scale = scale
         ctx.mark_non_differentiable(p)
         return o, p
@@ -350,25 +399,29 @@ class FusedAttnresFunction(torch.autograd.Function):
         ctx,
         do: torch.Tensor,
         dp: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, None, None]:
         del dp
-        rstd, p, query, residuals, rms_weight = ctx.saved_tensors
-        dv, dq, dw = fused_attnres_bwd(
-            do,
-            rstd,
-            p,
-            query,
-            residuals,
-            rms_weight,
-            ctx.scale,
+        query, residuals, rstd, p, rms_weight, output_rms_weight, o_pre, o_rstd = ctx.saved_tensors
+        dv, dq, dw, dw_out = fused_attnres_bwd(
+            do=do,
+            rstd=rstd,
+            p=p,
+            query=query,
+            residuals=residuals,
+            rms_weight=rms_weight,
+            output_rms_weight=output_rms_weight,
+            o_pre=o_pre,
+            o_rstd=o_rstd,
+            scale=ctx.scale,
         )
-        return dq, dv, dw, None, None
+        return dq, dv, dw, dw_out, None, None
 
 
 def fused_attnres(
     query: torch.Tensor,
     residuals: torch.Tensor | Sequence[torch.Tensor],
     rms_weight: torch.Tensor,
+    output_rms_weight: torch.Tensor | None = None,
     rms_eps: float = 1e-6,
     scale: float = 1.0,
     return_weights: bool = False,
@@ -392,8 +445,14 @@ def fused_attnres(
             sources.
         rms_weight (torch.Tensor):
             RMSNorm scale for key normalization of shape `[D]`.
+        output_rms_weight (torch.Tensor, optional):
+            If set, an extra RMSNorm with this weight is applied to the mixed
+            residual before returning, fusing the prenorm that would otherwise
+            follow the AttnRes call (e.g. `attn_norm` / `mlp_norm`). Default:
+            `None`.
         rms_eps (float):
-            RMSNorm epsilon. Default: `1e-6`.
+            RMSNorm epsilon (also used for `output_rms_weight` when set).
+            Default: `1e-6`.
         scale (float):
             Scale factor applied to AttnRes logits before softmax. Default: `1.0`.
         return_weights (bool):
@@ -421,7 +480,7 @@ def fused_attnres(
         D = output_shape[-1]
         residuals = torch.stack(tuple(residual.view(-1, D) for residual in residuals), dim=0)
 
-    o, p = FusedAttnresFunction.apply(query, residuals, rms_weight, rms_eps, scale)
+    o, p = FusedAttnresFunction.apply(query, residuals, rms_weight, output_rms_weight, rms_eps, scale)
     if output_shape is not None:
         o = o.view(output_shape)
 

@@ -111,9 +111,11 @@ class SambaBlock(GradientCheckpointingLayer):
             # (= previous layer's `output = prefix_sum + mlp_out`)
             prefix_sum = hidden_states
             if attnres_states is None:
-                # L0 attn single-source path: softmax over 1 entry has weight 1,
-                # so attnres reduces to `attn_res_norm(emb)` (no kernel call)
-                hidden_states = self.attn_res_norm(prefix_sum)
+                # L=1 single-source: attnres is trivially identity (p=1, mix=v[0]);
+                # apply the prenorm directly, matching the L>1 kernel path which
+                # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
+                # at the first layer (where `block_residual` is empty).
+                hidden_states = self.mixer_norm(prefix_sum)
                 attnres_states = prefix_sum.unsqueeze(0)
                 prefix_sum = None
             else:
@@ -131,11 +133,12 @@ class SambaBlock(GradientCheckpointingLayer):
                     query=self.attn_res_proj.weight,
                     residuals=residuals,
                     rms_weight=self.attn_res_norm.weight,
+                    output_rms_weight=self.mixer_norm.weight,
                     rms_eps=self.attn_res_norm.eps,
                 )
         else:
             residual = hidden_states
-        hidden_states = self.mixer_norm(hidden_states)
+            hidden_states = self.mixer_norm(hidden_states)
         hidden_states, attentions, past_key_values = self.mixer(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -161,9 +164,9 @@ class SambaBlock(GradientCheckpointingLayer):
                 query=self.mlp_res_proj.weight,
                 residuals=residuals,
                 rms_weight=self.mlp_res_norm.weight,
+                output_rms_weight=self.mlp_norm.weight,
                 rms_eps=self.mlp_res_norm.eps,
             )
-            hidden_states = self.mlp_norm(hidden_states)
         elif self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(hidden_states, residual, True)
         else:
@@ -332,7 +335,8 @@ class SambaModel(SambaPreTrainedModel):
                 all_attns = all_attns + (attentions,)
 
         if self.use_attnres:
-            # top-level attnres aggregation; `self.norm_f` still applies afterward
+            # top-level attnres aggregation; `self.norm_f` is folded into the
+            # kernel via `output_rms_weight` so we don't double-norm.
             residuals = checkpoint(
                 lambda s, p: torch.cat([s, p.unsqueeze(0)], 0),
                 attnres_states,
@@ -343,10 +347,11 @@ class SambaModel(SambaPreTrainedModel):
                 query=self.res_proj.weight,
                 residuals=residuals,
                 rms_weight=self.res_norm.weight,
+                output_rms_weight=self.norm_f.weight,
                 rms_eps=self.res_norm.eps,
             )
-
-        hidden_states = self.norm_f(hidden_states)
+        else:
+            hidden_states = self.norm_f(hidden_states)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
