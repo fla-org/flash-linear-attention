@@ -13,7 +13,7 @@ from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
-    ('L', 'B', 'T', 'D', 'scale', 'with_output_norm', 'dtype'),
+    ('L', 'B', 'T', 'D', 'scale', 'fuse_output_norm', 'dtype'),
     [
         pytest.param(*test, id="L{}-B{}-T{}-D{}-scale{}-onorm{}-{}".format(*test))
         for test in [
@@ -45,7 +45,7 @@ def test_attnres(
     T: int,
     D: int,
     scale: float,
-    with_output_norm: bool,
+    fuse_output_norm: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -60,7 +60,7 @@ def test_attnres(
     rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
     output_rms_weight = (
         torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
-        if with_output_norm else None
+        if fuse_output_norm else None
     )
 
     tri, tri_p = fused_attnres(
@@ -76,14 +76,14 @@ def test_attnres(
     (tri * do).sum().backward()
     tri_dv = residuals.grad
     tri_dq, tri_dw = query.grad, rms_weight.grad
-    tri_dw_out = output_rms_weight.grad if with_output_norm else None
+    tri_dw_out = output_rms_weight.grad if fuse_output_norm else None
 
     residuals_ref = residuals.detach().clone().requires_grad_(True)
     query_ref = query.detach().clone().requires_grad_(True)
     rms_weight_ref = rms_weight.detach().clone().requires_grad_(True)
     output_rms_weight_ref = (
         output_rms_weight.detach().clone().requires_grad_(True)
-        if with_output_norm else None
+        if fuse_output_norm else None
     )
 
     ref, ref_p = naive_attnres(
@@ -102,5 +102,5 @@ def test_attnres(
     assert_close('dq', query_ref.grad, tri_dq, 0.005)
     assert_close('dv', residuals_ref.grad, tri_dv, 0.005)
     assert_close('dw', rms_weight_ref.grad, tri_dw, 0.005)
-    if with_output_norm:
+    if fuse_output_norm:
         assert_close('dw_out', output_rms_weight_ref.grad, tri_dw_out, 0.005)
