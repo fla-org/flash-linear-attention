@@ -82,6 +82,9 @@ def attnres_fwd_kernel(
 
     # one-time gather of source base pointers; reused across all D-loops below.
     p_v = tl.load(res + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
+    # each residual storage is 16-byte aligned (torch CUDA allocator is
+    # 256-byte aligned), so tell Triton it can use wide vector loads.
+    p_v = tl.multiple_of(p_v, 16)
 
     # [BL]
     b_var = tl.zeros([BL], dtype=tl.float32)
@@ -89,6 +92,11 @@ def attnres_fwd_kernel(
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
+        # tell Triton that o_d has BD contiguous elements with stride 1 — this
+        # is the hint the compiler needs to coalesce the inner-D load across
+        # the [BL, BD] pointer tile (without it, Triton sees `p_v[:, None] +
+        # offs[None, :]` as opaque and emits per-element scattered loads).
+        o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         # [BL, BD] gather: row l from source l's storage at offset i_n*D + o_d
         b_v = tl.load(
@@ -125,6 +133,11 @@ def attnres_fwd_kernel(
     b_o_var = tl.zeros([], dtype=tl.float32)
     for i_d in range(0, D, BD):
         o_d = i_d + tl.arange(0, BD)
+        # tell Triton that o_d has BD contiguous elements with stride 1 — this
+        # is the hint the compiler needs to coalesce the inner-D load across
+        # the [BL, BD] pointer tile (without it, Triton sees `p_v[:, None] +
+        # offs[None, :]` as opaque and emits per-element scattered loads).
+        o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
@@ -187,7 +200,11 @@ def attnres_bwd_kernel_dv(
     o_l = tl.arange(0, BL)
     m_l = o_l < L
     p_v = tl.load(res + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
+    # each residual storage is 16-byte aligned (torch CUDA allocator is
+    # 256-byte aligned), so tell Triton it can use wide vector loads.
+    p_v = tl.multiple_of(p_v, 16)
     p_dv = tl.load(dres + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
+    p_dv = tl.multiple_of(p_dv, 16)
 
     p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
     p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
@@ -221,6 +238,11 @@ def attnres_bwd_kernel_dv(
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
+        # tell Triton that o_d has BD contiguous elements with stride 1 — this
+        # is the hint the compiler needs to coalesce the inner-D load across
+        # the [BL, BD] pointer tile (without it, Triton sees `p_v[:, None] +
+        # offs[None, :]` as opaque and emits per-element scattered loads).
+        o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
@@ -269,6 +291,11 @@ def attnres_bwd_kernel_dv(
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
+        # tell Triton that o_d has BD contiguous elements with stride 1 — this
+        # is the hint the compiler needs to coalesce the inner-D load across
+        # the [BL, BD] pointer tile (without it, Triton sees `p_v[:, None] +
+        # offs[None, :]` as opaque and emits per-element scattered loads).
+        o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         m_v = m_l[:, None] & m_d[None, :]
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
