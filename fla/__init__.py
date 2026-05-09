@@ -173,7 +173,7 @@ __all__ = [
     "RodimusAttention",
     "RodimusForCausalLM",
     "RodimusModel",
-    "SSEGGLA",
+    "SSEGLA",
     "SSEGDN",
     "SSEForCausalLM",
     "SSEModel",
