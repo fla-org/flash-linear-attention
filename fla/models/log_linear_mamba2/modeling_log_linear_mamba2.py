@@ -87,7 +87,11 @@ class LogLinearMamba2Block(nn.Module):
         if self.use_attnres:
             prefix_sum = hidden_states
             if attnres_states is None:
-                hidden_states = self.attn_res_norm(prefix_sum)
+                # L=1 single-source: attnres is trivially identity (p=1, mix=v[0]);
+                # apply the prenorm directly, matching the L>1 kernel path which
+                # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
+                # at the first layer (where `block_residual` is empty).
+                hidden_states = self.mixer_norm(prefix_sum)
                 attnres_states = prefix_sum.unsqueeze(0)
                 prefix_sum = None
             else:
@@ -104,11 +108,12 @@ class LogLinearMamba2Block(nn.Module):
                     query=self.attn_res_proj.weight,
                     residuals=residuals,
                     rms_weight=self.attn_res_norm.weight,
+                    output_rms_weight=self.mixer_norm.weight,
                     rms_eps=self.attn_res_norm.eps,
                 )
         else:
             residual = hidden_states
-        hidden_states = self.mixer_norm(hidden_states)
+            hidden_states = self.mixer_norm(hidden_states)
         hidden_states, attentions, past_key_values = self.mixer(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -133,9 +138,9 @@ class LogLinearMamba2Block(nn.Module):
                 query=self.mlp_res_proj.weight,
                 residuals=residuals,
                 rms_weight=self.mlp_res_norm.weight,
+                output_rms_weight=self.mlp_norm.weight,
                 rms_eps=self.mlp_res_norm.eps,
             )
-            hidden_states = self.mlp_norm(hidden_states)
         elif self.config.fuse_norm:
             hidden_states, residual = self.mlp_norm(
                 hidden_states, residual=residual, prenorm=True,
@@ -393,10 +398,11 @@ class LogLinearMamba2Model(LogLinearMamba2PreTrainedModel):
                 query=self.res_proj.weight,
                 residuals=residuals,
                 rms_weight=self.res_norm.weight,
+                output_rms_weight=self.norm_f.weight,
                 rms_eps=self.res_norm.eps,
             )
-
-        hidden_states = self.norm_f(hidden_states)
+        else:
+            hidden_states = self.norm_f(hidden_states)
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
