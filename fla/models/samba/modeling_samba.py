@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
-from torch.utils.checkpoint import checkpoint
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -103,7 +102,7 @@ class SambaBlock(GradientCheckpointingLayer):
         past_key_values: Cache | list[torch.FloatTensor] | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
-        attnres_states: torch.Tensor | None = None,
+        attnres_states: list[torch.Tensor] | None = None,
         **kwargs: Unpack[dict],
     ):
         if self.use_attnres:
@@ -116,15 +115,10 @@ class SambaBlock(GradientCheckpointingLayer):
                 # folds it via `output_rms_weight`. Mirrors Megatron-LM's bypass
                 # at the first layer (where `block_residual` is empty).
                 hidden_states = self.mixer_norm(prefix_sum)
-                attnres_states = prefix_sum.unsqueeze(0)
+                attnres_states = [prefix_sum]
                 prefix_sum = None
             else:
-                residuals = checkpoint(
-                    lambda s, p: torch.cat([s, p.unsqueeze(0)], 0),
-                    attnres_states,
-                    prefix_sum,
-                    use_reentrant=False,
-                )
+                residuals = [*attnres_states, prefix_sum]
                 if self.attnres_is_attn_boundary:
                     # prev block's sum becomes a new residual entry
                     attnres_states = residuals
@@ -151,12 +145,7 @@ class SambaBlock(GradientCheckpointingLayer):
         if self.use_attnres:
             # accumulate attn output into the running `prefix_sum`
             prefix_sum = hidden_states if prefix_sum is None else prefix_sum + hidden_states
-            residuals = checkpoint(
-                lambda s, p: torch.cat([s, p.unsqueeze(0)], 0),
-                attnres_states,
-                prefix_sum,
-                use_reentrant=False,
-            )
+            residuals = [*attnres_states, prefix_sum]
             if self.attnres_is_mlp_boundary:
                 attnres_states = residuals
                 prefix_sum = None
@@ -310,10 +299,11 @@ class SambaModel(SambaPreTrainedModel):
 
         hidden_states = inputs_embeds
 
-        # block-residual stack of shape `[L, B, T, D]` (only completed block
-        # summaries; the running `prefix_sum` rides on `hidden_states` itself,
-        # so pp transmits a single tensor + a stacked block-residual tensor)
-        attnres_states: torch.Tensor | None = None
+        # list of completed block summaries (kept as separate tensors so
+        # `fused_attnres` can ingest them via its pointer-table API
+        # without an upstream `torch.cat`); the running `prefix_sum`
+        # rides on `hidden_states` itself.
+        attnres_states: list[torch.Tensor] | None = None
 
         all_hidden_states = () if output_hidden_states else None
         all_attns = () if output_attentions else None
@@ -337,12 +327,7 @@ class SambaModel(SambaPreTrainedModel):
         if self.use_attnres:
             # top-level attnres aggregation; `self.norm_f` is folded into the
             # kernel via `output_rms_weight` so we don't double-norm.
-            residuals = checkpoint(
-                lambda s, p: torch.cat([s, p.unsqueeze(0)], 0),
-                attnres_states,
-                hidden_states,
-                use_reentrant=False,
-            )
+            residuals = [*attnres_states, hidden_states]
             hidden_states = fused_attnres(
                 query=self.res_proj.weight,
                 residuals=residuals,

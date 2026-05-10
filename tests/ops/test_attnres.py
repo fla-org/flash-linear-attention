@@ -55,7 +55,11 @@ def test_attnres(
     torch.backends.cuda.matmul.allow_tf32 = False
     rms_eps = 1e-6
 
-    residuals = torch.randn(L, B, T, D, dtype=dtype, device=device).requires_grad_(True)
+    # list of L independently allocated `[B, T, D]` tensors — true zero-cat input.
+    residuals = [
+        torch.randn(B, T, D, dtype=dtype, device=device).requires_grad_(True)
+        for _ in range(L)
+    ]
     query = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
     rms_weight = torch.randn(D, dtype=dtype, device=device).requires_grad_(True)
     output_rms_weight = (
@@ -74,11 +78,11 @@ def test_attnres(
     )
     do = torch.randn_like(tri)
     (tri * do).sum().backward()
-    tri_dv = residuals.grad
+    tri_dvs = [r.grad for r in residuals]
     tri_dq, tri_dw = query.grad, rms_weight.grad
     tri_dow = output_rms_weight.grad if fuse_output_norm else None
 
-    residuals_ref = residuals.detach().clone().requires_grad_(True)
+    residuals_ref = [r.detach().clone().requires_grad_(True) for r in residuals]
     query_ref = query.detach().clone().requires_grad_(True)
     rms_weight_ref = rms_weight.detach().clone().requires_grad_(True)
     output_rms_weight_ref = (
@@ -100,7 +104,7 @@ def test_attnres(
     assert_close(' o', ref, tri, 0.005)
     assert_close(' p', ref_p, tri_p, 0.005)
     assert_close('dq', query_ref.grad, tri_dq, 0.005)
-    assert_close('dv', residuals_ref.grad, tri_dv, 0.005)
     assert_close('dw', rms_weight_ref.grad, tri_dw, 0.005)
+    assert_close('dv', torch.stack([r.grad for r in residuals_ref]), torch.stack(tri_dvs), 0.005)
     if fuse_output_norm:
         assert_close('dow', output_rms_weight_ref.grad, tri_dow, 0.005)
