@@ -22,14 +22,11 @@ from fla.utils import (
     input_guard,
 )
 
-# residual sources are passed as a list of separately-allocated tensors and
-# accessed inside the kernels via int64 pointer tables — the upstream caller
-# never has to `torch.stack` / `torch.cat` them. each source is read with a
-# 2D pointer-tile gather: BL int64 base addresses are loaded once, cast to
-# `tl.pointer_type(DTYPE)`, then broadcast against the inner D-tile to form
-# `[BL, BD]` of independent global addresses. OOB rows (l >= L) load the
-# dummy address 0 but are masked off by `m_l`, so the zero pointer is never
-# dereferenced.
+# residual sources are passed as separately allocated tensors and accessed inside kernels through int64 pointer tables.
+# the caller never has to `torch.stack` / `torch.cat` them. Each source uses a 2D pointer-tile gather that loads BL int64
+# base addresses once, casts them to `tl.pointer_type(DTYPE)`, and broadcasts them against inner D offsets to form
+# `[BL, BD]` tiles of independent global addresses. OOB rows (l >= L) load dummy address 0 and are masked by `m_l`.
+# the zero pointer is never dereferenced.
 _TORCH_TO_TL_DTYPE = {
     torch.float16: tl.float16,
     torch.float32: tl.float32,
@@ -75,8 +72,7 @@ def attnres_fwd_kernel(
 
     # one-time gather of source base pointers; reused across all D-loops below.
     p_v = tl.load(res + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
-    # each residual storage is 16-byte aligned (torch CUDA allocator is
-    # 256-byte aligned), so tell Triton it can use wide vector loads.
+    # each residual storage is 16-byte aligned (the torch CUDA allocator is 256-byte aligned), so Triton can use wide loads.
     p_v = tl.multiple_of(p_v, 16)
 
     # [BL]
@@ -85,10 +81,8 @@ def attnres_fwd_kernel(
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
-        # tell Triton that o_d has BD contiguous elements with stride 1 — this
-        # is the hint the compiler needs to coalesce the inner-D load across
-        # the [BL, BD] pointer tile (without it, Triton sees `p_v[:, None] +
-        # offs[None, :]` as opaque and emits per-element scattered loads).
+        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [BL, BD] pointer tile.
+        # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         # [BL, BD] gather: row l from source l's storage at offset i_n*D + o_d
@@ -105,9 +99,7 @@ def attnres_fwd_kernel(
 
     # [BL]
     b_rstd = tl.rsqrt(b_var / D + eps)
-    # `b_score = sum_d (v * rstd) * (w * q)` is the RMSNorm coupling term
-    # needed again in backward. Save `score / D` so bwd_dv does not repeat
-    # this full LxD dot product.
+    # save `score / D` so bwd_dv does not repeat the full LxD dot product for `sum_d (v * rstd) * (w * q)`.
     b_score = b_logits * b_rstd
     b_logits = b_score * scale
     b_logits = tl.where(m_l, b_logits, -float("inf"))
@@ -122,19 +114,14 @@ def attnres_fwd_kernel(
     tl.store(p_score_mean, (b_score / D).to(p_score_mean.dtype.element_ty), boundary_check=(0,))
     tl.store(p_p, b_p.to(p_p.dtype.element_ty), boundary_check=(0,))
 
-    # second pass: compute mix `b_o = sum_l p_l * v_l` and write to `o`. under
-    # HAS_ONORM we also accumulate `b_o_var` for the output rstd. `o` is
-    # allocated as fp32 by the python wrapper when HAS_ONORM=True so the
-    # un-normed mix round-trips losslessly through gmem before pass 3
-    # normalizes and overwrites it in place; the final cast to the residual
-    # dtype happens once at the wrapper boundary.
+    # second pass: compute `b_o = sum_l p_l * v_l`, write it to `o`, and optionally accumulate `b_o_var` for output rstd.
+    # when HAS_ONORM=True, the Python wrapper allocates `o` as fp32 so the unnormalized mix survives the pass 2 -> pass 3
+    # round trip through gmem; pass 3 normalizes in place, and the wrapper casts to the residual dtype once at the end.
     b_o_var = tl.zeros([], dtype=tl.float32)
     for i_d in range(0, D, BD):
         o_d = i_d + tl.arange(0, BD)
-        # tell Triton that o_d has BD contiguous elements with stride 1 — this
-        # is the hint the compiler needs to coalesce the inner-D load across
-        # the [BL, BD] pointer tile (without it, Triton sees `p_v[:, None] +
-        # offs[None, :]` as opaque and emits per-element scattered loads).
+        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [BL, BD] pointer tile.
+        # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
@@ -155,7 +142,7 @@ def attnres_fwd_kernel(
         tl.store(o_rstd + i_n, b_o_rstd)
         # ensure pass-2 stores to `o` are visible before pass 3 reads them back.
         tl.debug_barrier()
-        # third pass: load staged `o`, apply RMSNorm with `ow`, write back to `o`.
+        # third pass: load staged `o`, apply RMSNorm with `ow`, and write back to `o`.
         for i_d in range(0, D, BD):
             o_d = i_d + tl.arange(0, BD)
             m_d = o_d < D
@@ -167,9 +154,8 @@ def attnres_fwd_kernel(
 
 
 @fla_cache_autotune(
-    # bwd_dv carries more BL-axis reductions (b_dp, b_dp_w, b_dp_x, b_o_c1)
-    # than fwd plus a scattered dv store with no fwd analogue, so explore a
-    # wider grid along the per-thread = BD/num_warps contour (32, 64, 128).
+    # bwd_dv carries more BL-axis reductions than fwd (b_dp, b_dp_w, b_dp_x, b_o_c1), plus a scattered dv store with no
+    # fwd analogue; explore a wider grid along the per-thread = BD/num_warps contour (32, 64, 128).
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
         for BD, num_warps in [
@@ -212,8 +198,7 @@ def attnres_bwd_kernel_dv(
     o_l = tl.arange(0, BL)
     m_l = o_l < L
     p_v = tl.load(res + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
-    # each residual storage is 16-byte aligned (torch CUDA allocator is
-    # 256-byte aligned), so tell Triton it can use wide vector loads.
+    # each residual storage is 16-byte aligned (the torch CUDA allocator is 256-byte aligned), so Triton can use wide loads.
     p_v = tl.multiple_of(p_v, 16)
     p_dv = tl.load(dres + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
     p_dv = tl.multiple_of(p_dv, 16)
@@ -226,22 +211,21 @@ def attnres_bwd_kernel_dv(
     b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
     b_score_mean = tl.load(p_score_mean, boundary_check=(0,), padding_option="zero").to(tl.float32)
 
-    # the optional output RMSNorm bwd is folded into pass 1. Following fla's
-    # layernorm bwd factoring (`b_wdy = w * dy`; see `fla/modules/layernorm.py`),
-    # the gradient flowing back through the output RMSNorm into the mix is:
+    # output RMSNorm bwd is folded into pass 1.
+    # using fla's layernorm bwd factoring (`b_wdy = w * dy`), the mixed-gradient
+    # formula from `fla/modules/layernorm.py` is:
     #
     #   b_do_pre = (b_o_wdy - b_o_xhat * b_o_c1) * b_o_rstd
     #              where b_o_wdy  = b_ow * b_do
     #                    b_o_xhat = b_o_pre * b_o_rstd
     #
-    # Plugging into the softmax-bwd's `b_dp[l] = sum_d v[l,d] * b_do_pre[d]`:
+    # plugging into the softmax-bwd's `b_dp[l] = sum_d v[l,d] * b_do_pre[d]`:
     #
     #   b_dp[l] = b_o_rstd * (sum_d v[l,d] * b_o_wdy[d] - b_o_c1 * sum_d v[l,d] * b_o_xhat[d])
     #           = b_o_rstd * (b_dp_w[l]                 - b_o_c1 * b_dp_x[l])
     #
-    # `b_dp_w` and `b_dp_x` (and `b_o_c1` + `dow_partial`) accumulate cleanly
-    # over the same D-loop that already loads `v` for `b_dp`, so we don't
-    # need a separate pre-pass and only load `v` once across pass 1.
+    # `b_dp_w`, `b_dp_x`, `b_o_c1`, and `dow_partial` accumulate in the same D-loop that already loads `v` for `b_dp`.
+    # no separate pre-pass is needed, and `v` is loaded only once across pass 1.
     b_o_rstd = tl.zeros([], dtype=tl.float32)
     b_o_c1 = tl.zeros([], dtype=tl.float32)
     b_dp_w = tl.zeros([BL], dtype=tl.float32)
@@ -254,10 +238,8 @@ def attnres_bwd_kernel_dv(
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
-        # tell Triton that o_d has BD contiguous elements with stride 1 — this
-        # is the hint the compiler needs to coalesce the inner-D load across
-        # the [BL, BD] pointer tile (without it, Triton sees `p_v[:, None] +
-        # offs[None, :]` as opaque and emits per-element scattered loads).
+        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [BL, BD] pointer tile.
+        # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
@@ -273,8 +255,8 @@ def attnres_bwd_kernel_dv(
 
         if HAS_ONORM:
             b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
-            # rebuild `b_o_pre` and `b_o_xhat` from the just-loaded `b_v` and
-            # the saved softmax probs `b_p` — no extra v load.
+            # rebuild `b_o_pre` and `b_o_xhat` from the just-loaded `b_v` and saved softmax probs `b_p`.
+            # reuse this `b_v` tile instead of loading v again.
             b_o_pre = tl.sum(b_v * b_p[:, None], axis=0)
             b_o_xhat = b_o_pre * b_o_rstd
             b_o_wdy = b_ow * b_do
@@ -290,7 +272,7 @@ def attnres_bwd_kernel_dv(
         b_o_c1 = b_o_c1 / D
         b_dp = b_o_rstd * (b_dp_w - b_o_c1 * b_dp_x)
 
-    # softmax bwd via the standard delta trick: delta = sum_l p*dp = sum_d do*o
+    # softmax bwd via the standard delta trick: delta = sum_l p*dp = sum_d do*o.
     # [1]
     b_delta = tl.sum(b_p * b_dp, axis=0)
     # [BL]
@@ -299,16 +281,14 @@ def attnres_bwd_kernel_dv(
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
-        # tell Triton that o_d has BD contiguous elements with stride 1 — this
-        # is the hint the compiler needs to coalesce the inner-D load across
-        # the [BL, BD] pointer tile (without it, Triton sees `p_v[:, None] +
-        # offs[None, :]` as opaque and emits per-element scattered loads).
+        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [BL, BD] pointer tile.
+        # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         m_v = m_l[:, None] & m_d[None, :]
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
-        # last touch of this v tile — release the L2 line.
+        # last touch of this v tile; release the L2 line.
         b_v = tl.load(
             tl.multiple_of(p_v[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
             mask=m_v,
@@ -391,12 +371,9 @@ def attnres_bwd_kernel_dqdw(
 
 
 def _build_ptr_table(tensors: Sequence[torch.Tensor]) -> torch.Tensor:
-    # build the int64 ptr table on **pinned** CPU memory, then issue a
-    # `non_blocking=True` H2D. with this combo PyTorch knows the source
-    # storage outlives the async copy and skips the implicit
-    # `cudaStreamSynchronize` that `torch.tensor([...], device='cuda')`
-    # otherwise inserts to keep the pageable staging buffer alive
-    # (~600µs of CPU stall per call, observed via `torch.profiler`).
+    # build the int64 ptr table on **pinned** CPU memory, then issue a `non_blocking=True` H2D.
+    # with this combo, PyTorch knows the source storage outlives the async copy and skips the implicit `cudaStreamSynchronize`.
+    # `torch.tensor([...], device='cuda')` otherwise adds that sync to keep pageable staging alive (~600µs CPU stall).
     cpu_t = torch.tensor(
         [t.data_ptr() for t in tensors],
         dtype=torch.int64,
@@ -427,13 +404,9 @@ def fused_attnres_fwd(
 
     stats_shape = (L, *output_shape[:-1])
 
-    # under HAS_ONORM the kernel needs `o` to round-trip across pass 2 → pass 3
-    # without precision loss, so we keep it in fp32 inside the kernel and cast
-    # to the residual dtype once at the end. bwd recomputes
-    # `o_pre = sum_l p_l * v_l` inline from saved `p` and `res`, so we
-    # don't keep an [N, D] activation across fwd→bwd. It does save the much
-    # smaller per-source RMSNorm coupling term `score_mean` to avoid repeating the
-    # score dot product in bwd_dv.
+    # under HAS_ONORM, keep `o` in fp32 for the pass 2 -> pass 3 round trip, then cast to the residual dtype once at the end.
+    # backward recomputes `o_pre = sum_l p_l * v_l` from saved `p` and `res`, so no [N, D] activation is kept across
+    # fwd->bwd; only the smaller per-source RMSNorm coupling `score_mean` is saved to avoid repeating the score dot product.
     has_onorm = ow is not None
     o = torch.empty(output_shape, device=residuals[0].device, dtype=torch.float32 if has_onorm else dtype)
     p = torch.empty(stats_shape, device=residuals[0].device, dtype=torch.float32)
@@ -488,14 +461,11 @@ def fused_attnres_bwd(
     dtype = residuals[0].dtype
     DTYPE = _TORCH_TO_TL_DTYPE[dtype]
 
-    # optional output RMSNorm bwd is folded into the attnres kernels:
-    # `attnres_bwd_kernel_dv` derives `c1_o` and `dow_partial` in a pre-pass,
-    # rebuilds `o_pre = sum_l p_l * v_l` inline (so we don't have to save it
-    # across fwd→bwd), and recomputes `do_pre = (ow * do - xhat_o * c1_o)
-    # * o_rstd` per BD chunk so we never materialize `do_pre` in gmem either.
-    # The key-side RMSNorm `score_mean` comes from fwd, avoiding another score-dot
-    # reduction here. `attnres_bwd_kernel_dqdw` finishes by reducing
-    # `dow_partial` over N alongside the existing dq / dw.
+    # output RMSNorm bwd is folded into the attnres kernels. The first D-loop derives `c1_o`, writes `dow_partial`, and
+    # rebuilds `o_pre = sum_l p_l * v_l` inline so it is not saved across fwd->bwd.
+    # later, it recomputes `do_pre = (ow * do - xhat_o * c1_o) * o_rstd` per BD chunk so `do_pre` is never materialized.
+    # the key-side RMSNorm `score_mean` comes from fwd, avoiding another score-dot reduction; `attnres_bwd_kernel_dqdw`
+    # reduces `dow_partial` over N alongside dq / dw.
     has_onorm = ow is not None
     if has_onorm:
         dow_partial = torch.empty_like(do, dtype=torch.float32)
@@ -563,9 +533,8 @@ class FusedAttnresFunction(torch.autograd.Function):
         scale: float,
         *residuals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # `res` is built once here and threaded through fwd/bwd so neither
-        # internal wrapper has to rebuild it (the H2D copy + cudaMemcpy
-        # launch is ~tens of µs, comparable to the kernel itself for small N).
+        # `res` is built once here and threaded through fwd/bwd so neither internal wrapper rebuilds it.
+        # for small N, the H2D copy plus cudaMemcpy launch is ~tens of µs, comparable to the kernel itself.
         res = _build_ptr_table(residuals)
         o, p, rstd, score_mean, o_rstd = fused_attnres_fwd(
             q=query,
@@ -605,7 +574,7 @@ class FusedAttnresFunction(torch.autograd.Function):
             o_rstd=o_rstd,
             scale=ctx.scale,
         )
-        # gradient order matches forward signature:
+        # gradient order matches the forward signature:
         # query, rms_weight, output_rms_weight, rms_eps (None), scale (None), *residuals.
         return (dq, dw, dow, None, None, *dvs)
 
@@ -622,34 +591,26 @@ def fused_attnres(
     r"""
     Apply AttnRes residual aggregation.
 
-    AttnRes normalizes each residual source with RMSNorm, scores it against
-    `query`, applies softmax over the residual-source dimension, and returns
-    the weighted sum of residual sources.
+    AttnRes normalizes each residual source with RMSNorm, scores it against `query`, applies softmax over the
+    residual-source dimension, and returns the weighted sum of residual sources.
     See `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
 
-    Residual sources are passed as a sequence of independently allocated
-    tensors and accessed inside the kernel via a pointer table — there is no
-    upstream `torch.stack` / `torch.cat`, and per-source `dv` is written back
-    into separately allocated tensors so autograd routes each gradient to its
-    own leaf.
+    Residual sources are passed as a sequence of independently allocated tensors and accessed inside the kernel via a
+    pointer table; there is no upstream `torch.stack` / `torch.cat`, and per-source `dv` is written back into separately
+    allocated tensors so autograd routes each gradient to its own leaf.
 
     Args:
         query (torch.Tensor):
-            Per-layer pseudo-query of shape `[D]` or `[D, 1]`, where `D` is
-            the hidden size.
+            Per-layer pseudo-query of shape `[D]` or `[D, 1]`, where `D` is the hidden size.
         residuals (Sequence[torch.Tensor]):
-            Non-empty sequence of same-dtype, same-`D` residual sources, each
-            of shape `[..., D]`.
+            Non-empty sequence of same-dtype, same-`D` residual sources, each of shape `[..., D]`.
         rms_weight (torch.Tensor):
             RMSNorm scale for key normalization of shape `[D]`.
         output_rms_weight (torch.Tensor, optional):
-            If set, an extra RMSNorm with this weight is applied to the mixed
-            residual before returning, fusing the prenorm that would otherwise
-            follow the AttnRes call (e.g. `attn_norm` / `mlp_norm`). Default:
-            `None`.
+            If set, an extra RMSNorm with this weight is applied to the mixed residual before returning, fusing the
+            prenorm that would otherwise follow the AttnRes call (e.g. `attn_norm` / `mlp_norm`). Default: `None`.
         rms_eps (float):
-            RMSNorm epsilon (also used for `output_rms_weight` when set).
-            Default: `1e-6`.
+            RMSNorm epsilon (also used for `output_rms_weight` when set). Default: `1e-6`.
         scale (float):
             Scale factor applied to AttnRes logits before softmax. Default: `1.0`.
         return_weights (bool):
@@ -659,8 +620,7 @@ def fused_attnres(
         o (torch.Tensor):
             Mixed residual of shape `[..., D]`.
         p (torch.Tensor):
-            Depth softmax probabilities of shape `[L, ...]` if
-            `return_weights=True`, otherwise not returned.
+            Depth softmax probabilities of shape `[L, ...]` if `return_weights=True`, otherwise not returned.
     """
     if len(residuals) == 0:
         raise ValueError("residuals must contain at least one source")
