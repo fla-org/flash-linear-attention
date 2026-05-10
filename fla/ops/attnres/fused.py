@@ -52,8 +52,9 @@ def attnres_fwd_kernel(
     res,
     w,
     o,
-    rstd,
     p,
+    rstd,
+    score_mean,
     ow,         # output rms weight, [D]; None when HAS_ONORM=False
     o_rstd,     # output rstd, [N]; None when HAS_ONORM=False
     N,
@@ -97,23 +98,28 @@ def attnres_fwd_kernel(
             other=0.0,
         ).to(tl.float32)
         # [BD]
-        b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-        b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 
         b_var += tl.sum(b_v * b_v, axis=1)
-        b_logits += tl.sum(b_v * (b_w * b_q)[None, :], axis=1)
+        b_logits += tl.sum(b_v * b_qw[None, :], axis=1)
 
     # [BL]
     b_rstd = tl.rsqrt(b_var / D + eps)
-    b_logits *= b_rstd * scale
+    # `b_score = sum_d (v * rstd) * (w * q)` is the RMSNorm coupling term
+    # needed again in backward. Save `score / D` so bwd_dv does not repeat
+    # this full LxD dot product.
+    b_score = b_logits * b_rstd
+    b_logits = b_score * scale
     b_logits = tl.where(m_l, b_logits, -float("inf"))
     b_logits = exp(b_logits - tl.max(b_logits, axis=0))
     # [BL]
     b_p = b_logits / tl.sum(b_logits, axis=0)
 
     p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
+    p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (BL,), (0,))
     p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
     tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_score_mean, (b_score / D).to(p_score_mean.dtype.element_ty), boundary_check=(0,))
     tl.store(p_p, b_p.to(p_p.dtype.element_ty), boundary_check=(0,))
 
     # second pass: compute mix `b_o = sum_l p_l * v_l` and write to `o`. under
@@ -161,7 +167,7 @@ def attnres_fwd_kernel(
 
 
 @fla_cache_autotune(
-    # bwd_dv carries more BL-axis reductions (b_dp, b_dp_w, b_dp_x, b_z, b_o_c1)
+    # bwd_dv carries more BL-axis reductions (b_dp, b_dp_w, b_dp_x, b_o_c1)
     # than fwd plus a scattered dv store with no fwd analogue, so explore a
     # wider grid along the per-thread = BD/num_warps contour (32, 64, 128).
     configs=[
@@ -186,6 +192,7 @@ def attnres_bwd_kernel_dv(
     ow,
     p,
     rstd,
+    score_mean,
     o_rstd,
     do,
     dres,    # int64 [L]; data_ptr() of each per-source dv allocation
@@ -213,23 +220,28 @@ def attnres_bwd_kernel_dv(
 
     p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
     p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
+    p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (BL,), (0,))
     # [BL]
     b_p = tl.load(p_p, boundary_check=(0,), padding_option="zero").to(tl.float32)
     b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
+    b_score_mean = tl.load(p_score_mean, boundary_check=(0,), padding_option="zero").to(tl.float32)
 
     # the optional output RMSNorm bwd is folded into pass 1. Following fla's
-    # layernorm bwd factoring (`b_wdy = w * dy`; see `fla/modules/layernorm.py`):
+    # layernorm bwd factoring (`b_wdy = w * dy`; see `fla/modules/layernorm.py`),
+    # the gradient flowing back through the output RMSNorm into the mix is:
     #
-    #   do_pre = (wdy_o - xhat_o * c1_o) * o_rstd     where wdy_o = ow * do
+    #   b_do_pre = (b_o_wdy - b_o_xhat * b_o_c1) * b_o_rstd
+    #              where b_o_wdy  = b_ow * b_do
+    #                    b_o_xhat = b_o_pre * b_o_rstd
     #
-    # Plugging into the softmax-bwd's `b_dp[l] = sum_d v[l,d] * do_pre[d]`:
+    # Plugging into the softmax-bwd's `b_dp[l] = sum_d v[l,d] * b_do_pre[d]`:
     #
-    #   b_dp[l] = o_rstd * (sum_d v[l,d] * wdy_o[d] - c1_o * sum_d v[l,d] * xhat_o[d])
-    #           = o_rstd * (b_dp_w[l]               - c1_o * b_dp_x[l])
+    #   b_dp[l] = b_o_rstd * (sum_d v[l,d] * b_o_wdy[d] - b_o_c1 * sum_d v[l,d] * b_o_xhat[d])
+    #           = b_o_rstd * (b_dp_w[l]                 - b_o_c1 * b_dp_x[l])
     #
-    # `b_dp_w` and `b_dp_x` (and `c1_o` + `dow_partial`) accumulate cleanly
-    # over the same D-loop that already loads `v` for `b_dp` / `b_z`, so we
-    # don't need a separate pre-pass and only load `v` once across pass 1.
+    # `b_dp_w` and `b_dp_x` (and `b_o_c1` + `dow_partial`) accumulate cleanly
+    # over the same D-loop that already loads `v` for `b_dp`, so we don't
+    # need a separate pre-pass and only load `v` once across pass 1.
     b_o_rstd = tl.zeros([], dtype=tl.float32)
     b_o_c1 = tl.zeros([], dtype=tl.float32)
     b_dp_w = tl.zeros([BL], dtype=tl.float32)
@@ -239,7 +251,6 @@ def attnres_bwd_kernel_dv(
 
     # [BL]
     b_dp = tl.zeros([BL], dtype=tl.float32)
-    b_z = tl.zeros([BL], dtype=tl.float32)
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
@@ -259,12 +270,10 @@ def attnres_bwd_kernel_dv(
         ).to(tl.float32)
         # [BD]
         b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
-        b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-        b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
 
         if HAS_ONORM:
             b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
-            # rebuild `o_pre` and `xhat_o` from the just-loaded `b_v` and
+            # rebuild `b_o_pre` and `b_o_xhat` from the just-loaded `b_v` and
             # the saved softmax probs `b_p` — no extra v load.
             b_o_pre = tl.sum(b_v * b_p[:, None], axis=0)
             b_o_xhat = b_o_pre * b_o_rstd
@@ -277,10 +286,6 @@ def attnres_bwd_kernel_dv(
         else:
             b_dp += tl.sum(b_v * b_do[None, :], axis=1)
 
-        # [BL, BD]
-        b_xhat = b_v * b_rstd[:, None]
-        b_z += tl.sum(b_xhat * (b_w * b_q)[None, :], axis=1)
-
     if HAS_ONORM:
         b_o_c1 = b_o_c1 / D
         b_dp = b_o_rstd * (b_dp_w - b_o_c1 * b_dp_x)
@@ -290,9 +295,6 @@ def attnres_bwd_kernel_dv(
     b_delta = tl.sum(b_p * b_dp, axis=0)
     # [BL]
     b_ds = b_p * (b_dp - b_delta) * scale
-    # rstd-coupling correction (same role as `c1` in layernorm bwd)
-    # [BL]
-    b_c1 = b_z / D
 
     for i_d in range(0, D, BD):
         # [BD]
@@ -315,8 +317,7 @@ def attnres_bwd_kernel_dv(
         ).to(tl.float32)
         # [BD]
         b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
-        b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-        b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 
         if HAS_ONORM:
             b_o_pre = tl.sum(b_v * b_p[:, None], axis=0)
@@ -325,15 +326,15 @@ def attnres_bwd_kernel_dv(
             b_do = (b_ow * b_do - b_o_xhat * b_o_c1) * b_o_rstd
 
         # [BL, BD]
-        b_xhat = b_v * b_rstd[:, None]
+        b_k = b_v * b_rstd[:, None]
         b_dv = b_p[:, None] * b_do[None, :] + b_ds[:, None] * b_rstd[:, None] * (
-            (b_w * b_q)[None, :] - b_xhat * b_c1[:, None]
+            b_qw[None, :] - b_k * b_score_mean[:, None]
         )
 
         p_dqw = tl.make_block_ptr(dqw + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         tl.store(tl.multiple_of(p_dv[:, None] + (i_n * D + o_d[None, :]), (1, 16)), b_dv.to(DTYPE), mask=m_v)
         # [BD]
-        tl.store(p_dqw, tl.sum(b_ds[:, None] * b_xhat, axis=0), boundary_check=(0,))
+        tl.store(p_dqw, tl.sum(b_ds[:, None] * b_k, axis=0), boundary_check=(0,))
 
 
 @fla_cache_autotune(
@@ -412,7 +413,7 @@ def fused_attnres_fwd(
     ow: torch.Tensor | None,
     eps: float,
     scale: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if not residuals[0].is_cuda:
         raise ValueError("Triton attnres requires CUDA tensors")
 
@@ -430,11 +431,14 @@ def fused_attnres_fwd(
     # without precision loss, so we keep it in fp32 inside the kernel and cast
     # to the residual dtype once at the end. bwd recomputes
     # `o_pre = sum_l p_l * v_l` inline from saved `p` and `res`, so we
-    # don't keep an [N, D] activation across fwd→bwd.
+    # don't keep an [N, D] activation across fwd→bwd. It does save the much
+    # smaller per-source RMSNorm coupling term `score_mean` to avoid repeating the
+    # score dot product in bwd_dv.
     has_onorm = ow is not None
     o = torch.empty(output_shape, device=residuals[0].device, dtype=torch.float32 if has_onorm else dtype)
     p = torch.empty(stats_shape, device=residuals[0].device, dtype=torch.float32)
     rstd = torch.empty_like(p)
+    score_mean = torch.empty_like(p)
     if has_onorm:
         o_rstd = torch.empty(output_shape[:-1], device=residuals[0].device, dtype=torch.float32)
     else:
@@ -446,8 +450,9 @@ def fused_attnres_fwd(
         res=res,
         w=w,
         o=o,
-        rstd=rstd,
         p=p,
+        rstd=rstd,
+        score_mean=score_mean,
         ow=ow,
         o_rstd=o_rstd,
         N=N,
@@ -463,7 +468,7 @@ def fused_attnres_fwd(
     if has_onorm:
         o = o.to(dtype)
 
-    return o, p, rstd, o_rstd
+    return o, p, rstd, score_mean, o_rstd
 
 
 def fused_attnres_bwd(
@@ -475,6 +480,7 @@ def fused_attnres_bwd(
     ow: torch.Tensor | None,
     p: torch.Tensor,
     rstd: torch.Tensor,
+    score_mean: torch.Tensor,
     o_rstd: torch.Tensor | None,
     scale: float,
 ) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -487,8 +493,9 @@ def fused_attnres_bwd(
     # rebuilds `o_pre = sum_l p_l * v_l` inline (so we don't have to save it
     # across fwd→bwd), and recomputes `do_pre = (ow * do - xhat_o * c1_o)
     # * o_rstd` per BD chunk so we never materialize `do_pre` in gmem either.
-    # `attnres_bwd_kernel_dqdw` finishes by reducing `dow_partial` over N
-    # alongside the existing dq / dw.
+    # The key-side RMSNorm `score_mean` comes from fwd, avoiding another score-dot
+    # reduction here. `attnres_bwd_kernel_dqdw` finishes by reducing
+    # `dow_partial` over N alongside the existing dq / dw.
     has_onorm = ow is not None
     if has_onorm:
         dow_partial = torch.empty_like(do, dtype=torch.float32)
@@ -510,6 +517,7 @@ def fused_attnres_bwd(
         ow=ow,
         p=p,
         rstd=rstd,
+        score_mean=score_mean,
         o_rstd=o_rstd,
         do=do,
         dres=dres,
@@ -559,7 +567,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         # internal wrapper has to rebuild it (the H2D copy + cudaMemcpy
         # launch is ~tens of µs, comparable to the kernel itself for small N).
         res = _build_ptr_table(residuals)
-        o, p, rstd, o_rstd = fused_attnres_fwd(
+        o, p, rstd, score_mean, o_rstd = fused_attnres_fwd(
             q=query,
             residuals=residuals,
             res=res,
@@ -568,7 +576,7 @@ class FusedAttnresFunction(torch.autograd.Function):
             eps=rms_eps,
             scale=scale,
         )
-        ctx.save_for_backward(query, rms_weight, output_rms_weight, p, rstd, o_rstd, *residuals)
+        ctx.save_for_backward(query, rms_weight, output_rms_weight, p, rstd, score_mean, o_rstd, *residuals)
         ctx.scale = scale
         ctx.res = res
         ctx.mark_non_differentiable(p)
@@ -583,7 +591,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         dp: torch.Tensor | None = None,
     ):
         del dp
-        query, rms_weight, output_rms_weight, p, rstd, o_rstd, *residuals = ctx.saved_tensors
+        query, rms_weight, output_rms_weight, p, rstd, score_mean, o_rstd, *residuals = ctx.saved_tensors
         dvs, dq, dw, dow = fused_attnres_bwd(
             do=do,
             q=query,
@@ -593,6 +601,7 @@ class FusedAttnresFunction(torch.autograd.Function):
             ow=output_rms_weight,
             p=p,
             rstd=rstd,
+            score_mean=score_mean,
             o_rstd=o_rstd,
             scale=ctx.scale,
         )
