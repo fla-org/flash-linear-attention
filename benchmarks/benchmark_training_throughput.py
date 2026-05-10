@@ -6,12 +6,14 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import argparse
+import subprocess
 import time
 
 import torch
 from accelerate import Accelerator
 from torch.cuda import max_memory_allocated, memory_allocated
 from torch.optim import AdamW
+from torch.profiler import ProfilerActivity, profile as torch_profile, record_function
 from tqdm import trange
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.optimization import get_cosine_schedule_with_warmup
@@ -28,6 +30,32 @@ def sizeof_fmt(num, suffix='B'):
             return f'{num:.2f}{unit}{suffix}'
         num /= 1024.0
     return f'{num:.2f}Yi{suffix}'
+
+
+def _git_describe() -> str:
+    try:
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        sha = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        dirty = subprocess.check_output(
+            ['git', 'status', '--porcelain'], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        return f"{branch} @ {sha}{' (dirty)' if dirty else ''}"
+    except Exception:
+        return "unknown"
+
+
+def _print_run_header(rows: dict) -> None:
+    title = " benchmark_training_throughput "
+    bar = "=" * 78
+    print(f"== {title} ".ljust(len(bar), '='))
+    key_w = max(len(k) for k in rows)
+    for k, v in rows.items():
+        print(f"  {k.ljust(key_w)}  {v}")
+    print(bar)
 
 
 def prepare_inputs(
@@ -58,8 +86,8 @@ def prepare_inputs(
 
 def profile(
     name: str,
-    batch_size: int = 8,
-    seq_len: int = 2048,
+    batch_size: int = 4,
+    seq_len: int = 4096,
     context_len: int = 2048,
     varlen: bool = False,
     num_heads: int | None = None,
@@ -74,6 +102,9 @@ def profile(
     dtype: torch.dtype | None = torch.bfloat16,
     mixed_precision: str = 'bf16',
     compile: bool = False,
+    enable_profile: bool = False,
+    profile_steps: int = 8,
+    profile_trace: str | None = None,
 ):
     device = torch.device('cuda')
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
@@ -84,6 +115,27 @@ def profile(
         config.hidden_size = config.num_heads * config.head_dim
     if num_hidden_layers is not None:
         config.num_hidden_layers = num_hidden_layers
+
+    def _mark(override):
+        return ' *' if override is not None else ''
+
+    gpu_name = torch.cuda.get_device_name(device) if torch.cuda.is_available() else 'no-cuda'
+    profile_str = (f"on (steps={profile_steps}"
+                   + (f", trace={profile_trace}" if profile_trace else "")
+                   + ")") if enable_profile else 'off'
+    _print_run_header({
+        'model':    name,
+        'arch':     (f"heads={config.num_heads}{_mark(num_heads)} "
+                     f"head_dim={config.head_dim}{_mark(head_dim)} "
+                     f"hidden={config.hidden_size} "
+                     f"layers={config.num_hidden_layers}{_mark(num_hidden_layers)} "
+                     f"vocab={config.vocab_size}"),
+        'data':     f"B={batch_size} T={seq_len} ctx={context_len} varlen={varlen}",
+        'training': f"{dtype} (mixed={mixed_precision}) compile={compile} "
+                    f"warmup={warmup_steps} steps={steps}",
+        'profile':  profile_str,
+        'env':      f"{_git_describe()} | {gpu_name} ({device}) | torch {torch.__version__}",
+    })
     model = AutoModelForCausalLM.from_config(config).cuda().to(dtype)
     if compile:
         print("Compiling the model")
@@ -147,14 +199,61 @@ def profile(
         total_tokens += batch_size * seq_len
         torch.cuda.synchronize(device)
         duration = time.time() - start
-        bar.set_description_str(f"Thoughput: {total_tokens / duration:10.2f} tokens/s")
+        bar.set_description_str(f"Throughput: {total_tokens / duration:10.2f} tokens/s")
+
+    bar.close()
+    duration = time.time() - start
+    print(f"\nthroughput: {total_tokens / duration:.2f} tokens/s  "
+          f"({duration / steps * 1000:.2f} ms/step over {steps} steps, "
+          f"total {duration:.2f}s)")
+    print(f"peak memory: {sizeof_fmt(max_memory_allocated(device))}")
+
+    if enable_profile:
+        print(f"\nRunning torch.profiler over {profile_steps} steps "
+              "(measurement loop above is unaffected; profiler adds overhead).")
+        torch.cuda.synchronize(device)
+        with torch_profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=False,
+            with_stack=False,
+        ) as prof:
+            for _ in range(profile_steps):
+                with record_function("step"):
+                    tokens, cu_seqlens = prepare_inputs(
+                        batch_size=batch_size,
+                        seq_len=seq_len,
+                        context_len=context_len,
+                        varlen=varlen,
+                        vocab_size=config.vocab_size,
+                        device=device,
+                    )
+                    outputs = model(tokens, labels=tokens, cu_seqlens=cu_seqlens)
+                    accelerator.backward(outputs.loss)
+                    optimizer.step()
+                    optimizer.zero_grad()
+            torch.cuda.synchronize(device)
+
+        print("=" * 100)
+        print("Top by CUDA time (where the GPU is spending time)")
+        print("=" * 100)
+        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=25))
+
+        print("=" * 100)
+        print("Top by CPU time (host stalls — H2D / launch overhead lives here)")
+        print("=" * 100)
+        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=25))
+
+        if profile_trace:
+            prof.export_chrome_trace(profile_trace)
+            print(f"\nchrome trace written to {profile_trace}")
+            print("  inspect via chrome://tracing or https://ui.perfetto.dev")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", default='retnet')
-    parser.add_argument("--batch_size", default=8, type=int)
-    parser.add_argument("--seq_len", default=2048, type=int)
+    parser.add_argument("--batch_size", default=4, type=int)
+    parser.add_argument("--seq_len", default=4096, type=int)
     parser.add_argument("--context_len", default=None, type=int)
     parser.add_argument("--varlen", action='store_true')
     parser.add_argument("--num_heads", default=None, type=int)
@@ -163,6 +262,8 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_steps", default=64, type=int)
     parser.add_argument("--steps", default=256, type=int)
     parser.add_argument("--compile", action='store_true')
+    parser.add_argument("--profile", action='store_true',
+                        help="run torch.profiler over a few steps after the throughput loop")
     args = parser.parse_args()
     profile(
         name=args.name,
@@ -176,4 +277,5 @@ if __name__ == "__main__":
         warmup_steps=args.warmup_steps,
         steps=args.steps,
         compile=args.compile,
+        enable_profile=args.profile,
     )
