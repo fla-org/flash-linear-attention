@@ -104,7 +104,7 @@ def profile(
     mixed_precision: str = 'bf16',
     compile: bool = False,
     enable_profile: bool = False,
-    profile_steps: int = 8,
+    profile_steps: int = 128,
     profile_trace: str | None = None,
 ):
     device = torch.device('cuda')
