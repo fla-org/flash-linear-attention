@@ -13,7 +13,8 @@ import torch
 from accelerate import Accelerator
 from torch.cuda import max_memory_allocated, memory_allocated
 from torch.optim import AdamW
-from torch.profiler import ProfilerActivity, profile as torch_profile, record_function
+from torch.profiler import ProfilerActivity, record_function
+from torch.profiler import profile as torch_profile
 from tqdm import trange
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.optimization import get_cosine_schedule_with_warmup
@@ -132,7 +133,7 @@ def profile(
                      f"vocab={config.vocab_size}"),
         'data':     f"B={batch_size} T={seq_len} ctx={context_len} varlen={varlen}",
         'training': f"{dtype} (mixed={mixed_precision}) compile={compile} "
-                    f"warmup={warmup_steps} steps={steps}",
+        f"warmup={warmup_steps} steps={steps}",
         'profile':  profile_str,
         'env':      f"{_git_describe()} | {gpu_name} ({device}) | torch {torch.__version__}",
     })
