@@ -88,7 +88,7 @@ def profile(
     name: str,
     batch_size: int = 4,
     seq_len: int = 4096,
-    context_len: int = 2048,
+    context_len: int = 4096,
     varlen: bool = False,
     num_heads: int | None = None,
     head_dim: int | None = None,
