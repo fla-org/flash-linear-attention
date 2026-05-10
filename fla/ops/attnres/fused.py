@@ -22,18 +22,6 @@ from fla.utils import (
     input_guard,
 )
 
-ATTNRES_FWD_BWD_CONFIGS = [
-    triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
-    for BD, num_warps in [(64, 1), (128, 2), (256, 4), (512, 4), (1024, 8)]
-    for num_stages in [3, 4]
-]
-
-ATTNRES_DW_CONFIGS = [
-    triton.Config({'BN': BN, 'BD': BD}, num_warps=num_warps, num_stages=num_stages)
-    for BN, BD, num_warps in [(1024, 16, 4), (2048, 32, 4), (2048, 32, 8), (4096, 32, 8), (4096, 64, 8)]
-    for num_stages in [3, 4]
-]
-
 # residual sources are passed as a list of separately-allocated tensors and
 # accessed inside the kernels via int64 pointer tables — the upstream caller
 # never has to `torch.stack` / `torch.cat` them. each source is read with a
@@ -50,7 +38,11 @@ _TORCH_TO_TL_DTYPE = {
 
 
 @fla_cache_autotune(
-    configs=ATTNRES_FWD_BWD_CONFIGS,
+    configs=[
+        triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
+        for BD, num_warps in [(64, 1), (128, 2), (256, 4), (512, 4), (1024, 8)]
+        for num_stages in [3, 4]
+    ],
     key=['L', 'D', 'HAS_ONORM'],
     **autotune_cache_kwargs,
 )
@@ -169,7 +161,20 @@ def attnres_fwd_kernel(
 
 
 @fla_cache_autotune(
-    configs=ATTNRES_FWD_BWD_CONFIGS,
+    # bwd_dv carries more BL-axis reductions (b_dp, b_dp_w, b_dp_x, b_z, b_o_c1)
+    # than fwd plus a scattered dv store with no fwd analogue, so explore a
+    # wider grid along the per-thread = BD/num_warps contour (32, 64, 128).
+    configs=[
+        triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
+        for BD, num_warps in [
+            (64, 1),   (64, 2),
+            (128, 1),  (128, 2),  (128, 4),
+            (256, 2),  (256, 4),  (256, 8),
+            (512, 4),  (512, 8),  (512, 16),
+            (1024, 8), (1024, 16),
+        ]
+        for num_stages in [3, 4]
+    ],
     key=['L', 'D', 'HAS_ONORM'],
     **autotune_cache_kwargs,
 )
@@ -245,11 +250,12 @@ def attnres_bwd_kernel_dv(
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        # [BL, BD]
+        # [BL, BD] — pass 2 reloads the same v tile, so hint L2 to retain.
         b_v = tl.load(
             p_v[:, None] + (i_n * D + o_d[None, :]),
             mask=m_l[:, None] & m_d[None, :],
             other=0.0,
+            eviction_policy="evict_last",
         ).to(tl.float32)
         # [BD]
         b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
@@ -300,7 +306,13 @@ def attnres_bwd_kernel_dv(
         m_v = m_l[:, None] & m_d[None, :]
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
-        b_v = tl.load(tl.multiple_of(p_v[:, None] + (i_n * D + o_d[None, :]), (1, 16)), mask=m_v, other=0.0).to(tl.float32)
+        # last touch of this v tile — release the L2 line.
+        b_v = tl.load(
+            tl.multiple_of(p_v[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
+            mask=m_v,
+            other=0.0,
+            eviction_policy="evict_first",
+        ).to(tl.float32)
         # [BD]
         b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
         b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
@@ -325,7 +337,11 @@ def attnres_bwd_kernel_dv(
 
 
 @fla_cache_autotune(
-    configs=ATTNRES_DW_CONFIGS,
+    configs=[
+        triton.Config({'BN': BN, 'BD': BD}, num_warps=num_warps, num_stages=num_stages)
+        for BN, BD, num_warps in [(1024, 16, 4), (2048, 32, 4), (2048, 32, 8), (4096, 32, 8), (4096, 64, 8)]
+        for num_stages in [3, 4]
+    ],
     key=['N', 'D', 'HAS_ONORM'],
     **autotune_cache_kwargs,
 )
