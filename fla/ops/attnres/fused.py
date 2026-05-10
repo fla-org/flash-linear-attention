@@ -300,7 +300,7 @@ def attnres_bwd_kernel_dv(
         m_v = m_l[:, None] & m_d[None, :]
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
-        b_v = tl.load(p_v[:, None] + (i_n * D + o_d[None, :]), mask=m_v, other=0.0).to(tl.float32)
+        b_v = tl.load(tl.multiple_of(p_v[:, None] + (i_n * D + o_d[None, :]), (1, 16)), mask=m_v, other=0.0).to(tl.float32)
         # [BD]
         b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
         b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
@@ -319,7 +319,7 @@ def attnres_bwd_kernel_dv(
         )
 
         p_dqw = tl.make_block_ptr(dqw + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        tl.store(p_dv[:, None] + (i_n * D + o_d[None, :]), b_dv.to(DTYPE), mask=m_v)
+        tl.store(tl.multiple_of(p_dv[:, None] + (i_n * D + o_d[None, :]), (1, 16)), b_dv.to(DTYPE), mask=m_v)
         # [BD]
         tl.store(p_dqw, tl.sum(b_ds[:, None] * b_xhat, axis=0), boundary_check=(0,))
 
