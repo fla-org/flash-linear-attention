@@ -961,3 +961,170 @@ def test_gate(
     assert_close("dA", ref_dA, tri_dA, 1e-4)
     if HAS_BIAS:
         assert_close("dbias", ref_dbias, tri_dbias, 1e-4)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-{}".format(*test),
+        )
+        for test in [
+            (1, 4096, 64, 128, torch.float16),
+        ]
+    ],
+)
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_LARGE") == "1",
+    reason="Skipping large-scale chunk test because SKIP_TEST_CHUNK_LARGE is set",
+)
+def test_chunk_bwd_dg_shared_mem_race(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    """Regression test for shared memory race in chunk_bwd dg_last accumulation.
+
+    In fla/ops/common/backends/tilelang/chunk_bwd.py, unguarded writes to
+    s_dg_last_acc[0] (shared memory) cause non-deterministic dg gradients.
+    Using g=0 (no decay) maximizes hidden state growth, amplifying the race
+    condition to produce visibly different results across runs.
+    """
+    if IS_INTEL_ALCHEMIST and D > 128:
+        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
+    torch.manual_seed(42)
+
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    beta = torch.rand(B, T, H, dtype=torch.float).sigmoid()
+    g = torch.zeros(B, T, H, dtype=torch.float32)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q, k, v, beta, g, h0 = map(lambda x: x.to(device), (q, k, v, beta, g, h0))
+    do = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    dht = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    scale = D**-0.5
+
+    dg_baseline = None
+    for i in range(10):
+        q_c = q.clone().requires_grad_(True)
+        k_c = k.clone().requires_grad_(True)
+        v_c = v.clone().requires_grad_(True)
+        g_c = g.clone().requires_grad_(True)
+        beta_c = beta.clone().requires_grad_(True)
+        h0_c = h0.clone().requires_grad_(True)
+
+        tri, tri_ht = chunk_gated_delta_rule(
+            q=F.normalize(q_c, p=2, dim=-1),
+            k=F.normalize(k_c, p=2, dim=-1),
+            v=v_c,
+            g=g_c,
+            beta=beta_c,
+            scale=scale,
+            initial_state=h0_c,
+            output_final_state=True,
+        )
+        ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+        dg_i = g_c.grad.clone()
+
+        if dg_baseline is None:
+            dg_baseline = dg_i
+        else:
+            max_diff = (dg_baseline - dg_i).abs().max().item()
+            assert max_diff == 0.0, (
+                f"dg non-deterministic: run 0 vs run {i}, max_diff={max_diff:.6f}. "
+                f"Shared memory race in chunk_bwd dg_last accumulation "
+                f"(chunk_bwd.py:112)."
+            )
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-D{}-{}".format(*test),
+        )
+        for test in [
+            (1, 4096, 64, 128, torch.float16),
+        ]
+    ],
+)
+@pytest.mark.skipif(
+    os.getenv("SKIP_TEST_CHUNK_LARGE") == "1",
+    reason="Skipping large-scale chunk test because SKIP_TEST_CHUNK_LARGE is set",
+)
+def test_chunk_bwd_dg_accuracy_zero_gate(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    """Accuracy test for dg with zero gate (no decay).
+
+    Complements test_chunk_bwd_dg_shared_mem_race: with g=0 the hidden state
+    grows without bound, amplifying any error in s_dg_last_acc accumulation.
+    Runs chunk backward multiple times and checks worst-case dg error against
+    the naive recurrent reference, catching race-induced outliers.
+    """
+    if IS_INTEL_ALCHEMIST and D > 128:
+        pytest.skip(reason="chunk_gated_delta_rule is not supported on alchemist for D>128")
+    torch.manual_seed(42)
+
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, H, D, dtype=dtype)
+    beta = torch.rand(B, T, H, dtype=torch.float).sigmoid()
+    g = torch.zeros(B, T, H, dtype=torch.float32)
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32)
+    q, k, v, beta, g, h0 = map(lambda x: x.to(device), (q, k, v, beta, g, h0))
+    do = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    dht = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    scale = D**-0.5
+
+    # naive recurrent reference (once)
+    q_r, k_r, v_r, beta_r, g_r, h0_r = [x.clone().requires_grad_(True) for x in (q, k, v, beta, g, h0)]
+    ref, ref_ht = naive_recurrent_gated_delta_rule(
+        q=F.normalize(q_r, p=2, dim=-1),
+        k=F.normalize(k_r, p=2, dim=-1),
+        v=v_r,
+        beta=beta_r,
+        g=g_r,
+        scale=scale,
+        initial_state=h0_r,
+        output_final_state=True,
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward()
+    ref_dg = g_r.grad.clone()
+
+    # chunk backward (multiple runs, track worst-case error)
+    worst_dg = None
+    worst_ratio = 0.0
+    for i in range(100):
+        g_c = g.clone().requires_grad_(True)
+        q_c = q.clone().requires_grad_(True)
+        k_c = k.clone().requires_grad_(True)
+        v_c = v.clone().requires_grad_(True)
+        beta_c = beta.clone().requires_grad_(True)
+        h0_c = h0.clone().requires_grad_(True)
+        tri, tri_ht = chunk_gated_delta_rule(
+            q=F.normalize(q_c, p=2, dim=-1),
+            k=F.normalize(k_c, p=2, dim=-1),
+            v=v_c,
+            g=g_c,
+            beta=beta_c,
+            scale=scale,
+            initial_state=h0_c,
+            output_final_state=True,
+        )
+        ((tri * do).sum() + (tri_ht * dht).sum()).backward()
+        ratio = (g_c.grad - ref_dg).abs().max().item() / ref_dg.abs().max().item()
+        if ratio > worst_ratio:
+            worst_ratio = ratio
+            worst_dg = g_c.grad.clone()
+
+    assert_close("dg (worst of 100 runs)", ref_dg, worst_dg, 0.02)

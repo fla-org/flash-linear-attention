@@ -108,7 +108,8 @@ def _build_kernel(
                 T.reduce_sum(f_hdh, f_hdh_row, dim=1)
                 f_hdh_scalar = T.alloc_fragment((1,), T.float32)
                 T.reduce_sum(f_hdh_row, f_hdh_scalar, dim=0)
-                s_dg_last_acc[0] = s_dg_last_acc[0] + f_hdh_scalar[0]
+                for _i in T.Parallel(1):
+                    s_dg_last_acc[0] = s_dg_last_acc[0] + f_hdh_scalar[0]
 
             if _TS:
                 T.gemm(s_do, s_h, b_dq)
