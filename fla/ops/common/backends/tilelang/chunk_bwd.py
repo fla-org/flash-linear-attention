@@ -126,6 +126,12 @@ def _build_kernel(
                 else:
                     T.gemm(s_dv, s_h, b_dw, transpose_B=True)
 
+        if _USE_G:
+            # Make the single-thread dg_last accumulation visible before all
+            # threads read s_dg_last_acc below. The dw path has its own later
+            # shared-memory barrier, but USE_DW=False needs this one.
+            T.sync_threads()
+
         # ========== store dw (negated, with varlen boundary mask) ==========
         if _USE_DW:
             s_dw_out = T.alloc_shared((_BT, _BK), _dtype)
@@ -135,8 +141,6 @@ def _build_kernel(
             for _i, _j in T.Parallel(_BT, _BK):
                 if (i_t_local * _BT + _i) < T_seq:
                     dw[i_b, t_s + _i, i_h, k_off + _j] = s_dw_out[_i, _j]
-
-        # dg_last is now in s_dg_last_acc[0] (shared memory, visible to all threads)
 
         # ========== load q, k ==========
         s_q = T.alloc_shared((_BT, _BK), _dtype)
