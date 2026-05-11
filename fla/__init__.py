@@ -34,6 +34,8 @@ from fla.layers import (
     RodimusAttention,
     RWKV6Attention,
     RWKV7Attention,
+    SSEGLA,
+    SSEGDN,
 )
 from fla.models import (
     ABCForCausalLM,
@@ -86,6 +88,8 @@ from fla.models import (
     RWKV6Model,
     RWKV7ForCausalLM,
     RWKV7Model,
+    SSEForCausalLM,
+    SSEModel,
     TransformerForCausalLM,
     TransformerModel,
 )
@@ -169,6 +173,10 @@ __all__ = [
     "RodimusAttention",
     "RodimusForCausalLM",
     "RodimusModel",
+    "SSEGLA",
+    "SSEGDN",
+    "SSEForCausalLM",
+    "SSEModel",
     "TransformerForCausalLM",
     "TransformerModel",
 ]
