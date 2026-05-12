@@ -1130,6 +1130,7 @@ def test_chunk_bwd_dg_accuracy_zero_gate(
 
     assert_close("dg (worst of 100 runs)", ref_dg, worst_dg, 0.02)
 
+
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D'),
     [
