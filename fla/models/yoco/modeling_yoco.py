@@ -19,7 +19,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.gated_deltanet import GatedDeltaNet
-from fla.layers.yoco_attn import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
+from fla.layers.yoco import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.models.yoco.configuration_yoco import YOCOConfig
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
