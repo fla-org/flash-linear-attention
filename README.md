@@ -29,7 +29,8 @@
 
 ## News
 
-- [2026-04] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
+- [2026-05] 🚀 Add [YOCO](https://arxiv.org/abs/2405.05254) (You Only Cache Once) implementation to `fla`.
+- [2026-05] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
 - [2026-04] 🐍 Add Mamba-3 implementation to `fla` ([paper](https://arxiv.org/abs/2603.15569)).
 - [2026-04] 🧱 Add [MoBA](https://arxiv.org/abs/2502.13189) (Mixture of Block Attention) implementation to `fla`, with [FlashMoBA](https://github.com/mit-han-lab/flash-moba) backend support.
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
@@ -83,6 +84,7 @@
 | 2024 | HGRN2                | [HGRN2: Gated Linear RNNs with State Expansion](https://arxiv.org/abs/2404.07904)                                                             | [official](https://github.com/OpenNLPLab/HGRN2)                                                 |        [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/hgrn2.py)         |
 | 2024 | RWKV6                | [Eagle and Finch: RWKV with Matrix-Valued States and Dynamic Recurrence](https://arxiv.org/abs/2404.05892)                                    | [official](https://github.com/RWKV/RWKV-LM)                                                     |        [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/rwkv6.py)         |
 | 2024 | LightNet             | [You Only Scan Once: Efficient Multi-dimension Sequential Modeling with LightNet](https://arxiv.org/abs/2405.21022)                           | [official](https://github.com/OpenNLPLab/LightNet)                                              |       [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/lightnet.py)       |
+| 2024 | YOCO                 | [You Only Cache Once: Decoder-Decoder Architectures for Language Models](https://arxiv.org/abs/2405.05254)                                    | [official](https://github.com/microsoft/unilm/tree/master/YOCO)                                 |          [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/yoco)           |
 | 2024 | Mamba2               | [Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality](https://arxiv.org/abs/2405.21060) | [official](https://github.com/state-spaces/mamba)                                               |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba2)          |
 | 2024 | GSA                  | [Gated Slot Attention for Efficient Linear-Time Sequence Modeling](https://arxiv.org/abs/2409.07146)                                          | [official](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)          |           [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/gsa)           |
 | 2024 | MLA                  | [DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434)                        | [official](https://github.com/deepseek-ai/DeepSeek-V2)                                          |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/mla.py)          |
