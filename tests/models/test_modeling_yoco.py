@@ -20,6 +20,7 @@ def _create_yoco_config_kwargs(
     vocab_size: int = 1000,
     self_decoder_attn_type: str = 'gated_deltanet',
     self_window_size: int | None = None,
+    attnres_block_size: int | None = None,
 ):
     self_decoder_attn = {
         'type': self_decoder_attn_type,
@@ -48,6 +49,7 @@ def _create_yoco_config_kwargs(
         'fuse_norm': False,
         'fuse_swiglu': False,
         'fuse_cross_entropy': False,
+        'attnres_block_size': attnres_block_size,
     }
 
 
@@ -59,6 +61,7 @@ def _create_yoco_config(
     vocab_size: int = 1000,
     self_decoder_attn_type: str = 'gated_deltanet',
     self_window_size: int | None = None,
+    attnres_block_size: int | None = None,
 ):
     return YOCOConfig(
         **_create_yoco_config_kwargs(
@@ -68,6 +71,7 @@ def _create_yoco_config(
             vocab_size=vocab_size,
             self_decoder_attn_type=self_decoder_attn_type,
             self_window_size=self_window_size,
+            attnres_block_size=attnres_block_size,
         ),
         use_l2warp=use_l2warp,
     )
@@ -77,15 +81,17 @@ def _create_yoco_config(
 # Test for Modeling (Forward/Backward Pass)
 # ===================================================================================
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'self_decoder_attn_type', 'use_l2warp', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'self_decoder_attn_type', 'use_l2warp', 'attnres_block_size', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-attn{}-use_l2warp{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-attn{}-use_l2warp{}-bs{}-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, 'gated_deltanet', True, torch.bfloat16),
-            (4, 4, 1024, 4, 64, 'gated_deltanet', False, torch.bfloat16),
-            (4, 2, 32, 4, 32, 'gated_retention', False, torch.bfloat16),
-            (4, 2, 96, 4, 32, 'gated_retention', False, torch.bfloat16),
-            (4, 2, 128, 4, 32, 'swa', False, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 'gated_deltanet', True,  None, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 'gated_deltanet', False, None, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 'gated_deltanet', False, 1,    torch.bfloat16),
+            (4, 4, 1024, 4, 64, 'gated_deltanet', False, 4,    torch.bfloat16),
+            (4, 2, 32, 4, 32, 'gated_retention', False, None, torch.bfloat16),
+            (4, 2, 96, 4, 32, 'gated_retention', False, None, torch.bfloat16),
+            (4, 2, 128, 4, 32, 'swa', False, None, torch.bfloat16),
         ]
     ],
 )
@@ -97,6 +103,7 @@ def test_modeling(
     D: int,
     self_decoder_attn_type: str,
     use_l2warp: bool,
+    attnres_block_size: int | None,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -114,6 +121,7 @@ def test_modeling(
             H,
             D,
             self_decoder_attn_type=self_decoder_attn_type,
+            attnres_block_size=attnres_block_size,
         ),
     )
 

@@ -36,6 +36,7 @@ class YOCOConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
+        attnres_block_size: int | None = None,
         **kwargs
     ):
         self.hidden_size = hidden_size
@@ -55,6 +56,7 @@ class YOCOConfig(PretrainedConfig):
         self.fuse_cross_entropy = fuse_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.attnres_block_size = attnres_block_size
 
         if self_decoder_attn is not None and not isinstance(self_decoder_attn, dict):
             raise ValueError("self_decoder_attn must be a dictionary")
@@ -105,6 +107,12 @@ class YOCOConfig(PretrainedConfig):
             raise ValueError("self_decoder_attn['window_size'] must be set when self_decoder_attn['type']='swa'")
         if self.cross_decoder_attn['rope_inv_freq'] not in {'fla', 'yoco'}:
             raise ValueError("cross_decoder_attn['rope_inv_freq'] must be one of {'fla', 'yoco'}")
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
