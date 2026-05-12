@@ -48,6 +48,17 @@ def shape_HD(B, T, H, D, **kw):
     return (H, D)
 
 
+def shape_D(B, T, H, D, **kw):
+    return (D,)
+
+
+def shape_LBTD(B, T, H, D, L=None, **kw):
+    """AttnRes-style residuals stack: [L, B, T, D] where L is the number of residual sources."""
+    if L is None:
+        raise ValueError("shape_LBTD requires the 'L' shape config key")
+    return (L, B, T, D)
+
+
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------
@@ -102,16 +113,35 @@ class OpConfig:
     """Registry entry describing how to benchmark a single op.
 
     Args:
-        name:           display/registry name, e.g. 'chunk_gla'
-        import_path:    Python module path, e.g. 'fla.ops.gla'
-        inputs:         param_name -> TensorSpec mapping
-        func_name:      actual function attribute name if different from *name*
-        extra_kwargs:   constant keyword args passed to the op
-        output_is_tuple: True if output[0] is the tensor to .backward()
-        skip_backward:  True to skip fwdbwd mode
-        post_init:      callable(inputs_dict, B, T, H, D, **kw) for custom mutation
-        category:       grouping label
-        dim_constraints: e.g. {'D': [64, 128]} — skip shapes that don't match
+        name (str):
+            Display and registry name, such as `chunk_gla`.
+        import_path (str):
+            Python module path, such as `fla.ops.gla`.
+        inputs (dict[str, TensorSpec]):
+            Mapping from function argument names to tensor specs.
+        func_name (str, Optional):
+            Function attribute name to import when it differs from `name`.
+            Default: None.
+        extra_kwargs (dict[str, Any], Optional):
+            Constant keyword arguments passed to the op. Default: `{}`.
+        output_is_tuple (bool):
+            Whether the op returns a tuple whose first item is the tensor used
+            for `.backward()`. Default: `True`.
+        skip_backward (bool):
+            Whether to skip forward-backward benchmark mode. Default: `False`.
+        post_init (Callable, Optional):
+            Callback invoked as `post_init(inputs, B=B, T=T, H=H, D=D, **kw)`
+            for custom input mutation. Default: None.
+        category (str):
+            Grouping label used in reports. Default: `''`.
+        dim_constraints (dict, Optional):
+            Shape constraints, such as `{'D': [64, 128]}`. Shapes that do not
+            match are skipped. Default: None.
+        default_shapes (dict[str, dict[str, int]], Optional):
+            Per-op shape configs used instead of the global `SHAPE_CONFIGS`.
+            This is useful when the op's shape semantics differ from `B/T/H/D`,
+            for example when AttnRes uses an extra `L` residual-source axis.
+            Default: None.
     """
     name: str
     import_path: str
@@ -123,6 +153,7 @@ class OpConfig:
     post_init: Callable | None = None
     category: str = ''
     dim_constraints: dict | None = None
+    default_shapes: dict[str, dict[str, int]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -419,4 +450,41 @@ register_op(OpConfig(
     extra_kwargs={'causal': True},
     output_is_tuple=False,
     category='flash_attn',
+))
+
+# --- M: layer-axis residual aggregation (AttnRes, mHC, ...) ---
+# These ops attend / aggregate over an `L` axis of stacked residual sources.
+# Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
+
+_layer_default_shapes = {
+    'L8_B1_T8K_D2K':   {'L': 8,  'B': 1, 'T': 8192,  'H': 1, 'D': 2048},
+    'L8_B1_T32K_D2K':  {'L': 8,  'B': 1, 'T': 32768, 'H': 1, 'D': 2048},
+    'L10_B1_T8K_D4K':  {'L': 10, 'B': 1, 'T': 8192,  'H': 1, 'D': 4096},
+    'L10_B1_T32K_D4K': {'L': 10, 'B': 1, 'T': 32768, 'H': 1, 'D': 4096},
+    'L32_B1_T8K_D2K':  {'L': 64, 'B': 1, 'T': 8192,  'H': 1, 'D': 8192},
+}
+
+
+_attnres_inputs = {
+    'query': TensorSpec(shape_D),
+    'residuals': TensorSpec(shape_LBTD),
+    'rms_weight': TensorSpec(shape_D),
+}
+
+register_op(OpConfig(
+    name='fused_attnres',
+    import_path='fla.ops.attnres',
+    inputs=_attnres_inputs,
+    output_is_tuple=False,
+    default_shapes=_layer_default_shapes,
+    category='fused_attnres',
+))
+
+register_op(OpConfig(
+    name='naive_attnres',
+    import_path='fla.ops.attnres',
+    inputs=_attnres_inputs,
+    output_is_tuple=False,
+    default_shapes=_layer_default_shapes,
+    category='naive_attnres',
 ))

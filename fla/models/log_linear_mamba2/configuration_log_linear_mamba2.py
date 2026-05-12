@@ -16,8 +16,18 @@ class LogLinearMamba2Config(Mamba2Config):
         self,
         residual_in_fp32: bool = False,
         chunk_size: int = 64,
+        attnres_block_size: int | None = None,
         **kwargs,
     ):
+        self.attnres_block_size = attnres_block_size
+
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
+
         super().__init__(
             residual_in_fp32=residual_in_fp32,
             chunk_size=chunk_size,

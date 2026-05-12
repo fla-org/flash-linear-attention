@@ -7,6 +7,7 @@
 
 from .abc import chunk_abc
 from .attn import parallel_attn
+from .attnres import fused_attnres
 from .based import fused_chunk_based, parallel_based
 from .comba import chunk_comba, fused_recurrent_comba
 from .delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_delta_rule
@@ -52,6 +53,7 @@ __all__ = [
     'chunk_rwkv6',
     'chunk_rwkv7',
     'chunk_simple_gla',
+    'fused_attnres',
     'fused_chunk_based',
     'fused_chunk_delta_rule',
     'fused_chunk_gla',

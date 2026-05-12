@@ -46,6 +46,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         use_forget_gate: bool = False,
         allow_neg_eigval: bool = False,
         num_householder: int = 1,
+        attnres_block_size: int | None = None,
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -89,6 +90,7 @@ class GatedDeltaProductConfig(PretrainedConfig):
         self.allow_neg_eigval = allow_neg_eigval
         self.num_householder = num_householder
         self.use_forget_gate = use_forget_gate
+        self.attnres_block_size = attnres_block_size
 
         if attn is not None:
             if not isinstance(attn, dict):
@@ -101,6 +103,13 @@ class GatedDeltaProductConfig(PretrainedConfig):
             attn['qkv_bias'] = attn.get('qkv_bias', False)
             attn['window_size'] = attn.get('window_size', None)
             attn['rope_theta'] = attn.get('rope_theta', 10000.)
+
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,
