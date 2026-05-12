@@ -346,6 +346,26 @@ class CachedAutotuner(Autotuner):
         super().__init__(fn, arg_names, configs, key, reset_to_zero, restore_value, **kwargs)
         self.kernel_name = fn.fn.__name__ if hasattr(fn, 'fn') else fn.__name__
 
+        # Replace Triton's default pre/post hooks with None-safe versions. The defaults
+        # unconditionally call .clone()/.copy_()/.zero_() on every restore_value /
+        # reset_to_zero name, which crashes when a kernel arg is None (idiomatic for
+        # optional pointers gated by a tl.constexpr flag). User-supplied hooks are
+        # left alone.
+        if not self.user_defined_pre_hook and (self.reset_to_zero or self.restore_value):
+            def _pre_hook(kw, reset_only=False):
+                for n in self.reset_to_zero:
+                    if kw[n] is not None:
+                        kw[n].zero_()
+                if not reset_only:
+                    self.restore_copies = {n: kw[n].clone() for n in self.restore_value if kw[n] is not None}
+            self.pre_hook = _pre_hook
+        if not self.user_defined_post_hook and self.restore_value:
+            def _post_hook(kw, exception):
+                for n, copy in self.restore_copies.items():
+                    kw[n].copy_(copy)
+                self.restore_copies = {}
+            self.post_hook = _post_hook
+
     def should_check_fla_cache(self, key: AutotuneKey) -> bool:
         if FLA_CACHE_MODE is FlaCacheMode.DISABLED:
             return False
