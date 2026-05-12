@@ -52,7 +52,6 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        use_exp2: bool = False,
         transpose_state_layout: bool = False,
     ) -> tuple[bool, str | None]:
         """Check if intracard CP should handle this call."""
@@ -80,7 +79,6 @@ class IntraCardCPBackend(BaseBackend):
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        use_exp2: bool = False,
         transpose_state_layout: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Intra-card CP implementation of chunk_gated_delta_rule_fwd_h."""
@@ -95,7 +93,6 @@ class IntraCardCPBackend(BaseBackend):
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
-            use_exp2=use_exp2,
             max_splits=MAX_SUBSEQS,
             transpose_state_layout=transpose_state_layout,
         )

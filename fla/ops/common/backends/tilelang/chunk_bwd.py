@@ -19,10 +19,21 @@ from fla.utils import check_shared_mem
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
 def _build_kernel(
-    B, H, K, V, BT, BK, BV, NK,
-    hD1, hD2,
+    B,
+    H,
+    K,
+    V,
+    BT,
+    BK,
+    BV,
+    NK,
+    hD1,
+    hD2,
     dtype_str,
-    USE_G, USE_DW, USE_EXP2, TRANSPOSE_STATE, IS_VARLEN=False,
+    USE_G,
+    USE_DW,
+    TRANSPOSE_STATE,
+    IS_VARLEN=False,
     num_warps=4,
 ):
     dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
@@ -39,7 +50,7 @@ def _build_kernel(
     _NV = NV
     _hD1, _hD2, _thD1, _thD2 = hD1, hD2, tile_hD1, tile_hD2
     _threads = threads
-    _USE_G, _USE_DW, _USE_EXP2 = USE_G, USE_DW, USE_EXP2
+    _USE_G, _USE_DW = USE_G, USE_DW
     _TS, _VAR = TRANSPOSE_STATE, IS_VARLEN
 
     # T, NT, total_h are dynamic (vary with sequence length, no recompilation).
@@ -159,18 +170,18 @@ def _build_kernel(
             last_pos = T.max(0, T.min(_BT, T_seq - i_t_local * _BT) - 1)
             g_last = s_g[last_pos]
             b_dg_last = T.alloc_var(T.float32)
-            b_dg_last = s_dg_last_acc[0] * (T.exp2(g_last) if _USE_EXP2 else T.exp(g_last))
+            b_dg_last = s_dg_last_acc[0] * T.exp2(g_last)
 
-            # b_dq *= exp(g) * scale  (inline, no extra fragment)
+            # b_dq *= exp2(g) * scale  (inline, no extra fragment)
             for _i, _j in T.Parallel(_BT, _BK):
-                b_dq[_i, _j] = b_dq[_i, _j] * (T.exp2(s_g[_i]) if _USE_EXP2 else T.exp(s_g[_i])) * scale
+                b_dq[_i, _j] = b_dq[_i, _j] * T.exp2(s_g[_i]) * scale
 
             # Gate b_dk with m_t mask: zero out OOB positions
             for _i, _j in T.Parallel(_BT, _BK):
                 m_t = (i_t_local * _BT + _i) < T_seq
                 b_dk[_i, _j] = T.if_then_else(
                     m_t,
-                    b_dk[_i, _j] * (T.exp2(-s_g[_i] + g_last) if _USE_EXP2 else T.exp(-s_g[_i] + g_last)),
+                    b_dk[_i, _j] * T.exp2(-s_g[_i] + g_last),
                     0.0)
 
             # dk*k reduction (before ds gemms): compute product directly in
@@ -185,12 +196,12 @@ def _build_kernel(
             T.reduce_sum(f_dg2, f_dkk_scalar, dim=0)
             b_dg_last = b_dg_last + f_dkk_scalar[0]
 
-            # b_ds = where(causal, b_ds * exp(g_i - g_j), 0) * scale
+            # b_ds = where(causal, b_ds * exp2(g_i - g_j), 0) * scale
             for _i, _j in T.Parallel(_BT, _BT):
                 causal = (_i >= _j) & ((i_t_local * _BT + _i) < T_seq) & ((i_t_local * _BT + _j) < T_seq)
                 b_ds[_i, _j] = T.if_then_else(
                     causal,
-                    b_ds[_i, _j] * (T.exp2(s_g[_i] - s_g[_j]) if _USE_EXP2 else T.exp(s_g[_i] - s_g[_j])) * scale,
+                    b_ds[_i, _j] * T.exp2(s_g[_i] - s_g[_j]) * scale,
                     0.0)
 
             # cast ds for final gemms
@@ -289,10 +300,21 @@ def _build_kernel(
 
 
 def chunk_bwd_dqkwg_tilelang(
-    q, k, v, do, h, dh,
-    w=None, g=None, g_gamma=None, dv=None,
-    scale=None, cu_seqlens=None, chunk_size=64,
-    chunk_indices=None, use_exp2=False, transpose_state_layout=False,
+    q,
+    k,
+    v,
+    do,
+    h,
+    dh,
+    w=None,
+    g=None,
+    g_gamma=None,
+    dv=None,
+    scale=None,
+    cu_seqlens=None,
+    chunk_size=64,
+    chunk_indices=None,
+    transpose_state_layout=False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -323,9 +345,21 @@ def chunk_bwd_dqkwg_tilelang(
 
     # Cache key: B, H, tile sizes, flags. T is dynamic (no recompilation for different seq lengths).
     kernel = _build_kernel(
-        B, H, K, V, BT, BK, BV, NK,
-        hD1, hD2, dtype_str,
-        USE_G, USE_DW, use_exp2, transpose_state_layout, IS_VARLEN,
+        B,
+        H,
+        K,
+        V,
+        BT,
+        BK,
+        BV,
+        NK,
+        hD1,
+        hD2,
+        dtype_str,
+        USE_G,
+        USE_DW,
+        transpose_state_layout,
+        IS_VARLEN,
     )
 
     # Unused optional params still need shape-matching tensors for TileLang

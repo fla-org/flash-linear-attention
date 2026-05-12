@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 
 
 @triton.jit()
@@ -94,9 +94,9 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     p_lamb = tl.make_block_ptr(lamb, (K,), (1,), (0,), (BK,), (0,))
     b_lamb = tl.load(p_lamb, boundary_check=(0,)).to(tl.float32)
 
-    b_m = exp(b_g[:, None] - b_g[None, :]) * b_beta[None, :]
+    b_m = exp2(b_g[:, None] - b_g[None, :]) * b_beta[None, :]
     b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), b_m, 0)
-    b_g_exp_q = tl.exp(b_g)[:, None]
+    b_g_exp_q = exp2(b_g)[:, None]
 
     b_x = tl.zeros([BT, BK], dtype=tl.float32)
     b_p = tl.zeros([BT, BK], dtype=tl.float32)

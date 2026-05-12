@@ -90,7 +90,6 @@ def _raw_chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
@@ -115,10 +114,23 @@ def _raw_chunk_gated_delta_rule_fwd_h(
         return (triton.cdiv(V, meta['BV']), N * HV)
 
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
-        k=k, v=u, w=w, v_new=v_new,
-        g=g, gk=gk, h=h, h0=initial_state, ht=final_state,
-        cu_seqlens=cu_seqlens, chunk_offsets=chunk_offsets,
-        T=T, HV=HV, H=H, K=K, V=V, BT=BT, USE_EXP2=use_exp2,
+        k=k,
+        v=u,
+        w=w,
+        v_new=v_new,
+        g=g,
+        gk=gk,
+        h=h,
+        h0=initial_state,
+        ht=final_state,
+        cu_seqlens=cu_seqlens,
+        chunk_offsets=chunk_offsets,
+        T=T,
+        HV=HV,
+        H=H,
+        K=K,
+        V=V,
+        BT=BT,
         TRANSPOSE_STATE=transpose_state_layout,
     )
     return h, v_new, final_state
@@ -247,7 +259,6 @@ def intracard_pre_scan(
     cu_seqlens_subseq_split: torch.Tensor,
     S_split: int,
     chunk_size: int = 64,
-    use_exp2: bool = True,
 ):
     H, K, V, HV = kg.shape[2], kg.shape[3], u.shape[3], u.shape[2]
     BK = triton.next_power_of_2(K)
@@ -274,7 +285,6 @@ def intracard_pre_scan(
         BT=chunk_size,
         BLOCK_SIZE=BLOCK_SIZE,
         BK1=BK,
-        USE_EXP2=use_exp2,
         MULTI_SEQS=True,
     )
 
@@ -316,8 +326,8 @@ def intracard_merge(
     n_so = len(merge_seq_offsets)
     n_io = len(merge_init_offsets)
     seq_offsets = all_tensor[:n_so]
-    init_offsets = all_tensor[n_so:n_so + n_io]
-    h0_seq_ids = all_tensor[n_so + n_io:]
+    init_offsets = all_tensor[n_so:n_so+n_io]
+    h0_seq_ids = all_tensor[n_so+n_io:]
 
     if transpose_state_layout:
         initial_states_merge = hm.new_empty(num_non_first, HV, V, K, dtype=torch.float32)
@@ -374,7 +384,7 @@ def _precompute_intracard_indices(
     cu_seqlens_split_values: list[int] = []
     S_split_total = 0
     for s, n in zip(starts, num_ss):
-        cu_seqlens_split_values.extend(cu_seqlens_subseq_values[s:s + n + 1])
+        cu_seqlens_split_values.extend(cu_seqlens_subseq_values[s:s+n+1])
         S_split_total += n
 
     # num_subseqs_per_seq: [N_orig], default 1 for unsplit sequences
@@ -435,7 +445,6 @@ def intracard_fwd_h(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    use_exp2: bool = False,
     max_splits: int = 32,
     transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -502,14 +511,17 @@ def intracard_fwd_h(
 
     if early_return or not split_info:
         return _raw_chunk_gated_delta_rule_fwd_h(
-            k=k, w=w, u=u, g=g, gk=gk,
+            k=k,
+            w=w,
+            u=u,
+            g=g,
+            gk=gk,
             initial_state=initial_state,
             output_final_state=output_final_state,
             chunk_size=chunk_size,
             save_new_value=save_new_value,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
-            use_exp2=use_exp2,
             transpose_state_layout=transpose_state_layout,
         )
 
@@ -555,11 +567,14 @@ def intracard_fwd_h(
             _intracard_cache.popitem(last=False)
 
     hm = intracard_pre_scan(
-        kg=k, w=w, u=u, g=g, gk=gk,
+        kg=k,
+        w=w,
+        u=u,
+        g=g,
+        gk=gk,
         cu_seqlens_subseq_split=cu_seqlens_split_flat,
         S_split=S_split_total,
         chunk_size=chunk_size,
-        use_exp2=use_exp2,
     )
 
     initial_states_merge, num_non_first = intracard_merge(
@@ -598,7 +613,6 @@ def intracard_fwd_h(
         save_new_value=save_new_value,
         cu_seqlens=cu_seqlens_subseq_gpu,
         chunk_indices=chunk_indices_subseq,
-        use_exp2=use_exp2,
         transpose_state_layout=transpose_state_layout,
     )
 

@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_offsets
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2, safe_dot
 from fla.utils import autotune_cache_kwargs
 
 
@@ -103,12 +103,12 @@ def chunk_mesa_net_fwd_kernel_h(
         # scalar decay
         b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
         p_g = g + bos*H + (i_t * BT + tl.arange(0, BT)) * H + i_h
-        b_h *= exp(b_g_last)
-        b_h_kv *= exp(b_g_last)
+        b_h *= exp2(b_g_last)
+        b_h_kv *= exp2(b_g_last)
         b_g = tl.load(p_g, mask=(i_t * BT + tl.arange(0, BT) < T), other=0.)
-        b_k_decay = ((b_k * exp(b_g_last - b_g)[:, None]) * b_beta[:, None]).to(b_k2.dtype)
-        b_h += tl.dot(tl.trans(b_k_decay), b_k2)
-        b_h_kv += tl.dot(tl.trans(b_k_decay), b_v.to(b_k2.dtype))
+        b_k_decay = ((b_k * exp2(b_g_last - b_g)[:, None]) * b_beta[:, None]).to(b_k2.dtype)
+        b_h += safe_dot(tl.trans(b_k_decay), b_k2)
+        b_h_kv += safe_dot(tl.trans(b_k_decay), b_v.to(b_k2.dtype))
 
     if STORE_FINAL_STATE:
         p_ht = tl.make_block_ptr(h_final + i_nh * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
