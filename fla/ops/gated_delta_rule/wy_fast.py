@@ -242,8 +242,8 @@ def recompute_w_u_fwd(
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    w = k.new_empty(B, T, HV, K)
-    u = torch.empty_like(v)
+    w = k.new_zeros(B, T, HV, K)
+    u = torch.zeros_like(v)
     recompute_w_u_fwd_kernel[(NT, B*HV)](
         k=k,
         v=v,
@@ -286,10 +286,10 @@ def prepare_wy_repr_bwd(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
 
-    dk = k.new_empty(B, T, HV, K)
-    dv = torch.empty_like(v)
-    dg = torch.empty_like(g) if g is not None else None
-    db = torch.empty_like(beta)
+    dk = k.new_zeros(B, T, HV, K)
+    dv = torch.zeros_like(v)
+    dg = torch.zeros_like(g) if g is not None else None
+    db = torch.zeros_like(beta)
     prepare_wy_repr_bwd_kernel[(NT, B * HV)](
         k=k,
         v=v,

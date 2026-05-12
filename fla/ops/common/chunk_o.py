@@ -518,7 +518,7 @@ def chunk_fwd_o(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    o = torch.empty_like(v)
+    o = torch.zeros_like(v)
     def grid(meta): return (triton.cdiv(V, meta['BV']), NT, B * HV)
     chunk_fwd_kernel_o[grid](
         q=q,
@@ -572,7 +572,7 @@ def chunk_bwd_dv(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    dv = torch.empty_like(do)
+    dv = torch.zeros_like(do)
     grid = (NV, NT, B * HV)
     chunk_bwd_kernel_dv[grid](
         q=q,
@@ -624,7 +624,7 @@ def chunk_bwd_dv_local(
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
-    dv = torch.empty_like(do)
+    dv = torch.zeros_like(do)
     grid = (NT, B * HV)
     chunk_bwd_kernel_dv_local[grid](
         q=q,
@@ -689,10 +689,10 @@ def chunk_bwd_dqkwg(
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
     NK = triton.cdiv(K, BK)
-    dq = q.new_empty(B, T, HV, K)
-    dk = k.new_empty(B, T, HV, K)
-    dg = torch.empty(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
-    dw = torch.empty_like(w) if w is not None else None
+    dq = q.new_zeros(B, T, HV, K)
+    dk = k.new_zeros(B, T, HV, K)
+    dg = torch.zeros(NK, *g.shape, dtype=torch.float32, device=g.device) if g is not None else None
+    dw = torch.zeros_like(w) if w is not None else None
 
     grid = (NK, NT, B * HV)
     chunk_bwd_kernel_dqkwg[grid](

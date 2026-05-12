@@ -625,13 +625,13 @@ def chunk_gated_delta_rule_fwd_h(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     if transpose_state_layout:
-        h = k.new_empty(B, NT, HV, V, K)
+        h = k.new_zeros(B, NT, HV, V, K)
         final_state = k.new_zeros(N, HV, V, K, dtype=torch.float32) if output_final_state else None
     else:
-        h = k.new_empty(B, NT, HV, K, V)
+        h = k.new_zeros(B, NT, HV, K, V)
         final_state = k.new_zeros(N, HV, K, V, dtype=torch.float32) if output_final_state else None
 
-    v_new = torch.empty_like(u) if save_new_value else None
+    v_new = torch.zeros_like(u) if save_new_value else None
     def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64[grid](
         k=k,
@@ -685,11 +685,11 @@ def chunk_gated_delta_rule_bwd_dhu(
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
     if transpose_state_layout:
-        dh = q.new_empty(B, NT, HV, V, K)
+        dh = q.new_zeros(B, NT, HV, V, K)
     else:
-        dh = q.new_empty(B, NT, HV, K, V)
-    dh0 = torch.empty_like(h0, dtype=torch.float32) if h0 is not None else None
-    dv2 = torch.empty_like(dv)
+        dh = q.new_zeros(B, NT, HV, K, V)
+    dh0 = torch.zeros_like(h0, dtype=torch.float32) if h0 is not None else None
+    dv2 = torch.zeros_like(dv)
 
     def grid(meta): return (triton.cdiv(V, meta['BV']), N*HV)
     chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64[grid](
