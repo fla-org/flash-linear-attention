@@ -86,11 +86,7 @@ def attnres_fwd_kernel(
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         # [BL, BD] gather: row l from source l's storage at offset i_n*D + o_d
-        b_v = tl.load(
-            p_v[:, None] + (i_n * D + o_d[None, :]),
-            mask=m_l[:, None] & m_d[None, :],
-            other=0.0,
-        ).to(tl.float32)
+        b_v = tl.load(p_v[:, None] + (i_n * D + o_d[None, :]), mask=m_l[:, None] & m_d[None, :], other=0.0).to(tl.float32)
         # [BD]
         b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 
@@ -115,8 +111,8 @@ def attnres_fwd_kernel(
     tl.store(p_p, b_p.to(p_p.dtype.element_ty), boundary_check=(0,))
 
     # second pass: compute `b_o = sum_l p_l * v_l`, write it to `o`, and optionally accumulate `b_o_var` for output rstd.
-    # when HAS_ONORM=True, the Python wrapper allocates `o` as fp32 so the unnormalized mix survives the pass 2 -> pass 3
-    # round trip through gmem; pass 3 normalizes in place, and the wrapper casts to the residual dtype once at the end.
+    # `o` is allocated in the residual dtype; the pass 2 -> pass 3 round trip goes through a dtype cast (rtne rounding),
+    # which is fine since the final output is in that dtype anyway.  pass 3 normalizes in place.
     b_o_var = tl.zeros([], dtype=tl.float32)
     for i_d in range(0, D, BD):
         o_d = i_d + tl.arange(0, BD)
@@ -126,11 +122,7 @@ def attnres_fwd_kernel(
         m_d = o_d < D
         p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
         # [BL, BD]
-        b_v = tl.load(
-            p_v[:, None] + (i_n * D + o_d[None, :]),
-            mask=m_l[:, None] & m_d[None, :],
-            other=0.0,
-        ).to(tl.float32)
+        b_v = tl.load(p_v[:, None] + (i_n * D + o_d[None, :]), mask=m_l[:, None] & m_d[None, :], other=0.0).to(tl.float32)
         # [BD]
         b_o = tl.sum(b_v * b_p[:, None], axis=0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
@@ -404,11 +396,8 @@ def fused_attnres_fwd(
 
     stats_shape = (L, *output_shape[:-1])
 
-    # under HAS_ONORM, keep `o` in fp32 for the pass 2 -> pass 3 round trip, then cast to the residual dtype once at the end.
-    # backward recomputes `o_pre = sum_l p_l * v_l` from saved `p` and `res`, so no [N, D] activation is kept across
-    # fwd->bwd; only the smaller per-source RMSNorm coupling `score_mean` is saved to avoid repeating the score dot product.
     has_onorm = ow is not None
-    o = torch.empty(output_shape, device=residuals[0].device, dtype=torch.float32 if has_onorm else dtype)
+    o = torch.empty(output_shape, device=residuals[0].device, dtype=dtype)
     p = torch.empty(stats_shape, device=residuals[0].device, dtype=torch.float32)
     rstd = torch.empty_like(p)
     score_mean = torch.empty_like(p)
@@ -437,9 +426,6 @@ def fused_attnres_fwd(
         HAS_ONORM=has_onorm,
         DTYPE=DTYPE,
     )
-
-    if has_onorm:
-        o = o.to(dtype)
 
     return o, p, rstd, score_mean, o_rstd
 
