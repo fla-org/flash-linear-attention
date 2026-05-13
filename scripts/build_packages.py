@@ -5,9 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-#!/usr/bin/env python3
-"""Build split packages with proper dependency management and copy them to target directory."""
-
 import ast
 import re
 import shutil
@@ -107,9 +104,9 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
 
     content += extras_content
 
-    # Add setuptools namespace package configuration for extension package
-    if name == 'flash-linear-attention':
-        content += """
+    # both split packages contribute subpackages under the shared `fla`
+    # namespace, so both generated pyproject.toml files need namespace discovery.
+    content += """
 
 [tool.setuptools.packages.find]
 include = ["fla*"]
