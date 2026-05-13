@@ -117,7 +117,7 @@ namespaces = true
         f.write(content)
 
 
-def build_split_packages():
+def build_split_packages(output_dir: str | Path | None = None):
     """Build split packages with proper dependency management."""
     # get script directory and find files relative to it
     script_dir = Path(__file__).parent
@@ -140,7 +140,10 @@ def build_split_packages():
     ext_deps.insert(0, f'fla-core=={version}')
 
     # create output directory
-    output_dir = script_dir / 'dist'
+    if output_dir is None:
+        output_dir = script_dir / 'dist'
+    else:
+        output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
 
     # create fla-core package
