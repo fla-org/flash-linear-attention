@@ -15,7 +15,7 @@ from pathlib import Path
 
 def extract_dependencies():
     """Extract dependencies from setup.py using AST."""
-    # Get script directory and find setup.py in parent directory
+    # get script directory and find setup.py in parent directory
     script_dir = Path(__file__).parent
     setup_py = script_dir.parent / 'setup.py'
 
@@ -46,7 +46,7 @@ def extract_dependencies():
                                 if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
                             ]
                             extras[key] = values
-            break  # Assume only one setup() call
+            break  # assume only one setup() call
 
     return all_deps, extras
 
@@ -79,7 +79,7 @@ def create_pyproject_toml(package_dir, name, version, dependencies, extras=None)
 
     deps_content = ', '.join(f'"{dep}"' for dep in dependencies)
 
-    # Create description text
+    # create description text
     if name == 'fla-core':
         desc_text = 'Core operations for flash-linear-attention'
     else:
@@ -119,11 +119,11 @@ namespaces = true
 
 def build_split_packages():
     """Build split packages with proper dependency management."""
-    # Get script directory and find files relative to it
+    # get script directory and find files relative to it
     script_dir = Path(__file__).parent
     root_dir = script_dir.parent
 
-    # Get current version
+    # get current version
     init_file = root_dir / 'fla' / '__init__.py'
     with open(init_file, encoding='utf-8') as f:
         content = f.read()
@@ -132,72 +132,72 @@ def build_split_packages():
         raise RuntimeError(f"Could not find __version__ in {init_file}")
     version = version_match.group(1)
 
-    # Extract dependencies
+    # extract dependencies
     all_deps, extras = extract_dependencies()
     core_deps, ext_deps = categorize_dependencies(all_deps)
 
-    # Add version constraint for fla-core in extension package
+    # add version constraint for fla-core in extension package
     ext_deps.insert(0, f'fla-core=={version}')
 
-    # Create output directory
+    # create output directory
     output_dir = script_dir / 'dist'
     output_dir.mkdir(exist_ok=True)
 
-    # Create fla-core package
+    # create fla-core package
     core_dir = output_dir / 'fla-core'
     if core_dir.exists():
         shutil.rmtree(core_dir)
     core_dir.mkdir()
 
-    # Copy core files
+    # copy core files
     fla_core = core_dir / 'fla'
     shutil.copytree(root_dir / 'fla' / 'ops', fla_core / 'ops')
     shutil.copytree(root_dir / 'fla' / 'modules', fla_core / 'modules')
     shutil.copy(root_dir / 'fla' / 'utils.py', fla_core / 'utils.py')
 
-    # Keep the source and split-wheel top-level import contract identical.
-    # The source __init__.py is split-package-safe: it always exposes core
+    # keep the source and split-wheel top-level import contract identical.
+    # the source __init__.py is split-package-safe: it always exposes core
     # metadata, extends the namespace path, and only exports layers/models
     # when the extension package is installed.
     shutil.copy(root_dir / 'fla' / '__init__.py', fla_core / '__init__.py')
 
-    # Copy ancillary files (README.md, LICENSE) to core package
+    # copy ancillary files (README.md, LICENSE) to core package
     for fname in ("README.md", "LICENSE"):
         src = root_dir / fname
         if src.exists():
             shutil.copy(src, core_dir / fname)
 
-    # Create fla-core configs
+    # create fla-core configs
     create_pyproject_toml(core_dir, 'fla-core', version, core_deps)
 
-    # Create flash-linear-attention package
+    # create flash-linear-attention package
     ext_dir = output_dir / 'flash-linear-attention'
     if ext_dir.exists():
         shutil.rmtree(ext_dir)
     ext_dir.mkdir()
 
-    # Copy extension files
+    # copy extension files
     fla_ext = ext_dir / 'fla'
     shutil.copytree(root_dir / 'fla' / 'models', fla_ext / 'models')
     shutil.copytree(root_dir / 'fla' / 'layers', fla_ext / 'layers')
 
-    # Intentionally do NOT create fla/__init__.py in the extension package.
-    # The top-level package is provided by fla-core (namespace via pkgutil).
+    # intentionally do not create fla/__init__.py in the extension package.
+    # the top-level package is provided by fla-core (namespace via pkgutil).
 
-    # Copy ancillary files (README.md, LICENSE) to extension package
+    # copy ancillary files (README.md, LICENSE) to extension package
     for fname in ("README.md", "LICENSE"):
         src = root_dir / fname
         if src.exists():
             shutil.copy(src, ext_dir / fname)
 
-    # Create extension configs
+    # create extension configs
     create_pyproject_toml(ext_dir, 'flash-linear-attention', version, ext_deps, extras)
 
-    # Create build script
+    # create build script
     build_script = output_dir / 'build.sh'
     with open(build_script, 'w') as f:
         f.write("""#!/bin/bash
-# Build both packages
+# build both packages
 
 echo "Building fla-core..."
 cd fla-core
@@ -225,7 +225,7 @@ def build_packages(dist_dir):
     """Build wheels and source distributions for both packages."""
     print("Building packages...")
 
-    # Build fla-core (both wheel and sdist)
+    # build fla-core (both wheel and sdist)
     print("Building fla-core packages...")
     try:
         subprocess.run(
@@ -244,7 +244,7 @@ def build_packages(dist_dir):
         print("Timed out building fla-core packages")
         return False
 
-    # Build flash-linear-attention (both wheel and sdist)
+    # build flash-linear-attention (both wheel and sdist)
     print("Building flash-linear-attention packages...")
     try:
         subprocess.run(
@@ -269,15 +269,15 @@ def build_packages(dist_dir):
 
 def copy_packages_to_output(dist_dir):
     """Copy wheels and source distributions to output directory."""
-    # Get script directory (relative to this file)
+    # get script directory (relative to this file)
     script_dir = Path(__file__).parent
     root_dir = script_dir.parent
 
-    # Create output directory (relative to root)
+    # create output directory (relative to root)
     output_dir = root_dir / 'dist-packages'
     output_dir.mkdir(exist_ok=True)
 
-    # Find wheels and source distributions
+    # find wheels and source distributions
     core_wheels = list((dist_dir / 'fla-core' / 'dist').glob('*.whl'))
     core_sdist = list((dist_dir / 'fla-core' / 'dist').glob('*.tar.gz'))
     ext_wheels = list((dist_dir / 'flash-linear-attention' / 'dist').glob('*.whl'))
@@ -290,7 +290,7 @@ def copy_packages_to_output(dist_dir):
         print("No flash-linear-attention wheel found")
         return False
 
-    # Copy all packages to output directory
+    # copy all packages to output directory
     all_packages = core_wheels + core_sdist + ext_wheels + ext_sdist
     for package in all_packages:
         target = output_dir / package.name
@@ -316,18 +316,18 @@ def main():
 
     print("Building split packages...")
 
-    # Build the split packages
+    # build the split packages
     dist_dir, _ = build_split_packages()
 
     print("\nTo build packages manually:")
     print(f"cd {dist_dir}")
     print("./build.sh")
 
-    # Build packages (wheels and source distributions)
+    # build packages (wheels and source distributions)
     if not build_packages(dist_dir):
         return 1
 
-    # Copy packages to output directory
+    # copy packages to output directory
     if not copy_packages_to_output(dist_dir):
         return 1
 
