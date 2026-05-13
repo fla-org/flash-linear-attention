@@ -104,16 +104,30 @@ def profile(
     mixed_precision: str = 'bf16',
     compile: bool = False,
     enable_profile: bool = False,
-    profile_steps: int = 128,
+    profile_steps: int = 64,
     profile_trace: str | None = None,
 ):
     device = torch.device('cuda')
     config = configs[name] if name in configs else AutoConfig.from_pretrained(name)
     if num_heads is not None:
+        if not hasattr(config, 'num_heads'):
+            raise ValueError(
+                f"`--num_heads` override is not supported for model '{name}': "
+                f"its config ({type(config).__name__}) has no `num_heads` field."
+            )
         config.num_heads = num_heads
     if head_dim is not None:
+        if not hasattr(config, 'num_heads'):
+            raise ValueError(
+                f"`--head_dim` override requires `config.num_heads` to derive `hidden_size`, "
+                f"but model '{name}' ({type(config).__name__}) has no `num_heads` field."
+            )
         config.head_dim = head_dim
         config.hidden_size = config.num_heads * config.head_dim
+    if hasattr(config, 'num_heads') and not hasattr(config, 'head_dim'):
+        config.head_dim = config.hidden_size // config.num_heads
+    elif hasattr(config, 'head_dim') and not hasattr(config, 'num_heads'):
+        config.num_heads = config.hidden_size // config.head_dim
     if num_hidden_layers is not None:
         config.num_hidden_layers = num_hidden_layers
 
