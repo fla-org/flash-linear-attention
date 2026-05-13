@@ -14,6 +14,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 from packaging.version import parse as parse_version
 
 from scripts.build_packages import build_split_packages
@@ -71,8 +72,13 @@ def _wheel_names(wheel: Path) -> set[str]:
         return set(zf.namelist())
 
 
-def _requires_dist(wheel: Path) -> set[str]:
-    return set(read_wheel_metadata(wheel).get_all("Requires-Dist") or [])
+def _requires_dist(wheel: Path) -> dict[str, Requirement]:
+    return {
+        requirement.name: requirement
+        for requirement in (
+            Requirement(value) for value in read_wheel_metadata(wheel).get_all("Requires-Dist") or []
+        )
+    }
 
 
 def _create_venv(tmp_path: Path, *, system_site_packages: bool = False) -> Path:
@@ -103,8 +109,13 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
 
     assert read_wheel_metadata(core_wheel)["Version"] == version
     assert read_wheel_metadata(ext_wheel)["Version"] == version
-    assert {"torch >=2.7.0", "triton >=3.3", "einops"}.issubset(_requires_dist(core_wheel))
-    assert {f"fla-core =={version}", "transformers >=4.45.0"}.issubset(_requires_dist(ext_wheel))
+    core_requires = _requires_dist(core_wheel)
+    ext_requires = _requires_dist(ext_wheel)
+    assert str(core_requires["torch"].specifier) == ">=2.7.0"
+    assert str(core_requires["triton"].specifier) == ">=3.3"
+    assert str(core_requires["einops"].specifier) == ""
+    assert str(ext_requires["fla-core"].specifier) == f"=={version}"
+    assert str(ext_requires["transformers"].specifier) == ">=4.45.0"
 
 
 def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Path) -> None:
