@@ -17,7 +17,8 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.7.0",
-    "transformers",
+    "triton>=3.3",
+    "transformers>=4.45.0",
     "einops",
 ]
 
@@ -33,6 +34,9 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
 
 [build-system]
 requires = ["setuptools>=45", "wheel"]
+
+[tool.setuptools.dynamic]
+version = {attr = "fla.__version__"}
 
 [tool.pytest.ini_options]
 log_cli = true
