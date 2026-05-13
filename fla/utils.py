@@ -10,6 +10,7 @@ import functools
 import inspect
 import logging
 import os
+import platform
 import sys
 import warnings
 from collections.abc import Callable
@@ -460,11 +461,12 @@ device_platform = get_available_device()
 device_name = map_triton_backend_to_torch_device()
 
 IS_AMD = (device_platform == 'hip')
+IS_ARM = platform.machine().lower() in ('aarch64', 'arm64')
 IS_INTEL = (device_platform == 'xpu')
-IS_NVIDIA = (device_platform == 'cuda')
 IS_INTEL_ALCHEMIST = (IS_INTEL and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
-IS_NVIDIA_HOPPER = (IS_NVIDIA and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] == 9))
+IS_NVIDIA = (device_platform == 'cuda')
 IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] == 10)
+IS_NVIDIA_HOPPER = (IS_NVIDIA and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] == 9))
 USE_CUDA_GRAPH = (IS_NVIDIA and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
 
 # Nvidia Ampere or newer, haven't check AMD and intel yet.
@@ -550,11 +552,12 @@ def _register_aliases():
     current_module = sys.modules[__name__]
     for key in (
         'IS_AMD',
+        'IS_ARM',
         'IS_INTEL',
-        'IS_NVIDIA',
         'IS_INTEL_ALCHEMIST',
-        'IS_NVIDIA_HOPPER',
+        'IS_NVIDIA',
         'IS_NVIDIA_BLACKWELL',
+        'IS_NVIDIA_HOPPER',
         'USE_CUDA_GRAPH',
         'IS_TF32_SUPPORTED',
         'IS_GATHER_SUPPORTED',
