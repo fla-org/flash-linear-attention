@@ -5,176 +5,32 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from fla.layers import (
-    ABCAttention,
-    Attention,
-    BasedLinearAttention,
-    BitAttention,
-    Comba,
-    DeltaFormerAttention,
-    DeltaNet,
-    GatedDeltaNet,
-    GatedDeltaProduct,
-    GatedLinearAttention,
-    GatedSlotAttention,
-    HGRN2Attention,
-    HGRNAttention,
-    LightNetAttention,
-    LinearAttention,
-    LogLinearMamba2,
-    Mamba3,
-    MesaNet,
-    MoBA,
-    MomAttention,
-    MultiheadLatentAttention,
-    MultiScaleRetention,
-    NativeSparseAttention,
-    PaTHAttention,
-    ReBasedLinearAttention,
-    RodimusAttention,
-    RWKV6Attention,
-    RWKV7Attention,
-)
-from fla.models import (
-    ABCForCausalLM,
-    ABCModel,
-    BitNetForCausalLM,
-    BitNetModel,
-    CombaForCausalLM,
-    CombaModel,
-    DeltaFormerForCausalLM,
-    DeltaFormerModel,
-    DeltaNetForCausalLM,
-    DeltaNetModel,
-    GatedDeltaNetForCausalLM,
-    GatedDeltaNetModel,
-    GatedDeltaProductForCausalLM,
-    GatedDeltaProductModel,
-    GLAForCausalLM,
-    GLAModel,
-    GSAForCausalLM,
-    GSAModel,
-    HGRN2ForCausalLM,
-    HGRN2Model,
-    HGRNForCausalLM,
-    HGRNModel,
-    LightNetForCausalLM,
-    LightNetModel,
-    LinearAttentionForCausalLM,
-    LinearAttentionModel,
-    LogLinearMamba2ForCausalLM,
-    LogLinearMamba2Model,
-    Mamba3ForCausalLM,
-    Mamba3Model,
-    MesaNetForCausalLM,
-    MesaNetModel,
-    MLAForCausalLM,
-    MLAModel,
-    MoBAForCausalLM,
-    MoBAModel,
-    MomForCausalLM,
-    MomModel,
-    NSAForCausalLM,
-    NSAModel,
-    PaTHAttentionForCausalLM,
-    PaTHAttentionModel,
-    RetNetForCausalLM,
-    RetNetModel,
-    RodimusForCausalLM,
-    RodimusModel,
-    RWKV6ForCausalLM,
-    RWKV6Model,
-    RWKV7ForCausalLM,
-    RWKV7Model,
-    TransformerForCausalLM,
-    TransformerModel,
-    YOCOForCausalLM,
-    YOCOModel,
-)
+import importlib
+from pkgutil import extend_path
 
-__all__ = [
-    "ABCAttention",
-    "ABCForCausalLM",
-    "ABCModel",
-    "Attention",
-    "BasedLinearAttention",
-    "BitAttention",
-    "BitNetForCausalLM",
-    "BitNetModel",
-    "Comba",
-    "CombaForCausalLM",
-    "CombaModel",
-    "DeltaFormerAttention",
-    "DeltaFormerForCausalLM",
-    "DeltaFormerModel",
-    "DeltaNet",
-    "DeltaNetForCausalLM",
-    "DeltaNetModel",
-    "GLAForCausalLM",
-    "GLAModel",
-    "GSAForCausalLM",
-    "GSAModel",
-    "GatedDeltaNet",
-    "GatedDeltaNetForCausalLM",
-    "GatedDeltaNetModel",
-    "GatedDeltaProduct",
-    "GatedDeltaProductForCausalLM",
-    "GatedDeltaProductModel",
-    "GatedLinearAttention",
-    "GatedSlotAttention",
-    "HGRN2Attention",
-    "HGRN2ForCausalLM",
-    "HGRN2Model",
-    "HGRNAttention",
-    "HGRNForCausalLM",
-    "HGRNModel",
-    "LightNetAttention",
-    "LightNetForCausalLM",
-    "LightNetModel",
-    "LinearAttention",
-    "LinearAttentionForCausalLM",
-    "LinearAttentionModel",
-    "LogLinearMamba2",
-    "LogLinearMamba2ForCausalLM",
-    "LogLinearMamba2Model",
-    "MLAForCausalLM",
-    "MLAModel",
-    "Mamba3",
-    "Mamba3ForCausalLM",
-    "Mamba3Model",
-    "MesaNet",
-    "MesaNetForCausalLM",
-    "MesaNetModel",
-    "MoBA",
-    "MoBAForCausalLM",
-    "MoBAModel",
-    "MomAttention",
-    "MomForCausalLM",
-    "MomModel",
-    "MultiScaleRetention",
-    "MultiheadLatentAttention",
-    "NSAForCausalLM",
-    "NSAModel",
-    "NativeSparseAttention",
-    "PaTHAttention",
-    "PaTHAttentionForCausalLM",
-    "PaTHAttentionModel",
-    "RWKV6Attention",
-    "RWKV6ForCausalLM",
-    "RWKV6Model",
-    "RWKV7Attention",
-    "RWKV7ForCausalLM",
-    "RWKV7Model",
-    "ReBasedLinearAttention",
-    "RetNetForCausalLM",
-    "RetNetModel",
-    "RodimusAttention",
-    "RodimusForCausalLM",
-    "RodimusModel",
-    "TransformerForCausalLM",
-    "TransformerModel",
-    "YOCOForCausalLM",
-    "YOCOModel",
-]
-
+__path__ = extend_path(__path__, __name__)
 __version__ = "0.5.1"
+
+__all__: list[str] = []
+
+
+def _export_optional_public_api(module_name: str) -> None:
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name == module_name:
+            return
+        raise
+
+    globals()[module_name.rsplit(".", maxsplit=1)[-1]] = module
+    for name in module.__all__:
+        if name.endswith("Config"):
+            continue
+        globals()[name] = getattr(module, name)
+        __all__.append(name)
+
+
+_export_optional_public_api("fla.layers")
+_export_optional_public_api("fla.models")
+
+del _export_optional_public_api

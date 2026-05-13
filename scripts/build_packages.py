@@ -60,7 +60,7 @@ def categorize_dependencies(deps):
     ext_deps = []
 
     for dep in deps:
-        if any(core in dep for core in ['torch', 'einops']):
+        if any(core in dep for core in ['torch', 'triton', 'einops']):
             core_deps.append(dep)
         else:
             ext_deps.append(dep)
@@ -158,13 +158,11 @@ def build_split_packages():
     shutil.copytree(root_dir / 'fla' / 'modules', fla_core / 'modules')
     shutil.copy(root_dir / 'fla' / 'utils.py', fla_core / 'utils.py')
 
-    # Create fla-core __init__.py
-    with open(fla_core / '__init__.py', 'w') as f:
-        f.write(f"""# -*- coding: utf-8 -*-
-
-__path__ = __import__('pkgutil').extend_path(__path__, __name__)
-__version__ = '{version}'
-""")
+    # Keep the source and split-wheel top-level import contract identical.
+    # The source __init__.py is split-package-safe: it always exposes core
+    # metadata, extends the namespace path, and only exports layers/models
+    # when the extension package is installed.
+    shutil.copy(root_dir / 'fla' / '__init__.py', fla_core / '__init__.py')
 
     # Copy ancillary files (README.md, LICENSE) to core package
     for fname in ("README.md", "LICENSE"):
