@@ -23,9 +23,9 @@ jobs:
     - name: Build packages
       run: |
         python scripts/build_packages.py
-    - name: Smoke test split packages
+    - name: Check packages
       run: |
-        python scripts/smoke_test_split_packages.py dist-packages
+        twine check dist-packages/*
     - name: Publish packages
       env:
         TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}

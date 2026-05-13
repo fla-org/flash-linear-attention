@@ -94,6 +94,7 @@ name = "{name}"
 version = "{version}"
 description = "{desc_text}"
 readme = "README.md"
+license = {{file = "LICENSE"}}
 requires-python = ">=3.10"
 dependencies = [{deps_content}]
 
@@ -154,8 +155,9 @@ def build_split_packages(output_dir: str | Path | None = None):
 
     # copy core files
     fla_core = core_dir / 'fla'
-    shutil.copytree(root_dir / 'fla' / 'ops', fla_core / 'ops')
-    shutil.copytree(root_dir / 'fla' / 'modules', fla_core / 'modules')
+    ignore = shutil.ignore_patterns('__pycache__')
+    shutil.copytree(root_dir / 'fla' / 'ops', fla_core / 'ops', ignore=ignore)
+    shutil.copytree(root_dir / 'fla' / 'modules', fla_core / 'modules', ignore=ignore)
     shutil.copy(root_dir / 'fla' / 'utils.py', fla_core / 'utils.py')
 
     # keep the source and split-wheel top-level import contract identical.
@@ -181,8 +183,8 @@ def build_split_packages(output_dir: str | Path | None = None):
 
     # copy extension files
     fla_ext = ext_dir / 'fla'
-    shutil.copytree(root_dir / 'fla' / 'models', fla_ext / 'models')
-    shutil.copytree(root_dir / 'fla' / 'layers', fla_ext / 'layers')
+    shutil.copytree(root_dir / 'fla' / 'models', fla_ext / 'models', ignore=ignore)
+    shutil.copytree(root_dir / 'fla' / 'layers', fla_ext / 'layers', ignore=ignore)
 
     # intentionally do not create fla/__init__.py in the extension package.
     # the top-level package is provided by fla-core (namespace via pkgutil).

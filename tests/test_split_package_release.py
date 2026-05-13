@@ -122,6 +122,8 @@ def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Pat
     core_wheel, ext_wheel, version = _build_split_wheels(tmp_path)
     python = _create_venv(tmp_path)
 
+    _run([sys.executable, "scripts/smoke_test_split_packages.py", str(core_wheel.parent)], cwd=ROOT)
+
     _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(core_wheel)], cwd=tmp_path)
     core_check = textwrap.dedent(
         f"""
@@ -177,6 +179,41 @@ def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Pat
     _run([str(python), "-c", extension_check], cwd=tmp_path)
 
 
+def test_split_namespace_across_sys_path_entries_without_runtime_deps(tmp_path: Path) -> None:
+    core_wheel, ext_wheel, _ = _build_split_wheels(tmp_path)
+    python = _create_venv(tmp_path)
+    core_target = tmp_path / "core-target"
+    ext_target = tmp_path / "ext-target"
+
+    _run(
+        [str(python), "-m", "pip", "install", "--no-index", "--no-deps", "--target", str(core_target), str(core_wheel)],
+        cwd=tmp_path,
+    )
+    _run(
+        [str(python), "-m", "pip", "install", "--no-index", "--no-deps", "--target", str(ext_target), str(ext_wheel)],
+        cwd=tmp_path,
+    )
+
+    for first, second in ((core_target, ext_target), (ext_target, core_target)):
+        check = textwrap.dedent(
+            f"""
+            import sys
+
+            sys.path[:0] = [{str(first)!r}, {str(second)!r}]
+            try:
+                import fla
+            except ModuleNotFoundError as exc:
+                assert exc.name not in {{"fla.layers", "fla.models"}}
+                assert exc.name in {{"torch", "triton", "transformers", "einops"}}
+            else:
+                assert "GLAModel" in fla.__all__
+                assert "GatedLinearAttention" in fla.__all__
+                assert "GLAConfig" not in fla.__all__
+            """
+        )
+        _run([str(python), "-c", check], cwd=tmp_path)
+
+
 def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     pytest.importorskip("triton")
@@ -207,8 +244,9 @@ def test_full_split_import_contract_when_runtime_dependencies_available(tmp_path
         assert GLAModel is ModelsGLAModel
         assert GatedLinearAttention is fla.layers.GatedLinearAttention
         assert isinstance(AutoConfig.for_model(GLAConfig.model_type), GLAConfig)
-        assert AutoModel._model_mapping[GLAConfig] is ModelsGLAModel
-        assert AutoModelForCausalLM._model_mapping[GLAConfig] is GLAForCausalLM
+        config = GLAConfig(hidden_size=16, hidden_ratio=1, num_hidden_layers=1)
+        assert isinstance(AutoModel.from_config(config), ModelsGLAModel)
+        assert isinstance(AutoModelForCausalLM.from_config(config), GLAForCausalLM)
         """
     )
     _run([str(python), "-c", full_check], cwd=tmp_path)

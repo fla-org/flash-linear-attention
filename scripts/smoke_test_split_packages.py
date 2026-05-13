@@ -22,8 +22,9 @@ def run(
     *,
     cwd: str | Path | None = None,
     env: dict[str, str] | None = None,
+    timeout: int = 600,
 ) -> None:
-    subprocess.run(cmd, check=True, cwd=cwd, env=env)
+    subprocess.run(cmd, check=True, cwd=cwd, env=env, timeout=timeout)
 
 
 def venv_python(venv_dir: Path) -> Path:
@@ -93,17 +94,55 @@ def assert_full_import(python: Path, version: str) -> None:
         assert GLAModel is ModelsGLAModel
         assert GatedLinearAttention is fla.layers.GatedLinearAttention
         assert isinstance(AutoConfig.for_model(GLAConfig.model_type), GLAConfig)
-        assert AutoModel._model_mapping[GLAConfig] is ModelsGLAModel
-        assert AutoModelForCausalLM._model_mapping[GLAConfig] is GLAForCausalLM
+        config = GLAConfig(hidden_size=16, hidden_ratio=1, num_hidden_layers=1)
+        assert isinstance(AutoModel.from_config(config), ModelsGLAModel)
+        assert isinstance(AutoModelForCausalLM.from_config(config), GLAForCausalLM)
         """
     )
     run([str(python), "-c", code], cwd=tempfile.gettempdir(), env=python_env())
+
+
+def assert_split_namespace_installed(python: Path) -> None:
+    code = textwrap.dedent(
+        """
+        import importlib.metadata as metadata
+
+        core_files = {str(file) for file in metadata.files("fla-core")}
+        ext_files = {str(file) for file in metadata.files("flash-linear-attention")}
+
+        assert "fla/__init__.py" in core_files
+        assert "fla/ops/__init__.py" in core_files
+        assert "fla/modules/__init__.py" in core_files
+        assert "fla/layers/__init__.py" in ext_files
+        assert "fla/models/__init__.py" in ext_files
+
+        try:
+            import fla
+        except ModuleNotFoundError as exc:
+            assert exc.name not in {"fla.layers", "fla.models"}
+            assert exc.name in {"torch", "triton", "transformers", "einops"}
+        else:
+            assert "GLAModel" in fla.__all__
+            assert "GatedLinearAttention" in fla.__all__
+            assert "GLAConfig" not in fla.__all__
+        """
+    )
+    run([str(python), "-c", code], cwd=tempfile.gettempdir(), env=python_env())
+
+
+def install_wheel(python: Path, wheel: Path, *, with_deps: bool) -> None:
+    cmd = [str(python), "-m", "pip", "install"]
+    if not with_deps:
+        cmd.extend(["--no-index", "--no-deps"])
+    cmd.append(str(wheel))
+    run(cmd, timeout=900)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke test locally built split package wheels.")
     parser.add_argument("dist_dir", type=Path, help="directory containing split package wheels")
     parser.add_argument("--version", help="expected package version")
+    parser.add_argument("--with-deps", action="store_true", help="install runtime dependencies and run full import smoke")
     args = parser.parse_args()
 
     core_wheel = find_wheel(args.dist_dir, "fla_core")
@@ -122,12 +161,14 @@ def main() -> int:
         venv.EnvBuilder(with_pip=True).create(venv_dir)
         python = venv_python(venv_dir)
 
-        run([str(python), "-m", "pip", "install", str(core_wheel)])
+        install_wheel(python, core_wheel, with_deps=args.with_deps)
         assert_core_only_import(python, version)
 
-        run([str(python), "-m", "pip", "install", str(ext_wheel)])
-        run([str(python), "-m", "pip", "check"])
-        assert_full_import(python, version)
+        install_wheel(python, ext_wheel, with_deps=args.with_deps)
+        assert_split_namespace_installed(python)
+        if args.with_deps:
+            run([str(python), "-m", "pip", "check"])
+            assert_full_import(python, version)
 
     return 0
 
