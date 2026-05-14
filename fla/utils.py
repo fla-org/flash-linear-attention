@@ -140,14 +140,14 @@ def tensor_cache(
         Callable[..., torch.Tensor]:
             A wrapped version of ``fn`` backed by an identity-based bounded cache.
     """
-    last_args: deque = deque(maxlen=FLA_TENSOR_CACHE_SIZE)
+    cached: deque = deque(maxlen=FLA_TENSOR_CACHE_SIZE)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if FLA_DISABLE_TENSOR_CACHE:
             return fn(*args, **kwargs)
 
-        for cached_args, cached_kwargs, cached_result in last_args:
+        for cached_args, cached_kwargs, cached_result in cached:
             if len(args) != len(cached_args) or len(kwargs) != len(cached_kwargs):
                 continue
             if all(a is b for a, b in zip(args, cached_args, strict=False)) and \
@@ -155,7 +155,7 @@ def tensor_cache(
                 return cached_result
 
         result = fn(*args, **kwargs)
-        last_args.append((args, kwargs, result))
+        cached.append((args, kwargs, result))
         return result
 
     return wrapper
