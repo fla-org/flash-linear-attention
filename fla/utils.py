@@ -13,6 +13,7 @@ import os
 import platform
 import sys
 import warnings
+from collections import deque
 from collections.abc import Callable
 from enum import Enum
 from functools import lru_cache
@@ -29,9 +30,11 @@ if TYPE_CHECKING:
 
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
+
 FLA_DISABLE_TENSOR_CACHE = os.getenv('FLA_DISABLE_TENSOR_CACHE', '0') == '1'
 TRITON_ABOVE_3_4_0 = version.parse(triton.__version__) >= version.parse("3.4.0")
 TRITON_ABOVE_3_5_1 = version.parse(triton.__version__) >= version.parse("3.5.1")
+FLA_TENSOR_CACHE_SIZE = int(os.getenv('FLA_TENSOR_CACHE_SIZE', "4"))
 
 
 SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
@@ -116,41 +119,43 @@ def tensor_cache(
     fn: Callable[..., torch.Tensor],
 ) -> Callable[..., torch.Tensor]:
     """
-    A decorator that caches the most recent result of a function with tensor inputs.
+    A decorator that memoizes the most recent results of a function call by argument identity.
 
-    This decorator will store the output of the decorated function for the most recent set of input tensors.
-    If the function is called again with the same input tensors, it will return the cached result.
+    The decorator keeps a bounded queue of up to ``FLA_TENSOR_CACHE_SIZE`` (default 4)
+    recent ``(args, kwargs, result)`` triples. On each call, every cached entry is checked
+    in order; an entry is considered a hit when the positional arg count and kwarg key set
+    match and every argument is the *same object* (``is`` identity) as the cached one. On a
+    hit the cached result is returned and ``fn`` is skipped; on a miss ``fn`` is invoked and
+    the new triple is appended (evicting the oldest when the queue is full).
 
-    If FLA_DISABLE_TENSOR_CACHE environment variable is set to '1', caching is disabled.
+    Caching is fully bypassed when the ``FLA_DISABLE_TENSOR_CACHE`` environment variable is
+    set to ``'1'``.
 
     Args:
         fn (Callable[..., torch.Tensor]):
-            The function to be decorated. It should take tensor inputs and return tensor outputs.
+            The function to be decorated. Intended for functions whose inputs are tensors
+            (or other objects compared by identity) and whose output is a tensor.
 
     Returns:
         Callable[..., torch.Tensor]:
-            A wrapped version of the input function with single-entry caching.
+            A wrapped version of ``fn`` backed by an identity-based bounded cache.
     """
-    last_args: tuple | None = None
-    last_kwargs: dict | None = None
-    last_result: Any = None
+    cached: deque = deque(maxlen=FLA_TENSOR_CACHE_SIZE)
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        nonlocal last_args, last_kwargs, last_result
-
-        # Skip cache if FLA_DISABLE_TENSOR_CACHE is set
         if FLA_DISABLE_TENSOR_CACHE:
             return fn(*args, **kwargs)
 
-        if last_args is not None and last_kwargs is not None:
-            if len(args) == len(last_args) and len(kwargs) == len(last_kwargs):
-                if all(a is b for a, b in zip(args, last_args, strict=False)) and \
-                        all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()):
-                    return last_result
+        for cached_args, cached_kwargs, cached_result in cached:
+            if len(args) != len(cached_args) or len(kwargs) != len(cached_kwargs):
+                continue
+            if all(a is b for a, b in zip(args, cached_args, strict=False)) and \
+                    all(k in cached_kwargs and v is cached_kwargs[k] for k, v in kwargs.items()):
+                return cached_result
 
         result = fn(*args, **kwargs)
-        last_args, last_kwargs, last_result = args, kwargs, result
+        cached.append((args, kwargs, result))
         return result
 
     return wrapper
