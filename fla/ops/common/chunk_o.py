@@ -70,7 +70,7 @@ def chunk_fwd_kernel_o(
     else:
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     # offset calculation
     q += (bos * H + i_h // (HV // H)) * K
