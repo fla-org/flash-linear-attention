@@ -13,6 +13,8 @@ import torch.nn.functional as F
 from fla.modules import FusedLayerNormGated, FusedRMSNormGated
 from fla.utils import assert_close, device
 
+_IS_BLACKWELL_CUDA = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10
+
 
 @pytest.mark.parametrize(
     ('B', 'H', 'T', 'D', 'elementwise_affine', 'activation', 'bias'),
@@ -96,3 +98,19 @@ def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     assert_close('dx', ref_dx, tri_dx, 1e-3)
     assert_close('dg', ref_dg, tri_dg, 1e-3)
     assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+
+@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_rmsnorm_gated_large_batch_offsets():
+    torch.manual_seed(42)
+    B, H, T, D = 256, 12, 6144, 128
+    x = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16)
+    g = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16)
+    weight = torch.ones(D, device=device, dtype=torch.bfloat16)
+
+    ref = x.float() * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+    ref = (ref * weight.float() * F.silu(g.float())).to(torch.bfloat16)
+    tri = FusedRMSNormGated(D, eps=1e-6, activation="silu").to(device, dtype=torch.bfloat16)
+    tri.weight.data.copy_(weight)
+
+    assert_close(' y', ref, tri(x, g), 6.3e-2)
