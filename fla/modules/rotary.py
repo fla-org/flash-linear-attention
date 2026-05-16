@@ -12,9 +12,15 @@ import triton.language as tl
 from einops import rearrange, repeat
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
+from fla.utils import IS_AMD, IS_NPU, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
+# Ascend vector UB is small; large num_warps / stages explodes compile-time UB (see bishengir ub overflow).
+if IS_NPU:
+    NUM_WARPS_AUTOTUNE = [2, 4]
+    NUM_STAGES_AUTOTUNE = [1, 2]
+else:
+    NUM_STAGES_AUTOTUNE = [2, 3, 4]
+    NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
 def rotate_half(x, interleaved=False):
@@ -38,7 +44,7 @@ def rotary_embedding_ref(x, cos, sin, interleaved=False):
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in NUM_WARPS_AUTOTUNE
-        for num_stages in [2, 3, 4]
+        for num_stages in NUM_STAGES_AUTOTUNE
     ],
     key=['B', 'H', 'D', 'INTERLEAVED'],
     **autotune_cache_kwargs,
@@ -183,7 +189,17 @@ def rotary_embedding_fwdbwd(
         y[..., R2:].copy_(x[..., R2:])
 
     BD = triton.next_power_of_2(R2)
-    BT = min(128, triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index))))
+    # GPU: one program loads a [BT, R] tile of cos/sin/x in fp32; Ascend UB (~192KiB) overflows for BT=128, R=128.
+    if IS_NPU:
+        if R >= 128:
+            bt_cap = 16
+        elif R >= 64:
+            bt_cap = 32
+        else:
+            bt_cap = 64
+        BT = min(bt_cap, triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index))))
+    else:
+        BT = min(128, triton.next_power_of_2(triton.cdiv(T, get_multiprocessor_count(x.device.index))))
     if chunk_indices is None and is_varlen:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if is_varlen else triton.cdiv(T, BT)
