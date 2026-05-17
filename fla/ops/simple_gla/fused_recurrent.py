@@ -53,8 +53,7 @@ def fused_recurrent_simple_gla(
         reverse (Optional[bool]):
             If `True`, process the state passing in reverse order. Default: `False`.
         state_v_first (Optional[bool]):
-            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
-            the default ``[K, V]``. Default: ``False``.
+            Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.

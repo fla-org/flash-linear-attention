@@ -249,8 +249,7 @@ def chunk_kda(
             Must be used within ``torch.inference_mode()`` and will return a 3-tuple instead of 2-tuple.
             This is not intended for training as it bypasses autograd. Default: ``False``.
         state_v_first (Optional[bool]):
-            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
-            the default ``[K, V]``. Default: ``False``.
+            Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
             consistent with the FlashAttention API.

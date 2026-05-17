@@ -1372,8 +1372,7 @@ def chunk_gla(
             Whether to output the final state of shape `[N, H, K, V]`
             (or `[N, H, V, K]` if `state_v_first=True`). Default: `False`.
         state_v_first (Optional[bool]):
-            Whether to store the recurrent state in V-first `[V, K]` layout instead of
-            the default `[K, V]`. Default: `False`.
+            Store the recurrent state in V-first `[V, K]` layout instead of the default `[K, V]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.

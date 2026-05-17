@@ -350,8 +350,7 @@ def fused_recurrent_gated_delta_rule(
             Bias added to `g` before activation, of shape `[HV]`.
             Only used when `use_gate_in_kernel=True`.
         state_v_first (Optional[bool]):
-            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
-            the default ``[K, V]``. Default: ``False``.
+            Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
