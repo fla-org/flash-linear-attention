@@ -24,10 +24,10 @@ def chunk_simple_gla_fwd(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     h, ht = chunk_fwd_h(
         k=k,
@@ -69,10 +69,10 @@ def chunk_simple_gla_bwd(
     do: torch.Tensor,
     dht: torch.Tensor,
     scale: float,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # (SY 09/22) states_in_fp32 seems not affecting the error of dg but for safety, set to True
     h, _ = chunk_fwd_h(
@@ -152,9 +152,9 @@ class ChunkSimpleGLAFunction(torch.autograd.Function):
         scale,
         initial_state,
         output_final_state,
+        state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
-        state_v_first,
     ):
         T = q.shape[1]
         chunk_size = min(64, max(16, triton.next_power_of_2(T)))
@@ -344,8 +344,8 @@ def chunk_simple_gla(
         scale,
         initial_state,
         output_final_state,
+        state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
-        state_v_first,
     )
     return o, final_state

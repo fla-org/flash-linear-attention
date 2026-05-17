@@ -300,11 +300,11 @@ def chunk_fwd_h(
     gv: torch.Tensor | None = None,
     h0: torch.Tensor | None = None,
     output_final_state: bool = False,
+    state_v_first: bool = False,
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -361,11 +361,11 @@ def chunk_bwd_dh(
     g_gamma: torch.Tensor | None = None,
     gk: torch.Tensor | None = None,
     gv: torch.Tensor | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     split_size: int | None = None,
     states_in_fp32: bool = False,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]

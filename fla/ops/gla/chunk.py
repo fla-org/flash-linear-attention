@@ -887,10 +887,10 @@ def chunk_gla_fwd_o_gk(
     A: torch.Tensor,
     h: torch.Tensor,
     scale: float,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ):
     B, T, H, K, HV, V = *q.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
@@ -963,10 +963,10 @@ def chunk_gla_bwd_dv(
     A: torch.Tensor,
     do: torch.Tensor,
     dh: torch.Tensor,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ):
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
@@ -1050,10 +1050,10 @@ def chunk_gla_bwd_dqkg(
     dq: torch.Tensor,
     dk: torch.Tensor,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -1101,10 +1101,10 @@ def chunk_gla_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if g_cumsum is None:
         g_cumsum = chunk_local_cumsum(
@@ -1166,10 +1166,10 @@ def chunk_gla_bwd(
     A: torch.Tensor,
     do: torch.Tensor,
     dht: torch.Tensor,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ):
     if g_cumsum is None:
         g_cumsum = chunk_local_cumsum(
@@ -1272,9 +1272,9 @@ class ChunkGLAFunction(torch.autograd.Function):
         scale,
         initial_state,
         output_final_state,
+        state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
-        state_v_first,
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
         if cu_seqlens is not None:
@@ -1437,8 +1437,8 @@ def chunk_gla(
         scale,
         initial_state,
         output_final_state,
+        state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
-        state_v_first,
     )
     return o, final_state

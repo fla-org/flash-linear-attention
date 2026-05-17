@@ -510,10 +510,10 @@ def chunk_fwd_o(
     g: torch.Tensor | None = None,
     g_gamma: torch.Tensor | None = None,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
@@ -555,10 +555,10 @@ def chunk_bwd_dv(
     g: torch.Tensor | None = None,
     g_gamma: torch.Tensor | None = None,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
@@ -669,10 +669,10 @@ def chunk_bwd_dqkwg(
     g_gamma: torch.Tensor | None = None,
     dv: torch.Tensor | None = None,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if g is not None and IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0:
         raise RuntimeError(
