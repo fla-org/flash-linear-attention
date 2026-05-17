@@ -55,7 +55,6 @@ class Raven(nn.Module):
         gate_logit_normalizer: int = 8,
         feature_map: str = 'swish',
         use_output_gate: bool = False,
-        use_norm: bool = True,
         gate_fn: str = 'swish',
         layer_idx: int | None = None,
         scale: float | None = 1.,
@@ -120,8 +119,6 @@ class Raven(nn.Module):
         self.use_output_gate = use_output_gate
         self.use_rope = use_rope
         self.gate_logit_normalizer = gate_logit_normalizer
-        self.use_norm = use_norm
-        self.gate_fn_name = gate_fn
         self.gate_fn = ACT2FN[gate_fn]
         self.fuse_norm = fuse_norm
         self.scale = scale
@@ -140,7 +137,6 @@ class Raven(nn.Module):
                 "when creating this class.",
             )
 
-        self.register_module('feature_map', None)
         if feature_map == 'swish':
             self.feature_map = SwishFeatureMap()
         elif feature_map == 'relu':
@@ -193,10 +189,15 @@ class Raven(nn.Module):
         if self.use_output_gate:
             self.o_gate_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             if self.fuse_norm and gate_fn in ('swish', 'silu', 'sigmoid'):
-                self.o_norm = FusedRMSNormGated(self.head_v_dim, eps=norm_eps, activation=gate_fn)
+                self.o_norm = FusedRMSNormGated(
+                    self.head_v_dim,
+                    elementwise_affine=elementwise_affine,
+                    eps=norm_eps,
+                    activation=gate_fn,
+                )
                 self.fuse_norm_and_gate = True
             else:
-                self.o_norm = norm_cls(self.head_v_dim, eps=norm_eps)
+                self.o_norm = norm_cls(self.head_v_dim, elementwise_affine=elementwise_affine, eps=norm_eps)
                 self.fuse_norm_and_gate = False
         else:
             self.g_norm = norm_cls(self.hidden_size, elementwise_affine=elementwise_affine, eps=norm_eps)
@@ -246,8 +247,7 @@ class Raven(nn.Module):
             f = rearrange(self.f_proj(hidden_states), '... (h m) -> ... h m', m=self.num_slots)
             f = F.logsigmoid(f) / self.gate_logit_normalizer
 
-        if self.feature_map is not None:
-            q, k = map(lambda x: self.feature_map(x), (q, k))
+        q, k = self.feature_map(q), self.feature_map(k)
         q, k = self.q_norm(q), self.k_norm(k)
 
         if self.use_rope:
