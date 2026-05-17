@@ -322,7 +322,7 @@ def chunk_bwd_kernel_dqkwg(
         for num_warps in NUM_WARPS
         for num_stages in [2, 3, 4]
     ],
-    key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -348,6 +348,7 @@ def chunk_bwd_kernel_dv(
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // HV, i_bh % HV
@@ -378,8 +379,12 @@ def chunk_bwd_kernel_dv(
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_A += tl.dot(b_k, b_q)
-        p_dh = tl.make_block_ptr(dh, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
-        b_dh = tl.load(p_dh, boundary_check=(0, 1))
+        if STATE_V_FIRST:
+            p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+            b_dh = tl.trans(tl.load(p_dh, boundary_check=(0, 1)))
+        else:
+            p_dh = tl.make_block_ptr(dh, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+            b_dh = tl.load(p_dh, boundary_check=(0, 1))
         b_dv += tl.dot(b_k, b_dh.to(b_k.dtype))
 
     o_t = i_t * BT + tl.arange(0, BT)
@@ -553,6 +558,7 @@ def chunk_bwd_dv(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    state_v_first: bool = False,
 ) -> torch.Tensor:
     B, T, H, K, V, HV = *k.shape, do.shape[-1], do.shape[2]
     BT = chunk_size
@@ -593,6 +599,7 @@ def chunk_bwd_dv(
         BT=BT,
         BK=BK,
         BV=BV,
+        STATE_V_FIRST=state_v_first,
     )
     return dv
 

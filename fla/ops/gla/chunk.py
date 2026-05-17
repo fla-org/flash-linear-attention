@@ -585,7 +585,7 @@ def chunk_gla_bwd_kernel_dA(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT'],
+    key=['BT', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -606,6 +606,7 @@ def chunk_gla_bwd_kernel_dv(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -637,7 +638,11 @@ def chunk_gla_bwd_kernel_dv(
         p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_gk = tl.make_block_ptr(g + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         p_gn = g + (bos + min(i_t * BT + BT, T) - 1)*H*K + i_h * K + o_k
-        p_dh = tl.make_block_ptr(dh + (i_tg * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
+        if STATE_V_FIRST:
+            # dh stored as [V, K]; read a logical [BK, BV] tile via on-the-fly transpose
+            p_dh = tl.make_block_ptr(dh + (i_tg * H + i_h) * K*V, (K, V), (1, K), (i_k * BK, i_v * BV), (BK, BV), (0, 1))
+        else:
+            p_dh = tl.make_block_ptr(dh + (i_tg * H + i_h) * K*V, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0))
 
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
@@ -663,7 +668,7 @@ def chunk_gla_bwd_kernel_dv(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT'],
+    key=['BT', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -691,6 +696,7 @@ def chunk_gla_bwd_kernel_inter(
     BK: tl.constexpr,
     BV: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
 ):
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -731,8 +737,13 @@ def chunk_gla_bwd_kernel_inter(
     for i_v in range(tl.cdiv(V, BV)):
         p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
         p_do = tl.make_block_ptr(do, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-        p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
-        p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+        if STATE_V_FIRST:
+            # h / dh stored as [V, K] -- the [BV, BK] tile is now a contiguous read
+            p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+            p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
+        else:
+            p_h = tl.make_block_ptr(h, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
+            p_dh = tl.make_block_ptr(dh, (V, K), (1, V), (i_v * BV, i_k * BK), (BV, BK), (0, 1))
         # [BT, BV]
         b_v = tl.load(p_v, boundary_check=(0, 1))
         b_do = tl.load(p_do, boundary_check=(0, 1))
@@ -955,6 +966,7 @@ def chunk_gla_bwd_dv(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    state_v_first: bool = False,
 ):
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
@@ -979,6 +991,7 @@ def chunk_gla_bwd_dv(
         K=K,
         V=V,
         BT=BT,
+        STATE_V_FIRST=state_v_first,
     )
     return dv
 
@@ -1040,6 +1053,7 @@ def chunk_gla_bwd_dqkg(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    state_v_first: bool = False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -1073,6 +1087,7 @@ def chunk_gla_bwd_dqkg(
         K=K,
         V=V,
         BT=BT,
+        STATE_V_FIRST=state_v_first,
     )
     return dq2, dk2, dg
 
@@ -1089,6 +1104,7 @@ def chunk_gla_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if g_cumsum is None:
         g_cumsum = chunk_local_cumsum(
@@ -1109,6 +1125,7 @@ def chunk_gla_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         states_in_fp32=False,
+        state_v_first=state_v_first,
     )
 
     # the intra A is kept in fp32
@@ -1132,6 +1149,7 @@ def chunk_gla_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
     )
     return g_cumsum, A, h, ht, o
 
@@ -1151,6 +1169,7 @@ def chunk_gla_bwd(
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
+    state_v_first: bool = False,
 ):
     if g_cumsum is None:
         g_cumsum = chunk_local_cumsum(
@@ -1172,6 +1191,7 @@ def chunk_gla_bwd(
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             states_in_fp32=True,
+            state_v_first=state_v_first,
         )
     dh, dh0 = chunk_bwd_dh(
         q=q,
@@ -1187,6 +1207,7 @@ def chunk_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         states_in_fp32=True,
+        state_v_first=state_v_first,
     )
 
     dv = chunk_gla_bwd_dv(
@@ -1198,6 +1219,7 @@ def chunk_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
     )
 
     # dq dk in fp32
@@ -1232,6 +1254,7 @@ def chunk_gla_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
+        state_v_first=state_v_first,
     )
     return dq, dk, dv, dg, dh0
 
@@ -1251,6 +1274,7 @@ class ChunkGLAFunction(torch.autograd.Function):
         output_final_state,
         cu_seqlens,
         cu_seqlens_cpu,
+        state_v_first,
     ):
         chunk_size = min(64, max(16, triton.next_power_of_2(q.shape[1])))
         if cu_seqlens is not None:
@@ -1274,6 +1298,7 @@ class ChunkGLAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
+            state_v_first=state_v_first,
         )
         # recompute g_cumsum in bwd pass
         if g.dtype != torch.float:
@@ -1284,6 +1309,7 @@ class ChunkGLAFunction(torch.autograd.Function):
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
+        ctx.state_v_first = state_v_first
         return o, ht
 
     @staticmethod
@@ -1306,8 +1332,9 @@ class ChunkGLAFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
             chunk_indices=chunk_indices,
+            state_v_first=ctx.state_v_first,
         )
-        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), dg, None, dh0, None, None, None, None
 
 
 @torch.compiler.disable
@@ -1321,6 +1348,7 @@ def chunk_gla(
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
+    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -1336,20 +1364,26 @@ def chunk_gla(
             Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `[N, H, K, V]` for `N` input sequences.
+            Initial state of shape `[N, H, K, V]` (or `[N, H, V, K]` if `state_v_first=True`)
+            for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
+            Whether to output the final state of shape `[N, H, K, V]`
+            (or `[N, H, V, K]` if `state_v_first=True`). Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        state_v_first (Optional[bool]):
+            Whether to store the recurrent state in V-first `[V, K]` layout instead of
+            the default `[K, V]`. Default: `False`.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state of shape `[N, H, K, V]` (or `[N, H, V, K]` if `state_v_first=True`)
+            if `output_final_state=True` else `None`.
 
     Examples::
         >>> import torch
@@ -1406,5 +1440,6 @@ def chunk_gla(
         output_final_state,
         cu_seqlens,
         cu_seqlens_cpu,
+        state_v_first,
     )
     return o, final_state
