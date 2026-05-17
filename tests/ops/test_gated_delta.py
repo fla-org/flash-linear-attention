@@ -309,6 +309,13 @@ def test_fused_recurrent_state_v_first(
     assert_close('o', ref, tri, 1e-4)
     assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 1e-4)
 
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning,
+    # and passing both names at once is rejected
+    with pytest.warns(DeprecationWarning):
+        fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, transpose_state_layout=True)
+    with pytest.raises(ValueError):
+        fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, state_v_first=True, transpose_state_layout=True)
+
 
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'has_dt_bias', 'dtype'),
