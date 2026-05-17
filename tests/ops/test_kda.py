@@ -251,7 +251,7 @@ def test_fused_recurrent_transpose_state(
         initial_state=h0_kv.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        transpose_state_layout=False,
+        state_v_first=False,
     )
     tri, tri_ht = fused_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
@@ -263,7 +263,7 @@ def test_fused_recurrent_transpose_state(
         initial_state=h0_vk.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
     assert_close("o", ref, tri, 1e-4)
     assert_close("ht", ref_ht, tri_ht.transpose(-1, -2), 1e-4)
@@ -667,7 +667,7 @@ def test_chunk_transpose_state(
         initial_state=h0_vk.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
     ((tri * do).sum() + (tri_ht * dht_vk).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_vk.grad
@@ -683,7 +683,7 @@ def test_chunk_transpose_state(
         initial_state=h0_kv.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        transpose_state_layout=False,
+        state_v_first=False,
     )
     ((ref * do).sum() + (ref_ht * dht_kv).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_kv.grad
@@ -1165,7 +1165,7 @@ _FLASHKDA_REQUIRED_KWARGS = dict(
     use_beta_sigmoid_in_kernel=True,
     safe_gate=True,
     lower_bound=-5.0,
-    transpose_state_layout=True,
+    state_v_first=True,
 )
 
 _FLASHKDA_RTOL = 0.006
@@ -1202,7 +1202,7 @@ def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=True,
         lower_bound=lower_bound,
-        transpose_state_layout=True,
+        state_v_first=True,
         **kwargs,
     )
 

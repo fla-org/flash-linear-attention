@@ -133,7 +133,7 @@ def test_fused_recurrent_transpose_state(
             q=q_, k=k_, v=v_, gk=g_,
             initial_state=h0_in,
             output_final_state=True,
-            transpose_state_layout=transpose,
+            state_v_first=transpose,
         )
         ((out * do).sum() + (ht * dht_in).sum()).backward()
         return out, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_in.grad

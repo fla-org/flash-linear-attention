@@ -106,7 +106,7 @@ def run_cp_gdn_test_worker(
     D: int,
     lengths: list[int],
     dtype,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
     Hq: int | None = None,
 ):
     """
@@ -178,7 +178,7 @@ def run_cp_gdn_test_worker(
                 g=g_ref,
                 beta=beta_ref,
                 cu_seqlens=cu_seqlens_global,
-                transpose_state_layout=transpose_state_layout,
+                state_v_first=state_v_first,
             )
 
             o_ref.backward(do_global)
@@ -220,7 +220,7 @@ def run_cp_gdn_test_worker(
             g=g_local,
             beta=beta_local,
             cp_context=context,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
 
         # CP Backward
@@ -291,7 +291,7 @@ def run_cp_test_with_spawn(
     D: int,
     lengths: list[int],
     dtype=torch.bfloat16,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
     Hq: int | None = None,
 ):
     """
@@ -300,7 +300,7 @@ def run_cp_test_with_spawn(
     """
     mp.start_processes(
         run_cp_gdn_test_worker,
-        args=(world_size, test_name, T, H, D, lengths, dtype, transpose_state_layout, Hq),
+        args=(world_size, test_name, T, H, D, lengths, dtype, state_v_first, Hq),
         nprocs=world_size,
         join=True,
         start_method='spawn',
@@ -428,7 +428,7 @@ def test_cp2_gqa_single_sequence():
 # ============================================================
 
 def test_cp2_transpose_state():
-    """CP2: transpose_state_layout=True with sequence cut."""
+    """CP2: state_v_first=True with sequence cut."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
 
@@ -438,12 +438,12 @@ def test_cp2_transpose_state():
         T=10240, H=4, D=128,
         lengths=[3000, 4000, 3240],
         dtype=torch.bfloat16,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
 
 
 def test_cp4_transpose_state():
-    """CP4: transpose_state_layout=True with single long sequence."""
+    """CP4: state_v_first=True with single long sequence."""
     if torch.cuda.device_count() < 4:
         pytest.skip("At least 4 GPUs required")
 
@@ -453,7 +453,7 @@ def test_cp4_transpose_state():
         T=10240, H=4, D=128,
         lengths=[10240],
         dtype=torch.bfloat16,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
 
 

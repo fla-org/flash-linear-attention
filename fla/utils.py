@@ -17,16 +17,14 @@ from collections import deque
 from collections.abc import Callable
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import triton
 from packaging import version
+from packaging.version import parse as parse_version
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from fla import __version__
 
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
@@ -170,7 +168,8 @@ def input_guard(
     A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
 
     Args:
-        no_guard_contiguous: If True, skip all contiguous checks. If a list of parameter names, skip contiguous check for those parameters.
+        no_guard_contiguous (bool | list[str]):
+            If True, skip all contiguous checks. If a list of parameter names, skip contiguous check for those parameters.
     """
 
     def decorator(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
@@ -336,8 +335,13 @@ def deprecate_kwarg(
         ```
 
     """
-    deprecated_version = version.parse(version)
-    current_version = version.parse(__version__)
+    # Imported lazily to avoid a circular import at module load time.
+    from fla import __version__
+
+    # NB: the `version` parameter shadows the `packaging.version` module here,
+    # so parse through the module-level `parse_version` alias instead.
+    deprecated_version = parse_version(version)
+    current_version = parse_version(__version__)
     is_greater_or_equal_version = current_version >= deprecated_version
 
     if is_greater_or_equal_version:

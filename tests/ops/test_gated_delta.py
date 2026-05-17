@@ -215,7 +215,7 @@ def test_chunk_transpose_state(
         scale=scale,
         initial_state=h0_vk.clone(),
         output_final_state=True,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
     do = torch.randn_like(v)
     dht_vk = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
@@ -233,7 +233,7 @@ def test_chunk_transpose_state(
         scale=scale,
         initial_state=h0_kv.clone(),
         output_final_state=True,
-        transpose_state_layout=False,
+        state_v_first=False,
     )
     ((ref * do).sum() + (ref_ht * dht_kv).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0_kv.grad
@@ -292,7 +292,7 @@ def test_fused_recurrent_transpose_state(
         initial_state=h0_kv.clone(),
         use_qk_l2norm_in_kernel=True,
         output_final_state=True,
-        transpose_state_layout=False,
+        state_v_first=False,
     )
     tri, tri_ht = fused_recurrent_gated_delta_rule(
         q=q.clone(),
@@ -304,7 +304,7 @@ def test_fused_recurrent_transpose_state(
         initial_state=h0_vk.clone(),
         use_qk_l2norm_in_kernel=True,
         output_final_state=True,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
     assert_close('o', ref, tri, 1e-4)
     assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 1e-4)

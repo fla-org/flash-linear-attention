@@ -8,8 +8,15 @@
 import torch
 
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
+from fla.utils import deprecate_kwarg
 
 
+@deprecate_kwarg(
+    "transpose_state_layout",
+    new_name="state_v_first",
+    version="0.6.0",
+    raise_if_both_names=True,
+)
 def fused_recurrent_retention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -19,7 +26,7 @@ def fused_recurrent_retention(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if cu_seqlens is not None:
         if q.shape[0] != 1:
@@ -43,6 +50,6 @@ def fused_recurrent_retention(
         output_final_state=output_final_state,
         reverse=reverse,
         cu_seqlens=cu_seqlens,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
     return o, final_state

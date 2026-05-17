@@ -16,7 +16,7 @@ from fla.ops.kda.chunk_bwd import chunk_kda_bwd
 from fla.ops.kda.chunk_fwd import chunk_kda_fwd
 from fla.ops.kda.gate import beta_sigmoid_bwd, fused_beta_sigmoid
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, deprecate_kwarg, input_guard
 
 
 class ChunkKDAFunction(torch.autograd.Function):
@@ -46,7 +46,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
-        transpose_state_layout: bool = False,
+        state_v_first: bool = False,
     ):
         # Apply l2norm
         q_rstd, k_rstd = None, None
@@ -89,7 +89,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             disable_recompute=disable_recompute,
             return_intermediate_states=return_intermediate_states,
             cp_context=cp_context,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
 
         if return_intermediate_states:
@@ -111,7 +111,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.use_beta_sigmoid_in_kernel = use_beta_sigmoid_in_kernel
         ctx.disable_recompute = disable_recompute
         ctx.cp_context = cp_context
-        ctx.transpose_state_layout = transpose_state_layout
+        ctx.state_v_first = state_v_first
         return o.type_as(q), final_state
 
     @staticmethod
@@ -150,7 +150,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             disable_recompute=ctx.disable_recompute,
             w=w, u=u, qg=qg, kg=kg, v_new=v_new, h=h,
             cp_context=ctx.cp_context,
-            transpose_state_layout=ctx.transpose_state_layout,
+            state_v_first=ctx.state_v_first,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -162,6 +162,12 @@ class ChunkKDAFunction(torch.autograd.Function):
                 None, None, None, None, None, None, None, None, None, None, None, None, None)
 
 
+@deprecate_kwarg(
+    "transpose_state_layout",
+    new_name="state_v_first",
+    version="0.6.0",
+    raise_if_both_names=True,
+)
 @dispatch('kda')
 @torch.compiler.disable
 def chunk_kda(
@@ -183,7 +189,7 @@ def chunk_kda(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     cp_context: FLACPContext = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
     **kwargs,
 ):
     r"""
@@ -256,9 +262,9 @@ def chunk_kda(
             Context parallel context for distributed training across multiple devices.
             When provided, ``initial_state`` and ``output_final_state`` are not supported,
             and ``cu_seqlens`` will be overridden by the context. Default: ``None``.
-        transpose_state_layout (Optional[bool]):
-            Whether to use the transposed state layout for the hidden state.
-            Default: ``False``.
+        state_v_first (Optional[bool]):
+            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
+            the default ``[K, V]``. Default: ``False``.
 
     Returns:
         - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
@@ -407,5 +413,5 @@ def chunk_kda(
         disable_recompute,
         return_intermediate_states,
         cp_context,
-        transpose_state_layout,
+        state_v_first,
     )

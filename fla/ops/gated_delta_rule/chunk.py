@@ -23,7 +23,7 @@ from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, deprecate_kwarg, input_guard
 
 
 def chunk_gated_delta_rule_fwd(
@@ -38,7 +38,7 @@ def chunk_gated_delta_rule_fwd(
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
     use_gate_in_kernel: bool = False,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
@@ -82,7 +82,7 @@ def chunk_gated_delta_rule_fwd(
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,
             context=cp_context,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -94,7 +94,7 @@ def chunk_gated_delta_rule_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
 
     if cp_context is not None:
@@ -109,7 +109,7 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
     return g, o, A, final_state, initial_state, g_input
 
@@ -128,7 +128,7 @@ def chunk_gated_delta_rule_bwd(
     cu_seqlens: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
     use_gate_in_kernel: bool = False,
     g_input: torch.Tensor | None = None,
     A_log: torch.Tensor | None = None,
@@ -156,7 +156,7 @@ def chunk_gated_delta_rule_bwd(
         output_final_state=False,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -183,7 +183,7 @@ def chunk_gated_delta_rule_bwd(
             dht=dht,
             initial_state=initial_state,
             context=cp_context,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -198,7 +198,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
@@ -213,7 +213,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
     dk2, dv, db, dg2 = prepare_wy_repr_bwd(
         k=k,
@@ -254,7 +254,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         cu_seqlens_cpu: torch.LongTensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
         cp_context: FLACPContext | None = None,
-        transpose_state_layout: bool = False,
+        state_v_first: bool = False,
         use_gate_in_kernel: bool = False,
         A_log: torch.Tensor | None = None,
         dt_bias: torch.Tensor | None = None,
@@ -279,7 +279,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cp_context=cp_context,
             chunk_indices=chunk_indices,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
             use_gate_in_kernel=use_gate_in_kernel,
             A_log=A_log,
             dt_bias=dt_bias,
@@ -303,7 +303,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.cp_context = cp_context
-        ctx.transpose_state_layout = transpose_state_layout
+        ctx.state_v_first = state_v_first
         ctx.use_gate_in_kernel = use_gate_in_kernel
         return o.to(q.dtype), final_state
 
@@ -345,7 +345,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             cp_context=ctx.cp_context,
             chunk_indices=chunk_indices,
-            transpose_state_layout=ctx.transpose_state_layout,
+            state_v_first=ctx.state_v_first,
             use_gate_in_kernel=ctx.use_gate_in_kernel,
             g_input=g_input,
             A_log=A_log,
@@ -361,6 +361,12 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         )
 
 
+@deprecate_kwarg(
+    "transpose_state_layout",
+    new_name="state_v_first",
+    version="0.6.0",
+    raise_if_both_names=True,
+)
 @torch.compiler.disable
 def chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -375,7 +381,7 @@ def chunk_gated_delta_rule(
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
     **kwargs,
 ):
     r"""
@@ -412,9 +418,9 @@ def chunk_gated_delta_rule(
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported,
             and `cu_seqlens` will be overridden by the context. Default: `None`.
-        transpose_state_layout (Optional[bool]):
-            Whether to use the transposed state layout for the hidden state.
-            Default: `False`.
+        state_v_first (Optional[bool]):
+            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
+            the default ``[K, V]``. Default: ``False``.
         use_gate_in_kernel (bool):
             Whether to compute the log-space GDN decay internally.
             When `True`, the passed `g` is the raw input, and `A_log` must be provided.
@@ -519,7 +525,7 @@ def chunk_gated_delta_rule(
         cu_seqlens_cpu,
         use_qk_l2norm_in_kernel,
         cp_context,
-        transpose_state_layout,
+        state_v_first,
         use_gate_in_kernel,
         A_log,
         dt_bias,

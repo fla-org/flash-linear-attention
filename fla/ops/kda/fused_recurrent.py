@@ -13,7 +13,7 @@ import triton.language as tl
 
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import deprecate_kwarg, input_guard
 
 
 @triton.heuristics(
@@ -68,7 +68,7 @@ def fused_recurrent_kda_fwd_kernel(
     USE_GATE_IN_KERNEL: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     APPLY_BETA_SIGMOID: tl.constexpr,
-    TRANSPOSE_STATE: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
     num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -110,12 +110,12 @@ def fused_recurrent_kda_fwd_kernel(
 
     mask_k = o_k < K
     mask_v = o_v < V
-    if TRANSPOSE_STATE:
+    if STATE_V_FIRST:
         mask_h = mask_v[:, None] & mask_k[None, :]
     else:
         mask_h = mask_k[:, None] & mask_v[None, :]
 
-    if TRANSPOSE_STATE:
+    if STATE_V_FIRST:
         b_h = tl.zeros([BV, BK], dtype=tl.float32)
     else:
         b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -132,12 +132,12 @@ def fused_recurrent_kda_fwd_kernel(
                 )
                 * stride_init_state_token
             )
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 p_h0 = p_h0 + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
             else:
                 p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         else:
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 p_h0 = h0 + (i_n * HV + i_hv) * K * V + o_v[:, None] * K + o_k[None, :]
             else:
                 p_h0 = h0 + (i_n * HV + i_hv) * K * V + o_k[:, None] * V + o_v[None, :]
@@ -168,12 +168,12 @@ def fused_recurrent_kda_fwd_kernel(
         else:
             b_gk = b_g
 
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_h *= exp(b_gk[None, :])
         else:
             b_h *= exp(b_gk[:, None])
 
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_v -= tl.sum(b_h * b_k[None, :], 1)
         else:
             b_v -= tl.sum(b_h * b_k[:, None], 0)
@@ -184,7 +184,7 @@ def fused_recurrent_kda_fwd_kernel(
         if APPLY_BETA_SIGMOID:
             b_beta = tl.sigmoid(b_beta)
         b_v *= b_beta
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_h += b_v[:, None] * b_k[None, :]
             b_o = tl.sum(b_h * b_q[None, :], 1)
         else:
@@ -203,7 +203,7 @@ def fused_recurrent_kda_fwd_kernel(
                 )
             else:
                 p_ht = ht + (bos + i_t) * stride_final_state_token
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 p_ht = p_ht + i_hv * K * V + o_v[:, None] * K + o_k[None, :]
             else:
                 p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
@@ -218,7 +218,7 @@ def fused_recurrent_kda_fwd_kernel(
 
     if not IS_CONTINUOUS_BATCHING:
         if STORE_FINAL_STATE:
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 p_ht = ht + (i_n * HV + i_hv) * K * V + o_v[:, None] * K + o_k[None, :]
             else:
                 p_ht = ht + (i_n * HV + i_hv) * K * V + o_k[:, None] * V + o_v[None, :]
@@ -246,7 +246,7 @@ def fused_recurrent_kda_fwd(
     use_beta_sigmoid_in_kernel: bool = False,
     lower_bound: float | None = None,
     out: torch.Tensor | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
@@ -266,7 +266,7 @@ def fused_recurrent_kda_fwd(
         assert initial_state is not None
         final_state = initial_state
     elif output_final_state:
-        if transpose_state_layout:
+        if state_v_first:
             final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
         else:
             final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
@@ -317,7 +317,7 @@ def fused_recurrent_kda_fwd(
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
-        TRANSPOSE_STATE=transpose_state_layout,
+        STATE_V_FIRST=state_v_first,
         num_warps=4,
         num_stages=2,
     )
@@ -325,6 +325,12 @@ def fused_recurrent_kda_fwd(
     return out, final_state
 
 
+@deprecate_kwarg(
+    "transpose_state_layout",
+    new_name="state_v_first",
+    version="0.6.0",
+    raise_if_both_names=True,
+)
 @input_guard
 def fused_recurrent_kda(
     q: torch.Tensor,
@@ -342,7 +348,7 @@ def fused_recurrent_kda(
     use_beta_sigmoid_in_kernel: bool = False,
     lower_bound: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -377,8 +383,9 @@ def fused_recurrent_kda(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        transpose_state_layout (bool):
-            Whether to use transposed state layout `[V, K]` instead of `[K, V]`. Default: `False`.
+        state_v_first (Optional[bool]):
+            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
+            the default ``[K, V]``. Default: ``False``.
 
     Returns:
         o (torch.Tensor):
@@ -447,6 +454,6 @@ def fused_recurrent_kda(
         use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
     return o, final_state

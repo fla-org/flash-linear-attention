@@ -23,7 +23,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
         triton.Config({}, num_warps=num_warps)
         for num_warps in [4, 8]
     ],
-    key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'TRANSPOSE_STATE'],
+    key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['B', 'T'])
@@ -55,7 +55,7 @@ def fused_recurrent_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    TRANSPOSE_STATE: tl.constexpr = False,
+    STATE_V_FIRST: tl.constexpr = False,
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -84,7 +84,7 @@ def fused_recurrent_fwd_kernel(
 
     m_k = o_k < K
     m_v = o_v < V
-    if TRANSPOSE_STATE:
+    if STATE_V_FIRST:
         m_h = m_v[:, None] & m_k[None, :]
         b_h = tl.zeros([BV, BK], dtype=tl.float32)
     else:
@@ -92,7 +92,7 @@ def fused_recurrent_fwd_kernel(
         b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
     if USE_INITIAL_STATE:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_h0 = h0 + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -109,17 +109,17 @@ def fused_recurrent_fwd_kernel(
             b_h = b_h * exp(b_g_gamma)
         if USE_GK:
             b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h = b_h * exp(b_gk[None, :])
             else:
                 b_h = b_h * exp(b_gk[:, None])
         if USE_GV:
             b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h = b_h * exp(b_gv[:, None])
             else:
                 b_h = b_h * exp(b_gv[None, :])
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_h += b_v[:, None] * b_k[None, :]
             b_o = tl.sum(b_h * b_q[None, :], axis=1)
         else:
@@ -138,7 +138,7 @@ def fused_recurrent_fwd_kernel(
             p_gv += (-1 if REVERSE else 1) * H*V
 
     if STORE_FINAL_STATE:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_ht = ht + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -156,7 +156,7 @@ def fused_recurrent_fwd_kernel(
         triton.Config({}, num_warps=num_warps)
         for num_warps in [4]
     ],
-    key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'TRANSPOSE_STATE'],
+    key=['BK', 'BV', 'USE_G', 'USE_G_GAMMA', 'USE_GK', 'USE_GV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['B', 'T'])
@@ -197,7 +197,7 @@ def fused_recurrent_bwd_kernel(
     STORE_INITIAL_STATE_GRADIENT: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    TRANSPOSE_STATE: tl.constexpr = False,
+    STATE_V_FIRST: tl.constexpr = False,
 ):
     i_v, i_k, i_nh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
     i_n, i_h = i_nh // H, i_nh % H
@@ -214,7 +214,7 @@ def fused_recurrent_bwd_kernel(
     o_v = i_v * BV + tl.arange(0, BV)
     m_k = o_k < K
     m_v = o_v < V
-    if TRANSPOSE_STATE:
+    if STATE_V_FIRST:
         m_h = m_v[:, None] & m_k[None, :]
     else:
         m_h = m_k[:, None] & m_v[None, :]
@@ -232,12 +232,12 @@ def fused_recurrent_bwd_kernel(
     if USE_G_GAMMA:
         b_g_gamma = tl.load(g_gamma + i_h)
 
-    if TRANSPOSE_STATE:
+    if STATE_V_FIRST:
         b_h = tl.zeros([BV, BK], dtype=tl.float32)
     else:
         b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_h0 = h0 + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -254,17 +254,17 @@ def fused_recurrent_bwd_kernel(
             b_h = b_h * exp(b_g_gamma)
         if USE_GK:
             b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h = b_h * exp(b_gk[None, :])
             else:
                 b_h = b_h * exp(b_gk[:, None])
         if USE_GV:
             b_gv = tl.load(p_gv, mask=m_v, other=0).to(tl.float32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h = b_h * exp(b_gv[:, None])
             else:
                 b_h = b_h * exp(b_gv[None, :])
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_h += b_v[:, None] * b_k[None, :]
             b_dq = tl.sum(b_h * b_do[:, None], axis=0) * scale
         else:
@@ -305,12 +305,12 @@ def fused_recurrent_bwd_kernel(
         p_gv = gv + (bos + ((T - 1) if not REVERSE else 0)) * H*V + i_h * V + o_v
         p_dgv = dgv + ((i_k * all + bos) + ((T - 1) if not REVERSE else 0)) * H*V + i_h * V + o_v
 
-    if TRANSPOSE_STATE:
+    if STATE_V_FIRST:
         b_dh = tl.zeros([BV, BK], dtype=tl.float32)
     else:
         b_dh = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_FINAL_STATE_GRADIENT:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_dht = dht + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_dht = dht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -319,12 +319,12 @@ def fused_recurrent_bwd_kernel(
     if USE_G:
         b_dg = tl.sum(b_h * b_dh)
     if USE_GK:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_dgk = tl.sum(b_h * b_dh, 0)
         else:
             b_dgk = tl.sum(b_h * b_dh, 1)
     if USE_GV:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_dgv = tl.sum(b_h * b_dh, 1)
         else:
             b_dgv = tl.sum(b_h * b_dh, 0)
@@ -334,7 +334,7 @@ def fused_recurrent_bwd_kernel(
         b_k = tl.load(p_k, mask=m_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=m_v, other=0).to(tl.float32)
         b_do = tl.load(p_do, mask=m_v, other=0).to(tl.float32)
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_dh += b_do[:, None] * (b_q * scale)[None, :]
             b_dk = tl.sum(b_dh * b_v[:, None], axis=0)
             b_dv = tl.sum(b_dh * b_k[None, :], axis=1)
@@ -355,7 +355,7 @@ def fused_recurrent_bwd_kernel(
             b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
             b_dq = tl.load(p_dq, mask=m_k, other=0).to(tl.float32)
             b_dgk += b_q * b_dq - b_k * b_dk
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_dh *= exp(b_gk)[None, :]
             else:
                 b_dh *= exp(b_gk)[:, None]
@@ -366,7 +366,7 @@ def fused_recurrent_bwd_kernel(
             if i_k == 0:
                 b_dgv += b_o * b_do
             b_dgv -= b_v * b_dv
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_dh *= exp(b_gv)[:, None]
             else:
                 b_dh *= exp(b_gv)[None, :]
@@ -395,7 +395,7 @@ def fused_recurrent_bwd_kernel(
             p_dgv += (1 if REVERSE else -1) * H*V
 
     if STORE_INITIAL_STATE_GRADIENT:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_dh0 = dh0 + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_dh0 = dh0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -415,7 +415,7 @@ def fused_recurrent_fwd(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -424,7 +424,7 @@ def fused_recurrent_fwd(
 
     h0 = initial_state
     if output_final_state:
-        if transpose_state_layout:
+        if state_v_first:
             ht = q.new_empty(N, H, V, K, dtype=torch.float32)
         else:
             ht = q.new_empty(N, H, K, V, dtype=torch.float32)
@@ -458,7 +458,7 @@ def fused_recurrent_fwd(
         USE_GK=gk is not None,
         USE_GV=gv is not None,
         REVERSE=reverse,
-        TRANSPOSE_STATE=transpose_state_layout,
+        STATE_V_FIRST=state_v_first,
     )
     o = o.sum(0)
     return o, ht
@@ -479,7 +479,7 @@ def fused_recurrent_bwd(
     initial_state: torch.Tensor | None = None,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -535,7 +535,7 @@ def fused_recurrent_bwd(
         USE_GK=gk is not None,
         USE_GV=gv is not None,
         REVERSE=reverse,
-        TRANSPOSE_STATE=transpose_state_layout,
+        STATE_V_FIRST=state_v_first,
     )
     dq = dq.sum(0)
     dk = dk.sum(0)
@@ -569,7 +569,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         output_final_state: bool = False,
         reverse: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
-        transpose_state_layout: bool = False,
+        state_v_first: bool = False,
     ):
         o, ht = fused_recurrent_fwd(
             q=q,
@@ -584,13 +584,13 @@ class FusedRecurrentFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             reverse=reverse,
             cu_seqlens=cu_seqlens,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
         ctx.save_for_backward(q, k, v, g, g_gamma, gk, gv, initial_state, o)
         ctx.scale = scale
         ctx.reverse = reverse
         ctx.cu_seqlens = cu_seqlens
-        ctx.transpose_state_layout = transpose_state_layout
+        ctx.state_v_first = state_v_first
         return o.to(q.dtype), ht
 
     @staticmethod
@@ -613,7 +613,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             initial_state=initial_state,
             reverse=ctx.reverse,
             cu_seqlens=ctx.cu_seqlens,
-            transpose_state_layout=ctx.transpose_state_layout,
+            state_v_first=ctx.state_v_first,
         )
         return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dg, None, dgk, dgv, None, dh0, None, None, None, None
 
@@ -631,7 +631,7 @@ def fused_recurrent(
     output_final_state: bool = False,
     reverse: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
+    state_v_first: bool = False,
 ):
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -648,5 +648,5 @@ def fused_recurrent(
         output_final_state,
         reverse,
         cu_seqlens,
-        transpose_state_layout,
+        state_v_first,
     )
