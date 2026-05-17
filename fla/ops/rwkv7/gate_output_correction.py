@@ -249,6 +249,7 @@ class GateOutputCorrection(torch.autograd.Function):
         return gate_output_correction_backward_triton(grad_output, o, r, k, r_k, v, g)
 
 
+@torch.compiler.disable
 def gate_output_correction(
     o: torch.Tensor,
     r: torch.Tensor,
