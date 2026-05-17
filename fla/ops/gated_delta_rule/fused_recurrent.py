@@ -5,13 +5,15 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import warnings
+
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import deprecate_kwarg, input_guard
+from fla.utils import input_guard
 
 
 @triton.heuristics({
@@ -288,12 +290,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
         )
 
 
-@deprecate_kwarg(
-    "transpose_state_layout",
-    new_name="state_v_first",
-    version="0.6.0",
-    raise_if_both_names=True,
-)
 def fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -309,8 +305,9 @@ def fused_recurrent_gated_delta_rule(
     use_gate_in_kernel: bool = False,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -352,12 +349,12 @@ def fused_recurrent_gated_delta_rule(
         dt_bias (Optional[torch.Tensor]):
             Bias added to `g` before activation, of shape `[HV]`.
             Only used when `use_gate_in_kernel=True`.
-        cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
         state_v_first (Optional[bool]):
             Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
             the default ``[K, V]``. Default: ``False``.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
+            consistent with the FlashAttention API.
 
     Returns:
         o (torch.Tensor):
@@ -394,6 +391,16 @@ def fused_recurrent_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if 'transpose_state_layout' in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        warnings.warn(
+            "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        state_v_first = kwargs.pop('transpose_state_layout')
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

@@ -244,9 +244,9 @@ def chunk_simple_gla(
     scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
-    state_v_first: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
@@ -276,14 +276,14 @@ def chunk_simple_gla(
         output_final_state (Optional[bool]):
             Whether to output the final state of shape `[N, H, K, V]`
             (or `[N, H, V, K]` if `state_v_first=True`). Default: `False`.
+        state_v_first (Optional[bool]):
+            Whether to store the recurrent state in V-first `[V, K]` layout instead of
+            the default `[K, V]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         cu_seqlens_cpu (torch.LongTensor):
             CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
-        state_v_first (Optional[bool]):
-            Whether to store the recurrent state in V-first `[V, K]` layout instead of
-            the default `[K, V]`. Default: `False`.
 
     Returns:
         o (torch.Tensor):

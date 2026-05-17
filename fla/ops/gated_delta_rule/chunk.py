@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import warnings
+
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -23,7 +25,7 @@ from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, deprecate_kwarg, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 def chunk_gated_delta_rule_fwd(
@@ -361,12 +363,6 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         )
 
 
-@deprecate_kwarg(
-    "transpose_state_layout",
-    new_name="state_v_first",
-    version="0.6.0",
-    raise_if_both_names=True,
-)
 @torch.compiler.disable
 def chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -378,10 +374,10 @@ def chunk_gated_delta_rule(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     cp_context: FLACPContext | None = None,
-    state_v_first: bool = False,
     **kwargs,
 ):
     r"""
@@ -411,6 +407,9 @@ def chunk_gated_delta_rule(
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q/k tensor internally. Default: `False`.
+        state_v_first (Optional[bool]):
+            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
+            the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -418,9 +417,6 @@ def chunk_gated_delta_rule(
             Context parallel context for distributed training across multiple devices.
             When provided, `initial_state` and `output_final_state` are not supported,
             and `cu_seqlens` will be overridden by the context. Default: `None`.
-        state_v_first (Optional[bool]):
-            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
-            the default ``[K, V]``. Default: ``False``.
         use_gate_in_kernel (bool):
             Whether to compute the log-space GDN decay internally.
             When `True`, the passed `g` is the raw input, and `A_log` must be provided.
@@ -467,6 +463,16 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if 'transpose_state_layout' in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        warnings.warn(
+            "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        state_v_first = kwargs.pop('transpose_state_layout')
+
     # Validate head dimensions
     if q.shape[2] != k.shape[2]:
         raise ValueError(

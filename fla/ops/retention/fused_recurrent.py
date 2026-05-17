@@ -5,18 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import warnings
+
 import torch
 
 from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
-from fla.utils import deprecate_kwarg
 
 
-@deprecate_kwarg(
-    "transpose_state_layout",
-    new_name="state_v_first",
-    version="0.6.0",
-    raise_if_both_names=True,
-)
 def fused_recurrent_retention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -25,9 +20,20 @@ def fused_recurrent_retention(
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if 'transpose_state_layout' in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        warnings.warn(
+            "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        state_v_first = kwargs.pop('transpose_state_layout')
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
