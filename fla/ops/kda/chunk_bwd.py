@@ -119,7 +119,7 @@ def chunk_kda_bwd_kernel_dAv(
         for num_stages in [2, 3, 4]
         if not (IS_NVIDIA_HOPPER and BK == 32 and num_warps == 4)
     ],
-    key=['BT', 'HV', 'TRANSPOSE_STATE'],
+    key=['BT', 'HV', 'STATE_V_FIRST'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -152,7 +152,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     BT: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    TRANSPOSE_STATE: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
@@ -221,7 +221,7 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         for i_v in range(tl.cdiv(V, BV)):
             p_v_new = tl.make_block_ptr(v_new, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
             p_do = tl.make_block_ptr(do, (T, V), (HV*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
                 p_dh = tl.make_block_ptr(dh, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0))
             else:
@@ -362,10 +362,10 @@ def chunk_kda_bwd_wy_dqkg_fused(
     dh: torch.Tensor,
     dv: torch.Tensor,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
 ):
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
@@ -410,7 +410,7 @@ def chunk_kda_bwd_wy_dqkg_fused(
         K=K,
         V=V,
         BT=BT,
-        TRANSPOSE_STATE=transpose_state_layout,
+        STATE_V_FIRST=state_v_first,
     )
     dv = dv2
     return dq, dk, dv, db, dg, dA
@@ -429,6 +429,7 @@ def chunk_kda_bwd(
     dht: torch.Tensor,
     g: torch.Tensor | None = None,
     g_org: torch.Tensor | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
@@ -439,7 +440,6 @@ def chunk_kda_bwd(
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
-    transpose_state_layout: bool = False,
     **kwargs,
 ):
     H, HV = q.shape[2], v.shape[2]
@@ -481,7 +481,7 @@ def chunk_kda_bwd(
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             chunk_size=chunk_size,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
     else:
         w, u, qg, kg, v_new, h = kwargs["w"], kwargs["u"], kwargs["qg"], kwargs["kg"], kwargs["v_new"], kwargs["h"]
@@ -520,7 +520,7 @@ def chunk_kda_bwd(
             initial_state=initial_state,
             context=cp_context,
             chunk_size=chunk_size,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -536,7 +536,7 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
 
     dq, dk, dv, db, dg, dAkk = chunk_kda_bwd_wy_dqkg_fused(
@@ -555,7 +555,7 @@ def chunk_kda_bwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         chunk_indices=chunk_indices,
-        transpose_state_layout=transpose_state_layout,
+        state_v_first=state_v_first,
     )
 
     dq, dk, db, dg = chunk_kda_bwd_intra(

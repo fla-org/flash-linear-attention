@@ -7,6 +7,8 @@
 
 # Related files are modified and supported by the Moonshot AI Team
 
+import warnings
+
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
@@ -38,6 +40,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
@@ -46,7 +49,6 @@ class ChunkKDAFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
-        transpose_state_layout: bool = False,
     ):
         # Apply l2norm
         q_rstd, k_rstd = None, None
@@ -89,7 +91,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             disable_recompute=disable_recompute,
             return_intermediate_states=return_intermediate_states,
             cp_context=cp_context,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )
 
         if return_intermediate_states:
@@ -111,7 +113,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         ctx.use_beta_sigmoid_in_kernel = use_beta_sigmoid_in_kernel
         ctx.disable_recompute = disable_recompute
         ctx.cp_context = cp_context
-        ctx.transpose_state_layout = transpose_state_layout
+        ctx.state_v_first = state_v_first
         return o.type_as(q), final_state
 
     @staticmethod
@@ -150,7 +152,7 @@ class ChunkKDAFunction(torch.autograd.Function):
             disable_recompute=ctx.disable_recompute,
             w=w, u=u, qg=qg, kg=kg, v_new=v_new, h=h,
             cp_context=ctx.cp_context,
-            transpose_state_layout=ctx.transpose_state_layout,
+            state_v_first=ctx.state_v_first,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -176,14 +178,14 @@ def chunk_kda(
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
     use_beta_sigmoid_in_kernel: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
-    cu_seqlens_cpu: torch.LongTensor | None = None,
     safe_gate: bool = False,
     lower_bound: float | None = None,
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
     cp_context: FLACPContext = None,
-    transpose_state_layout: bool = False,
     **kwargs,
 ):
     r"""
@@ -226,12 +228,6 @@ def chunk_kda(
               ``A_log`` (shape ``[HV]``) and the optional ``dt_bias`` (shape ``[HV * K]``) should be provided.
             - If ``False``, ``g`` is expected to be the pre-computed decay value.
             Default: ``False``.
-        cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
-            consistent with the FlashAttention API.
-        cu_seqlens_cpu (torch.LongTensor):
-            Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
-            consistent with the FlashAttention API.
         safe_gate (bool):
             Whether to clamp the gate to ``[lower_bound, 0)`` and enable M=16 TensorCore
             acceleration for higher throughput. Requires ``lower_bound`` to be set.
@@ -252,13 +248,18 @@ def chunk_kda(
             If True, returns intermediate state ``h`` for inference scenarios (e.g., vLLM).
             Must be used within ``torch.inference_mode()`` and will return a 3-tuple instead of 2-tuple.
             This is not intended for training as it bypasses autograd. Default: ``False``.
+        state_v_first (Optional[bool]):
+            Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
+        cu_seqlens (torch.LongTensor):
+            Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
+            consistent with the FlashAttention API.
+        cu_seqlens_cpu (torch.LongTensor):
+            Cumulative sequence lengths of shape ``[N+1]`` used for variable-length training,
+            consistent with the FlashAttention API.
         cp_context (Optional[FLACPContext]):
             Context parallel context for distributed training across multiple devices.
             When provided, ``initial_state`` and ``output_final_state`` are not supported,
             and ``cu_seqlens`` will be overridden by the context. Default: ``None``.
-        transpose_state_layout (Optional[bool]):
-            Whether to use the transposed state layout for the hidden state.
-            Default: ``False``.
 
     Returns:
         - Normal mode (return_intermediate_states=False): A tuple (o, final_state)
@@ -333,6 +334,15 @@ def chunk_kda(
             cu_seqlens=cu_seqlens
         )
     """
+    if 'transpose_state_layout' in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        warnings.warn(
+            "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        state_v_first = kwargs.pop('transpose_state_layout')
 
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
@@ -399,6 +409,7 @@ def chunk_kda(
         use_qk_l2norm_in_kernel,
         use_gate_in_kernel,
         use_beta_sigmoid_in_kernel,
+        state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
         safe_gate,
@@ -407,5 +418,4 @@ def chunk_kda(
         disable_recompute,
         return_intermediate_states,
         cp_context,
-        transpose_state_layout,
     )

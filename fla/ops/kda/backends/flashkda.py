@@ -51,6 +51,7 @@ class FlashKDABackend(BaseBackend):
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
@@ -58,7 +59,6 @@ class FlashKDABackend(BaseBackend):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
-        transpose_state_layout: bool = False,
         **kwargs,
     ) -> tuple[bool, str | None]:
         if torch.is_grad_enabled():
@@ -77,8 +77,8 @@ class FlashKDABackend(BaseBackend):
             return False, "FlashKDA requires use_qk_l2norm_in_kernel=True"
         if not use_beta_sigmoid_in_kernel:
             return False, "FlashKDA requires use_beta_sigmoid_in_kernel=True"
-        if not transpose_state_layout:
-            return False, "FlashKDA requires transpose_state_layout=True"
+        if not state_v_first:
+            return False, "FlashKDA requires state_v_first=True"
         if cp_context is not None:
             return False, "FlashKDA does not support context parallel"
         if return_intermediate_states:
@@ -100,6 +100,7 @@ class FlashKDABackend(BaseBackend):
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
@@ -107,7 +108,6 @@ class FlashKDABackend(BaseBackend):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
-        transpose_state_layout: bool = False,
         A_log: torch.Tensor | None = None,
         dt_bias: torch.Tensor | None = None,
         **kwargs,

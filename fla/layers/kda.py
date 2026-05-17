@@ -274,6 +274,7 @@ class KimiDeltaAttention(nn.Module):
                 use_gate_in_kernel=True,
                 safe_gate=self.safe_gate,
                 lower_bound=self.lower_bound,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == "fused_recurrent":
@@ -290,6 +291,7 @@ class KimiDeltaAttention(nn.Module):
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
                 lower_bound=self.lower_bound,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         else:

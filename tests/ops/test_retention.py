@@ -324,7 +324,7 @@ def test_parallel(
         ]
     ],
 )
-def test_fused_recurrent_transpose_state(
+def test_fused_recurrent_state_v_first(
     B: int,
     T: int,
     H: int,
@@ -342,16 +342,16 @@ def test_fused_recurrent_transpose_state(
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
-    def run(transpose: bool):
+    def run(state_v_first: bool):
         q_, k_, v_ = (x.detach().clone().requires_grad_() for x in (q, k, v))
-        h0_in = h0.transpose(-1, -2).contiguous() if transpose else h0.clone()
-        dht_in = dht.transpose(-1, -2).contiguous() if transpose else dht
+        h0_in = h0.transpose(-1, -2).contiguous() if state_v_first else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if state_v_first else dht
         h0_in = h0_in.requires_grad_()
         out, ht = fused_recurrent_retention(
             q_, k_, v_,
             initial_state=h0_in,
             output_final_state=True,
-            transpose_state_layout=transpose,
+            state_v_first=state_v_first,
         )
         ((out * do).sum() + (ht * dht_in).sum()).backward()
         return out, ht, q_.grad, k_.grad, v_.grad, h0_in.grad
@@ -366,3 +366,10 @@ def test_fused_recurrent_transpose_state(
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
+
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning,
+    # and passing both names at once is rejected
+    with pytest.warns(DeprecationWarning):
+        fused_recurrent_retention(q, k, v, transpose_state_layout=True)
+    with pytest.raises(ValueError):
+        fused_recurrent_retention(q, k, v, state_v_first=True, transpose_state_layout=True)

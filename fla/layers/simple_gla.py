@@ -235,6 +235,7 @@ class SimpleGatedLinearAttention(nn.Module):
                 g=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
@@ -245,6 +246,7 @@ class SimpleGatedLinearAttention(nn.Module):
                 g=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
         else:

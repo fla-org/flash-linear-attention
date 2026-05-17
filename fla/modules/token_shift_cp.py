@@ -200,6 +200,7 @@ class TokenShiftCPFunction(torch.autograd.Function):
         return dx, None, None, None
 
 
+@torch.compiler.disable
 def token_shift_cp(
     x: torch.Tensor,
     cp_context: FLACPContext,
