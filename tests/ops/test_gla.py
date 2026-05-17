@@ -149,20 +149,12 @@ def test_fused_recurrent_state_v_first(
     assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
 
-
-@pytest.mark.skipif(
-    device_platform == 'intel',
-    reason='Intel Triton Failure',
-)
-def test_state_v_first_deprecation():
-    torch.manual_seed(42)
-    q, k, v = (torch.rand(1, 16, 2, 64, device=device) for _ in range(3))
-    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning,
+    # and passing both names at once is rejected
     with pytest.warns(DeprecationWarning):
-        fused_recurrent_gla(q, k, v, transpose_state_layout=True)
-    # passing both the new and the deprecated name at once is rejected
+        fused_recurrent_gla(q, k, v, gk=g, transpose_state_layout=True)
     with pytest.raises(ValueError):
-        fused_recurrent_gla(q, k, v, state_v_first=True, transpose_state_layout=True)
+        fused_recurrent_gla(q, k, v, gk=g, state_v_first=True, transpose_state_layout=True)
 
 
 @pytest.mark.parametrize(

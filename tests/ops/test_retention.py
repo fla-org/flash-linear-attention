@@ -367,13 +367,9 @@ def test_fused_recurrent_state_v_first(
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
 
-
-def test_state_v_first_deprecation():
-    torch.manual_seed(42)
-    q, k, v = (torch.randn(1, 16, 2, 64, device=device) for _ in range(3))
-    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning,
+    # and passing both names at once is rejected
     with pytest.warns(DeprecationWarning):
         fused_recurrent_retention(q, k, v, transpose_state_layout=True)
-    # passing both the new and the deprecated name at once is rejected
     with pytest.raises(ValueError):
         fused_recurrent_retention(q, k, v, state_v_first=True, transpose_state_layout=True)
