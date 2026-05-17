@@ -275,8 +275,8 @@ class GatedDeltaNet(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gated_delta_rule(
@@ -291,8 +291,8 @@ class GatedDeltaNet(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

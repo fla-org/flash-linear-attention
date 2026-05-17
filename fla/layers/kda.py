@@ -274,8 +274,8 @@ class KimiDeltaAttention(nn.Module):
                 use_gate_in_kernel=True,
                 safe_gate=self.safe_gate,
                 lower_bound=self.lower_bound,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == "fused_recurrent":
             o, recurrent_state = fused_recurrent_kda(
@@ -291,8 +291,8 @@ class KimiDeltaAttention(nn.Module):
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
                 lower_bound=self.lower_bound,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

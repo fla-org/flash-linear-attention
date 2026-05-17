@@ -190,8 +190,8 @@ class YOCOGatedRetention(nn.Module):
                 g=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_simple_gla(
@@ -201,8 +201,8 @@ class YOCOGatedRetention(nn.Module):
                 g=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Unsupported GatedRetention mode: {mode}")

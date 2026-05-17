@@ -201,8 +201,8 @@ class LightNetAttention(nn.Module):
                 gk=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'chunk':
             o, recurrent_state = chunk_gla(
@@ -212,8 +212,8 @@ class LightNetAttention(nn.Module):
                 g=g,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

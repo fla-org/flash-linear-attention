@@ -195,8 +195,8 @@ class RodimusAttention(nn.Module):
                 gk=rt_gate_log,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
                 head_first=False,
             )
         elif mode == 'fused_chunk':
@@ -218,8 +218,8 @@ class RodimusAttention(nn.Module):
                 g=rt_gate_log,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
                 head_first=False,
             )
         else:

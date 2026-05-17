@@ -252,8 +252,8 @@ class GatedLinearAttention(nn.Module):
                 gk=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_chunk':
             o, recurrent_state = fused_chunk_gla(
@@ -272,8 +272,8 @@ class GatedLinearAttention(nn.Module):
                 g=gk,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
