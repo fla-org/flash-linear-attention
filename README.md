@@ -29,10 +29,10 @@
 
 ## News
 
+- [2026-05] 🦅 Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
 - [2026-05] 🚀 Add [YOCO](https://arxiv.org/abs/2405.05254) (You Only Cache Once) implementation to `fla`.
 - [2026-05] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
-- [2026-05] Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
-- [2026-04] 🐍 Add Mamba-3 implementation to `fla` ([paper](https://arxiv.org/abs/2603.15569)).
+- [2026-04] 🐍 Add Mamba3 implementation to `fla` ([paper](https://arxiv.org/abs/2603.15569)).
 - [2026-04] 🧱 Add [MoBA](https://arxiv.org/abs/2502.13189) (Mixture of Block Attention) implementation to `fla`, with [FlashMoBA](https://github.com/mit-han-lab/flash-moba) backend support.
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
 - [2026-04] 🎯 Add [GPT-OSS](https://openai.com/index/introducing-gpt-oss/)-style attention sink support to `fla`'s attention kernels.
@@ -104,8 +104,8 @@
 | 2025 | DeltaFormer          | [Understanding Transformer from the Perspective of Associative Memory](https://arxiv.org/abs/2505.19488v1)                                    |                                                                                                 |     [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/deltaformer.py)      |
 | 2025 | KDA                  | [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)                                              |                                                                                                 |            [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/kda)             |
 | 2025 | MoBA                 | [MoBA: Mixture of Block Attention for Long-Context LLMs](https://arxiv.org/abs/2502.13189)                                                    | [official](https://github.com/MoonshotAI/MoBA)                                                  |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/moba.py)         |
-| 2026 | Mamba-3              | [Mamba-3: Improved Sequence Modeling using State Space Principles](https://arxiv.org/abs/2603.15569)                                          | [official](https://github.com/state-spaces/mamba)                                               |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba3)          |
-| 2026 | Raven                | [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven/blob/main/raven.pdf)                    | [official](https://github.com/goombalab/raven)                                                  |          [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/raven)          |
+| 2026 | Mamba3               | [Mamba-3: Improved Sequence Modeling using State Space Principles](https://arxiv.org/abs/2603.15569)                                          | [official](https://github.com/state-spaces/mamba)                                               |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba3)          |
+| 2026 | Raven                | [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven/blob/main/raven.pdf)                     | [official](https://github.com/goombalab/raven)                                                  |          [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/raven)          |
 
 ## Installation
 
@@ -606,8 +606,8 @@ If you find this repository helpful, please cite our work:
   title         = {Attention Residuals},
   author        = {Chen, Guangyu  and Zhang, Yu  and Su, Jianlin  and Xu, Weixin  and Pan, Siyuan  and Wang, Yaoyu  and Wang, Yucheng  and Chen, Guanduo  and Yin, Bohong  and Chen, Yutian  and Yan, Junjie  and Wei, Ming  and Zhang, Y.  and Meng, Fanqing  and Hong, Chao  and Xie, Xiaotong  and Liu, Shaowei  and Lu, Enzhe  and Tai, Yunpeng  and Chen, Yanru  and Men, Xin  and Guo, Haiqing  and Charles, Y.  and Lu, Haoyu  and Sui, Lin  and Zhu, Jinguo  and Zhou, Zaida  and He, Weiran  and Huang, Weixiao  and Xu, Xinran  and Wang, Yuzhi  and Lai, Guokun  and Du, Yulun  and Wu, Yuxin  and Yang, Zhilin  and Zhou, Xinyu},
   year          = {2026},
-  archiveprefix = {arXiv},
   eprint        = {2603.15031},
+  archiveprefix = {arXiv},
   primaryclass  = {cs.CL}
 }
 

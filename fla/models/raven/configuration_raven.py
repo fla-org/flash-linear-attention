@@ -22,21 +22,16 @@ class RavenConfig(PretrainedConfig):
         self,
         hidden_size: int = 2048,
         gate_logit_normalizer: int | None = 8,
-        clamp_min: float | None = None,
-        clamp_max: float | None = None,
         hidden_ratio: int | None = 4,
         intermediate_size: int | None = None,
         num_hidden_layers: int = 24,
         num_heads: int = 4,
         num_kv_heads: int | None = None,
         num_slots: int | None = 64,
-        use_short_conv: bool = False,
-        conv_size: int = 4,
         expand_k: float = 1,
         expand_v: float = 1,
         feature_map: str = 'swish',
         use_output_gate: bool = False,
-        use_norm: bool = True,
         max_position_embeddings: int = 2048,
         hidden_act: str = "swish",
         decay_type: str = 'Mamba2',
@@ -67,21 +62,16 @@ class RavenConfig(PretrainedConfig):
     ):
         self.hidden_size = hidden_size
         self.gate_logit_normalizer = gate_logit_normalizer
-        self.clamp_min = clamp_min
-        self.clamp_max = clamp_max
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.num_slots = num_slots
-        self.use_short_conv = use_short_conv
-        self.conv_size = conv_size
         self.expand_k = expand_k
         self.expand_v = expand_v
         self.feature_map = feature_map
         self.use_output_gate = use_output_gate
-        self.use_norm = use_norm
         self.max_position_embeddings = max_position_embeddings
         self.hidden_act = hidden_act
         self.decay_type = decay_type
