@@ -338,6 +338,7 @@ def token_shift_bwd_kernel_long(
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:
+        i_n = i_b
         bos, eos = i_b * T, (i_b + 1) * T
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, T)
