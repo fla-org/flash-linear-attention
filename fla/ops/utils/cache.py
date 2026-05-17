@@ -346,10 +346,9 @@ class CachedAutotuner(Autotuner):
         super().__init__(fn, arg_names, configs, key, reset_to_zero, restore_value, **kwargs)
         self.kernel_name = fn.fn.__name__ if hasattr(fn, 'fn') else fn.__name__
 
-        # None-safe pre/post hooks: Triton's defaults crash when a restore_value /
-        # reset_to_zero arg is None (idiomatic for optional pointers gated by a
-        # tl.constexpr flag). Fixed upstream in triton-lang/triton#10295 — remove
-        # this override once FLA's minimum Triton version contains the fix.
+        # None-safe pre/post hooks: Triton's defaults crash when a restore_value / reset_to_zero arg
+        # is None (idiomatic for optional pointers gated by a tl.constexpr flag).
+        # Fixed upstream in triton-lang/triton#10295 — remove this override once FLA's minimum Triton version has it.
         if not self.user_defined_pre_hook and (self.reset_to_zero or self.restore_value):
             def _pre_hook(kw, reset_only=False):
                 for n in self.reset_to_zero:
