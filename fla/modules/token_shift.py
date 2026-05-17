@@ -527,6 +527,7 @@ class TokenShift(torch.autograd.Function):
                                          ctx.use_short_kernel, ctx.has_cache, ctx.chunk_indices)
         return dx, None, grad_cache, None, None
 
+
 @torch.compiler.disable
 def token_shift(
     x: torch.Tensor,
