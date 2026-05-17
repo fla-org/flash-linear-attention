@@ -15,12 +15,13 @@ from .test_modeling_utils import create_model_and_config
 
 
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'use_l2warp', 'decay_type', 'use_output_gate', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'expand_v', 'use_l2warp', 'decay_type', 'use_output_gate', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-l2{}-decay{}-og{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-ev{}-l2{}-decay{}-og{}-{}".format(*test))
         for test in [
-            (4, 4, 1024, 4, 64, False, 'Mamba2', False, torch.bfloat16),
-            (4, 4, 1024, 4, 64, False, 'GLA', True, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 1, False, 'Mamba2', False, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 1, False, 'GLA', True, torch.bfloat16),
+            (4, 4, 1024, 4, 64, 2, False, 'Mamba2', False, torch.bfloat16),
         ]
     ],
 )
@@ -30,6 +31,7 @@ def test_modeling(
     T: int,
     H: int,
     D: int,
+    expand_v: float,
     use_l2warp: bool,
     decay_type: str,
     use_output_gate: bool,
@@ -46,6 +48,7 @@ def test_modeling(
         add_gumbel_noise=False,
         decay_type=decay_type,
         use_output_gate=use_output_gate,
+        expand_v=expand_v,
         dtype=dtype,
     )
 
