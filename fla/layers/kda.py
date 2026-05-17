@@ -78,6 +78,9 @@ class KimiDeltaAttention(nn.Module):
             The index of the layer. Default: None.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
+        state_v_first (bool, Optional):
+            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
+            the default ``[K, V]``. See :func:`chunk_kda` for details. Default: ``False``.
     """
 
     def __init__(
@@ -96,6 +99,7 @@ class KimiDeltaAttention(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        state_v_first: bool = False,
         **kwargs,
     ) -> KimiDeltaAttention:
         super().__init__()
@@ -104,6 +108,7 @@ class KimiDeltaAttention(nn.Module):
         self.allow_neg_eigval = allow_neg_eigval
         self.safe_gate = safe_gate
         self.lower_bound = lower_bound
+        self.state_v_first = state_v_first
         self.hidden_size = hidden_size
         self.expand_v = expand_v
 
@@ -275,6 +280,7 @@ class KimiDeltaAttention(nn.Module):
                 safe_gate=self.safe_gate,
                 lower_bound=self.lower_bound,
                 cu_seqlens=cu_seqlens,
+                state_v_first=self.state_v_first,
             )
         elif mode == "fused_recurrent":
             o, recurrent_state = fused_recurrent_kda(
@@ -291,6 +297,7 @@ class KimiDeltaAttention(nn.Module):
                 use_gate_in_kernel=True,
                 lower_bound=self.lower_bound,
                 cu_seqlens=cu_seqlens,
+                state_v_first=self.state_v_first,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

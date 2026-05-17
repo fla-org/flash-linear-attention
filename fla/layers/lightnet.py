@@ -42,10 +42,12 @@ class LightNetAttention(nn.Module):
         elementwise_affine: bool | None = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
+        state_v_first: bool = False,
     ) -> LightNetAttention:
         super().__init__()
 
         self.mode = mode
+        self.state_v_first = state_v_first
         self.hidden_size = hidden_size
 
         if expand_ratio is None and num_heads is not None:
@@ -202,6 +204,7 @@ class LightNetAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                state_v_first=self.state_v_first,
             )
         elif mode == 'chunk':
             o, recurrent_state = chunk_gla(
@@ -212,6 +215,7 @@ class LightNetAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                state_v_first=self.state_v_first,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

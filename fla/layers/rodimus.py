@@ -75,11 +75,13 @@ class RodimusAttention(nn.Module):
         k_norm_eps: float | None = None,
         residual_in_fp32: bool = True,
         layer_idx: int = None,
+        state_v_first: bool = False,
     ):
         super().__init__()
 
         self.block_type = block_type
         self.mode = mode
+        self.state_v_first = state_v_first
         self.hidden_size = hidden_size
         self.d_inner = align_multiple(int(self.hidden_size * 2), 8)
 
@@ -196,6 +198,7 @@ class RodimusAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                state_v_first=self.state_v_first,
                 head_first=False,
             )
         elif mode == 'fused_chunk':
@@ -218,6 +221,7 @@ class RodimusAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                state_v_first=self.state_v_first,
                 head_first=False,
             )
         else:

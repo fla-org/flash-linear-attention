@@ -42,10 +42,12 @@ class HGRN2Attention(nn.Module):
         elementwise_affine: bool | None = True,
         norm_eps: float = 1e-5,
         layer_idx: int = None,
+        state_v_first: bool = False,
     ) -> HGRN2Attention:
         super().__init__()
 
         self.mode = mode
+        self.state_v_first = state_v_first
         self.hidden_size = hidden_size
 
         if expand_ratio is not None:
@@ -176,6 +178,7 @@ class HGRN2Attention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                state_v_first=self.state_v_first,
             )
         elif mode == 'fused_chunk':
             o, recurrent_state = fused_chunk_gla(
@@ -195,6 +198,7 @@ class HGRN2Attention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
+                state_v_first=self.state_v_first,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
