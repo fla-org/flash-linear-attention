@@ -92,14 +92,34 @@ class Raven(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        if self.num_heads < 1:
+            raise ValueError(f"`num_heads` must be a positive integer, got {self.num_heads}.")
+        if self.num_kv_heads < 1:
+            raise ValueError(f"`num_kv_heads` must be a positive integer, got {self.num_kv_heads}.")
         if self.num_heads % self.num_kv_heads != 0:
             raise ValueError(
                 f"`num_heads` must be divisible by `num_kv_heads`, got {self.num_heads} and {self.num_kv_heads}.",
             )
 
         self.num_kv_groups = self.num_heads // self.num_kv_heads
-        self.key_dim = int(hidden_size * expand_k)
-        self.value_dim = int(hidden_size * expand_v)
+        key_dim = hidden_size * expand_k
+        value_dim = hidden_size * expand_v
+        self.key_dim = int(key_dim)
+        self.value_dim = int(value_dim)
+        if not math.isclose(key_dim, self.key_dim):
+            raise ValueError(f"`hidden_size * expand_k` must be an integer, got {key_dim}.")
+        if not math.isclose(value_dim, self.value_dim):
+            raise ValueError(f"`hidden_size * expand_v` must be an integer, got {value_dim}.")
+        if self.key_dim % self.num_heads != 0:
+            raise ValueError(
+                f"`hidden_size * expand_k` must be divisible by `num_heads`, "
+                f"got key_dim={self.key_dim} and num_heads={self.num_heads}.",
+            )
+        if self.value_dim % self.num_heads != 0:
+            raise ValueError(
+                f"`hidden_size * expand_v` must be divisible by `num_heads`, "
+                f"got value_dim={self.value_dim} and num_heads={self.num_heads}.",
+            )
         self.key_dim_per_group = self.key_dim // self.num_kv_groups
         self.value_dim_per_group = self.value_dim // self.num_kv_groups
         self.head_k_dim = self.key_dim // self.num_heads
@@ -200,7 +220,7 @@ class Raven(nn.Module):
                 self.o_norm = norm_cls(self.head_v_dim, elementwise_affine=elementwise_affine, eps=norm_eps)
                 self.fuse_norm_and_gate = False
         else:
-            self.g_norm = norm_cls(self.hidden_size, elementwise_affine=elementwise_affine, eps=norm_eps)
+            self.g_norm = norm_cls(self.value_dim, elementwise_affine=elementwise_affine, eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
 
     def forward(
@@ -233,8 +253,13 @@ class Raven(nn.Module):
         if cu_seqlens is None and attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
-            seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-            max_seqlen = q_len + _max_offset(seqlen_offset)
+            # Shift RoPE positions by each sequence's left padding only when decoding on
+            # top of cached tokens. During prefill the unpadded tokens are already packed
+            # contiguously per `cu_seqlens`, so positions start at 0; adding `lens - mask_len`
+            # there would push them negative.
+            if _max_offset(seqlen_offset) > 0:
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
+                max_seqlen = q_len + _max_offset(seqlen_offset)
 
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_k_dim)
         k = rearrange(self.k_proj(hidden_states), '... (h d) -> ... h d', d=self.head_k_dim)
