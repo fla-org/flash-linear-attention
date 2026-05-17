@@ -427,7 +427,7 @@ def test_cp2_gqa_single_sequence():
 # Transpose State Layout Tests
 # ============================================================
 
-def test_cp2_transpose_state():
+def test_cp2_state_v_first():
     """CP2: state_v_first=True with sequence cut."""
     if torch.cuda.device_count() < 2:
         pytest.skip("At least 2 GPUs required")
@@ -442,7 +442,7 @@ def test_cp2_transpose_state():
     )
 
 
-def test_cp4_transpose_state():
+def test_cp4_state_v_first():
     """CP4: state_v_first=True with single long sequence."""
     if torch.cuda.device_count() < 4:
         pytest.skip("At least 4 GPUs required")

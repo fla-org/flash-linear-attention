@@ -222,7 +222,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
         ]
     ],
 )
-def test_fused_recurrent_transpose_state(
+def test_fused_recurrent_state_v_first(
     B: int,
     T: int,
     H: int,
@@ -634,7 +634,7 @@ def test_chunk(
         ]
     ],
 )
-def test_chunk_transpose_state(
+def test_chunk_state_v_first(
     B: int,
     T: int,
     H: int,

@@ -107,7 +107,7 @@ def test_fused_recurrent(
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
-def test_fused_recurrent_transpose_state(
+def test_fused_recurrent_state_v_first(
     B: int,
     T: int,
     H: int,
@@ -124,16 +124,16 @@ def test_fused_recurrent_transpose_state(
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
-    def run(transpose: bool):
+    def run(state_v_first: bool):
         q_, k_, v_, g_ = (x.detach().clone().requires_grad_() for x in (q, k, v, g))
-        h0_in = h0.transpose(-1, -2).contiguous() if transpose else h0.clone()
-        dht_in = dht.transpose(-1, -2).contiguous() if transpose else dht
+        h0_in = h0.transpose(-1, -2).contiguous() if state_v_first else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if state_v_first else dht
         h0_in = h0_in.requires_grad_()
         out, ht = fused_recurrent_gla(
             q=q_, k=k_, v=v_, gk=g_,
             initial_state=h0_in,
             output_final_state=True,
-            state_v_first=transpose,
+            state_v_first=state_v_first,
         )
         ((out * do).sum() + (ht * dht_in).sum()).backward()
         return out, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_in.grad
@@ -148,6 +148,21 @@ def test_fused_recurrent_transpose_state(
     assert_close('dv', ref_dv, tri_dv, 0.005)
     assert_close('dg', ref_dg, tri_dg, 0.005)
     assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 0.005)
+
+
+@pytest.mark.skipif(
+    device_platform == 'intel',
+    reason='Intel Triton Failure',
+)
+def test_state_v_first_deprecation():
+    torch.manual_seed(42)
+    q, k, v = (torch.rand(1, 16, 2, 64, device=device) for _ in range(3))
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning
+    with pytest.warns(DeprecationWarning):
+        fused_recurrent_gla(q, k, v, transpose_state_layout=True)
+    # passing both the new and the deprecated name at once is rejected
+    with pytest.raises(ValueError):
+        fused_recurrent_gla(q, k, v, state_v_first=True, transpose_state_layout=True)
 
 
 @pytest.mark.parametrize(
@@ -324,7 +339,7 @@ def test_chunk(
     device_platform == 'intel',
     reason='Intel Triton Failure',
 )
-def test_chunk_transpose_state(
+def test_chunk_state_v_first(
     B: int,
     T: int,
     H: int,
@@ -342,17 +357,17 @@ def test_chunk_transpose_state(
     do = torch.randn_like(v)
     dht = torch.randn_like(h0)
 
-    def run(transpose: bool):
+    def run(state_v_first: bool):
         q_, k_, v_, g_ = (x.detach().clone().requires_grad_() for x in (q, k, v, g))
         # the [V, K] state layout takes a transposed initial state / final-state gradient
-        h0_in = h0.transpose(-1, -2).contiguous() if transpose else h0.clone()
-        dht_in = dht.transpose(-1, -2).contiguous() if transpose else dht
+        h0_in = h0.transpose(-1, -2).contiguous() if state_v_first else h0.clone()
+        dht_in = dht.transpose(-1, -2).contiguous() if state_v_first else dht
         h0_in = h0_in.requires_grad_()
         out, ht = chunk_gla(
             q=q_, k=k_, v=v_, g=g_,
             initial_state=h0_in,
             output_final_state=True,
-            state_v_first=transpose,
+            state_v_first=state_v_first,
         )
         ((out * do).sum() + (ht * dht_in).sum()).backward()
         return out, ht, q_.grad, k_.grad, v_.grad, g_.grad, h0_in.grad
