@@ -300,7 +300,6 @@ class MomAttention(nn.Module):
         capacity: float = 1.0,
         shared_mem: bool = False,
         single_kv_proj: bool = False,
-        state_v_first: bool = False,
         **kwargs,
     ) -> MomAttention:
         super().__init__()
@@ -311,7 +310,6 @@ class MomAttention(nn.Module):
         self.single_kv_proj = single_kv_proj
 
         self.mode = mode
-        self.state_v_first = state_v_first
 
         self.hidden_size = hidden_size
         self.expand_v = expand_v
@@ -588,7 +586,7 @@ class MomAttention(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
-                state_v_first=self.state_v_first,
+                state_v_first=True,
             )
             recurrent_state[0] = self.handle_recurrent_state(
                 recurrent_state[0],
@@ -614,7 +612,7 @@ class MomAttention(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
-                state_v_first=self.state_v_first,
+                state_v_first=True,
             )
             recurrent_state[0] = self.handle_recurrent_state(
                 recurrent_state[0],
@@ -725,7 +723,7 @@ class MomAttention(nn.Module):
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
-                state_v_first=self.state_v_first,
+                state_v_first=True,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state[-1] = fused_recurrent_gated_delta_rule(
@@ -738,7 +736,7 @@ class MomAttention(nn.Module):
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
-                state_v_first=self.state_v_first,
+                state_v_first=True,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

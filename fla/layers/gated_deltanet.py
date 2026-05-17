@@ -82,9 +82,6 @@ class GatedDeltaNet(nn.Module):
             The index of the layer. Default: None.
         norm_eps (float, Optional):
             The epsilon value for the normalization layer. Default: 1e-5.
-        state_v_first (bool, Optional):
-            Whether to store the recurrent state in V-first ``[V, K]`` layout instead of
-            the default ``[K, V]``. See :func:`chunk_gated_delta_rule` for details. Default: ``False``.
     """
 
     def __init__(
@@ -102,14 +99,12 @@ class GatedDeltaNet(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
-        state_v_first: bool = False,
         **kwargs,
     ) -> GatedDeltaNet:
         super().__init__()
 
         self.mode = mode
         self.allow_neg_eigval = allow_neg_eigval
-        self.state_v_first = state_v_first
         self.hidden_size = hidden_size
         self.expand_v = expand_v
 
@@ -274,14 +269,14 @@ class GatedDeltaNet(nn.Module):
                 v=v,
                 g=self.a_proj(hidden_states),
                 beta=beta,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
-                use_gate_in_kernel=True,
                 A_log=self.A_log,
                 dt_bias=self.dt_bias,
-                state_v_first=self.state_v_first,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+                state_v_first=True,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_gated_delta_rule(
@@ -290,14 +285,14 @@ class GatedDeltaNet(nn.Module):
                 v=v,
                 g=self.a_proj(hidden_states),
                 beta=beta,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
-                use_gate_in_kernel=True,
                 A_log=self.A_log,
                 dt_bias=self.dt_bias,
-                state_v_first=self.state_v_first,
+                initial_state=recurrent_state,
+                output_final_state=use_cache,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+                state_v_first=True,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

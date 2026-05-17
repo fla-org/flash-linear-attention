@@ -95,7 +95,6 @@ class YOCOGatedRetention(nn.Module):
         norm_eps: float = 1e-6,
         fuse_norm: bool = True,
         layer_idx: int = None,
-        state_v_first: bool = False,
     ):
         super().__init__()
 
@@ -105,7 +104,6 @@ class YOCOGatedRetention(nn.Module):
             raise ValueError(f"hidden_size={hidden_size} must be divisible by num_heads={num_heads}")
 
         self.mode = mode
-        self.state_v_first = state_v_first
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
@@ -193,7 +191,7 @@ class YOCOGatedRetention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                state_v_first=self.state_v_first,
+                state_v_first=True,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_simple_gla(
@@ -204,7 +202,7 @@ class YOCOGatedRetention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                state_v_first=self.state_v_first,
+                state_v_first=True,
             )
         else:
             raise NotImplementedError(f"Unsupported GatedRetention mode: {mode}")

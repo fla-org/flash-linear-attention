@@ -63,9 +63,6 @@ class SimpleGatedLinearAttention(nn.Module):
             Whether to fuse the norm and the output gate for better memory footprint. Default: `True`.
         layer_idx (int, Optional):
             The index of the layer. Default: None.
-        state_v_first (bool, Optional):
-            Whether to store the recurrent state in V-first `[V, K]` layout instead of
-            the default `[K, V]`. See :func:`chunk_simple_gla` for details. Default: `False`.
     """
 
     def __init__(
@@ -86,12 +83,10 @@ class SimpleGatedLinearAttention(nn.Module):
         gate_logit_normalizer: int = 16,
         fuse_norm: bool = True,
         layer_idx: int = None,
-        state_v_first: bool = False,
     ) -> SimpleGatedLinearAttention:
         super().__init__()
 
         self.mode = mode
-        self.state_v_first = state_v_first
         self.hidden_size = hidden_size
         self.expand_k = expand_k
         self.expand_v = expand_v
@@ -241,7 +236,7 @@ class SimpleGatedLinearAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                state_v_first=self.state_v_first,
+                state_v_first=True,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state = fused_recurrent_simple_gla(
@@ -252,7 +247,7 @@ class SimpleGatedLinearAttention(nn.Module):
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 cu_seqlens=cu_seqlens,
-                state_v_first=self.state_v_first,
+                state_v_first=True,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
