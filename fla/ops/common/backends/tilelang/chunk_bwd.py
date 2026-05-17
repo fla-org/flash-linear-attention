@@ -32,7 +32,7 @@ def _build_kernel(
     dtype_str,
     USE_G,
     USE_DW,
-    TRANSPOSE_STATE,
+    STATE_V_FIRST,
     IS_VARLEN=False,
     num_warps=4,
 ):
@@ -40,7 +40,7 @@ def _build_kernel(
     _dtype = dtype_map[dtype_str]
     NV = tilelang.cdiv(V, BV)
     threads = num_warps * 32
-    tile_hD1, tile_hD2 = (BV, BK) if TRANSPOSE_STATE else (BK, BV)
+    tile_hD1, tile_hD2 = (BV, BK) if STATE_V_FIRST else (BK, BV)
 
     # Rebind to underscore-prefixed locals so the kernel body (a closure below)
     # stays identical to the previous nested layout. tilelang caches _build_kernel
@@ -51,7 +51,7 @@ def _build_kernel(
     _hD1, _hD2, _thD1, _thD2 = hD1, hD2, tile_hD1, tile_hD2
     _threads = threads
     _USE_G, _USE_DW = USE_G, USE_DW
-    _TS, _VAR = TRANSPOSE_STATE, IS_VARLEN
+    _TS, _VAR = STATE_V_FIRST, IS_VARLEN
 
     # T, NT, total_h are dynamic (vary with sequence length, no recompilation).
     # B, H are compile-time (stable across batches, enables fast integer division).
@@ -306,10 +306,10 @@ def chunk_bwd_dqkwg_tilelang(
     g_gamma=None,
     dv=None,
     scale=None,
+    state_v_first=False,
     cu_seqlens=None,
     chunk_size=64,
     chunk_indices=None,
-    transpose_state_layout=False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -353,7 +353,7 @@ def chunk_bwd_dqkwg_tilelang(
         dtype_str,
         USE_G,
         USE_DW,
-        transpose_state_layout,
+        state_v_first,
         IS_VARLEN,
     )
 
