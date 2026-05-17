@@ -306,10 +306,10 @@ def chunk_bwd_dqkwg_tilelang(
     g_gamma=None,
     dv=None,
     scale=None,
+    state_v_first=False,
     cu_seqlens=None,
     chunk_size=64,
     chunk_indices=None,
-    state_v_first=False,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size

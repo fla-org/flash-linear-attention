@@ -42,10 +42,10 @@ class KDATileLangBackend(BaseBackend):
         dh: torch.Tensor,
         dv: torch.Tensor,
         scale: float | None = None,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
-        state_v_first: bool = False,
     ) -> tuple[bool, str | None]:
         if v.shape[2] != k.shape[2]:
             return False, (
@@ -68,10 +68,10 @@ class KDATileLangBackend(BaseBackend):
         dh: torch.Tensor,
         dv: torch.Tensor,
         scale: float | None = None,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
-        state_v_first: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         from fla.ops.kda.backends.tilelang.chunk_bwd_dqkg import (
             chunk_kda_bwd_wy_dqkg_fused_tilelang,

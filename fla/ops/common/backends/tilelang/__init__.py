@@ -45,10 +45,10 @@ class TileLangBackend(BaseBackend):
         g_gamma: torch.Tensor | None = None,
         dv: torch.Tensor | None = None,
         scale: float | None = None,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
-        state_v_first: bool = False,
     ) -> tuple[bool, str | None]:
         if g is None:
             return False, "TileLang backend only supports gated case (g != None)"
@@ -79,10 +79,10 @@ class TileLangBackend(BaseBackend):
         g_gamma: torch.Tensor | None = None,
         dv: torch.Tensor | None = None,
         scale: float | None = None,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
-        state_v_first: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         from fla.ops.common.backends.tilelang.chunk_bwd import (
             chunk_bwd_dqkwg_tilelang,

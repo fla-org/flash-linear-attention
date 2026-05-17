@@ -88,9 +88,9 @@ def _raw_chunk_gated_delta_rule_fwd_h(
     output_final_state: bool = False,
     chunk_size: int = 64,
     save_new_value: bool = True,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     B, T, H, K, V, HV = *k.shape, u.shape[-1], u.shape[2]
     BT = chunk_size
@@ -442,11 +442,11 @@ def intracard_fwd_h(
     output_final_state: bool = False,
     chunk_size: int = 64,
     save_new_value: bool = True,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     max_splits: int = 32,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     assert cu_seqlens is not None, "intracard_fwd_h requires cu_seqlens"
 

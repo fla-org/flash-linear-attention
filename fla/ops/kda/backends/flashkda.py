@@ -51,6 +51,7 @@ class FlashKDABackend(BaseBackend):
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
@@ -58,7 +59,6 @@ class FlashKDABackend(BaseBackend):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
-        state_v_first: bool = False,
         **kwargs,
     ) -> tuple[bool, str | None]:
         if torch.is_grad_enabled():
@@ -100,6 +100,7 @@ class FlashKDABackend(BaseBackend):
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
@@ -107,7 +108,6 @@ class FlashKDABackend(BaseBackend):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
-        state_v_first: bool = False,
         A_log: torch.Tensor | None = None,
         dt_bias: torch.Tensor | None = None,
         **kwargs,

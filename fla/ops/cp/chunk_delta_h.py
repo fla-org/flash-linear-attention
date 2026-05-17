@@ -742,10 +742,10 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     bg: torch.Tensor | None = None,
     v: torch.Tensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext = None,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return initial_state
@@ -827,12 +827,12 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     gk: torch.Tensor | None = None,
     bg: torch.Tensor | None = None,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     dht: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
     chunk_size: int = 64,
-    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return dht, initial_state

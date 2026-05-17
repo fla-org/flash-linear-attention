@@ -362,10 +362,10 @@ def chunk_kda_bwd_wy_dqkg_fused(
     dh: torch.Tensor,
     dv: torch.Tensor,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
     chunk_indices: torch.LongTensor | None = None,
-    state_v_first: bool = False,
 ):
     B, T, H, K, HV, V = *k.shape, v.shape[2], v.shape[-1]
     BT = chunk_size
@@ -429,6 +429,7 @@ def chunk_kda_bwd(
     dht: torch.Tensor,
     g: torch.Tensor | None = None,
     g_org: torch.Tensor | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
@@ -439,7 +440,6 @@ def chunk_kda_bwd(
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
     cp_context: FLACPContext | None = None,
-    state_v_first: bool = False,
     **kwargs,
 ):
     H, HV = q.shape[2], v.shape[2]

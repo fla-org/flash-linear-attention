@@ -240,6 +240,7 @@ def fused_recurrent_kda_fwd(
     scale: float | None = None,
     output_final_state: bool = False,
     inplace_final_state: bool = True,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
@@ -248,7 +249,6 @@ def fused_recurrent_kda_fwd(
     use_beta_sigmoid_in_kernel: bool = False,
     lower_bound: float | None = None,
     out: torch.Tensor | None = None,
-    state_v_first: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:

@@ -40,6 +40,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         use_gate_in_kernel: bool = False,
         use_beta_sigmoid_in_kernel: bool = False,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         safe_gate: bool = False,
@@ -48,7 +49,6 @@ class ChunkKDAFunction(torch.autograd.Function):
         disable_recompute: bool = False,
         return_intermediate_states: bool = False,
         cp_context: FLACPContext | None = None,
-        state_v_first: bool = False,
     ):
         # Apply l2norm
         q_rstd, k_rstd = None, None
@@ -409,6 +409,7 @@ def chunk_kda(
         use_qk_l2norm_in_kernel,
         use_gate_in_kernel,
         use_beta_sigmoid_in_kernel,
+        state_v_first,
         cu_seqlens,
         cu_seqlens_cpu,
         safe_gate,
@@ -417,5 +418,4 @@ def chunk_kda(
         disable_recompute,
         return_intermediate_states,
         cp_context,
-        state_v_first,
     )

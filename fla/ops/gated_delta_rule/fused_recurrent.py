@@ -187,8 +187,8 @@ def fused_recurrent_gated_delta_rule_fwd(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
     state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -257,8 +257,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
-        cu_seqlens: torch.LongTensor | None = None,
         state_v_first: bool = False,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
             q=q,
@@ -438,8 +438,8 @@ def fused_recurrent_gated_delta_rule(
         initial_state,
         output_final_state,
         use_qk_l2norm_in_kernel,
-        cu_seqlens,
         state_v_first,
+        cu_seqlens,
     )
     return o, final_state
 
