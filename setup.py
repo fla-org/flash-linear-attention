@@ -45,7 +45,8 @@ setup(
     python_requires='>=3.10',
     install_requires=[
         'torch>=2.7.0',
-        'transformers',
+        'triton>=3.3',
+        'transformers>=4.45.0',
         'einops',
     ],
     extras_require={

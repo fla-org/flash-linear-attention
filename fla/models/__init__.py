@@ -34,6 +34,7 @@ from fla.models.moba import MoBAConfig, MoBAForCausalLM, MoBAModel
 from fla.models.mom import MomConfig, MomForCausalLM, MomModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
 from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
+from fla.models.raven import RavenConfig, RavenForCausalLM, RavenModel
 from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
 from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel
 from fla.models.rwkv6 import RWKV6Config, RWKV6ForCausalLM, RWKV6Model
@@ -124,6 +125,9 @@ __all__ = [
     'RWKV7Config',
     'RWKV7ForCausalLM',
     'RWKV7Model',
+    'RavenConfig',
+    'RavenForCausalLM',
+    'RavenModel',
     'RetNetConfig',
     'RetNetForCausalLM',
     'RetNetModel',

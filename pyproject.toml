@@ -17,7 +17,8 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.7.0",
-    "transformers",
+    "triton>=3.3",
+    "transformers>=4.45.0",
     "einops",
 ]
 
@@ -33,6 +34,9 @@ Repository = "https://github.com/fla-org/flash-linear-attention"
 
 [build-system]
 requires = ["setuptools>=45", "wheel"]
+
+[tool.setuptools.dynamic]
+version = {attr = "fla.__version__"}
 
 [tool.pytest.ini_options]
 log_cli = true
@@ -63,26 +67,39 @@ select = [
     "T",    # flake8-debugger
 ]
 ignore = [
-    "E501",
-    "E741",
-    "B023",
-    "B006",
-    "B007",
-    "B008",
-    "B028",
-    "B904",
-    "B905",
-    "C408",
-    "C416",
-    "C417",
-    "T201",
-    "TC002",
-    "TC003",
-    "SIM102",
-    "SIM108",
-    "SIM118",
-    "SIM211",
-    "COM812",
+    # pycodestyle (E)
+    "E501",   # line-too-long: Triton kernels and benchmark tables often have long calls/shape lists.
+    "E741",   # ambiguous-variable-name: math code commonly uses short symbols like l/I/O.
+
+    # flake8-bugbear (B)
+    "B023",   # function-uses-loop-variable: closures in generated/autotuned code may intentionally capture loop vars.
+    "B006",   # mutable-argument-default: some APIs use defaults like []/{} for compatibility with existing call sites.
+    "B007",   # unused-loop-control-variable: loops may keep named indices for shape/layout readability.
+    "B008",   # function-call-in-default-argument: defaults sometimes depend on module-level factories/constants.
+    "B028",   # no-explicit-stacklevel: warning locations are usually less important in tests/scripts.
+    "B904",   # raise-without-from-inside-except: concise re-raise patterns are used in compatibility paths.
+    "B905",   # zip-without-explicit-strict: many zips intentionally allow the pre-Python-3.10 default strict=False behavior.
+
+    # flake8-comprehensions (C4)
+    "C408",   # unnecessary-collection-call: dict()/list()/tuple() can be clearer when constructing dynamic values.
+    "C416",   # unnecessary-comprehension: comprehensions may preserve structure for later filtering/debugging.
+    "C417",   # unnecessary-map: map(...) is allowed when it mirrors functional or data-pipeline code.
+
+    # flake8-debugger / print checks (T)
+    "T201",   # print-found: benchmark, release, and CI helper scripts intentionally print progress and summaries.
+
+    # flake8-type-checking (TC)
+    "TC002",  # typing-only-third-party-import: moving imports behind TYPE_CHECKING can hide optional dependency failures.
+    "TC003",  # typing-only-standard-library-import: runtime stdlib imports are cheap and often improve readability.
+
+    # flake8-simplify (SIM)
+    "SIM102", # collapsible-if: nested guards often document staged shape/device checks.
+    "SIM108", # if-else-block-instead-of-if-exp: explicit branches are easier to debug around tensor setup.
+    "SIM118", # in-dict-keys: explicit .keys() can be clearer when the object is mapping-like, not always a plain dict.
+    "SIM211", # if-expr-with-false-true: keep explicit boolean expressions when they mirror config/env logic.
+
+    # flake8-commas (COM)
+    "COM812", # missing-trailing-comma: formatter/autofix tools should own trailing comma style.
 ]
 extend-select = ["RUF022"]
 
