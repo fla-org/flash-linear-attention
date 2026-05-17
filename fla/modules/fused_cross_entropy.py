@@ -13,7 +13,10 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log, tanh
-from fla.utils import input_guard
+from fla.utils import IS_NPU, input_guard
+
+if IS_NPU:
+    from triton.language.math import tanh  # Ascend: tldevice.tanh fails in softcap kernels
 
 # `all_gather_into_tensor` and `reduce_scatter_tensor` are new placeholders for
 # `_all_gather_base` and `_reduce_scatter_base`. They require the most recent
@@ -25,7 +28,6 @@ if "all_gather_into_tensor" not in dir(torch.distributed):
 
 @triton.heuristics({
     "HAS_SMOOTHING": lambda args: args["label_smoothing"] > 0.0,
-    "HAS_SOFTCAPPING": lambda args: args["logit_softcapping"] is not None,
 })
 @triton.jit
 def cross_entropy_fwd_kernel(
@@ -37,7 +39,7 @@ def cross_entropy_fwd_kernel(
     label_smoothing,
     logit_scale,
     lse_square_scale,
-    logit_softcapping,
+    logit_softcapping: tl.constexpr,
     ignore_index,
     total_classes,
     class_start_idx,  # Useful for tensor parallel when each rank only has a subset of classes
@@ -101,7 +103,6 @@ def cross_entropy_fwd_kernel(
 
 @triton.heuristics({
     "HAS_SMOOTHING": lambda args: args["label_smoothing"] > 0.0,
-    "HAS_SOFTCAPPING": lambda args: args["logit_softcapping"] is not None,
 })
 @triton.jit
 def cross_entropy_bwd_kernel(
@@ -113,7 +114,7 @@ def cross_entropy_bwd_kernel(
     label_smoothing,
     logit_scale,
     lse_square_scale,
-    logit_softcapping,
+    logit_softcapping: tl.constexpr,
     ignore_index,
     total_classes,
     class_start_idx,  # Useful for tensor parallel when each rank only has a subset of classes
@@ -177,17 +178,28 @@ def fused_cross_entropy_forward(
         logits = logits.contiguous()
     # Set these similar to https://github.com/triton-lang/triton/blob/main/python/tutorials/02-fused-softmax.py
     MAX_BLOCK_SIZE = 64 * 1024
-    BLOCK_SIZE = min(triton.next_power_of_2(n_cols), MAX_BLOCK_SIZE)
-    num_warps = (
-        4
-        if BLOCK_SIZE < 2048
-        else (8 if BLOCK_SIZE < 8192 else (16 if BLOCK_SIZE < 128 * 1024 else 32))
-    )
+    if IS_NPU:
+        BLOCK_SIZE = 1024 if n_cols <= 32768 else (2048 if n_cols <= 131072 else 4096)
+        max_splits = max(1, 65535 // max(n_rows, 1))
+        BLOCK_SIZE = min(
+            max(BLOCK_SIZE, triton.next_power_of_2((n_cols + max_splits - 1) // max_splits)),
+            8192,
+        )
+        num_warps = 2 if BLOCK_SIZE <= 2048 else 4
+    else:
+        BLOCK_SIZE = min(triton.next_power_of_2(n_cols), MAX_BLOCK_SIZE)
+        num_warps = (
+            4
+            if BLOCK_SIZE < 2048
+            else (8 if BLOCK_SIZE < 8192 else (16 if BLOCK_SIZE < 128 * 1024 else 32))
+        )
+    has_softcapping = logit_softcapping is not None
+    softcap_val = float(logit_softcapping) if has_softcapping else 0.0
     # We may split the lse computation across multiple blocks, then do a reduction
     # lse(local_lse) to get the final LSE. This is faster for large n_cols (e.g., > 64k)
     # where having just one thread block processing more than 64k elements is slow.
-    split = world_size > 1 or n_cols > MAX_BLOCK_SIZE
     n_splits = (n_cols + BLOCK_SIZE - 1) // BLOCK_SIZE
+    split = world_size > 1 or n_cols > MAX_BLOCK_SIZE or n_splits > 1
     loss_shape = (n_splits, n_rows) if n_splits > 1 else (n_rows,)
     losses = torch.empty(*loss_shape, dtype=torch.float, device=logits.device)
     lse = torch.empty(*loss_shape, dtype=torch.float, device=logits.device)
@@ -202,7 +214,7 @@ def fused_cross_entropy_forward(
         label_smoothing,
         logit_scale,
         lse_square_scale,
-        logit_softcapping,
+        softcap_val,
         ignore_index,
         total_classes,
         class_start_idx,
@@ -210,6 +222,7 @@ def fused_cross_entropy_forward(
         n_rows,
         logits.stride(0),  # strides
         BLOCK_SIZE=BLOCK_SIZE,  # constants
+        HAS_SOFTCAPPING=has_softcapping,
         num_warps=num_warps,
         SPLIT=split,
     )
@@ -296,8 +309,19 @@ class CrossEntropyLossFunction(torch.autograd.Function):
         logits, lse, target = ctx.saved_tensors
         dlogits = logits if ctx.inplace_backward else torch.empty_like(logits)
         n_rows, n_cols = logits.shape
-        BLOCK_SIZE = min(triton.next_power_of_2(n_cols), 4 * 1024)
-        num_warps = 4 if BLOCK_SIZE < 2048 else (8 if BLOCK_SIZE < 8192 else 16)
+        if IS_NPU:
+            BLOCK_SIZE = 1024 if n_cols <= 32768 else (2048 if n_cols <= 131072 else 4096)
+            max_splits = max(1, 65535 // max(n_rows, 1))
+            BLOCK_SIZE = min(
+                max(BLOCK_SIZE, triton.next_power_of_2((n_cols + max_splits - 1) // max_splits)),
+                8192,
+            )
+            num_warps = 2 if BLOCK_SIZE <= 2048 else 4
+        else:
+            BLOCK_SIZE = min(triton.next_power_of_2(n_cols), 4 * 1024)
+            num_warps = 4 if BLOCK_SIZE < 2048 else (8 if BLOCK_SIZE < 8192 else 16)
+        has_softcapping = ctx.logit_softcapping is not None
+        softcap_val = float(ctx.logit_softcapping) if has_softcapping else 0.0
         def grid(META): return (n_rows, triton.cdiv(n_cols, META["BLOCK_SIZE"]))  # noqa
         cross_entropy_bwd_kernel[grid](
             dlogits,  # data ptrs
@@ -308,7 +332,7 @@ class CrossEntropyLossFunction(torch.autograd.Function):
             ctx.label_smoothing,
             ctx.logit_scale,
             ctx.lse_square_scale,
-            ctx.logit_softcapping,
+            softcap_val,
             ctx.ignore_index,
             ctx.total_classes,
             ctx.class_start_idx,
@@ -317,6 +341,7 @@ class CrossEntropyLossFunction(torch.autograd.Function):
             dlogits.stride(0),
             grad_losses.stride(0),
             BLOCK_SIZE=BLOCK_SIZE,  # constants
+            HAS_SOFTCAPPING=has_softcapping,
             num_warps=num_warps,
         )
         return dlogits, None, None, None, None, None, None, None, None, None
