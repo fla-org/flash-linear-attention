@@ -11,6 +11,7 @@ import torch
 from fla.models import RavenConfig
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
+from .test_modeling_utils import create_model_and_config
 
 
 @pytest.mark.parametrize(
@@ -50,11 +51,12 @@ def test_modeling(
 
 
 @pytest.mark.parametrize(
-    ['L', 'B', 'T', 'H', 'D', 'dtype'],
+    ['L', 'B', 'T', 'H', 'D', 'use_rope', 'dtype'],
     [
-        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-H{}-D{}-rope{}-{}".format(*test))
         for test in [
-            (2, 4, 2000, 8, 64, torch.float16),
+            (2, 4, 2000, 8, 64, False, torch.float16),
+            (2, 4, 2000, 8, 64, True, torch.float16),
         ]
     ],
 )
@@ -64,6 +66,13 @@ def test_generation(
     T: int,
     H: int,
     D: int,
+    use_rope: bool,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, RavenConfig, dtype)
+    if not use_rope:
+        run_test_generation(L, B, T, H, D, RavenConfig, dtype)
+        return
+    # `use_rope=True` exercises the RoPE position offset under left-padded prefill,
+    # a path the default config (`use_rope=False`) leaves uncovered.
+    model, config = create_model_and_config(RavenConfig, L, H, D, dtype=dtype, use_rope=True)
+    run_test_generation(L, B, T, H, D, RavenConfig, dtype, model=model, config=config)
