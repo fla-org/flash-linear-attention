@@ -31,6 +31,7 @@
 
 - [2026-05] 🚀 Add [YOCO](https://arxiv.org/abs/2405.05254) (You Only Cache Once) implementation to `fla`.
 - [2026-05] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
+- [2026-05] Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
 - [2026-04] 🐍 Add Mamba-3 implementation to `fla` ([paper](https://arxiv.org/abs/2603.15569)).
 - [2026-04] 🧱 Add [MoBA](https://arxiv.org/abs/2502.13189) (Mixture of Block Attention) implementation to `fla`, with [FlashMoBA](https://github.com/mit-han-lab/flash-moba) backend support.
 - [2026-04] 🧱 Add [TileLang](https://github.com/tile-ai/tilelang) backend support for selected kernels.
@@ -104,6 +105,7 @@
 | 2025 | KDA                  | [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692)                                              |                                                                                                 |            [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/kda)             |
 | 2025 | MoBA                 | [MoBA: Mixture of Block Attention for Long-Context LLMs](https://arxiv.org/abs/2502.13189)                                                    | [official](https://github.com/MoonshotAI/MoBA)                                                  |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/moba.py)         |
 | 2026 | Mamba-3              | [Mamba-3: Improved Sequence Modeling using State Space Principles](https://arxiv.org/abs/2603.15569)                                          | [official](https://github.com/state-spaces/mamba)                                               |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba3)          |
+| 2026 | Raven                | [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven/blob/main/raven.pdf)                    | [official](https://github.com/goombalab/raven)                                                  |          [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/raven)          |
 
 ## Installation
 
