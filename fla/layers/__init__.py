@@ -33,6 +33,7 @@ from .mom import MomAttention
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
 from .path_attn import PaTHAttention
+from .raven import Raven
 from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
@@ -70,6 +71,7 @@ __all__ = [
     'PaTHAttention',
     'RWKV6Attention',
     'RWKV7Attention',
+    'Raven',
     'ReBasedLinearAttention',
     'RodimusAttention',
     'SlidingWindowSharedKeyAttention',
