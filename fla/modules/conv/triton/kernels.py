@@ -334,7 +334,7 @@ def causal_conv1d_bwd_kernel(
     'HAS_BIAS': lambda args: args['bias'] is not None,
     'HAS_RESIDUAL': lambda args: args['residual'] is not None,
 })
-@triton.autotune(
+@fla_cache_autotune(
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps)
         for BD in [8, 16, 32, 64, 128, 256]
