@@ -12,11 +12,35 @@ from fla.models.utils import FLACache, FLALayer, LegacyFLACache
 from fla.utils import device
 
 
+# encode token positions into tensorvalues so window  tail assertions are exact
+def _make_attn_state(start: int, length: int, *, batch_size: int = 1, num_heads: int = 2, head_dim: int = 3):
+    token_ids = torch.arange(start, start + length, dtype=torch.float32, device=device).view(1, length, 1, 1)
+    key_states = token_ids.expand(batch_size, length, num_heads, head_dim).contiguous()
+    value_states = (token_ids + 1000).expand(batch_size, length, num_heads, head_dim).contiguous()
+    return key_states, value_states
+
+
+def _assert_attn_state_tokens(attn_state, expected_tokens: torch.Tensor):
+    expected = expected_tokens.to(device=device, dtype=torch.float32).view(1, -1, 1, 1)
+    expected_key = expected.expand_as(attn_state[0])
+    expected_value = (expected + 1000).expand_as(attn_state[1])
+
+    torch.testing.assert_close(attn_state[0], expected_key)
+    torch.testing.assert_close(attn_state[1], expected_value)
+
+
+def _new_cache(cache_cls):
+    try:
+        return cache_cls()
+    except (TypeError, ValueError) as exc:
+        pytest.skip(f"{cache_cls.__name__} is not compatible with this transformers version: {exc}")
+
+
 # ===================================================================================
 # Test for FLACache per-layer get_seq_length behavior
 # ===================================================================================
 @pytest.mark.parametrize(
-    ['num_layers', 'batch_size', 'seq_len', 'hidden_size', 'num_heads'],
+    ["num_layers", "batch_size", "seq_len", "hidden_size", "num_heads"],
     [
         pytest.param(*test, id=f"L{test[0]}-B{test[1]}-T{test[2]}-D{test[3]}-H{test[4]}")
         for test in [
@@ -59,22 +83,23 @@ def test_cache_per_layer_seq_length(
         )
 
         # Verify that this layer's seq_length is updated
-        assert cache.get_seq_length(layer_idx) == seq_len, \
+        assert cache.get_seq_length(layer_idx) == seq_len, (
             f"Layer {layer_idx} should have seq_length={seq_len}, got {cache.get_seq_length(layer_idx)}"
+        )
 
         # Verify that the next layer still has seq_length=0 (not updated yet)
         if layer_idx + 1 < num_layers:
-            assert cache.get_seq_length(layer_idx + 1) == 0, \
+            assert cache.get_seq_length(layer_idx + 1) == 0, (
                 f"Layer {layer_idx + 1} should have seq_length=0 before being updated"
+            )
 
     # Now verify all layers have the correct seq_length
     for layer_idx in range(num_layers):
-        assert cache.get_seq_length(layer_idx) == seq_len, \
-            f"Layer {layer_idx} should have seq_length={seq_len}"
+        assert cache.get_seq_length(layer_idx) == seq_len, f"Layer {layer_idx} should have seq_length={seq_len}"
 
 
 @pytest.mark.parametrize(
-    ['num_layers', 'batch_size', 'chunk_size', 'num_chunks', 'hidden_size', 'num_heads'],
+    ["num_layers", "batch_size", "chunk_size", "num_chunks", "hidden_size", "num_heads"],
     [
         pytest.param(*test, id=f"L{test[0]}-B{test[1]}-chunk{test[2]}-n{test[3]}-D{test[4]}-H{test[5]}")
         for test in [
@@ -115,8 +140,9 @@ def test_cache_incremental_update(
             # Verify seq_length accumulates correctly
             expected_seq_len = (chunk_idx + 1) * chunk_size
             actual_seq_len = cache.get_seq_length(layer_idx)
-            assert actual_seq_len == expected_seq_len, \
+            assert actual_seq_len == expected_seq_len, (
                 f"Layer {layer_idx} after chunk {chunk_idx} should have seq_length={expected_seq_len}, got {actual_seq_len}"
+            )
 
 
 def test_cache_get_seq_length_nonexistent_layer():
@@ -155,29 +181,117 @@ def test_cache_window_size_does_not_undercount():
     value_states = torch.randn(batch_size, seq_len, num_heads, head_dim, device=device)
 
     # Update with window_size smaller than seq_len
-    cache.update(
-        attn_state=(key_states, value_states),
-        layer_idx=0,
-        cache_kwargs={"window_size": window_size}
-    )
+    cache.update(attn_state=(key_states, value_states), layer_idx=0, cache_kwargs={"window_size": window_size})
 
     # Sequence length should be the full seq_len, not window_size
-    assert cache.get_seq_length(0) == seq_len, \
+    assert cache.get_seq_length(0) == seq_len, (
         f"Expected seq_length={seq_len}, got {cache.get_seq_length(0)} (window_size={window_size})"
+    )
+
+
+@pytest.mark.parametrize("cache_cls", [FLACache, LegacyFLACache])
+@pytest.mark.parametrize(
+    ["first_len", "second_len", "window_size"],
+    [
+        pytest.param(4, 6, 4, id="full-window-oversized-update"),
+        pytest.param(2, 4, 4, id="partial-window-overflow"),
+    ],
+)
+def test_windowed_cache_keeps_tail_for_oversized_updates(cache_cls, first_len: int, second_len: int, window_size: int):
+    cache = _new_cache(cache_cls)
+
+    first_state = _make_attn_state(0, first_len)
+    second_state = _make_attn_state(first_len, second_len)
+
+    cache.update(
+        attn_state=first_state,
+        layer_idx=0,
+        offset=first_len,
+        cache_kwargs={"window_size": window_size},
+    )
+    cache.update(
+        attn_state=second_state,
+        layer_idx=0,
+        offset=second_len,
+        cache_kwargs={"window_size": window_size},
+    )
+
+    expected_tokens = torch.arange(first_len + second_len - window_size, first_len + second_len)
+    state = cache[0]
+    assert state["attn_state"][0].shape[1] == window_size
+    _assert_attn_state_tokens(state["attn_state"], expected_tokens)
+    assert cache.get_seq_length(0) == first_len + second_len
+
+
+def test_fla_layer_reset_clears_state_and_seen_tokens():
+    layer = FLALayer()
+    layer.update(attn_state=_make_attn_state(0, 5))
+
+    assert layer.state is not None
+    assert layer.get_seq_length() == 5
+
+    layer.reset()
+
+    assert layer.state is None
+    assert layer.get_seq_length() == 0
+
+    layer.update(attn_state=_make_attn_state(20, 2))
+
+    assert layer.get_seq_length() == 2
+    _assert_attn_state_tokens(layer.state["attn_state"], torch.arange(20, 22))
+
+
+@pytest.mark.parametrize("cache_cls", [FLACache, LegacyFLACache])
+def test_cache_reset_clears_cached_state(cache_cls):
+    cache = _new_cache(cache_cls)
+    for layer_idx in range(2):
+        cache.update(
+            attn_state=_make_attn_state(layer_idx * 10, 3),
+            layer_idx=layer_idx,
+            offset=3,
+        )
+
+    assert cache.get_seq_length(0) == 3
+
+    cache.reset()
+
+    assert cache.get_seq_length(0) == 0
+    if isinstance(cache, FLACache):
+        assert len(cache) == 2
+        assert cache[0] is None
+        assert cache[1] is None
+    else:
+        assert len(cache) == 0
+
+
+def test_fla_cache_from_legacy_cache_preserves_seen_tokens():
+    seen_tokens = 17
+    legacy_state = {
+        "recurrent_state": None,
+        "attn_state": _make_attn_state(10, 4),
+        "conv_state": None,
+        "ffn_state": None,
+    }
+
+    cache = FLACache.from_legacy_cache([legacy_state], seen_tokens=seen_tokens)
+
+    assert cache.get_seq_length(0) == seen_tokens
+    _assert_attn_state_tokens(cache[0]["attn_state"], torch.arange(10, 14))
 
 
 # ===================================================================================
 # Tests for GitHub Issue #766: Cache seen-token count committed too early during decode
 # ===================================================================================
 
+
 @pytest.mark.parametrize(
-    ['num_layers', 'batch_size', 'seq_len', 'hidden_size', 'num_heads'],
+    ["num_layers", "batch_size", "seq_len", "hidden_size", "num_heads"],
     [
         pytest.param(*test, id=f"L{test[0]}-B{test[1]}-T{test[2]}-D{test[3]}-H{test[4]}")
         for test in [
-            (4, 1, 1, 64, 4),   # Single token decode
+            (4, 1, 1, 64, 4),  # Single token decode
             (8, 2, 1, 128, 8),  # Batch decode
-            (4, 1, 3, 64, 4),   # Multi-token prefill/decode
+            (4, 1, 3, 64, 4),  # Multi-token prefill/decode
         ]
     ],
 )
@@ -222,8 +336,9 @@ def test_cache_decode_all_layers_see_same_past_length(
 
     # Now all layers should have _seen_tokens = initial_seq_len
     for layer_idx in range(num_layers):
-        assert cache.get_seq_length(layer_idx) == initial_seq_len, \
+        assert cache.get_seq_length(layer_idx) == initial_seq_len, (
             f"Layer {layer_idx} should have seq_length={initial_seq_len} after prefill"
+        )
 
     # Simulate a decode step (single token) through all layers
     observed_lengths_before_update = []
@@ -268,7 +383,7 @@ def test_cache_decode_all_layers_see_same_past_length(
 
 
 @pytest.mark.parametrize(
-    ['num_layers', 'batch_size', 'seq_len', 'hidden_size', 'num_heads'],
+    ["num_layers", "batch_size", "seq_len", "hidden_size", "num_heads"],
     [
         pytest.param(*test, id=f"legacy-L{test[0]}-B{test[1]}-T{test[2]}")
         for test in [
@@ -338,7 +453,7 @@ def test_legacy_cache_decode_all_layers_see_same_past_length(
 
 
 @pytest.mark.parametrize(
-    ['num_decode_steps', 'num_layers'],
+    ["num_decode_steps", "num_layers"],
     [
         pytest.param(5, 4, id="5steps-4layers"),
         pytest.param(10, 8, id="10steps-8layers"),
@@ -400,6 +515,7 @@ def test_cache_incremental_decode_consistency(num_decode_steps: int, num_layers:
 # ===================================================================================
 # Additional regression tests for GitHub Issue #766
 # ===================================================================================
+
 
 def test_per_layer_independent_counter_regression():
     """

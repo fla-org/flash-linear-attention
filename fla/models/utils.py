@@ -79,26 +79,38 @@ class FLALayer(CacheLayerMixin):
                 self.state["attn_state"] = tuple(attn_state)
             else:
                 old = self.state["attn_state"]
-                if window_size is not None and old[0].shape[1] >= window_size:
+                if window_size is not None and input_size == 0:
+                    pass
+                # if the incoming chunk covers the whole window then we can replace the cache with its tail
+                # otherwise we roll the exisitng window and splice it into new tokens
+                elif window_size is not None and old[0].shape[1] >= window_size:
                     new_tuple = []
                     for old_x, new_x in zip(old, attn_state, strict=False):
-                        rolled = old_x.roll(-input_size, dims=1)
                         tail = new_x[:, -window_size:]
-                        rolled[:, -tail.shape[1]:] = tail
-                        new_tuple.append(rolled)
+                        if tail.shape[1] >= window_size:
+                            new_tuple.append(tail.contiguous())
+                        else:
+                            old_x = old_x[:, -window_size:].contiguous() if old_x.shape[1] > window_size else old_x
+                            rolled = old_x.roll(-input_size, dims=1)
+                            rolled[:, -tail.shape[1] :] = tail
+                            new_tuple.append(rolled)
                     self.state["attn_state"] = tuple(new_tuple)
                 else:
-                    self.state["attn_state"] = tuple(
-                        torch.cat([old_x, new_x], dim=1) for old_x, new_x in zip(old, attn_state, strict=False)
-                    )
+                    new_tuple = []
+                    for old_x, new_x in zip(old, attn_state, strict=False):
+                        updated = torch.cat([old_x, new_x], dim=1)
+                        if window_size is not None and updated.shape[1] > window_size:
+                            updated = updated[:, -window_size:].contiguous()
+                        new_tuple.append(updated)
+                    self.state["attn_state"] = tuple(new_tuple)
 
         if conv_state is not None:
             self.state["conv_state"] = conv_state
         if ffn_state is not None:
             self.state["ffn_state"] = ffn_state
 
-        if not hasattr(self, 'device'):
-            self.device = 'cpu'
+        if not hasattr(self, "device"):
+            self.device = "cpu"
         for state in (recurrent_state, attn_state, conv_state, ffn_state):
             if state is not None:
                 if isinstance(state, torch.Tensor):
@@ -107,7 +119,7 @@ class FLALayer(CacheLayerMixin):
                     first_tensor = next((item for item in state if isinstance(item, torch.Tensor)), None)
                     if first_tensor is not None:
                         self.device = first_tensor.device
-                elif hasattr(state, 'device'):
+                elif hasattr(state, "device"):
                     self.device = state.device
                 else:
                     # For custom state objects (e.g., LogLinearAttentionState),
@@ -143,6 +155,7 @@ class FLALayer(CacheLayerMixin):
 
         def to_cpu(x):
             return x.to("cpu", non_blocking=True) if isinstance(x, torch.Tensor) else x
+
         for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
             v = self.state.get(k, None)
             if v is None:
@@ -158,6 +171,7 @@ class FLALayer(CacheLayerMixin):
 
         def to_dev(x):
             return x.to(self.device, non_blocking=True) if isinstance(x, torch.Tensor) else x
+
         for k in ("recurrent_state", "attn_state", "conv_state", "ffn_state"):
             v = self.state.get(k, None)
             if v is None:
@@ -168,7 +182,8 @@ class FLALayer(CacheLayerMixin):
                 self.state[k] = to_dev(v)
 
     def reset(self):
-        pass
+        self.state = None
+        self._seen_tokens = 0
 
 
 class LegacyFLACache(HFCacheBase):
@@ -239,7 +254,7 @@ class LegacyFLACache(HFCacheBase):
             cache_kwargs = {}
         if attn_state is not None:
             input_size = attn_state[0].shape[1]
-            window_size = cache_kwargs.get('window_size')
+            window_size = cache_kwargs.get("window_size")
             if not isinstance(attn_state, (tuple, list)):
                 raise ValueError("`attn_state` must be a tuple of tensors for key/value states")
         if len(self.states) <= layer_idx:
@@ -262,26 +277,47 @@ class LegacyFLACache(HFCacheBase):
                 self._seen_tokens += offset
             state = self.states[layer_idx]
             if recurrent_state is not None:
-                state['recurrent_state'] = recurrent_state
+                state["recurrent_state"] = recurrent_state
             if attn_state is not None:
-                if window_size is not None and state['attn_state'][0].shape[1] == window_size:
-                    for i, (old_state, new_state) in enumerate(zip(state['attn_state'], attn_state, strict=False)):
-                        # DO NOT allocate new memory if the cache is full
-                        # roll the key/value states to the left by `input_size`
-                        old_state = old_state.roll(-input_size, 1)
-                        # replace the last `input_size` tokens with the new key/value states
-                        old_state[:, -input_size:] = new_state
-                        state['attn_state'][i] = old_state
-                else:
-                    attn_state = [
-                        torch.cat([old_state, new_state], 1)
-                        for old_state, new_state in zip(state['attn_state'], attn_state, strict=False)
+                if state["attn_state"] is None:
+                    state["attn_state"] = [
+                        new_state[:, -window_size:].contiguous()
+                        if window_size is not None and new_state.shape[1] > window_size
+                        else new_state
+                        for new_state in attn_state
                     ]
-                    state['attn_state'] = attn_state
+                elif window_size is not None and input_size == 0:
+                    pass
+                # mirror FLALayer's window semantics so legacy caches handle oversided decoding chunks
+                elif window_size is not None and state["attn_state"][0].shape[1] >= window_size:
+                    updated_attn_state = []
+                    for old_state, new_state in zip(state["attn_state"], attn_state, strict=False):
+                        tail = new_state[:, -window_size:]
+                        if tail.shape[1] >= window_size:
+                            updated_attn_state.append(tail.contiguous())
+                        else:
+                            # DO NOT allocate new memory if the cache is full
+                            # roll the key/value states to the left by `input_size`
+                            old_state = (
+                                old_state[:, -window_size:].contiguous() if old_state.shape[1] > window_size else old_state
+                            )
+                            old_state = old_state.roll(-input_size, 1)
+                            # replace the newest slots with the new key/value states
+                            old_state[:, -tail.shape[1] :] = tail
+                            updated_attn_state.append(old_state)
+                    state["attn_state"] = updated_attn_state
+                else:
+                    attn_state = []
+                    for old_state, new_state in zip(state["attn_state"], attn_state, strict=False):
+                        updated = torch.cat([old_state, new_state], 1)
+                        if window_size is not None and updated.shape[1] > window_size:
+                            updated = updated[:, -window_size:].contiguous()
+                        attn_state.append(updated)
+                    state["attn_state"] = attn_state
             if conv_state is not None:
-                state['conv_state'] = conv_state
+                state["conv_state"] = conv_state
             if ffn_state is not None:
-                state['ffn_state'] = ffn_state
+                state["ffn_state"] = ffn_state
 
         return state
 
@@ -294,6 +330,10 @@ class LegacyFLACache(HFCacheBase):
     def get_max_cache_shape(self) -> int | None:
         """Returns the maximum sequence length of the cached states. Cache does not have a maximum length."""
         return None
+
+    def reset(self):
+        self.states.clear()
+        self._seen_tokens = 0
 
     def to_legacy_cache(self) -> tuple:
         return tuple(self.states)
@@ -330,10 +370,10 @@ class FLACache(HFCacheBase):
         sig = inspect.signature(parent_init)
         param_names = list(sig.parameters.keys())
 
-        if 'layer_class_to_replicate' in param_names:
+        if "layer_class_to_replicate" in param_names:
             self.use_layer_class_to_replicate = True
             super().__init__(layer_class_to_replicate=FLALayer, **kwargs)
-        elif 'layer_classes' in param_names:
+        elif "layer_classes" in param_names:
             self.use_layer_class_to_replicate = False
             super().__init__(layer_classes=FLALayer, **kwargs)
         else:
@@ -396,6 +436,13 @@ class FLACache(HFCacheBase):
         kv_length = int(self.get_seq_length(layer_idx)) + query_len
         return kv_length, 0
 
+    def reset(self):
+        # keeps the layer objects allocated for the HF cache compatibility
+        # drops cache state
+        for layer in self.layers:
+            layer.reset()
+        self._seen_tokens = 0
+
     def to_legacy_cache(self) -> tuple[dict[str, Any], ...]:
         return tuple(self[i] for i in range(len(self.layers)))
 
@@ -411,8 +458,13 @@ class FLACache(HFCacheBase):
         if isinstance(past_key_values, (list, tuple)):
             for i, st in enumerate(past_key_values):
                 while len(cache.layers) <= i:
-                    cache.layers.append(cache.layer_class_to_replicate())
+                    if cache.use_layer_class_to_replicate:
+                        cache.layers.append(cache.layer_class_to_replicate())
+                    else:
+                        cache.append_new_layers(i)
                 cache.layers[i].state = dict(st)
+                # legacy cache tracks seen token globally but FLACache stores per layer
+                cache.layers[i]._seen_tokens = int(seen_tokens)
         return cache
 
 
@@ -447,60 +499,66 @@ class FLAGenerationMixin(GenerationMixin):
                 model_inputs["past_key_values"] = past_key_values
 
                 # Use the new cache-dependent input preparation method if available
-                if hasattr(self, '_cache_dependant_input_preparation') and cache_position is not None:
+                if hasattr(self, "_cache_dependant_input_preparation") and cache_position is not None:
                     inputs_embeds, input_ids = self._cache_dependant_input_preparation(
-                        input_ids, inputs_embeds, cache_position,
+                        input_ids,
+                        inputs_embeds,
+                        cache_position,
                     )
                 elif cache_position is not None:
                     # Fallback: manually slice using cache_position
                     if input_ids is not None and input_ids.shape[1] != cache_position.shape[0]:
                         input_ids = input_ids[:, cache_position]
-                elif hasattr(past_key_values, '__len__') and len(past_key_values) > 0:
+                elif hasattr(past_key_values, "__len__") and len(past_key_values) > 0:
                     # Ultimate fallback to old behavior
                     input_ids = input_ids[:, -1:]
 
             # Handle input format (similar to base class logic)
             if inputs_embeds is not None and (cache_position is None or len(cache_position) == inputs_embeds.shape[1]):
-                model_inputs['inputs_embeds'] = inputs_embeds
-                model_inputs['input_ids'] = None
+                model_inputs["inputs_embeds"] = inputs_embeds
+                model_inputs["input_ids"] = None
             else:
-                model_inputs['input_ids'] = input_ids.contiguous() if input_ids is not None else None
-                model_inputs['inputs_embeds'] = None
+                model_inputs["input_ids"] = input_ids.contiguous() if input_ids is not None else None
+                model_inputs["inputs_embeds"] = None
 
-            model_inputs['cache_position'] = cache_position
+            model_inputs["cache_position"] = cache_position
 
         else:
             # For older transformers versions, use the original logic
             model_inputs = {}
             # only last token for `inputs_ids` if the `past_key_values` is not empty.
-            if past_key_values is not None and hasattr(past_key_values, '__len__') and len(past_key_values) > 0:
+            if past_key_values is not None and hasattr(past_key_values, "__len__") and len(past_key_values) > 0:
                 input_ids = input_ids[:, -1:]
             # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-            if inputs_embeds is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:
-                model_inputs = {'inputs_embeds': inputs_embeds}
+            if inputs_embeds is not None and hasattr(past_key_values, "__len__") and len(past_key_values) == 0:
+                model_inputs = {"inputs_embeds": inputs_embeds}
             else:
                 # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
                 # recompiles graphs as the stride of the inputs is a guard.
                 # Ref: https://github.com/huggingface/transformers/pull/29114
                 # TODO: use `next_tokens` directly instead.
-                model_inputs = {'input_ids': input_ids.contiguous()}
+                model_inputs = {"input_ids": input_ids.contiguous()}
 
         if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
+            model_inputs["logits_to_keep"] = logits_to_keep
 
-        model_inputs.update({
-            'past_key_values': past_key_values,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-        })
+        model_inputs.update(
+            {
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
+            }
+        )
         return model_inputs
 
 
 if version.parse(_TF_VERSION) > version.parse(_NEED_NEW):
+
     class Cache(FLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens, **kwargs)
 else:
+
     class Cache(LegacyFLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens)
