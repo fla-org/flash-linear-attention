@@ -170,7 +170,8 @@ def input_guard(
     A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
 
     Args:
-        no_guard_contiguous: If True, skip all contiguous checks. If a list of parameter names, skip contiguous check for those parameters.
+        no_guard_contiguous (bool | list[str]):
+            If True, skip all contiguous checks. If a list of parameter names, skip contiguous check for those parameters.
     """
 
     def decorator(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:

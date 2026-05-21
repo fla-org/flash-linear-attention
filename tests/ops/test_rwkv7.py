@@ -265,11 +265,13 @@ def test_fused_k_update(
     assert_close("dka", ref_dka, ka.grad, ratio=ratio)
 
 
-@pytest.mark.parametrize("B", [4])
-@pytest.mark.parametrize("T", [4096])
-@pytest.mark.parametrize("H", [64])
-@pytest.mark.parametrize("D", [64])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(4, 4096, 64, 64, torch.bfloat16, id="default"),
+        pytest.param(1, 65537, 8, 64, torch.bfloat16, id="long_ctx"),
+    ],
+)
 def test_gate_output_correction(
     B: int,
     T: int,

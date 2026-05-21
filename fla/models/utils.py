@@ -175,7 +175,9 @@ class LegacyFLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
-    It stores the states of each layer as the tensor of shape `[batch_size, key_dim, value_dim]`.
+    It stores the recurrent state of each layer; the exact state shape is layer-dependent
+    (e.g. `[batch_size, key_dim, value_dim]`, or `[batch_size, value_dim, key_dim]` for
+    layers using the V-first state layout).
     """
 
     is_compileable = True
@@ -316,7 +318,9 @@ class FLACache(HFCacheBase):
     """
     A cache used for storing hidden states produced by flash linear attention models.
 
-    It stores the states of each layer as the tensor of shape `[batch_size, key_dim, value_dim]`.
+    It stores the recurrent state of each layer; the exact state shape is layer-dependent
+    (e.g. `[batch_size, key_dim, value_dim]`, or `[batch_size, value_dim, key_dim]` for
+    layers using the V-first state layout).
     """
 
     is_compileable = True

@@ -22,17 +22,6 @@ from fla.utils import (
     input_guard,
 )
 
-# residual sources are passed as separately allocated tensors and accessed inside kernels through int64 pointer tables.
-# the caller never has to `torch.stack` / `torch.cat` them. Each source uses a 2D pointer-tile gather that loads BL int64
-# base addresses once, casts them to `tl.pointer_type(DTYPE)`, and broadcasts them against inner D offsets to form
-# `[BL, BD]` tiles of independent global addresses. OOB rows (l >= L) load dummy address 0 and are masked by `m_l`.
-# the zero pointer is never dereferenced.
-_TORCH_TO_TL_DTYPE = {
-    torch.float16: tl.float16,
-    torch.float32: tl.float32,
-    torch.bfloat16: tl.bfloat16,
-}
-
 
 @fla_cache_autotune(
     configs=[
@@ -40,10 +29,10 @@ _TORCH_TO_TL_DTYPE = {
         for BD, num_warps in [(64, 1), (128, 2), (256, 4), (512, 4), (1024, 8)]
         for num_stages in [3, 4]
     ],
-    key=['L', 'D', 'HAS_ONORM'],
+    key=['L2', 'D', 'HAS_ONORM'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['L'])
 def attnres_fwd_kernel(
     q,
     res,
@@ -52,60 +41,62 @@ def attnres_fwd_kernel(
     p,
     rstd,
     score_mean,
-    ow,         # output rms weight, [D]; None when HAS_ONORM=False
-    o_rstd,     # output rstd, [N]; None when HAS_ONORM=False
+    ow,
+    o_rstd,
     N,
-    L: tl.constexpr,
+    L,
+    L2: tl.constexpr,
     D: tl.constexpr,
     eps: tl.constexpr,
     scale: tl.constexpr,
-    BL: tl.constexpr,
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
-    DTYPE: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
-    # [BL]
-    o_l = tl.arange(0, BL)
+    # [L2]
+    o_l = tl.arange(0, L2)
     m_l = o_l < L
 
-    # one-time gather of source base pointers; reused across all D-loops below.
-    p_v = tl.load(res + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
+    # one-time construction of source base pointers; reused across all D-loops below.
+    # `L2` is constexpr so the tl.where chain unrolls and folds at compile time.
+    p_v = res[0] + o_l * 0
+    for i in tl.static_range(1, L2):
+        p_v = tl.where(o_l == i, res[i], p_v)
     # each residual storage is 16-byte aligned (the torch CUDA allocator is 256-byte aligned), so Triton can use wide loads.
     p_v = tl.multiple_of(p_v, 16)
 
-    # [BL]
-    b_var = tl.zeros([BL], dtype=tl.float32)
-    b_logits = tl.zeros([BL], dtype=tl.float32)
+    # [L2]
+    b_var = tl.zeros([L2], dtype=tl.float32)
+    b_logit = tl.zeros([L2], dtype=tl.float32)
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
-        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [BL, BD] pointer tile.
+        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [L2, BD] pointer tile.
         # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
-        # [BL, BD] gather: row l from source l's storage at offset i_n*D + o_d
+        # [L2, BD] gather: row l from source l's storage at offset i_n*D + o_d
         b_v = tl.load(p_v[:, None] + (i_n * D + o_d[None, :]), mask=m_l[:, None] & m_d[None, :], other=0.0).to(tl.float32)
         # [BD]
         b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 
         b_var += tl.sum(b_v * b_v, axis=1)
-        b_logits += tl.sum(b_v * b_qw[None, :], axis=1)
+        b_logit += tl.sum(b_v * b_qw[None, :], axis=1)
 
-    # [BL]
+    # [L2]
     b_rstd = tl.rsqrt(b_var / D + eps)
     # save `score / D` so bwd_dv does not repeat the full LxD dot product for `sum_d (v * rstd) * (w * q)`.
-    b_score = b_logits * b_rstd
-    b_logits = b_score * scale
-    b_logits = tl.where(m_l, b_logits, -float("inf"))
-    b_logits = exp(b_logits - tl.max(b_logits, axis=0))
-    # [BL]
-    b_p = b_logits / tl.sum(b_logits, axis=0)
+    b_score = b_logit * b_rstd
+    b_logit = b_score * scale
+    b_logit = tl.where(m_l, b_logit, -float("inf"))
+    b_logit = exp(b_logit - tl.max(b_logit, axis=0))
+    # [L2]
+    b_p = b_logit / tl.sum(b_logit, axis=0)
 
-    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
-    p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (BL,), (0,))
-    p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
+    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (L2,), (0,))
+    p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (L2,), (0,))
+    p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (L2,), (0,))
     tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
     tl.store(p_score_mean, (b_score / D).to(p_score_mean.dtype.element_ty), boundary_check=(0,))
     tl.store(p_p, b_p.to(p_p.dtype.element_ty), boundary_check=(0,))
@@ -116,12 +107,10 @@ def attnres_fwd_kernel(
     b_o_var = tl.zeros([], dtype=tl.float32)
     for i_d in range(0, D, BD):
         o_d = i_d + tl.arange(0, BD)
-        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [BL, BD] pointer tile.
-        # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        # [BL, BD]
+        # [L2, BD]
         b_v = tl.load(p_v[:, None] + (i_n * D + o_d[None, :]), mask=m_l[:, None] & m_d[None, :], other=0.0).to(tl.float32)
         # [BD]
         b_o = tl.sum(b_v * b_p[:, None], axis=0)
@@ -146,7 +135,7 @@ def attnres_fwd_kernel(
 
 
 @fla_cache_autotune(
-    # bwd_dv carries more BL-axis reductions than fwd (b_dp, b_dp_w, b_dp_x, b_o_c1), plus a scattered dv store with no
+    # bwd_dv carries more L2-axis reductions than fwd (b_dp, b_dp_w, b_dp_x, b_o_c1), plus a scattered dv store with no
     # fwd analogue; explore a wider grid along the per-thread = BD/num_warps contour (32, 64, 128).
     configs=[
         triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
@@ -159,13 +148,13 @@ def attnres_fwd_kernel(
         ]
         for num_stages in [3, 4]
     ],
-    key=['L', 'D', 'HAS_ONORM'],
+    key=['L2', 'D', 'HAS_ONORM'],
     **autotune_cache_kwargs,
 )
-@triton.jit
+@triton.jit(do_not_specialize=['L'])
 def attnres_bwd_kernel_dv(
     q,
-    res,     # int64 [L]
+    res,
     w,
     ow,
     p,
@@ -173,32 +162,35 @@ def attnres_bwd_kernel_dv(
     score_mean,
     o_rstd,
     do,
-    dres,    # int64 [L]; data_ptr() of each per-source dv allocation
+    dres,
     dqw,
     dow_partial,
     N,
     scale: tl.constexpr,
-    L: tl.constexpr,
+    L,
+    L2: tl.constexpr,
     D: tl.constexpr,
-    BL: tl.constexpr,
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
-    DTYPE: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
-    o_l = tl.arange(0, BL)
+    o_l = tl.arange(0, L2)
     m_l = o_l < L
-    p_v = tl.load(res + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
+    # one-time construction of source / dv base pointers; reused across all D-loops below.
+    p_v = res[0] + o_l * 0
+    p_dv = dres[0] + o_l * 0
+    for i in tl.static_range(1, L2):
+        p_v = tl.where(o_l == i, res[i], p_v)
+        p_dv = tl.where(o_l == i, dres[i], p_dv)
     # each residual storage is 16-byte aligned (the torch CUDA allocator is 256-byte aligned), so Triton can use wide loads.
     p_v = tl.multiple_of(p_v, 16)
-    p_dv = tl.load(dres + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
     p_dv = tl.multiple_of(p_dv, 16)
 
-    p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
-    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
-    p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (BL,), (0,))
-    # [BL]
+    p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (L2,), (0,))
+    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (L2,), (0,))
+    p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (L2,), (0,))
+    # [L2]
     b_p = tl.load(p_p, boundary_check=(0,), padding_option="zero").to(tl.float32)
     b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
     b_score_mean = tl.load(p_score_mean, boundary_check=(0,), padding_option="zero").to(tl.float32)
@@ -220,22 +212,22 @@ def attnres_bwd_kernel_dv(
     # no separate pre-pass is needed, and `v` is loaded only once across pass 1.
     b_o_rstd = tl.zeros([], dtype=tl.float32)
     b_o_c1 = tl.zeros([], dtype=tl.float32)
-    b_dp_w = tl.zeros([BL], dtype=tl.float32)
-    b_dp_x = tl.zeros([BL], dtype=tl.float32)
+    b_dp_w = tl.zeros([L2], dtype=tl.float32)
+    b_dp_x = tl.zeros([L2], dtype=tl.float32)
     if HAS_ONORM:
         b_o_rstd = tl.load(o_rstd + i_n).to(tl.float32)
 
-    # [BL]
-    b_dp = tl.zeros([BL], dtype=tl.float32)
+    # [L2]
+    b_dp = tl.zeros([L2], dtype=tl.float32)
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
-        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [BL, BD] pointer tile.
+        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [L2, BD] pointer tile.
         # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        # [BL, BD] — pass 2 reloads the same v tile, so hint L2 to retain.
+        # [L2, BD] — pass 2 reloads the same v tile, so evict_last keeps it cached.
         b_v = tl.load(
             p_v[:, None] + (i_n * D + o_d[None, :]),
             mask=m_l[:, None] & m_d[None, :],
@@ -267,20 +259,18 @@ def attnres_bwd_kernel_dv(
     # softmax bwd via the standard delta trick: delta = sum_l p*dp = sum_d do*o.
     # [1]
     b_delta = tl.sum(b_p * b_dp, axis=0)
-    # [BL]
+    # [L2]
     b_ds = b_p * (b_dp - b_delta) * scale
 
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
-        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [BL, BD] pointer tile.
-        # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
         o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
         m_d = o_d < D
         m_v = m_l[:, None] & m_d[None, :]
         p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        # [BL, BD]
-        # last touch of this v tile; release the L2 line.
+        # [L2, BD]
+        # last touch of this v tile; evict_first releases the cache line.
         b_v = tl.load(
             tl.multiple_of(p_v[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
             mask=m_v,
@@ -297,14 +287,18 @@ def attnres_bwd_kernel_dv(
             b_o_xhat = b_o_pre * b_o_rstd
             b_do = (b_ow * b_do - b_o_xhat * b_o_c1) * b_o_rstd
 
-        # [BL, BD]
+        # [L2, BD]
         b_k = b_v * b_rstd[:, None]
         b_dv = b_p[:, None] * b_do[None, :] + b_ds[:, None] * b_rstd[:, None] * (
             b_qw[None, :] - b_k * b_score_mean[:, None]
         )
 
         p_dqw = tl.make_block_ptr(dqw + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        tl.store(tl.multiple_of(p_dv[:, None] + (i_n * D + o_d[None, :]), (1, 16)), b_dv.to(DTYPE), mask=m_v)
+        tl.store(
+            tl.multiple_of(p_dv[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
+            b_dv.to(dres[0].dtype.element_ty),
+            mask=m_v,
+        )
         # [BD]
         tl.store(p_dqw, tl.sum(b_ds[:, None] * b_k, axis=0), boundary_check=(0,))
 
@@ -362,22 +356,20 @@ def attnres_bwd_kernel_dqdw(
         tl.store(dow + o_d, b_o_acc, mask=m_d)
 
 
-def _build_ptr_table(tensors: Sequence[torch.Tensor]) -> torch.Tensor:
-    # build the int64 ptr table on **pinned** CPU memory, then issue a `non_blocking=True` H2D.
-    # with this combo, PyTorch knows the source storage outlives the async copy and skips the implicit `cudaStreamSynchronize`.
-    # `torch.tensor([...], device='cuda')` otherwise adds that sync to keep pageable staging alive (~600µs CPU stall).
-    cpu_t = torch.tensor(
-        [t.data_ptr() for t in tensors],
-        dtype=torch.int64,
-        pin_memory=True,
-    )
-    return cpu_t.to(tensors[0].device, non_blocking=True)
+def _build_ptr_table(tensors: Sequence[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+    # pad the per-source tensor tuple to a fixed length so Triton can compile a single kernel per L2 bucket.
+    # the tuple length is part of the kernel's compile signature; padded slots are address-only (never read/written).
+    L2 = max(8, triton.next_power_of_2(len(tensors)))
+    assert 1 <= len(tensors) <= L2
+    for t in tensors:
+        assert t.data_ptr() % 16 == 0, "attnres residual sources must be 16-byte aligned"
+    return tuple(tensors) + (tensors[0],) * (L2 - len(tensors))
 
 
 def fused_attnres_fwd(
     q: torch.Tensor,
     residuals: Sequence[torch.Tensor],
-    res: torch.Tensor,
+    res: tuple[torch.Tensor, ...],
     w: torch.Tensor,
     ow: torch.Tensor | None,
     eps: float,
@@ -390,10 +382,6 @@ def fused_attnres_fwd(
     L, N, D = len(residuals), residuals[0].numel() // output_shape[-1], output_shape[-1]
 
     dtype = residuals[0].dtype
-    if dtype not in _TORCH_TO_TL_DTYPE:
-        raise ValueError(f"Unsupported residual dtype for fused_attnres: {dtype}")
-    DTYPE = _TORCH_TO_TL_DTYPE[dtype]
-
     stats_shape = (L, *output_shape[:-1])
 
     has_onorm = ow is not None
@@ -406,7 +394,7 @@ def fused_attnres_fwd(
     else:
         o_rstd = None
 
-    BL = max(8, triton.next_power_of_2(L))
+    L2 = max(8, triton.next_power_of_2(L))
     attnres_fwd_kernel[(N,)](
         q=q,
         res=res,
@@ -419,12 +407,11 @@ def fused_attnres_fwd(
         o_rstd=o_rstd,
         N=N,
         L=L,
+        L2=L2,
         D=D,
         eps=eps,
         scale=scale,
-        BL=BL,
         HAS_ONORM=has_onorm,
-        DTYPE=DTYPE,
     )
 
     return o, p, rstd, score_mean, o_rstd
@@ -434,7 +421,7 @@ def fused_attnres_bwd(
     do: torch.Tensor,
     q: torch.Tensor,
     residuals: Sequence[torch.Tensor],
-    res: torch.Tensor,
+    res: tuple[torch.Tensor, ...],
     w: torch.Tensor,
     ow: torch.Tensor | None,
     p: torch.Tensor,
@@ -444,8 +431,6 @@ def fused_attnres_bwd(
     scale: float,
 ) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor | None]:
     L, N, D = len(residuals), do.numel() // do.shape[-1], do.shape[-1]
-    dtype = residuals[0].dtype
-    DTYPE = _TORCH_TO_TL_DTYPE[dtype]
 
     # output RMSNorm bwd is folded into the attnres kernels. The first D-loop derives `c1_o`, writes `dow_partial`, and
     # rebuilds `o_pre = sum_l p_l * v_l` inline so it is not saved across fwd->bwd.
@@ -465,7 +450,7 @@ def fused_attnres_bwd(
     dq = torch.empty_like(q)
     dw = torch.empty_like(w)
 
-    BL = max(8, triton.next_power_of_2(L))
+    L2 = max(8, triton.next_power_of_2(L))
     attnres_bwd_kernel_dv[(N,)](
         q=q,
         res=res,
@@ -482,10 +467,9 @@ def fused_attnres_bwd(
         N=N,
         scale=scale,
         L=L,
+        L2=L2,
         D=D,
-        BL=BL,
         HAS_ONORM=has_onorm,
-        DTYPE=DTYPE,
     )
 
     def grid(meta): return (triton.cdiv(D, meta['BD']),)
@@ -520,7 +504,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         *residuals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # `res` is built once here and threaded through fwd/bwd so neither internal wrapper rebuilds it.
-        # for small N, the H2D copy plus cudaMemcpy launch is ~tens of µs, comparable to the kernel itself.
+        # the tuple is pure Python, no H2D copy.
         res = _build_ptr_table(residuals)
         o, p, rstd, score_mean, o_rstd = fused_attnres_fwd(
             q=query,
@@ -581,9 +565,9 @@ def fused_attnres(
     residual-source dimension, and returns the weighted sum of residual sources.
     See `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
 
-    Residual sources are passed as a sequence of independently allocated tensors and accessed inside the kernel via a
-    pointer table; there is no upstream `torch.stack` / `torch.cat`, and per-source `dv` is written back into separately
-    allocated tensors so autograd routes each gradient to its own leaf.
+    Residual sources are passed as a sequence of independently allocated tensors and accessed inside the kernel as
+    individual per-source tensor arguments; there is no upstream `torch.stack` / `torch.cat`, and per-source `dv` is
+    written back into separately allocated tensors so autograd routes each gradient to its own leaf.
 
     Args:
         query (torch.Tensor):

@@ -36,7 +36,7 @@ def _build_kda_bwd_kernel(
     B, H, K, V, BT, BK, BV,
     hD1, hD2,
     dtype_str,
-    TRANSPOSE_STATE, IS_VARLEN=False,
+    STATE_V_FIRST, IS_VARLEN=False,
     num_warps=4,
 ):
     dtype_map = {'float16': T.float16, 'bfloat16': T.bfloat16, 'float32': T.float32}
@@ -44,7 +44,7 @@ def _build_kda_bwd_kernel(
     NK = tilelang.cdiv(K, BK)
     NV = tilelang.cdiv(V, BV)
     threads = num_warps * 32
-    tile_hD1, tile_hD2 = (BV, BK) if TRANSPOSE_STATE else (BK, BV)
+    tile_hD1, tile_hD2 = (BV, BK) if STATE_V_FIRST else (BK, BV)
 
     # Rebind to underscore-prefixed locals for closure capture
     _B, _H, _K, _V = B, H, K, V
@@ -52,7 +52,7 @@ def _build_kda_bwd_kernel(
     _hD1, _hD2, _thD1, _thD2 = hD1, hD2, tile_hD1, tile_hD2
     _dtype = dtype
     _threads = threads
-    _TS = TRANSPOSE_STATE
+    _TS = STATE_V_FIRST
     _VAR = IS_VARLEN
 
     T_d, NT_d, total_h_d, N_seqs_d = T.dynamic("T, NT, total_h, N_seqs")
@@ -419,7 +419,7 @@ def _build_kda_bwd_kernel(
 def chunk_kda_bwd_wy_dqkg_fused_tilelang(
     q, k, v, v_new, g, beta, A, h, do, dh, dv,
     scale=None, cu_seqlens=None, chunk_size=64,
-    chunk_indices=None, transpose_state_layout=False,
+    chunk_indices=None, state_v_first=False,
 ):
     B, _, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
@@ -455,7 +455,7 @@ def chunk_kda_bwd_wy_dqkg_fused_tilelang(
     kernel = _build_kda_bwd_kernel(
         B, H, K, V, BT, BK, BV,
         hD1, hD2, dtype_str,
-        transpose_state_layout, IS_VARLEN,
+        state_v_first, IS_VARLEN,
         num_warps=num_warps,
     )
 
