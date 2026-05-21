@@ -104,13 +104,45 @@ def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
 def test_rmsnorm_gated_large_batch_offsets():
     torch.manual_seed(42)
     B, H, T, D = 256, 12, 6144, 128
-    x = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16)
-    g = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16)
+    x = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16).requires_grad_(True)
+    g = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16).requires_grad_(True)
     weight = torch.ones(D, device=device, dtype=torch.bfloat16)
 
-    ref = x.float() * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + 1e-6)
-    ref = (ref * weight.float() * F.silu(g.float())).to(torch.bfloat16)
+    with torch.no_grad():
+        ref = x.float() * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+        ref = (ref * weight.float() * F.silu(g.float())).to(torch.bfloat16)
     tri = FusedRMSNormGated(D, eps=1e-6, activation="silu").to(device, dtype=torch.bfloat16)
     tri.weight.data.copy_(weight)
+    y = tri(x, g)
 
-    assert_close(' y', ref, tri(x, g), 6.3e-2)
+    assert_close(' y', ref, y, 6.3e-2)
+    del ref
+
+    y.float().sum().backward()
+    assert x.grad is not None
+    assert g.grad is not None
+    assert tri.weight.grad is not None
+
+
+@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_rmsnorm_gated_large_batch_offsets_large_d():
+    torch.manual_seed(42)
+    B, H, T, D = 256, 1, 8200, 1024
+    x = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16).requires_grad_(True)
+    g = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16).requires_grad_(True)
+    tri = FusedRMSNormGated(D, eps=1e-6, activation="silu").to(device, dtype=torch.bfloat16)
+    tri.weight.data.fill_(1)
+
+    y = tri(x, g)
+    with torch.no_grad():
+        ref = torch.cat(
+            [tri(x[start:start + 128], g[start:start + 128]) for start in range(0, B, 128)],
+            dim=0,
+        )
+    assert_close(' y', ref, y, 6.3e-2)
+    del ref
+
+    y.float().sum().backward()
+    assert x.grad is not None
+    assert g.grad is not None
+    assert tri.weight.grad is not None
