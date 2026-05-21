@@ -92,7 +92,7 @@ class FLALayer(CacheLayerMixin):
                         else:
                             old_x = old_x[:, -window_size:].contiguous() if old_x.shape[1] > window_size else old_x
                             rolled = old_x.roll(-input_size, dims=1)
-                            rolled[:, -tail.shape[1] :] = tail
+                            rolled[:, -tail.shape[1]:] = tail
                             new_tuple.append(rolled)
                     self.state["attn_state"] = tuple(new_tuple)
                 else:
@@ -303,17 +303,17 @@ class LegacyFLACache(HFCacheBase):
                             )
                             old_state = old_state.roll(-input_size, 1)
                             # replace the newest slots with the new key/value states
-                            old_state[:, -tail.shape[1] :] = tail
+                            old_state[:, -tail.shape[1]:] = tail
                             updated_attn_state.append(old_state)
                     state["attn_state"] = updated_attn_state
                 else:
-                    attn_state = []
+                    updated_attn_state = []
                     for old_state, new_state in zip(state["attn_state"], attn_state, strict=False):
                         updated = torch.cat([old_state, new_state], 1)
                         if window_size is not None and updated.shape[1] > window_size:
                             updated = updated[:, -window_size:].contiguous()
-                        attn_state.append(updated)
-                    state["attn_state"] = attn_state
+                        updated_attn_state.append(updated)
+                    state["attn_state"] = updated_attn_state
             if conv_state is not None:
                 state["conv_state"] = conv_state
             if ffn_state is not None:

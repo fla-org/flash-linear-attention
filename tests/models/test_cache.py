@@ -36,6 +36,13 @@ def _new_cache(cache_cls):
         pytest.skip(f"{cache_cls.__name__} is not compatible with this transformers version: {exc}")
 
 
+def _new_legacy_cache_without_hf_init():
+    cache = object.__new__(LegacyFLACache)
+    cache.states = []
+    cache._seen_tokens = 0
+    return cache
+
+
 # ===================================================================================
 # Test for FLACache per-layer get_seq_length behavior
 # ===================================================================================
@@ -220,6 +227,31 @@ def test_windowed_cache_keeps_tail_for_oversized_updates(cache_cls, first_len: i
     state = cache[0]
     assert state["attn_state"][0].shape[1] == window_size
     _assert_attn_state_tokens(state["attn_state"], expected_tokens)
+    assert cache.get_seq_length(0) == first_len + second_len
+
+
+def test_legacy_cache_partial_window_overflow_keeps_update_when_constructor_is_incompatible():
+    cache = _new_legacy_cache_without_hf_init()
+    window_size = 4
+    first_len = 2
+    second_len = 4
+
+    cache.update(
+        attn_state=_make_attn_state(0, first_len),
+        layer_idx=0,
+        offset=first_len,
+        cache_kwargs={"window_size": window_size},
+    )
+    cache.update(
+        attn_state=_make_attn_state(first_len, second_len),
+        layer_idx=0,
+        offset=second_len,
+        cache_kwargs={"window_size": window_size},
+    )
+
+    _assert_attn_state_tokens(
+        cache[0]["attn_state"], torch.arange(first_len + second_len - window_size, first_len + second_len)
+    )
     assert cache.get_seq_length(0) == first_len + second_len
 
 

@@ -37,6 +37,8 @@ __pycache__
 *.pkl
 *.pt
 
+# virtual environment
+.venv/
 
 # vscode
 .vscode
