@@ -22,11 +22,11 @@ from fla.utils import (
     input_guard,
 )
 
-# residual sources are passed as separately allocated tensors and accessed inside kernels through int64 pointer tables.
-# the caller never has to `torch.stack` / `torch.cat` them. Each source uses a 2D pointer-tile gather that loads BL int64
-# base addresses once, casts them to `tl.pointer_type(DTYPE)`, and broadcasts them against inner D offsets to form
-# `[BL, BD]` tiles of independent global addresses. OOB rows (l >= L) load dummy address 0 and are masked by `m_l`.
-# the zero pointer is never dereferenced.
+# residual sources are passed as separately allocated tensors and accessed inside kernels via a length-BL tuple of
+# tensor arguments. the caller never has to `torch.stack` / `torch.cat` them. Each kernel selects per-row base pointers
+# from the tuple via a static-range `tl.where`, then broadcasts against inner D offsets to form `[BL, BD]` tiles of
+# independent global addresses. OOB rows (l >= L) are filled with the first tuple entry (a padding copy that is never
+# read or written) and masked by `m_l`.
 _TORCH_TO_TL_DTYPE = {
     torch.float16: tl.float16,
     torch.float32: tl.float32,
@@ -52,8 +52,8 @@ def attnres_fwd_kernel(
     p,
     rstd,
     score_mean,
-    ow,         # output rms weight, [D]; None when HAS_ONORM=False
-    o_rstd,     # output rstd, [N]; None when HAS_ONORM=False
+    ow,
+    o_rstd,
     N,
     L: tl.constexpr,
     D: tl.constexpr,
@@ -62,7 +62,6 @@ def attnres_fwd_kernel(
     BL: tl.constexpr,
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
-    DTYPE: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
@@ -70,14 +69,17 @@ def attnres_fwd_kernel(
     o_l = tl.arange(0, BL)
     m_l = o_l < L
 
-    # one-time gather of source base pointers; reused across all D-loops below.
-    p_v = tl.load(res + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
+    # one-time construction of source base pointers; reused across all D-loops below.
+    # `BL` is constexpr so the tl.where chain unrolls and folds at compile time.
+    p_v = res[0] + o_l * 0
+    for i in tl.static_range(1, BL):
+        p_v = tl.where(o_l == i, res[i], p_v)
     # each residual storage is 16-byte aligned (the torch CUDA allocator is 256-byte aligned), so Triton can use wide loads.
     p_v = tl.multiple_of(p_v, 16)
 
     # [BL]
     b_var = tl.zeros([BL], dtype=tl.float32)
-    b_logits = tl.zeros([BL], dtype=tl.float32)
+    b_logit = tl.zeros([BL], dtype=tl.float32)
     for i_d in range(0, D, BD):
         # [BD]
         o_d = i_d + tl.arange(0, BD)
@@ -91,17 +93,17 @@ def attnres_fwd_kernel(
         b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 
         b_var += tl.sum(b_v * b_v, axis=1)
-        b_logits += tl.sum(b_v * b_qw[None, :], axis=1)
+        b_logit += tl.sum(b_v * b_qw[None, :], axis=1)
 
     # [BL]
     b_rstd = tl.rsqrt(b_var / D + eps)
     # save `score / D` so bwd_dv does not repeat the full LxD dot product for `sum_d (v * rstd) * (w * q)`.
-    b_score = b_logits * b_rstd
-    b_logits = b_score * scale
-    b_logits = tl.where(m_l, b_logits, -float("inf"))
-    b_logits = exp(b_logits - tl.max(b_logits, axis=0))
+    b_score = b_logit * b_rstd
+    b_logit = b_score * scale
+    b_logit = tl.where(m_l, b_logit, -float("inf"))
+    b_logit = exp(b_logit - tl.max(b_logit, axis=0))
     # [BL]
-    b_p = b_logits / tl.sum(b_logits, axis=0)
+    b_p = b_logit / tl.sum(b_logit, axis=0)
 
     p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (BL,), (0,))
     p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (BL,), (0,))
@@ -165,7 +167,7 @@ def attnres_fwd_kernel(
 @triton.jit
 def attnres_bwd_kernel_dv(
     q,
-    res,     # int64 [L]
+    res,
     w,
     ow,
     p,
@@ -173,7 +175,7 @@ def attnres_bwd_kernel_dv(
     score_mean,
     o_rstd,
     do,
-    dres,    # int64 [L]; data_ptr() of each per-source dv allocation
+    dres,
     dqw,
     dow_partial,
     N,
@@ -189,10 +191,14 @@ def attnres_bwd_kernel_dv(
 
     o_l = tl.arange(0, BL)
     m_l = o_l < L
-    p_v = tl.load(res + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
+    # one-time construction of source / dv base pointers; reused across all D-loops below.
+    p_v = res[0] + o_l * 0
+    p_dv = dres[0] + o_l * 0
+    for i in tl.static_range(1, BL):
+        p_v = tl.where(o_l == i, res[i], p_v)
+        p_dv = tl.where(o_l == i, dres[i], p_dv)
     # each residual storage is 16-byte aligned (the torch CUDA allocator is 256-byte aligned), so Triton can use wide loads.
     p_v = tl.multiple_of(p_v, 16)
-    p_dv = tl.load(dres + o_l, mask=m_l, other=0).to(tl.pointer_type(DTYPE))
     p_dv = tl.multiple_of(p_dv, 16)
 
     p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (BL,), (0,))
@@ -362,22 +368,20 @@ def attnres_bwd_kernel_dqdw(
         tl.store(dow + o_d, b_o_acc, mask=m_d)
 
 
-def _build_ptr_table(tensors: Sequence[torch.Tensor]) -> torch.Tensor:
-    # build the int64 ptr table on **pinned** CPU memory, then issue a `non_blocking=True` H2D.
-    # with this combo, PyTorch knows the source storage outlives the async copy and skips the implicit `cudaStreamSynchronize`.
-    # `torch.tensor([...], device='cuda')` otherwise adds that sync to keep pageable staging alive (~600µs CPU stall).
-    cpu_t = torch.tensor(
-        [t.data_ptr() for t in tensors],
-        dtype=torch.int64,
-        pin_memory=True,
-    )
-    return cpu_t.to(tensors[0].device, non_blocking=True)
+def _build_ptr_table(tensors: Sequence[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+    # pad the per-source tensor tuple to a fixed length so Triton can compile a single kernel per BL bucket.
+    # the tuple length is part of the kernel's compile signature; padded slots are address-only (never read/written).
+    BL = max(8, triton.next_power_of_2(len(tensors)))
+    assert 1 <= len(tensors) <= BL
+    for t in tensors:
+        assert t.data_ptr() % 16 == 0, "attnres residual sources must be 16-byte aligned"
+    return tuple(tensors) + (tensors[0],) * (BL - len(tensors))
 
 
 def fused_attnres_fwd(
     q: torch.Tensor,
     residuals: Sequence[torch.Tensor],
-    res: torch.Tensor,
+    res: tuple[torch.Tensor, ...],
     w: torch.Tensor,
     ow: torch.Tensor | None,
     eps: float,
@@ -392,7 +396,6 @@ def fused_attnres_fwd(
     dtype = residuals[0].dtype
     if dtype not in _TORCH_TO_TL_DTYPE:
         raise ValueError(f"Unsupported residual dtype for fused_attnres: {dtype}")
-    DTYPE = _TORCH_TO_TL_DTYPE[dtype]
 
     stats_shape = (L, *output_shape[:-1])
 
@@ -424,7 +427,6 @@ def fused_attnres_fwd(
         scale=scale,
         BL=BL,
         HAS_ONORM=has_onorm,
-        DTYPE=DTYPE,
     )
 
     return o, p, rstd, score_mean, o_rstd
@@ -434,7 +436,7 @@ def fused_attnres_bwd(
     do: torch.Tensor,
     q: torch.Tensor,
     residuals: Sequence[torch.Tensor],
-    res: torch.Tensor,
+    res: tuple[torch.Tensor, ...],
     w: torch.Tensor,
     ow: torch.Tensor | None,
     p: torch.Tensor,
@@ -520,7 +522,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         *residuals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # `res` is built once here and threaded through fwd/bwd so neither internal wrapper rebuilds it.
-        # for small N, the H2D copy plus cudaMemcpy launch is ~tens of µs, comparable to the kernel itself.
+        # the tuple is pure Python, no H2D copy.
         res = _build_ptr_table(residuals)
         o, p, rstd, score_mean, o_rstd = fused_attnres_fwd(
             q=query,
@@ -581,9 +583,9 @@ def fused_attnres(
     residual-source dimension, and returns the weighted sum of residual sources.
     See `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
 
-    Residual sources are passed as a sequence of independently allocated tensors and accessed inside the kernel via a
-    pointer table; there is no upstream `torch.stack` / `torch.cat`, and per-source `dv` is written back into separately
-    allocated tensors so autograd routes each gradient to its own leaf.
+    Residual sources are passed as a sequence of independently allocated tensors and accessed inside the kernel as
+    individual per-source tensor arguments; there is no upstream `torch.stack` / `torch.cat`, and per-source `dv` is
+    written back into separately allocated tensors so autograd routes each gradient to its own leaf.
 
     Args:
         query (torch.Tensor):
