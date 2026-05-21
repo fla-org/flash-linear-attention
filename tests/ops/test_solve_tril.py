@@ -15,6 +15,8 @@ from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import assert_close, device, device_platform
 
+_IS_BLACKWELL_CUDA = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10
+
 
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'chunk_size'),
@@ -95,3 +97,45 @@ def test_solve_tril_varlen(
 
     tri = solve_tril(A, cu_seqlens=cu_seqlens)
     assert_close('solve_tril_varlen', ref, tri, 0.0001)
+
+
+@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_chunk_scaled_dot_kkt_large_batch_offsets():
+    torch.manual_seed(42)
+    B, T, H, K, BT = 256, 16384, 12, 64, 64
+    k = torch.randn(B, T, H, K, device=device, dtype=torch.bfloat16)
+    g = torch.randn(B, T, H, device=device, dtype=torch.bfloat16)
+    beta = torch.rand(B, T, H, device=device, dtype=torch.bfloat16)
+
+    tri = chunk_scaled_dot_kkt_fwd(k=k, g=g, beta=beta, chunk_size=BT, output_dtype=torch.bfloat16)
+    ref = torch.cat(
+        [
+            chunk_scaled_dot_kkt_fwd(
+                k=k[start:start + 128],
+                g=g[start:start + 128],
+                beta=beta[start:start + 128],
+                chunk_size=BT,
+                output_dtype=torch.bfloat16,
+            )
+            for start in range(0, B, 128)
+        ],
+        dim=0,
+    )
+    assert_close('chunk_scaled_dot_kkt', ref, tri, 0.0)
+
+
+@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_solve_tril_large_batch_offsets():
+    torch.manual_seed(42)
+    B, T, H, BT = 256, 16384, 12, 64
+    A = torch.randn(B, T, H, BT, device=device, dtype=torch.bfloat16) * 0.01
+    offsets = torch.arange(T, device=device) % BT
+    cols = torch.arange(BT, device=device)
+    A.masked_fill_(offsets[None, :, None, None] <= cols[None, None, None, :], 0)
+
+    tri = solve_tril(A, output_dtype=torch.bfloat16)
+    ref = torch.cat(
+        [solve_tril(A[start:start + 128], output_dtype=torch.bfloat16) for start in range(0, B, 128)],
+        dim=0,
+    )
+    assert_close('solve_tril', ref, tri, 0.0)

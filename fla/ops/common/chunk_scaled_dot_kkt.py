@@ -52,7 +52,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
     o_t = i_t * BT + tl.arange(0, BT)
     m_t = o_t < T
 
