@@ -57,7 +57,8 @@ def recompute_w_u_fwd_kernel(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
     p_b = tl.make_block_ptr(beta + bos*HV + i_h, (T,), (HV,), (i_t * BT,), (BT,), (0,))
     b_b = tl.load(p_b, boundary_check=(0,))
 

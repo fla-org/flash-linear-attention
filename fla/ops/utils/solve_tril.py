@@ -53,7 +53,8 @@ def solve_tril_16x16_kernel(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
     m_I = o_i[:, None] == o_i[None, :]
@@ -121,7 +122,8 @@ def merge_16x16_to_32x32_inverse_kernel(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
@@ -210,7 +212,8 @@ def merge_16x16_to_64x64_inverse_kernel(
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
-        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
+        bos = tl.cast(i_b, tl.int64) * T
+        eos = bos + T
 
     o_i = tl.arange(0, 16)
     m_A = o_i[:, None] > o_i[None, :]
