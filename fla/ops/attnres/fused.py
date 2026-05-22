@@ -25,9 +25,10 @@ from fla.utils import (
 
 @fla_cache_autotune(
     configs=[
-        triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
-        for BD, num_warps in [(64, 1), (128, 2), (256, 4), (512, 4), (1024, 8)]
-        for num_stages in [3, 4]
+        triton.Config({'BL': BL}, num_warps=num_warps, num_stages=num_stages)
+        for BL in [1, 2, 4, 8]
+        for num_warps in [4, 8, 16]
+        for num_stages in [2, 3]
     ],
     key=['L2', 'D', 'HAS_ONORM'],
     **autotune_cache_kwargs,
@@ -37,116 +38,92 @@ def attnres_fwd_kernel(
     q,
     res,
     w,
-    o,
-    p,
-    rstd,
-    score_mean,
     ow,
-    o_rstd,
+    o,
+    o_pre,
+    rstd,
+    logit,
+    lse,
     N,
     L,
     L2: tl.constexpr,
     D: tl.constexpr,
     eps: tl.constexpr,
     scale: tl.constexpr,
+    BL: tl.constexpr,
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
-    # [L2]
-    o_l = tl.arange(0, L2)
-    m_l = o_l < L
+    # [BD]
+    o_d = tl.max_contiguous(tl.multiple_of(tl.arange(0, BD), BD), BD)
+    m_d = o_d < D
+    # [BD] q * w, reused across all residual-source tiles
+    b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 
-    # one-time construction of source base pointers; reused across all D-loops below.
-    # `L2` is constexpr so the tl.where chain unrolls and folds at compile time.
-    p_v = res[0] + o_l * 0
-    for i in tl.static_range(1, L2):
-        p_v = tl.where(o_l == i, res[i], p_v)
-    # each residual storage is 16-byte aligned (the torch CUDA allocator is 256-byte aligned), so Triton can use wide loads.
-    p_v = tl.multiple_of(p_v, 16)
+    # online softmax over L; b_o accumulates in registers so each v tile is read once (logit + weighted sum)
+    b_m = tl.full([], float('-inf'), dtype=tl.float32)
+    b_acc = tl.zeros([], dtype=tl.float32)
+    b_o = tl.zeros([BD], dtype=tl.float32)
+    for i_l in range(tl.cdiv(L, BL)):
+        # [BL]
+        o_l = i_l * BL + tl.arange(0, BL)
+        m_l = o_l < L
+        # per-tile base pointers from the length-L2 padded tuple; OOB rows keep res[0] and are masked by m_l
+        p_v = res[0] + o_l * 0
+        for i in tl.static_range(1, L2):
+            p_v = tl.where(o_l == i, res[i], p_v)
+        p_v = tl.multiple_of(p_v, 16)
 
-    # [L2]
-    b_var = tl.zeros([L2], dtype=tl.float32)
-    b_logit = tl.zeros([L2], dtype=tl.float32)
-    for i_d in range(0, D, BD):
+        # [BL, BD] gather: row l from source l at offset i_n*D + o_d
+        b_v = tl.load(
+            tl.multiple_of(p_v[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
+            mask=m_l[:, None] & m_d[None, :],
+            other=0.0,
+            eviction_policy="evict_first",
+        ).to(tl.float32)
+
+        # [BL]
+        b_rstd = tl.rsqrt(tl.sum(b_v * b_v, axis=1) / D + eps)
+        b_logit = tl.sum(b_v * b_qw[None, :], axis=1) * b_rstd
+        b_s = tl.where(m_l, b_logit * scale, float('-inf'))
+
+        b_m, b_mp = tl.maximum(b_m, tl.max(b_s, axis=0)), b_m
+        b_r = exp(b_mp - b_m)
+        # [BL]
+        b_p = exp(b_s - b_m)
+        b_acc = b_acc * b_r + tl.sum(b_p, axis=0)
         # [BD]
-        o_d = i_d + tl.arange(0, BD)
-        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [L2, BD] pointer tile.
-        # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
-        o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
-        m_d = o_d < D
-        # [L2, BD] gather: row l from source l's storage at offset i_n*D + o_d
-        b_v = tl.load(p_v[:, None] + (i_n * D + o_d[None, :]), mask=m_l[:, None] & m_d[None, :], other=0.0).to(tl.float32)
-        # [BD]
-        b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_o = b_o * b_r + tl.sum(b_p[:, None] * b_v, axis=0)
 
-        b_var += tl.sum(b_v * b_v, axis=1)
-        b_logit += tl.sum(b_v * b_qw[None, :], axis=1)
+        # rstd and logit saved for bwd_dv
+        p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
+        p_logit = tl.make_block_ptr(logit + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
+        tl.store(p_rstd, b_rstd.to(rstd.dtype.element_ty), boundary_check=(0,))
+        tl.store(p_logit, b_logit.to(logit.dtype.element_ty), boundary_check=(0,))
 
-    # [L2]
-    b_rstd = tl.rsqrt(b_var / D + eps)
-    # save `score / D` so bwd_dv does not repeat the full LxD dot product for `sum_d (v * rstd) * (w * q)`.
-    b_score = b_logit * b_rstd
-    b_logit = b_score * scale
-    b_logit = tl.where(m_l, b_logit, -float("inf"))
-    b_logit = exp(b_logit - tl.max(b_logit, axis=0))
-    # [L2]
-    b_p = b_logit / tl.sum(b_logit, axis=0)
+    tl.store(lse + i_n, b_m + tl.log(b_acc))
 
-    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (L2,), (0,))
-    p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (L2,), (0,))
-    p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (L2,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
-    tl.store(p_score_mean, (b_score / D).to(p_score_mean.dtype.element_ty), boundary_check=(0,))
-    tl.store(p_p, b_p.to(p_p.dtype.element_ty), boundary_check=(0,))
-
-    # second pass: compute `b_o = sum_l p_l * v_l`, write it to `o`, and optionally accumulate `b_o_var` for output rstd.
-    # `o` is allocated in the residual dtype; the pass 2 -> pass 3 round trip goes through a dtype cast (rtne rounding),
-    # which is fine since the final output is in that dtype anyway.  pass 3 normalizes in place.
-    b_o_var = tl.zeros([], dtype=tl.float32)
-    for i_d in range(0, D, BD):
-        o_d = i_d + tl.arange(0, BD)
-        o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
-        m_d = o_d < D
-        p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        # [L2, BD]
-        b_v = tl.load(p_v[:, None] + (i_n * D + o_d[None, :]), mask=m_l[:, None] & m_d[None, :], other=0.0).to(tl.float32)
-        # [BD]
-        b_o = tl.sum(b_v * b_p[:, None], axis=0)
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
-        if HAS_ONORM:
-            b_o_var += tl.sum(tl.where(m_d, b_o * b_o, 0.0), axis=0)
-
+    # [BD] pre-norm mixed residual sum_l p_l * v_l; saved so bwd can precompute delta = <do_pre, o_pre> without V
+    b_o = b_o / b_acc
+    p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (0,), (BD,), (0,))
+    tl.store(p_o_pre, b_o.to(p_o_pre.dtype.element_ty), boundary_check=(0,))
+    # fold the optional output RMSNorm into the returned output o (o_rstd is recomputed from o_pre in bwd, not stored)
     if HAS_ONORM:
-        b_o_rstd = tl.rsqrt(b_o_var / D + eps)
-        tl.store(o_rstd + i_n, b_o_rstd)
-        # ensure pass-2 stores to `o` are visible before pass 3 reads them back.
-        tl.debug_barrier()
-        # third pass: load staged `o`, apply RMSNorm with `ow`, and write back to `o`.
-        for i_d in range(0, D, BD):
-            o_d = i_d + tl.arange(0, BD)
-            m_d = o_d < D
-            p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-            # [BD]
-            b_o = tl.load(p_o, boundary_check=(0,)).to(tl.float32)
-            b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
-            tl.store(p_o, (b_o * b_o_rstd * b_ow).to(p_o.dtype.element_ty), boundary_check=(0,))
+        b_o_rstd = tl.rsqrt(tl.sum(tl.where(m_d, b_o * b_o, 0.0), axis=0) / D + eps)
+        b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_o = b_o * b_o_rstd * b_ow
+    p_o = tl.make_block_ptr(o + i_n * D, (D,), (1,), (0,), (BD,), (0,))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
 
 
 @fla_cache_autotune(
-    # bwd_dv carries more L2-axis reductions than fwd (b_dp, b_dp_w, b_dp_x, b_o_c1), plus a scattered dv store with no
-    # fwd analogue; explore a wider grid along the per-thread = BD/num_warps contour (32, 64, 128).
     configs=[
-        triton.Config({'BD': BD}, num_warps=num_warps, num_stages=num_stages)
-        for BD, num_warps in [
-            (64, 1),   (64, 2),
-            (128, 1),  (128, 2),  (128, 4),
-            (256, 2),  (256, 4),  (256, 8),
-            (512, 4),  (512, 8),  (512, 16),
-            (1024, 8), (1024, 16),
-        ]
-        for num_stages in [3, 4]
+        triton.Config({'BL': BL}, num_warps=num_warps, num_stages=num_stages)
+        for BL in [1, 2, 4, 8]
+        for num_warps in [4, 8, 16]
+        for num_stages in [2, 3]
     ],
     key=['L2', 'D', 'HAS_ONORM'],
     **autotune_cache_kwargs,
@@ -157,150 +134,94 @@ def attnres_bwd_kernel_dv(
     res,
     w,
     ow,
-    p,
+    o_pre,
     rstd,
-    score_mean,
-    o_rstd,
+    logit,
+    lse,
     do,
     dres,
     dqw,
     dow_partial,
     N,
-    scale: tl.constexpr,
     L,
     L2: tl.constexpr,
     D: tl.constexpr,
+    eps: tl.constexpr,
+    scale: tl.constexpr,
+    BL: tl.constexpr,
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
-    o_l = tl.arange(0, L2)
-    m_l = o_l < L
-    # one-time construction of source / dv base pointers; reused across all D-loops below.
-    p_v = res[0] + o_l * 0
-    p_dv = dres[0] + o_l * 0
-    for i in tl.static_range(1, L2):
-        p_v = tl.where(o_l == i, res[i], p_v)
-        p_dv = tl.where(o_l == i, dres[i], p_dv)
-    # each residual storage is 16-byte aligned (the torch CUDA allocator is 256-byte aligned), so Triton can use wide loads.
-    p_v = tl.multiple_of(p_v, 16)
-    p_dv = tl.multiple_of(p_dv, 16)
+    # do_pre and delta are precomputed from the saved o_pre (no V), so the L-loop below reads each v tile once
+    # [BD]
+    o_d = tl.max_contiguous(tl.multiple_of(tl.arange(0, BD), BD), BD)
+    m_d = o_d < D
+    b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
+    b_lse = tl.load(lse + i_n).to(tl.float32)
+    p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (0,), (BD,), (0,))
+    p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (0,), (BD,), (0,))
+    b_do = tl.load(p_do, boundary_check=(0,), padding_option="zero").to(tl.float32)
+    b_o_pre = tl.load(p_o_pre, boundary_check=(0,), padding_option="zero").to(tl.float32)
 
-    p_p = tl.make_block_ptr(p + i_n, (L,), (N,), (0,), (L2,), (0,))
-    p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (0,), (L2,), (0,))
-    p_score_mean = tl.make_block_ptr(score_mean + i_n, (L,), (N,), (0,), (L2,), (0,))
-    # [L2]
-    b_p = tl.load(p_p, boundary_check=(0,), padding_option="zero").to(tl.float32)
-    b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
-    b_score_mean = tl.load(p_score_mean, boundary_check=(0,), padding_option="zero").to(tl.float32)
-
-    # output RMSNorm bwd is folded into pass 1.
-    # using fla's layernorm bwd factoring (`b_wdy = w * dy`), the mixed-gradient
-    # formula from `fla/modules/layernorm.py` is:
-    #
-    #   b_do_pre = (b_o_wdy - b_o_xhat * b_o_c1) * b_o_rstd
-    #              where b_o_wdy  = b_ow * b_do
-    #                    b_o_xhat = b_o_pre * b_o_rstd
-    #
-    # plugging into the softmax-bwd's `b_dp[l] = sum_d v[l,d] * b_do_pre[d]`:
-    #
-    #   b_dp[l] = b_o_rstd * (sum_d v[l,d] * b_o_wdy[d] - b_o_c1 * sum_d v[l,d] * b_o_xhat[d])
-    #           = b_o_rstd * (b_dp_w[l]                 - b_o_c1 * b_dp_x[l])
-    #
-    # `b_dp_w`, `b_dp_x`, `b_o_c1`, and `dow_partial` accumulate in the same D-loop that already loads `v` for `b_dp`.
-    # no separate pre-pass is needed, and `v` is loaded only once across pass 1.
-    b_o_rstd = tl.zeros([], dtype=tl.float32)
-    b_o_c1 = tl.zeros([], dtype=tl.float32)
-    b_dp_w = tl.zeros([L2], dtype=tl.float32)
-    b_dp_x = tl.zeros([L2], dtype=tl.float32)
+    # output RMSNorm bwd: turn b_do into the gradient w.r.t. the pre-norm output and stage dow_partial
     if HAS_ONORM:
-        b_o_rstd = tl.load(o_rstd + i_n).to(tl.float32)
+        b_o_rstd = tl.rsqrt(tl.sum(tl.where(m_d, b_o_pre * b_o_pre, 0.0), axis=0) / D + eps)
+        b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
+        b_xhat = b_o_pre * b_o_rstd
+        b_c1 = tl.sum(tl.where(m_d, b_xhat * b_ow * b_do, 0.0), axis=0) / D
+        p_dow = tl.make_block_ptr(dow_partial + i_n * D, (D,), (1,), (0,), (BD,), (0,))
+        tl.store(p_dow, (b_xhat * b_do).to(p_dow.dtype.element_ty), boundary_check=(0,))
+        b_do = (b_ow * b_do - b_xhat * b_c1) * b_o_rstd
+    # delta = sum_l p*dp = <do_pre, o_pre>, from the saved output only (no V)
+    b_delta = tl.sum(tl.where(m_d, b_do * b_o_pre, 0.0), axis=0)
 
-    # [L2]
-    b_dp = tl.zeros([L2], dtype=tl.float32)
-    for i_d in range(0, D, BD):
-        # [BD]
-        o_d = i_d + tl.arange(0, BD)
-        # hint that o_d is a contiguous stride-1 BD tile so Triton coalesces loads over the [L2, BD] pointer tile.
-        # otherwise, `p_v[:, None] + offs[None, :]` looks opaque and becomes scattered loads.
-        o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
-        m_d = o_d < D
-        p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        # [L2, BD] — pass 2 reloads the same v tile, so evict_last keeps it cached.
-        b_v = tl.load(
-            p_v[:, None] + (i_n * D + o_d[None, :]),
-            mask=m_l[:, None] & m_d[None, :],
-            other=0.0,
-            eviction_policy="evict_last",
-        ).to(tl.float32)
-        # [BD]
-        b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
-
-        if HAS_ONORM:
-            b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
-            # rebuild `b_o_pre` and `b_o_xhat` from the just-loaded `b_v` and saved softmax probs `b_p`.
-            # reuse this `b_v` tile instead of loading v again.
-            b_o_pre = tl.sum(b_v * b_p[:, None], axis=0)
-            b_o_xhat = b_o_pre * b_o_rstd
-            b_o_wdy = b_ow * b_do
-            b_o_c1 += tl.sum(tl.where(m_d, b_o_xhat * b_o_wdy, 0.0), axis=0)
-            b_dp_w += tl.sum(b_v * b_o_wdy[None, :], axis=1)
-            b_dp_x += tl.sum(b_v * b_o_xhat[None, :], axis=1)
-            p_dow = tl.make_block_ptr(dow_partial + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-            tl.store(p_dow, (b_o_xhat * b_do).to(p_dow.dtype.element_ty), boundary_check=(0,))
-        else:
-            b_dp += tl.sum(b_v * b_do[None, :], axis=1)
-
-    if HAS_ONORM:
-        b_o_c1 = b_o_c1 / D
-        b_dp = b_o_rstd * (b_dp_w - b_o_c1 * b_dp_x)
-
-    # softmax bwd via the standard delta trick: delta = sum_l p*dp = sum_d do*o.
-    # [1]
-    b_delta = tl.sum(b_p * b_dp, axis=0)
-    # [L2]
-    b_ds = b_p * (b_dp - b_delta) * scale
-
-    for i_d in range(0, D, BD):
-        # [BD]
-        o_d = i_d + tl.arange(0, BD)
-        o_d = tl.max_contiguous(tl.multiple_of(o_d, BD), BD)
-        m_d = o_d < D
+    # [BD] dqw accumulates over the L tiles
+    b_dqw = tl.zeros([BD], dtype=tl.float32)
+    for i_l in range(tl.cdiv(L, BL)):
+        # [BL]
+        o_l = i_l * BL + tl.arange(0, BL)
+        m_l = o_l < L
         m_v = m_l[:, None] & m_d[None, :]
-        p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
-        # [L2, BD]
-        # last touch of this v tile; evict_first releases the cache line.
+        # per-tile source / dv base pointers from the length-L2 padded tuple
+        p_v = res[0] + o_l * 0
+        p_dv = dres[0] + o_l * 0
+        for i in tl.static_range(1, L2):
+            p_v = tl.where(o_l == i, res[i], p_v)
+            p_dv = tl.where(o_l == i, dres[i], p_dv)
+        p_v = tl.multiple_of(p_v, 16)
+        p_dv = tl.multiple_of(p_dv, 16)
+        # [BL, BD] v tile, read once and reused for dp / dv / dqw
         b_v = tl.load(
             tl.multiple_of(p_v[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
             mask=m_v,
             other=0.0,
-            eviction_policy="evict_first",
         ).to(tl.float32)
-        # [BD]
-        b_do = tl.load(p_do, boundary_check=(0,)).to(tl.float32)
-        b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
 
-        if HAS_ONORM:
-            b_o_pre = tl.sum(b_v * b_p[:, None], axis=0)
-            b_ow = tl.load(ow + o_d, mask=m_d, other=0.).to(tl.float32)
-            b_o_xhat = b_o_pre * b_o_rstd
-            b_do = (b_ow * b_do - b_o_xhat * b_o_c1) * b_o_rstd
+        p_rstd = tl.make_block_ptr(rstd + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
+        p_logit = tl.make_block_ptr(logit + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
+        # [BL]; recompute probs from logit + lse, OOB rows masked to 0
+        b_rstd = tl.load(p_rstd, boundary_check=(0,), padding_option="zero").to(tl.float32)
+        b_logit = tl.load(p_logit, boundary_check=(0,), padding_option="zero").to(tl.float32)
+        b_p = tl.where(m_l, exp(b_logit * scale - b_lse), 0.0)
 
-        # [L2, BD]
+        # softmax bwd with delta already known
+        b_dp = tl.sum(b_v * b_do[None, :], axis=1)
+        b_ds = b_p * (b_dp - b_delta) * scale
+        # [BL, BD]
         b_k = b_v * b_rstd[:, None]
-        b_dv = b_p[:, None] * b_do[None, :] + b_ds[:, None] * b_rstd[:, None] * (
-            b_qw[None, :] - b_k * b_score_mean[:, None]
-        )
-
-        p_dqw = tl.make_block_ptr(dqw + i_n * D, (D,), (1,), (i_d,), (BD,), (0,))
+        b_dv = b_p[:, None] * b_do[None, :] + b_ds[:, None] * b_rstd[:, None] * (b_qw[None, :] - b_k * (b_logit / D)[:, None])
         tl.store(
             tl.multiple_of(p_dv[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
             b_dv.to(dres[0].dtype.element_ty),
             mask=m_v,
         )
         # [BD]
-        tl.store(p_dqw, tl.sum(b_ds[:, None] * b_k, axis=0), boundary_check=(0,))
+        b_dqw += tl.sum(b_ds[:, None] * b_k, axis=0)
+
+    p_dqw = tl.make_block_ptr(dqw + i_n * D, (D,), (1,), (0,), (BD,), (0,))
+    tl.store(p_dqw, b_dqw, boundary_check=(0,))
 
 
 @fla_cache_autotune(
@@ -317,9 +238,9 @@ def attnres_bwd_kernel_dqdw(
     q,
     w,
     dqw,
+    dow_partial,
     dq,
     dw,
-    dow_partial,
     dow,
     N,
     D: tl.constexpr,
@@ -333,27 +254,25 @@ def attnres_bwd_kernel_dqdw(
     o_d = i_d * BD + tl.arange(0, BD)
     m_d = o_d < D
 
+    # column-sum dqw (and dow_partial) over the N axis
     # [BD]
-    b_acc = tl.zeros([BD], dtype=tl.float32)
-    b_o_acc = tl.zeros([BD], dtype=tl.float32)
+    b_dqw = tl.zeros([BD], dtype=tl.float32)
+    b_dow = tl.zeros([BD], dtype=tl.float32)
     for i_n in range(0, N, BN):
         p_dqw = tl.make_block_ptr(dqw, (N, D), (D, 1), (i_n, i_d * BD), (BN, BD), (1, 0))
-        # [BN, BD]
-        b_dqw = tl.load(p_dqw, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-        b_acc += tl.sum(b_dqw, axis=0)
+        b_dqw += tl.sum(tl.load(p_dqw, boundary_check=(0, 1), padding_option="zero").to(tl.float32), axis=0)
         if HAS_ONORM:
             p_dow = tl.make_block_ptr(dow_partial, (N, D), (D, 1), (i_n, i_d * BD), (BN, BD), (1, 0))
-            b_dow = tl.load(p_dow, boundary_check=(0, 1), padding_option="zero").to(tl.float32)
-            b_o_acc += tl.sum(b_dow, axis=0)
+            b_dow += tl.sum(tl.load(p_dow, boundary_check=(0, 1), padding_option="zero").to(tl.float32), axis=0)
 
+    # the logit uses the q * w product, so dq = (sum_n dqw) * w and dw = (sum_n dqw) * q
     # [BD]
     b_q = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32)
     b_w = tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
-
-    tl.store(dq + o_d, b_acc * b_w, mask=m_d)
-    tl.store(dw + o_d, b_acc * b_q, mask=m_d)
+    tl.store(dq + o_d, b_dqw * b_w, mask=m_d)
+    tl.store(dw + o_d, b_dqw * b_q, mask=m_d)
     if HAS_ONORM:
-        tl.store(dow + o_d, b_o_acc, mask=m_d)
+        tl.store(dow + o_d, b_dow, mask=m_d)
 
 
 def _build_ptr_table(tensors: Sequence[torch.Tensor]) -> tuple[torch.Tensor, ...]:
@@ -374,7 +293,7 @@ def fused_attnres_fwd(
     ow: torch.Tensor | None,
     eps: float,
     scale: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if not residuals[0].is_cuda:
         raise ValueError("Triton attnres requires CUDA tensors")
 
@@ -386,35 +305,34 @@ def fused_attnres_fwd(
 
     has_onorm = ow is not None
     o = torch.empty(output_shape, device=residuals[0].device, dtype=dtype)
-    p = torch.empty(stats_shape, device=residuals[0].device, dtype=torch.float32)
-    rstd = torch.empty_like(p)
-    score_mean = torch.empty_like(p)
-    if has_onorm:
-        o_rstd = torch.empty(output_shape[:-1], device=residuals[0].device, dtype=torch.float32)
-    else:
-        o_rstd = None
+    # pre-norm mixed output, saved for the bwd delta (= <do_pre, o_pre>); residual dtype is enough
+    o_pre = torch.empty(output_shape, device=residuals[0].device, dtype=dtype)
+    lse = torch.empty(output_shape[:-1], device=residuals[0].device, dtype=torch.float32)
+    rstd = torch.empty(stats_shape, device=residuals[0].device, dtype=torch.float32)
+    logit = torch.empty_like(rstd)
 
     L2 = max(8, triton.next_power_of_2(L))
     attnres_fwd_kernel[(N,)](
         q=q,
         res=res,
         w=w,
-        o=o,
-        p=p,
-        rstd=rstd,
-        score_mean=score_mean,
         ow=ow,
-        o_rstd=o_rstd,
+        o=o,
+        o_pre=o_pre,
+        rstd=rstd,
+        logit=logit,
+        lse=lse,
         N=N,
         L=L,
         L2=L2,
         D=D,
         eps=eps,
         scale=scale,
+        BD=triton.next_power_of_2(D),
         HAS_ONORM=has_onorm,
     )
 
-    return o, p, rstd, score_mean, o_rstd
+    return o, o_pre, rstd, logit, lse
 
 
 def fused_attnres_bwd(
@@ -424,19 +342,17 @@ def fused_attnres_bwd(
     res: tuple[torch.Tensor, ...],
     w: torch.Tensor,
     ow: torch.Tensor | None,
-    p: torch.Tensor,
+    o_pre: torch.Tensor,
     rstd: torch.Tensor,
-    score_mean: torch.Tensor,
-    o_rstd: torch.Tensor | None,
+    logit: torch.Tensor,
+    lse: torch.Tensor,
+    eps: float,
     scale: float,
 ) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor | None]:
     L, N, D = len(residuals), do.numel() // do.shape[-1], do.shape[-1]
 
-    # output RMSNorm bwd is folded into the attnres kernels. The first D-loop derives `c1_o`, writes `dow_partial`, and
-    # rebuilds `o_pre = sum_l p_l * v_l` inline so it is not saved across fwd->bwd.
-    # later, it recomputes `do_pre = (ow * do - xhat_o * c1_o) * o_rstd` per BD chunk so `do_pre` is never materialized.
-    # the key-side RMSNorm `score_mean` comes from fwd, avoiding another score-dot reduction; `attnres_bwd_kernel_dqdw`
-    # reduces `dow_partial` over N alongside dq / dw.
+    # bwd_dv produces dvs + dqw (and dow_partial when fusing output RMSNorm); bwd_dqdw reduces dqw / dow_partial over N
+    # into dq / dw / dow.
     has_onorm = ow is not None
     if has_onorm:
         dow_partial = torch.empty_like(do, dtype=torch.float32)
@@ -456,19 +372,21 @@ def fused_attnres_bwd(
         res=res,
         w=w,
         ow=ow,
-        p=p,
+        o_pre=o_pre,
         rstd=rstd,
-        score_mean=score_mean,
-        o_rstd=o_rstd,
+        logit=logit,
+        lse=lse,
         do=do,
         dres=dres,
         dqw=dqw,
         dow_partial=dow_partial,
         N=N,
-        scale=scale,
         L=L,
         L2=L2,
         D=D,
+        eps=eps,
+        scale=scale,
+        BD=triton.next_power_of_2(D),
         HAS_ONORM=has_onorm,
     )
 
@@ -477,9 +395,9 @@ def fused_attnres_bwd(
         q=q,
         w=w,
         dqw=dqw,
+        dow_partial=dow_partial,
         dq=dq,
         dw=dw,
-        dow_partial=dow_partial,
         dow=dow,
         N=N,
         D=D,
@@ -501,12 +419,13 @@ class FusedAttnresFunction(torch.autograd.Function):
         output_rms_weight: torch.Tensor | None,
         rms_eps: float,
         scale: float,
+        return_weights: bool,
         *residuals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # `res` is built once here and threaded through fwd/bwd so neither internal wrapper rebuilds it.
         # the tuple is pure Python, no H2D copy.
         res = _build_ptr_table(residuals)
-        o, p, rstd, score_mean, o_rstd = fused_attnres_fwd(
+        o, o_pre, rstd, logit, lse = fused_attnres_fwd(
             q=query,
             residuals=residuals,
             res=res,
@@ -515,9 +434,12 @@ class FusedAttnresFunction(torch.autograd.Function):
             eps=rms_eps,
             scale=scale,
         )
-        ctx.save_for_backward(query, rms_weight, output_rms_weight, p, rstd, score_mean, o_rstd, *residuals)
+        ctx.save_for_backward(query, rms_weight, output_rms_weight, o_pre, rstd, logit, lse, *residuals)
+        ctx.eps = rms_eps
         ctx.scale = scale
         ctx.res = res
+        # probs are materialized only when requested; bwd recomputes them from logit + lse
+        p = (logit * scale - lse).exp() if return_weights else o.new_empty(0)
         ctx.mark_non_differentiable(p)
         return o, p
 
@@ -530,7 +452,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         dp: torch.Tensor | None = None,
     ):
         del dp
-        query, rms_weight, output_rms_weight, p, rstd, score_mean, o_rstd, *residuals = ctx.saved_tensors
+        query, rms_weight, output_rms_weight, o_pre, rstd, logit, lse, *residuals = ctx.saved_tensors
         dvs, dq, dw, dow = fused_attnres_bwd(
             do=do,
             q=query,
@@ -538,15 +460,15 @@ class FusedAttnresFunction(torch.autograd.Function):
             res=ctx.res,
             w=rms_weight,
             ow=output_rms_weight,
-            p=p,
+            o_pre=o_pre,
             rstd=rstd,
-            score_mean=score_mean,
-            o_rstd=o_rstd,
+            logit=logit,
+            lse=lse,
+            eps=ctx.eps,
             scale=ctx.scale,
         )
-        # gradient order matches the forward signature:
-        # query, rms_weight, output_rms_weight, rms_eps (None), scale (None), *residuals.
-        return (dq, dw, dow, None, None, *dvs)
+        # grads match forward inputs: query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, *residuals
+        return (dq, dw, dow, None, None, None, *dvs)
 
 
 def fused_attnres(
@@ -564,10 +486,6 @@ def fused_attnres(
     AttnRes normalizes each residual source with RMSNorm, scores it against `query`, applies softmax over the
     residual-source dimension, and returns the weighted sum of residual sources.
     See `Attention Residuals <https://arxiv.org/abs/2603.15031>`_.
-
-    Residual sources are passed as a sequence of independently allocated tensors and accessed inside the kernel as
-    individual per-source tensor arguments; there is no upstream `torch.stack` / `torch.cat`, and per-source `dv` is
-    written back into separately allocated tensors so autograd routes each gradient to its own leaf.
 
     Args:
         query (torch.Tensor):
@@ -600,7 +518,7 @@ def fused_attnres(
     flat_residuals = tuple(r.reshape(-1, D).contiguous() for r in residuals)
 
     o, p = FusedAttnresFunction.apply(
-        query, rms_weight, output_rms_weight, rms_eps, scale, *flat_residuals,
+        query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, *flat_residuals,
     )
     o = o.view(output_shape)
 
