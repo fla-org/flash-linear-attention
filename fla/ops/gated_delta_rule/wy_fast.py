@@ -50,7 +50,7 @@ def recompute_w_u_fwd_kernel(
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
@@ -126,7 +126,7 @@ def prepare_wy_repr_bwd_kernel(
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // HV, i_bh % HV
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
