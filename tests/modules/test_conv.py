@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
-from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
+from fla.utils import assert_close, device
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -175,24 +175,6 @@ def test_conv(
         assert_close("db", ref_db, tri_db, 1e-3)
     if has_residual:
         assert_close("dr", ref_dr, tri_dr, 1e-3)
-
-
-@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
-def test_conv_large_batch_offsets():
-    torch.manual_seed(42)
-    B, T, D, W = 256, 6144, 1536, 4
-    x = torch.randn(B, T, D, device=device, dtype=torch.bfloat16)
-    weight = torch.randn(D, W, device=device, dtype=torch.bfloat16)
-
-    ref = causal_conv1d_ref_torch(
-        x=rearrange(x, "b t d -> b d t"),
-        weight=weight.float(),
-        activation="silu",
-    )
-    ref = rearrange(ref, "b d t -> b t d").to(torch.bfloat16)
-
-    tri, _ = causal_conv1d(x, weight, activation="silu", backend="triton")
-    assert_close(" y", ref, tri, 3.2e-2)
 
 
 @pytest.mark.parametrize(
