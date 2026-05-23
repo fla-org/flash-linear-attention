@@ -13,29 +13,29 @@ from fla.utils import assert_close, device
 
 
 @pytest.mark.parametrize(
-    ('L', 'B', 'T', 'D', 'scale', 'fuse_output_norm', 'dtype'),
+    ('L', 'B', 'T', 'D', 'scale', 'fuse_output_norm', 'dtype', 'checkpoint_level'),
     [
-        pytest.param(*test, id="L{}-B{}-T{}-D{}-scale{}-onorm{}-{}".format(*test))
+        pytest.param(*test, id="L{}-B{}-T{}-D{}-scale{}-onorm{}-{}-ckpt{}".format(*test))
         for test in [
-            # single-axis stress (no output norm)
-            (1,  1, 1000, 4096, 1.0,             False, torch.float16),  # L=1
-            (3,  1, 1000, 4096, 4096 ** -0.5,    False, torch.float16),  # L=3
-            (15, 1, 15,   4096, 1.0,             False, torch.float16),  # T=15
-            (7,  1, 1000, 1000, 1000 ** -0.5,    False, torch.float16),  # D=1000
-            (7,  1, 1000, 2000, 2000 ** -0.5,    False, torch.float16),  # D=2000
+            # single-axis stress (no output norm); checkpoint_level spread across shapes
+            (1,  1, 1000, 4096, 1.0,             False, torch.float16, 1),  # L=1
+            (3,  1, 1000, 4096, 4096 ** -0.5,    False, torch.float16, 0),  # L=3
+            (15, 1, 15,   4096, 1.0,             False, torch.float16, 1),  # T=15
+            (7,  1, 1000, 1000, 1000 ** -0.5,    False, torch.float16, 0),  # D=1000
+            (7,  1, 1000, 2000, 2000 ** -0.5,    False, torch.float16, 1),  # D=2000
             # multi-axis stress (extremes stacked, no output norm)
-            (29, 5, 1000, 4096, 4096 ** -0.5,    False, torch.float16),  # L=29 + B=5
-            (29, 1, 8000, 4096, 4096 ** -0.5,    False, torch.float16),  # L=29 + T=8000
-            (15, 5, 1000, 7186, 7186 ** -0.5,    False, torch.float16),  # B=5  + D=7186
-            (15, 1, 8000, 7186, 1.0,             False, torch.float16),  # T=8000 + D=7186
-            (29, 3, 63,   7186, 7186 ** -0.5,    False, torch.float16),  # L=29 + D=7186 + T=63
+            (29, 5, 1000, 4096, 4096 ** -0.5,    False, torch.float16, 1),  # L=29 + B=5
+            (29, 1, 8000, 4096, 4096 ** -0.5,    False, torch.float16, 0),  # L=29 + T=8000
+            (15, 5, 1000, 7186, 7186 ** -0.5,    False, torch.float16, 1),  # B=5  + D=7186
+            (15, 1, 8000, 7186, 1.0,             False, torch.float16, 0),  # T=8000 + D=7186
+            (29, 3, 63,   7186, 7186 ** -0.5,    False, torch.float16, 1),  # L=29 + D=7186 + T=63
             # fp32 sanity at a larger size
-            (10, 2, 8000, 4096, 4096 ** -0.5,    False, torch.float32),
+            (10, 2, 8000, 4096, 4096 ** -0.5,    False, torch.float32, 1),
             # output_rms_weight on: fold-in path (fwd + bwd dow)
-            (3,  1, 1000, 4096, 4096 ** -0.5,    True,  torch.float16),  # L=3
-            (29, 5, 1000, 4096, 4096 ** -0.5,    True,  torch.float16),  # L=29 + B=5
-            (15, 1, 8000, 7186, 1.0,             True,  torch.float16),  # T=8000 + D=7186
-            (10, 2, 8000, 4096, 4096 ** -0.5,    True,  torch.float32),  # fp32 sanity
+            (3,  1, 1000, 4096, 4096 ** -0.5,    True,  torch.float16, 1),  # L=3
+            (29, 5, 1000, 4096, 4096 ** -0.5,    True,  torch.float16, 0),  # L=29 + B=5
+            (15, 1, 8000, 7186, 1.0,             True,  torch.float16, 1),  # T=8000 + D=7186
+            (10, 2, 8000, 4096, 4096 ** -0.5,    True,  torch.float32, 0),  # fp32 sanity
         ]
     ],
 )
@@ -47,6 +47,7 @@ def test_attnres(
     scale: float,
     fuse_output_norm: bool,
     dtype: torch.dtype,
+    checkpoint_level: int,
 ):
     torch.manual_seed(42)
     # disable TF32 in the PyTorch reference path so the fp32 sanity case
@@ -75,6 +76,7 @@ def test_attnres(
         rms_eps=rms_eps,
         scale=scale,
         return_weights=True,
+        checkpoint_level=checkpoint_level,
     )
     do = torch.randn_like(tri)
     (tri * do).sum().backward()

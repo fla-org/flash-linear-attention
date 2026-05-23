@@ -30,7 +30,7 @@ from fla.utils import (
         for num_warps in [4, 8, 16]
         for num_stages in [2, 3]
     ],
-    key=['L2', 'D', 'HAS_ONORM'],
+    key=['L2', 'D', 'HAS_ONORM', 'SAVE_OPRE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['L'])
@@ -53,6 +53,7 @@ def attnres_fwd_kernel(
     BL: tl.constexpr,
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
+    SAVE_OPRE: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
@@ -105,10 +106,11 @@ def attnres_fwd_kernel(
 
     tl.store(lse + i_n, b_m + tl.log(b_acc))
 
-    # [BD] pre-norm mixed residual sum_l p_l * v_l; saved so bwd can precompute delta = <do_pre, o_pre> without V
+    # [BD] pre-norm mixed residual sum_l p_l * v_l
     b_o = b_o / b_acc
-    p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (0,), (BD,), (0,))
-    tl.store(p_o_pre, b_o.to(p_o_pre.dtype.element_ty), boundary_check=(0,))
+    if SAVE_OPRE:
+        p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (0,), (BD,), (0,))
+        tl.store(p_o_pre, b_o.to(p_o_pre.dtype.element_ty), boundary_check=(0,))
     # fold the optional output RMSNorm into the returned output o (o_rstd is recomputed from o_pre in bwd, not stored)
     if HAS_ONORM:
         b_o_rstd = tl.rsqrt(tl.sum(tl.where(m_d, b_o * b_o, 0.0), axis=0) / D + eps)
@@ -125,7 +127,7 @@ def attnres_fwd_kernel(
         for num_warps in [4, 8, 16]
         for num_stages in [2, 3]
     ],
-    key=['L2', 'D', 'HAS_ONORM'],
+    key=['L2', 'D', 'HAS_ONORM', 'SAVE_OPRE'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['L'])
@@ -151,19 +153,39 @@ def attnres_bwd_kernel_dv(
     BL: tl.constexpr,
     BD: tl.constexpr,
     HAS_ONORM: tl.constexpr,
+    SAVE_OPRE: tl.constexpr,
 ):
     i_n = tl.program_id(0).to(tl.int64)
 
-    # do_pre and delta are precomputed from the saved o_pre (no V), so the L-loop below reads each v tile once
     # [BD]
     o_d = tl.max_contiguous(tl.multiple_of(tl.arange(0, BD), BD), BD)
     m_d = o_d < D
     b_qw = tl.load(q + o_d, mask=m_d, other=0.).to(tl.float32) * tl.load(w + o_d, mask=m_d, other=0.).to(tl.float32)
     b_lse = tl.load(lse + i_n).to(tl.float32)
     p_do = tl.make_block_ptr(do + i_n * D, (D,), (1,), (0,), (BD,), (0,))
-    p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (0,), (BD,), (0,))
     b_do = tl.load(p_do, boundary_check=(0,), padding_option="zero").to(tl.float32)
-    b_o_pre = tl.load(p_o_pre, boundary_check=(0,), padding_option="zero").to(tl.float32)
+    if SAVE_OPRE:
+        p_o_pre = tl.make_block_ptr(o_pre + i_n * D, (D,), (1,), (0,), (BD,), (0,))
+        b_o_pre = tl.load(p_o_pre, boundary_check=(0,), padding_option="zero").to(tl.float32)
+    else:
+        # level 1: recompute the mix sum_l p_l * v_l from V
+        b_o_pre = tl.zeros([BD], dtype=tl.float32)
+        for i_l in range(tl.cdiv(L, BL)):
+            o_l = i_l * BL + tl.arange(0, BL)
+            m_l = o_l < L
+            p_v = res[0] + o_l * 0
+            for i in tl.static_range(1, L2):
+                p_v = tl.where(o_l == i, res[i], p_v)
+            p_v = tl.multiple_of(p_v, 16)
+            b_v = tl.load(
+                tl.multiple_of(p_v[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
+                mask=m_l[:, None] & m_d[None, :],
+                other=0.0,
+            ).to(tl.float32)
+            p_logit = tl.make_block_ptr(logit + i_n, (L,), (N,), (i_l * BL,), (BL,), (0,))
+            b_logit = tl.load(p_logit, boundary_check=(0,), padding_option="zero").to(tl.float32)
+            b_p = tl.where(m_l, exp(b_logit * scale - b_lse), 0.0)
+            b_o_pre += tl.sum(b_p[:, None] * b_v, axis=0)
 
     # output RMSNorm bwd: turn b_do into the gradient w.r.t. the pre-norm output and stage dow_partial
     if HAS_ONORM:
@@ -174,7 +196,7 @@ def attnres_bwd_kernel_dv(
         p_dow = tl.make_block_ptr(dow_partial + i_n * D, (D,), (1,), (0,), (BD,), (0,))
         tl.store(p_dow, (b_xhat * b_do).to(p_dow.dtype.element_ty), boundary_check=(0,))
         b_do = (b_ow * b_do - b_xhat * b_c1) * b_o_rstd
-    # delta = sum_l p*dp = <do_pre, o_pre>, from the saved output only (no V)
+    # delta = sum_l p*dp = <do_pre, o_pre>
     b_delta = tl.sum(tl.where(m_d, b_do * b_o_pre, 0.0), axis=0)
 
     # [BD] dqw accumulates over the L tiles
@@ -293,7 +315,8 @@ def fused_attnres_fwd(
     ow: torch.Tensor | None,
     eps: float,
     scale: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    checkpoint_level: int,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor]:
     if not residuals[0].is_cuda:
         raise ValueError("Triton attnres requires CUDA tensors")
 
@@ -304,9 +327,9 @@ def fused_attnres_fwd(
     stats_shape = (L, *output_shape[:-1])
 
     has_onorm = ow is not None
+    save_opre = checkpoint_level == 0
     o = torch.empty(output_shape, device=residuals[0].device, dtype=dtype)
-    # pre-norm mixed output, saved for the bwd delta (= <do_pre, o_pre>); residual dtype is enough
-    o_pre = torch.empty(output_shape, device=residuals[0].device, dtype=dtype)
+    o_pre = torch.empty(output_shape, device=residuals[0].device, dtype=dtype) if save_opre else None
     lse = torch.empty(output_shape[:-1], device=residuals[0].device, dtype=torch.float32)
     rstd = torch.empty(stats_shape, device=residuals[0].device, dtype=torch.float32)
     logit = torch.empty_like(rstd)
@@ -330,6 +353,7 @@ def fused_attnres_fwd(
         scale=scale,
         BD=triton.next_power_of_2(D),
         HAS_ONORM=has_onorm,
+        SAVE_OPRE=save_opre,
     )
 
     return o, o_pre, rstd, logit, lse
@@ -342,12 +366,13 @@ def fused_attnres_bwd(
     res: tuple[torch.Tensor, ...],
     w: torch.Tensor,
     ow: torch.Tensor | None,
-    o_pre: torch.Tensor,
+    o_pre: torch.Tensor | None,
     rstd: torch.Tensor,
     logit: torch.Tensor,
     lse: torch.Tensor,
     eps: float,
     scale: float,
+    checkpoint_level: int,
 ) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor | None]:
     L, N, D = len(residuals), do.numel() // do.shape[-1], do.shape[-1]
 
@@ -388,6 +413,7 @@ def fused_attnres_bwd(
         scale=scale,
         BD=triton.next_power_of_2(D),
         HAS_ONORM=has_onorm,
+        SAVE_OPRE=checkpoint_level == 0,
     )
 
     def grid(meta): return (triton.cdiv(D, meta['BD']),)
@@ -420,6 +446,7 @@ class FusedAttnresFunction(torch.autograd.Function):
         rms_eps: float,
         scale: float,
         return_weights: bool,
+        checkpoint_level: int,
         *residuals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # `res` is built once here and threaded through fwd/bwd so neither internal wrapper rebuilds it.
@@ -433,10 +460,12 @@ class FusedAttnresFunction(torch.autograd.Function):
             ow=output_rms_weight,
             eps=rms_eps,
             scale=scale,
+            checkpoint_level=checkpoint_level,
         )
         ctx.save_for_backward(query, rms_weight, output_rms_weight, o_pre, rstd, logit, lse, *residuals)
         ctx.eps = rms_eps
         ctx.scale = scale
+        ctx.checkpoint_level = checkpoint_level
         ctx.res = res
         # probs are materialized only when requested; bwd recomputes them from logit + lse
         p = (logit * scale - lse).exp() if return_weights else o.new_empty(0)
@@ -466,9 +495,9 @@ class FusedAttnresFunction(torch.autograd.Function):
             lse=lse,
             eps=ctx.eps,
             scale=ctx.scale,
+            checkpoint_level=ctx.checkpoint_level,
         )
-        # grads match forward inputs: query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, *residuals
-        return (dq, dw, dow, None, None, None, *dvs)
+        return (dq, dw, dow, None, None, None, None, *dvs)
 
 
 def fused_attnres(
@@ -479,6 +508,7 @@ def fused_attnres(
     rms_eps: float = 1e-6,
     scale: float = 1.0,
     return_weights: bool = False,
+    checkpoint_level: int = 1,
 ) -> torch.Tensor | tuple[torch.Tensor, ...]:
     r"""
     Apply AttnRes residual aggregation.
@@ -503,6 +533,11 @@ def fused_attnres(
             Scale factor applied to AttnRes logits before softmax. Default: `1.0`.
         return_weights (bool):
             Whether to return depth softmax probabilities. Default: `False`.
+        checkpoint_level (int):
+            Backward memory/recompute trade-off.
+            `0` keeps the mixed residual;
+            `1` drops it and recomputes it from the sources in backward (less memory, one extra read).
+            Default: `1`.
 
     Returns:
         o (torch.Tensor):
@@ -512,13 +547,15 @@ def fused_attnres(
     """
     if len(residuals) == 0:
         raise ValueError("residuals must contain at least one source")
+    if checkpoint_level not in (0, 1):
+        raise ValueError(f"checkpoint_level must be 0 or 1, got {checkpoint_level}")
 
     output_shape = residuals[0].shape
     D = output_shape[-1]
     flat_residuals = tuple(r.reshape(-1, D).contiguous() for r in residuals)
 
     o, p = FusedAttnresFunction.apply(
-        query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, *flat_residuals,
+        query, rms_weight, output_rms_weight, rms_eps, scale, return_weights, checkpoint_level, *flat_residuals,
     )
     o = o.view(output_shape)
 
