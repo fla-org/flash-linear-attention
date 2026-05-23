@@ -11,9 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from fla.modules.convolution import ShortConvolution, causal_conv1d, causal_conv1d_update
-from fla.utils import assert_close, device
-
-_IS_BLACKWELL_CUDA = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10
+from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -179,7 +177,7 @@ def test_conv(
         assert_close("dr", ref_dr, tri_dr, 1e-3)
 
 
-@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
 def test_conv_large_batch_offsets():
     torch.manual_seed(42)
     B, T, D, W = 256, 6144, 1536, 4

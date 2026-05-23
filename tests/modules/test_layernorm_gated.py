@@ -11,9 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedLayerNormGated, FusedRMSNormGated
-from fla.utils import assert_close, device
-
-_IS_BLACKWELL_CUDA = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10
+from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -100,7 +98,7 @@ def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     assert_close('dw', ref_dw, tri_dw, 1e-3)
 
 
-@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
 def test_rmsnorm_gated_large_batch_offsets():
     torch.manual_seed(42)
     B, H, T, D = 256, 12, 6144, 128
@@ -124,7 +122,7 @@ def test_rmsnorm_gated_large_batch_offsets():
     assert tri.weight.grad is not None
 
 
-@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
 def test_rmsnorm_gated_large_batch_offsets_large_d():
     torch.manual_seed(42)
     B, H, T, D = 256, 1, 8200, 1024

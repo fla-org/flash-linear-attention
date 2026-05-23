@@ -13,9 +13,7 @@ import torch.nn.functional as F
 
 from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from fla.ops.utils.solve_tril import solve_tril
-from fla.utils import assert_close, device, device_platform
-
-_IS_BLACKWELL_CUDA = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 10
+from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
@@ -99,7 +97,7 @@ def test_solve_tril_varlen(
     assert_close('solve_tril_varlen', ref, tri, 0.0001)
 
 
-@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
 def test_chunk_scaled_dot_kkt_large_batch_offsets():
     torch.manual_seed(42)
     B, T, H, K, BT = 256, 16384, 12, 64, 64
@@ -124,7 +122,7 @@ def test_chunk_scaled_dot_kkt_large_batch_offsets():
     assert_close('chunk_scaled_dot_kkt', ref, tri, 0.0)
 
 
-@pytest.mark.skipif(not _IS_BLACKWELL_CUDA, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
 def test_solve_tril_large_batch_offsets():
     torch.manual_seed(42)
     B, T, H, BT = 256, 16384, 12, 64
