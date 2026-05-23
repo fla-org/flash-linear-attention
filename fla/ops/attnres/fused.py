@@ -211,7 +211,7 @@ def attnres_bwd_kernel_dv(
         b_ds = b_p * (b_dp - b_delta) * scale
         # [BL, BD]
         b_k = b_v * b_rstd[:, None]
-        b_dv = b_p[:, None] * b_do[None, :] + b_ds[:, None] * b_rstd[:, None] * (b_qw[None, :] - b_k * (b_logit / D)[:, None])
+        b_dv = b_p[:, None] * b_do[None, :] + (b_ds * b_rstd)[:, None] * (b_qw[None, :] - b_k * (b_logit / D)[:, None])
         tl.store(
             tl.multiple_of(p_dv[:, None] + (i_n * D + o_d[None, :]), (1, 16)),
             b_dv.to(dres[0].dtype.element_ty),
