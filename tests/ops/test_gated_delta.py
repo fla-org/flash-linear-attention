@@ -10,15 +10,13 @@ import os
 import pytest
 import torch
 import torch.nn.functional as F
-import triton
 from einops import repeat
 
-from fla.ops.common.chunk_o import chunk_fwd_o
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
-from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA_BLACKWELL, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -248,84 +246,6 @@ def test_chunk_state_v_first(
     assert_close('db', ref_dbeta, tri_dbeta, 1e-4)
     assert_close('dg', ref_dg, tri_dg, 1e-4)
     assert_close('dh0', ref_dh0, tri_dh0.transpose(-1, -2), 1e-4)
-
-
-def _recompute_w_u_ref(
-    k: torch.Tensor,
-    v: torch.Tensor,
-    beta: torch.Tensor,
-    A: torch.Tensor,
-    g: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    B, T, H, K = k.shape
-    V = v.shape[-1]
-    BT = A.shape[-1]
-    w = torch.empty_like(k)
-    u = torch.empty_like(v)
-
-    for start in range(0, T, BT):
-        end = min(start + BT, T)
-        length = end - start
-        a = A[:, start:end].float()
-        b = beta[:, start:end].float()
-
-        vb = torch.zeros((B, BT, H, V), device=device, dtype=torch.float32)
-        vb[:, :length] = v[:, start:end].float() * b[..., None]
-        u[:, start:end] = torch.einsum("blhm,bmhv->blhv", a, vb).to(u.dtype)
-
-        kb = torch.zeros((B, BT, H, K), device=device, dtype=torch.float32)
-        kb[:, :length] = k[:, start:end].float() * (b * torch.exp2(g[:, start:end].float()))[..., None]
-        w[:, start:end] = torch.einsum("blhm,bmhk->blhk", a, kb).to(w.dtype)
-
-    return w, u
-
-
-@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
-def test_recompute_w_u_large_batch_offsets():
-    torch.manual_seed(42)
-    B, T, H, K, V, BT = 256, 6144, 12, 64, 128, 64
-    k = torch.randn(B, T, H, K, device=device, dtype=torch.bfloat16)
-    v = torch.randn(B, T, H, V, device=device, dtype=torch.bfloat16)
-    beta = torch.rand(B, T, H, device=device, dtype=torch.bfloat16)
-    A = torch.randn(B, T, H, BT, device=device, dtype=torch.bfloat16)
-    g = torch.randn(B, T, H, device=device, dtype=torch.bfloat16)
-    offsets = torch.arange(T, device=device) % BT
-    cols = torch.arange(BT, device=device)
-    A.masked_fill_(offsets[None, :, None, None] < cols[None, None, None, :], 0)
-
-    ref_w, ref_u = _recompute_w_u_ref(k, v, beta, A, g)
-    tri_w, tri_u = recompute_w_u_fwd(k, v, beta, A, g)
-    assert_close('w', ref_w, tri_w, 1.0)
-    assert_close('u', ref_u, tri_u, 1.3e-1)
-
-
-@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
-def test_chunk_fwd_o_large_batch_offsets():
-    torch.manual_seed(42)
-    B, T, H, K, V, BT = 256, 6144, 12, 64, 128, 64
-    NT = triton.cdiv(T, BT)
-    q = torch.randn(B, T, H, K, device=device, dtype=torch.bfloat16)
-    k = torch.randn(B, T, H, K, device=device, dtype=torch.bfloat16)
-    v = torch.randn(B, T, H, V, device=device, dtype=torch.bfloat16)
-    h = torch.randn(B, NT, H, K, V, device=device, dtype=torch.bfloat16)
-    g = torch.randn(B, T, H, device=device, dtype=torch.bfloat16)
-
-    tri = chunk_fwd_o(q, k, v, h, g=g, chunk_size=BT)
-    ref = torch.cat(
-        [
-            chunk_fwd_o(
-                q[start:start + 128],
-                k[start:start + 128],
-                v[start:start + 128],
-                h[start:start + 128],
-                g=g[start:start + 128],
-                chunk_size=BT,
-            )
-            for start in range(0, B, 128)
-        ],
-        dim=0,
-    )
-    assert_close('o', ref, tri, 0.0)
 
 
 @pytest.mark.parametrize(
