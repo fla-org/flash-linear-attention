@@ -52,8 +52,8 @@ class HigherOrderLinearAttention(nn.Module):
     ) -> None:
         super().__init__()
 
-        if mode not in {"recurrent", "fused_recurrent"}:
-            raise ValueError(f"Unsupported mode `{mode}`.")
+        if mode != "recurrent":
+            raise ValueError("HigherOrderLinearAttention currently supports only `mode='recurrent'`.")
         self.hidden_size = hidden_size
         self.expand_v = expand_v
         self.head_dim = head_dim
@@ -114,7 +114,10 @@ class HigherOrderLinearAttention(nn.Module):
         k = rearrange(self.k_proj(hidden_states), "... (h d) -> ... h d", d=self.head_dim)
         v = rearrange(self.v_proj(hidden_states), "... (h d) -> ... h d", d=self.head_v_dim)
         if attention_mask is not None:
-            v = v.mul(attention_mask[:, -v.shape[1]:, None, None])
+            mask = attention_mask[:, -v.shape[1]:, None, None]
+            q = q.mul(mask)
+            k = k.mul(mask)
+            v = v.mul(mask)
 
         if self.num_v_heads != self.num_heads:
             groups = self.num_v_heads // self.num_heads

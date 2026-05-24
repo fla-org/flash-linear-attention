@@ -30,7 +30,11 @@ def _init_state(
     return S, C, m, G, h
 
 
-@torch.compiler.disable
+def _signed_clamp_min(x: torch.Tensor, eps: float) -> torch.Tensor:
+    sign = torch.where(x < 0, -torch.ones_like(x), torch.ones_like(x))
+    return sign * x.abs().clamp_min(eps)
+
+
 def recurrent_hla(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -45,6 +49,14 @@ def recurrent_hla(
 ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None]:
     r"""
     Reference recurrent implementation of masked second-order Higher-order Linear Attention.
+
+    This implements the second-order masked streaming identity from
+    "Higher-order Linear Attention" (arXiv:2510.27258):
+    ``S_t = sum_{i<=t} k_i k_i^T``, ``C_t = sum_{i<=t} q_i v_i^T``,
+    ``m_t = sum_{i<=t} q_i``, ``G_t = sum_{i<=t} k_i k_i^T C_{i-1}``,
+    and ``h_t = sum_{i<=t} k_i k_i^T m_{i-1}``. The unnormalized output is
+    ``o_t = q_t^T (S_t C_t - G_t)``; the optional normalized variant divides
+    by ``q_t^T (S_t m_t - h_t)`` with a signed epsilon floor.
 
     Args:
         q:
@@ -125,7 +137,7 @@ def recurrent_hla(
         o = torch.einsum("bhk,bhkv->bhv", u, C) - torch.einsum("bhk,bhkv->bhv", q_t, G)
         if normalize:
             den = torch.einsum("bhk,bhk->bh", u, m) - torch.einsum("bhk,bhk->bh", q_t, h)
-            o = o / den.unsqueeze(-1).clamp_min(eps)
+            o = o / _signed_clamp_min(den, eps).unsqueeze(-1)
         outputs.append(o)
 
     output = torch.stack(outputs, dim=1).to(dtype)
