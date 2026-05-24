@@ -138,13 +138,17 @@ def profile(
     profile_str = (f"on (steps={profile_steps}"
                    + (f", trace={profile_trace}" if profile_trace else "")
                    + ")") if enable_profile else 'off'
+    arch_parts = []
+    if hasattr(config, 'num_heads'):
+        arch_parts.append(f"heads={config.num_heads}{_mark(num_heads)}")
+    if hasattr(config, 'head_dim'):
+        arch_parts.append(f"head_dim={config.head_dim}{_mark(head_dim)}")
+    arch_parts.append(f"hidden={config.hidden_size}")
+    arch_parts.append(f"layers={config.num_hidden_layers}{_mark(num_hidden_layers)}")
+    arch_parts.append(f"vocab={config.vocab_size}")
     _print_run_header({
         'model':    name,
-        'arch':     (f"heads={config.num_heads}{_mark(num_heads)} "
-                     f"head_dim={config.head_dim}{_mark(head_dim)} "
-                     f"hidden={config.hidden_size} "
-                     f"layers={config.num_hidden_layers}{_mark(num_hidden_layers)} "
-                     f"vocab={config.vocab_size}"),
+        'arch':     ' '.join(arch_parts),
         'data':     f"B={batch_size} T={seq_len} ctx={context_len} varlen={varlen}",
         'training': f"{dtype} (mixed={mixed_precision}) compile={compile} "
         f"warmup={warmup_steps} steps={steps}",
@@ -170,6 +174,7 @@ def profile(
     )
     scheduler = get_cosine_schedule_with_warmup(optimizer, 0, total_steps)
 
+    # Warmup absorbs the one-time Triton autotune + torch.compile cost so the timed loop is steady-state.
     bar = trange(warmup_steps)
 
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
@@ -192,9 +197,9 @@ def profile(
         optimizer.zero_grad()
         bar.set_description_str(f"Max memory allocated: {sizeof_fmt(max_memory_allocated(device))}")
 
-    start, total_tokens = time.time(), 0
     bar = trange(steps)
     torch.cuda.synchronize(device)
+    start, total_tokens = time.time(), 0
     for _ in bar:
         # forward pass
         tokens, cu_seqlens = prepare_inputs(
