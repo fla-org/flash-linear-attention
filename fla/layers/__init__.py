@@ -19,6 +19,7 @@ from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
 from .hgrn import HGRNAttention
 from .hgrn2 import HGRN2Attention
+from .hla import HigherOrderLinearAttention
 from .kda import KimiDeltaAttention
 from .lightnet import LightNetAttention
 from .linear_attn import LinearAttention
@@ -55,6 +56,7 @@ __all__ = [
     'GatedSlotAttention',
     'HGRN2Attention',
     'HGRNAttention',
+    'HigherOrderLinearAttention',
     'KimiDeltaAttention',
     'LightNetAttention',
     'LinearAttention',
