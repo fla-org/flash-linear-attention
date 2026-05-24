@@ -215,8 +215,8 @@ def test_chunk_beta_sigmoid_in_kernel(
 
     # in-kernel sigmoid: `beta` is passed as raw logits
     tri, tri_ht = chunk_gated_delta_rule(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone(),
@@ -233,8 +233,8 @@ def test_chunk_beta_sigmoid_in_kernel(
 
     # reference: apply sigmoid (and the allow_neg_eigval x2) in PyTorch, then default path
     ref, ref_ht = chunk_gated_delta_rule(
-        q=q.clone(),
-        k=k.clone(),
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
         v=v.clone(),
         g=g.clone(),
         beta=beta.clone().sigmoid() * (2 if allow_neg_eigval else 1),
