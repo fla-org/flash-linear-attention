@@ -60,6 +60,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
+    APPLY_BETA_SIGMOID: tl.constexpr,
+    ALLOW_NEG_EIGVAL: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -119,6 +121,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_beta = tl.load(p_beta).to(tl.float32)
         else:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
+        if APPLY_BETA_SIGMOID:
+            b_beta = tl.sigmoid(b_beta)
+            if ALLOW_NEG_EIGVAL:
+                b_beta = b_beta * 2
 
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
@@ -187,6 +193,8 @@ def fused_recurrent_gated_delta_rule_fwd(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -231,6 +239,8 @@ def fused_recurrent_gated_delta_rule_fwd(
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim != v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
+        ALLOW_NEG_EIGVAL=allow_neg_eigval,
         STATE_V_FIRST=state_v_first,
         num_warps=1,
         num_stages=3,
@@ -257,6 +267,8 @@ class FusedRecurrentFunction(torch.autograd.Function):
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
+        use_beta_sigmoid_in_kernel: bool = False,
+        allow_neg_eigval: bool = False,
         state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
     ):
@@ -274,8 +286,10 @@ class FusedRecurrentFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-            cu_seqlens=cu_seqlens,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
             state_v_first=state_v_first,
+            cu_seqlens=cu_seqlens,
         )
 
         return o, final_state
@@ -305,6 +319,8 @@ def fused_recurrent_gated_delta_rule(
     use_gate_in_kernel: bool = False,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     **kwargs,
@@ -349,6 +365,15 @@ def fused_recurrent_gated_delta_rule(
         dt_bias (Optional[torch.Tensor]):
             Bias added to `g` before activation, of shape `[HV]`.
             Only used when `use_gate_in_kernel=True`.
+        use_beta_sigmoid_in_kernel (Optional[bool]):
+            Whether to apply `torch.sigmoid(beta)` inside the kernel.
+            - If `True`, the passed `beta` acts as the raw beta logits.
+            - If `False`, `beta` is expected to already be in post-sigmoid space.
+            Default: `False`.
+        allow_neg_eigval (Optional[bool]):
+            Whether to allow negative eigenvalues by scaling `beta` to `[0, 2)`.
+            Only takes effect together with `use_beta_sigmoid_in_kernel=True`, in which case
+            the kernel computes `2 * sigmoid(beta)` instead of `sigmoid(beta)`. Default: `False`.
         state_v_first (Optional[bool]):
             Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor):
@@ -423,6 +448,8 @@ def fused_recurrent_gated_delta_rule(
     else:
         A_log = None
         dt_bias = None
+    if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
+        raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
 
     o, final_state = FusedRecurrentFunction.apply(
         q,
@@ -438,6 +465,8 @@ def fused_recurrent_gated_delta_rule(
         initial_state,
         output_final_state,
         use_qk_l2norm_in_kernel,
+        use_beta_sigmoid_in_kernel,
+        allow_neg_eigval,
         state_v_first,
         cu_seqlens,
     )
