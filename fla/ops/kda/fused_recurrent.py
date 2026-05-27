@@ -70,6 +70,7 @@ def fused_recurrent_kda_fwd_kernel(
     USE_GATE_IN_KERNEL: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     APPLY_BETA_SIGMOID: tl.constexpr,
+    ALLOW_NEG_EIGVAL: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
     num_stages: tl.constexpr,
 ):
@@ -185,6 +186,8 @@ def fused_recurrent_kda_fwd_kernel(
             b_beta = tl.load(p_beta, eviction_policy='evict_last').to(tl.float32)
         if APPLY_BETA_SIGMOID:
             b_beta = tl.sigmoid(b_beta)
+            if ALLOW_NEG_EIGVAL:
+                b_beta = b_beta * 2
         b_v *= b_beta
         if STATE_V_FIRST:
             b_h += b_v[:, None] * b_k[None, :]
@@ -247,6 +250,7 @@ def fused_recurrent_kda_fwd(
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
     use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
     lower_bound: float | None = None,
     out: torch.Tensor | None = None,
     **kwargs,
@@ -319,6 +323,7 @@ def fused_recurrent_kda_fwd(
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
+        ALLOW_NEG_EIGVAL=allow_neg_eigval,
         STATE_V_FIRST=state_v_first,
         num_warps=4,
         num_stages=2,
@@ -342,6 +347,7 @@ def fused_recurrent_kda(
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,
     use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
     lower_bound: float | None = None,
     state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
@@ -360,6 +366,11 @@ def fused_recurrent_kda(
             g (decays) of shape `[B, T, HV, K]`.
         beta (torch.Tensor):
             betas of shape `[B, T, HV]`.
+        A_log (Optional[torch.Tensor]):
+            Decay parameter of shape `[HV]`. Required when `use_gate_in_kernel=True`.
+        dt_bias (Optional[torch.Tensor]):
+            Bias added to `g` before activation, of shape `[HV]`.
+            Only used when `use_gate_in_kernel=True`.
         scale (Optional[float]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -371,11 +382,21 @@ def fused_recurrent_kda(
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (Optional[bool]):
             Whether to use L2 normalization in the kernel. Default: `False`.
+        use_gate_in_kernel (Optional[bool]):
+            Whether to compute the log-space KDA decay internally.
+            When `True`, `g` is the raw input and `A_log` must be provided; the kernel fuses
+            gate activation into the recurrence. Default: `False`.
         use_beta_sigmoid_in_kernel (Optional[bool]):
             Whether to apply `torch.sigmoid(beta)` inside the kernel.
             - If `True`, the passed `beta` acts as the raw beta logits.
             - If `False`, `beta` is expected to already be in post-sigmoid space.
             Default: `False`.
+        allow_neg_eigval (Optional[bool]):
+            Whether to allow negative eigenvalues by scaling `beta` to `[0, 2)`.
+            Only takes effect together with `use_beta_sigmoid_in_kernel=True`, in which case
+            the kernel computes `2 * sigmoid(beta)` instead of `sigmoid(beta)`. Default: `False`.
+        lower_bound (Optional[float]):
+            Lower bound for the forget gate (in log space). Only used when `use_gate_in_kernel=True`. Default: `None`.
         state_v_first (Optional[bool]):
             Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor):
@@ -440,6 +461,8 @@ def fused_recurrent_kda(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
+        raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
 
     o, final_state = fused_recurrent_kda_fwd(
         q=q,
@@ -456,6 +479,7 @@ def fused_recurrent_kda(
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=use_gate_in_kernel,
         use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        allow_neg_eigval=allow_neg_eigval,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
         state_v_first=state_v_first,
