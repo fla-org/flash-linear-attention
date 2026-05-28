@@ -358,7 +358,7 @@ def fused_recurrent_gdn2(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     scale: float | None = None,
-    initial_state: torch.Tensor = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     use_gate_in_kernel: bool = False,

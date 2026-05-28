@@ -119,7 +119,14 @@ class GatedDeltaNet2(nn.Module):
                 f"expand_v={expand_v} does not produce an integer value when multiplied by "
                 f"num_v_heads*head_dim={self.num_v_heads * self.head_dim}."
             )
-        if self.num_v_heads > self.num_heads and self.num_v_heads % self.num_heads != 0:
+        # GVA requires num_v_heads >= num_heads with exact divisibility, since the kernel
+        # maps each value head to its qk head via `i_h = i_hv // (HV // H)`. num_v_heads <
+        # num_heads would divide by zero there.
+        if self.num_v_heads < self.num_heads:
+            raise ValueError(
+                f"num_v_heads={self.num_v_heads} must be >= num_heads={self.num_heads}."
+            )
+        if self.num_v_heads % self.num_heads != 0:
             raise ValueError(
                 f"num_v_heads={self.num_v_heads} must be divisible by num_heads={self.num_heads}."
             )
@@ -222,10 +229,11 @@ class GatedDeltaNet2(nn.Module):
             v = F.silu(self.v_proj(hidden_states))
 
         # Channel-wise log-decay. Computed in fp32 for stable cumsums downstream.
-        g = (
-            -self.A_log.float().exp().repeat_interleave(self.head_k_dim)
-            * F.softplus(self.f_proj(hidden_states).float() + self.dt_bias)
-        )
+        # We split into per-head shape *first* and multiply A_log via broadcast on the
+        # head axis, rather than `repeat_interleave(head_k_dim)` then `rearrange` —
+        # which produces an intermediate flat `key_dim` tensor only to immediately
+        # reshape it back.
+        g = F.softplus(self.f_proj(hidden_states).float() + self.dt_bias)
         # GDN-2 channel-wise gates, both squashed to [0, 1].
         b = self.b_proj(hidden_states).sigmoid()
         w = self.w_proj(hidden_states).sigmoid()
@@ -235,6 +243,8 @@ class GatedDeltaNet2(nn.Module):
         v = rearrange(v, "... (h d) -> ... h d", d=self.head_v_dim)
         b = rearrange(b, "... (h d) -> ... h d", d=self.head_k_dim)
         w = rearrange(w, "... (h d) -> ... h d", d=self.head_v_dim)
+        # Apply per-head A_log decay rate via broadcast on the (H, K) tail.
+        g = -self.A_log.float().exp().unsqueeze(-1) * g
 
         # Grouped value attention: broadcast QK-side tensors across value-head groups.
         if self.num_v_heads > self.num_heads:
