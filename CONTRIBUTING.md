@@ -7,7 +7,6 @@ Thank you for your interest in contributing to Flash Linear Attention! All pull 
 * [Table of Contents](#table-of-contents)
 * [Report Bugs](#report-bugs)
 * [Ask Questions](#ask-questions)
-* [Core Principles](#core-principles)
 * [Submit Pull Requests](#submit-pull-requests)
   * [Commit Message Convention](#commit-message-convention)
   * [PR Description](#pr-description)
@@ -22,7 +21,6 @@ Thank you for your interest in contributing to Flash Linear Attention! All pull 
 * [Code Style](#code-style)
   * [Copyright Header](#copyright-header)
   * [Formatting and Linting](#formatting-and-linting)
-  * [Docstrings and Comments](#docstrings-and-comments)
   * [Naming Conventions](#naming-conventions)
   * [Triton Kernels](#triton-kernels)
   * [PyTorch Operators](#pytorch-operators)
@@ -47,14 +45,6 @@ Any issue you open should include:
 ## Ask Questions
 
 Please ask questions in [issues](https://github.com/fla-org/flash-linear-attention/issues) or on [Discord](https://discord.gg/vDaJTmKNcS). Check [FAQs.md](FAQs.md) first for common questions.
-
-## Core Principles
-
-1. **Match the reference numerically.** Every optimized kernel must agree with its naive reference within `assert_close` tolerance. Pure refactors and other non-computational changes (rewrites, fused paths, autotune tweaks) must leave outputs **and gradients** unchanged — verify before vs. after, don't assume.
-2. **Find the root cause before patching.** Don't land band-aid fixes. If a change appears to help but you can't explain why, keep digging.
-3. **Reuse over duplication.** Check `fla/ops/common/` and existing operators before writing new kernels; unify shared code paths instead of copying per-operator variants.
-4. **Audit every callsite when touching shared code.** Renaming a symbol, changing a config field, or editing a common kernel/component means updating *all* of its uses in one pass — not one spot at a time. Changes in `fla/ops/` or `fla/modules/` ripple up to `fla/layers/` and `fla/models/`: check those consumers and decide explicitly whether the public interface needs to change. See [Triton Kernels](#triton-kernels) for the kernel-level checklist.
-5. **Protect battle-tested paths; keep diffs minimal.** Changes to converged kernels or public APIs can silently break user code or checkpoints. Change only what the fix or feature needs, plus light incidental cleanups — don't revert or rewrite working code just because it could be cleaner (note it as optional in review instead). Flag risky changes, and when in doubt, ask.
 
 ## Submit Pull Requests
 
@@ -106,11 +96,9 @@ When you submit a PR, the following checks run automatically:
 - **Linting** — Ruff + autopep8 via pre-commit
 - **License header check** — Ensures copyright headers are present
 - **GPU tests** — On NVIDIA H100/A100/4090 and Intel B580 (when available)
-- **Benchmarks** — Performance regression checks; results are posted automatically as a PR comment
+- **Benchmarks** — Performance regression checks
 
 Add `[skip test]` to your commit message to skip GPU tests for documentation-only changes.
-
-For `[Perf]` changes, benchmark locally and include before/after numbers in the PR. The op runner compares against a git ref directly, e.g. `python -m benchmarks.ops.run --op chunk_gla --base main`.
 
 ### Review Checklist
 
@@ -118,7 +106,6 @@ Before submitting, please go through the following checklist:
 
 - Code follows the project's style conventions.
 - Copyright header is present on all new files.
-- Changes to `fla/ops/` or `fla/modules/` add or update the matching test in `tests/`.
 - Tests pass locally (`pytest tests/ops/test_<your_op>.py`).
 - New operators include a naive reference implementation.
 - Both forward and backward passes are tested.
@@ -227,23 +214,6 @@ Key rules:
 - **Import sorting**: `isort`-compatible via Ruff (`fla` as first-party)
 - **Type hints**: Use modern syntax (`X | None` instead of `Optional[X]`, `list[str]` instead of `List[str]`)
 - Use `TYPE_CHECKING` for imports only needed at type-check time
-- **Multi-line calls**: don't wrap a call that fits within the line limit. When a call does overflow, use a hanging indent with **one keyword argument per line**, not several per line.
-
-### Docstrings and Comments
-
-Use a two-line hanging format for `Args:` / `Returns:` entries: a `name (type, Optional):` header line, then the description and `Default:` on the next indented line(s).
-
-```python
-Args:
-    hidden_size (int, Optional):
-        The hidden size of the input. Default: 2048.
-    use_output_gate (bool, Optional):
-        Whether to apply a gated RMSNorm on the attention output. Default: `False`.
-```
-
-Capitalize `Optional` (not `optional`), put the default as `Default: <value>` (not "Defaults to ..."), and wrap `True` / `False` / `None` in backticks. See `fla/layers/gla.py::GatedLinearAttention` for the canonical example.
-
-Keep inline comments restrained, especially in Triton kernels: shape annotations (e.g. `# [BL, BD]`) plus at most a one-line "why" for genuinely non-obvious tricks. Avoid multi-line derivations and narration that just restates the next line — math derivations belong in the operator's `README.md`, the PR description, or a single pointer, not inline.
 
 ### Naming Conventions
 
@@ -261,7 +231,6 @@ Keep inline comments restrained, especially in Triton kernels: shape annotations
 - Use `tl.make_block_ptr` for coalesced memory access.
 - Gate autotune configs with `autotune_cache_kwargs` for cache support.
 - Kernel naming: `<op>_fwd_kernel_<suffix>` / `<op>_bwd_kernel_<suffix>`.
-- When renaming a symbol or adding/moving a parameter, sweep **every** site in one pass: the tensor, its `b_*` value, the `p_*` block pointer, comments, and — across the forward/backward kernels, host wrappers, and autograd `Function` — every signature, launch, return tuple, and `save_for_backward`/`saved_tensors` list. Keyword-argument order at each call site must match the parameter order in the signature.
 
 ### PyTorch Operators
 
