@@ -9,7 +9,18 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.modules.activations import _is_inner_contiguous, logsigmoid, sigmoid, swiglu, swish
+from fla.modules.activations import (
+    _is_inner_contiguous,
+    logsigmoid,
+    sigmoid,
+    sigmoidglu,
+    sigmoidglu_linear,
+    sqrelu,
+    swiglu,
+    swiglu_linear,
+    swish,
+)
+from fla.modules.activations import fast_gelu_impl as gelu
 from fla.utils import assert_close, device
 
 
@@ -91,6 +102,56 @@ def test_swish(B: int, T: int, D: int, compile: bool):
 @pytest.mark.parametrize(
     ('B', 'T', 'D', 'compile'),
     [
+        (2, 500, 128, False),
+        (2, 512, 128, True),
+        (3, 2048, 1200, False),
+    ],
+)
+def test_gelu(B: int, T: int, D: int, compile: bool):
+    torch.manual_seed(42)
+    data = torch.randn(B, T, D * 2, device=device)
+    x, _ = data.chunk(2, dim=-1)
+    x.requires_grad_()
+
+    y_ref = F.gelu(x, approximate='tanh')
+    y_tri = gelu(x) if not compile else torch.compile(gelu)(x)
+
+    g = torch.randn_like(y_ref)
+    dx_ref, = torch.autograd.grad(y_ref, (x,), g)
+    dx_tri, = torch.autograd.grad(y_tri, (x,), g)
+
+    assert_close('gelu fwd', y_ref, y_tri, 1e-3)
+    assert_close('gelu dx', dx_ref, dx_tri, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'compile'),
+    [
+        (2, 500, 128, False),
+        (2, 512, 128, True),
+        (3, 2048, 1200, False),
+    ],
+)
+def test_sqrelu(B: int, T: int, D: int, compile: bool):
+    torch.manual_seed(42)
+    data = torch.randn(B, T, D * 2, device=device)
+    x, _ = data.chunk(2, dim=-1)
+    x.requires_grad_()
+
+    y_ref = F.relu(x) ** 2
+    y_tri = sqrelu(x) if not compile else torch.compile(sqrelu)(x)
+
+    g = torch.randn_like(y_ref)
+    dx_ref, = torch.autograd.grad(y_ref, (x,), g)
+    dx_tri, = torch.autograd.grad(y_tri, (x,), g)
+
+    assert_close('sqrelu fwd', y_ref, y_tri, 1e-3)
+    assert_close('sqrelu dx', dx_ref, dx_tri, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'compile'),
+    [
         (2, 500, 128, True),
         (2, 512, 128, False),
         (3, 2048, 1200, False),
@@ -114,6 +175,100 @@ def test_swiglu(B: int, T: int, D: int, compile: bool):
     assert_close('swiglu fwd', y_ref, y_tri, 1e-3)
     assert_close('swiglu dx', dx_ref, dx_tri, 1e-3)
     assert_close('swiglu dy', dy_ref, dy_tri, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'O', 'compile'),
+    [
+        (2, 500, 128, 64, False),
+        (2, 512, 128, 256, True),
+        (3, 2048, 1200, 600, False),
+    ],
+)
+def test_swiglu_linear(B: int, T: int, D: int, O: int, compile: bool):  # noqa: E741
+    torch.manual_seed(42)
+
+    data = torch.randn(B, T, D * 2, device=device)
+    x, y = data.chunk(2, dim=-1)
+    x.requires_grad_()
+    y.requires_grad_()
+    w = torch.randn(O, D, device=device, requires_grad=True)
+    b = torch.randn(O, device=device, requires_grad=True)
+
+    z_ref = F.silu(x) * y
+    out_ref = F.linear(z_ref, w, b)
+    out_tri = swiglu_linear(x, y, w, b) if not compile else torch.compile(swiglu_linear)(x, y, w, b)
+
+    g = torch.randn_like(out_ref)
+    dx_ref, dy_ref, dw_ref, db_ref = torch.autograd.grad(out_ref, (x, y, w, b), g)
+    dx_tri, dy_tri, dw_tri, db_tri = torch.autograd.grad(out_tri, (x, y, w, b), g)
+
+    assert_close('swiglu_linear  o', out_ref, out_tri, 1e-3)
+    assert_close('swiglu_linear dx', dx_ref, dx_tri, 1e-3)
+    assert_close('swiglu_linear dy', dy_ref, dy_tri, 1e-3)
+    assert_close('swiglu_linear dw', dw_ref, dw_tri, 1e-3)
+    assert_close('swiglu_linear db', db_ref, db_tri, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'compile'),
+    [
+        (2, 500, 128, True),
+        (2, 512, 128, False),
+        (3, 2048, 1200, False),
+    ],
+)
+def test_sigmoidglu(B: int, T: int, D: int, compile: bool):
+    torch.manual_seed(42)
+
+    data = torch.randn(B, T, D * 2, device=device)
+    x, y = data.chunk(2, dim=-1)
+    x.requires_grad_()
+    y.requires_grad_()
+
+    y_ref = torch.sigmoid(x) * y
+    y_tri = sigmoidglu(x, y) if not compile else torch.compile(sigmoidglu)(x, y)
+
+    g = torch.randn_like(y_ref)
+    dx_ref, dy_ref = torch.autograd.grad(y_ref, (x, y), g)
+    dx_tri, dy_tri = torch.autograd.grad(y_tri, (x, y), g)
+
+    assert_close('sigmoidglu fwd', y_ref, y_tri, 1e-3)
+    assert_close('sigmoidglu dx', dx_ref, dx_tri, 1e-3)
+    assert_close('sigmoidglu dy', dy_ref, dy_tri, 1e-3)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'D', 'O', 'compile'),
+    [
+        (2, 500, 128, 64, False),
+        (2, 512, 128, 256, True),
+        (3, 2048, 1200, 600, False),
+    ],
+)
+def test_sigmoidglu_linear(B: int, T: int, D: int, O: int, compile: bool):  # noqa: E741
+    torch.manual_seed(42)
+
+    data = torch.randn(B, T, D * 2, device=device)
+    x, y = data.chunk(2, dim=-1)
+    x.requires_grad_()
+    y.requires_grad_()
+    w = torch.randn(O, D, device=device, requires_grad=True)
+    b = torch.randn(O, device=device, requires_grad=True)
+
+    z_ref = torch.sigmoid(x) * y
+    out_ref = F.linear(z_ref, w, b)
+    out_tri = sigmoidglu_linear(x, y, w, b) if not compile else torch.compile(sigmoidglu_linear)(x, y, w, b)
+
+    g = torch.randn_like(out_ref)
+    dx_ref, dy_ref, dw_ref, db_ref = torch.autograd.grad(out_ref, (x, y, w, b), g)
+    dx_tri, dy_tri, dw_tri, db_tri = torch.autograd.grad(out_tri, (x, y, w, b), g)
+
+    assert_close('sigmoidglu_linear  o', out_ref, out_tri, 1e-3)
+    assert_close('sigmoidglu_linear dx', dx_ref, dx_tri, 1e-3)
+    assert_close('sigmoidglu_linear dy', dy_ref, dy_tri, 1e-3)
+    assert_close('sigmoidglu_linear dw', dw_ref, dw_tri, 1e-3)
+    assert_close('sigmoidglu_linear db', db_ref, db_tri, 1e-3)
 
 
 @pytest.mark.parametrize(
