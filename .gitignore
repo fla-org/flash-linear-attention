@@ -30,6 +30,13 @@ log.*
 *.cfg
 *.ini
 
+# virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
 # pycache
 __pycache__
 
