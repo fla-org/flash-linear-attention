@@ -11,7 +11,6 @@ import torch.nn.functional as F
 
 from fla.modules.activations import (
     _is_inner_contiguous,
-    fast_gelu_impl as gelu,
     logsigmoid,
     sigmoid,
     sigmoidglu,
@@ -21,6 +20,7 @@ from fla.modules.activations import (
     swiglu_linear,
     swish,
 )
+from fla.modules.activations import fast_gelu_impl as gelu
 from fla.utils import assert_close, device
 
 
