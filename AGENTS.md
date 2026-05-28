@@ -1,4 +1,4 @@
-# AGENTS.md
+# FLA Guidelines
 
 Guidance for AI coding agents (Claude Code, Codex, etc.) working in this repo.
 
