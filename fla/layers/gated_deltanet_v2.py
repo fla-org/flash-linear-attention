@@ -177,11 +177,11 @@ class GatedDeltaNet2(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        past_key_values: "Cache | None" = None,
+        past_key_values: Cache | None = None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
-        **kwargs: "Unpack[dict]",
-    ) -> tuple[torch.Tensor, torch.Tensor | None, "Cache | None"]:
+        **kwargs: Unpack[dict],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         if attention_mask is not None:
             assert len(attention_mask.shape) == 2, (
                 "Expected attention_mask as a [batch_size, seq_len] 0/1 padding mask."

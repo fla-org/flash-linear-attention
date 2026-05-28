@@ -122,6 +122,7 @@ def naive_chunk_gdn2(
 
     q = q * scale
     # Reshape to chunks: [B, H, NT, BT, D]
+
     def chunk(x):
         return x.view(B, H, NT, BT, -1)
     q, k, v, g, b, w = (chunk(x) for x in (q, k, v, g, b, w))
@@ -149,8 +150,8 @@ def naive_chunk_gdn2(
     T_lower = torch.einsum('bhnik,bhnjk,bhnijk->bhnij',
                            bk, k, decay_for_T)
     T_lower = T_lower.masked_fill(~tril_mask, 0.0)
-    A = torch.eye(BT, device=q.device, dtype=torch.float32).expand(B, H, NT, BT, BT).clone()
-    # In-place forward substitution: A_i = -T_lower_i + sum_{j<i} (-T_lower_ij) A_j
+    # Blocked forward substitution to build A_inv = (I + T_lower)^{-1} in place,
+    # mirroring the WY-block solve in fla.ops.gated_delta_rule.naive.
     A_inv = -T_lower
     for i in range(1, BT):
         A_inv[..., i, :i] = A_inv[..., i, :i].clone() + (

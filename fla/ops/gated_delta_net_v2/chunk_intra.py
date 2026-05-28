@@ -29,7 +29,7 @@ from fla.ops.gated_delta_net_v2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2, gather
-from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs, check_shared_mem
+from fla.utils import IS_GATHER_SUPPORTED, IS_TF32_SUPPORTED, autotune_cache_kwargs
 
 if IS_TF32_SUPPORTED:
     SOLVE_TRIL_DOT_PRECISION = tl.constexpr('tf32')
