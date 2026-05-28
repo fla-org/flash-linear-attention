@@ -203,7 +203,7 @@ def test_swiglu_linear(B: int, T: int, D: int, O: int, compile: bool):  # noqa: 
     dx_ref, dy_ref, dw_ref, db_ref = torch.autograd.grad(out_ref, (x, y, w, b), g)
     dx_tri, dy_tri, dw_tri, db_tri = torch.autograd.grad(out_tri, (x, y, w, b), g)
 
-    assert_close('swiglu_linear out', out_ref, out_tri, 1e-3)
+    assert_close('swiglu_linear  o', out_ref, out_tri, 1e-3)
     assert_close('swiglu_linear dx', dx_ref, dx_tri, 1e-3)
     assert_close('swiglu_linear dy', dy_ref, dy_tri, 1e-3)
     assert_close('swiglu_linear dw', dw_ref, dw_tri, 1e-3)
@@ -264,7 +264,7 @@ def test_sigmoidglu_linear(B: int, T: int, D: int, O: int, compile: bool):  # no
     dx_ref, dy_ref, dw_ref, db_ref = torch.autograd.grad(out_ref, (x, y, w, b), g)
     dx_tri, dy_tri, dw_tri, db_tri = torch.autograd.grad(out_tri, (x, y, w, b), g)
 
-    assert_close('sigmoidglu_linear out', out_ref, out_tri, 1e-3)
+    assert_close('sigmoidglu_linear  o', out_ref, out_tri, 1e-3)
     assert_close('sigmoidglu_linear dx', dx_ref, dx_tri, 1e-3)
     assert_close('sigmoidglu_linear dy', dy_ref, dy_tri, 1e-3)
     assert_close('sigmoidglu_linear dw', dw_ref, dw_tri, 1e-3)
