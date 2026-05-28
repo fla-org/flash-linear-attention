@@ -257,9 +257,7 @@ class GatedDeltaNet(nn.Module):
         q, k = map(lambda x: rearrange(x, '... (h d) -> ... h d', d=self.head_k_dim), (q, k))
         v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
 
-        beta = self.b_proj(hidden_states).sigmoid()
-        if self.allow_neg_eigval:
-            beta = beta * 2.
+        beta = self.b_proj(hidden_states)
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
         if mode == 'chunk':
@@ -275,6 +273,8 @@ class GatedDeltaNet(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                allow_neg_eigval=self.allow_neg_eigval,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
@@ -291,6 +291,8 @@ class GatedDeltaNet(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                allow_neg_eigval=self.allow_neg_eigval,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )

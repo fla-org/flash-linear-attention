@@ -248,15 +248,12 @@ class KimiDeltaAttention(nn.Module):
             v = F.silu(self.v_proj(hidden_states))
 
         g = self.f_proj(hidden_states)
-        beta = self.b_proj(hidden_states).sigmoid()
+        beta = self.b_proj(hidden_states)
 
         q, k = (rearrange(x, "... (h d) -> ... h d", d=self.head_k_dim) for x in (q, k))
         # g and v are at value-head dimension (HV); q/k are at qk-head dimension (H).
         g = rearrange(g, "... (h d) -> ... h d", d=self.head_k_dim)
         v = rearrange(v, "... (h d) -> ... h d", d=self.head_v_dim)
-
-        if self.allow_neg_eigval:
-            beta = beta * 2.0
 
         recurrent_state = last_state["recurrent_state"] if last_state is not None else None
         if mode == "chunk":
@@ -272,6 +269,8 @@ class KimiDeltaAttention(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                allow_neg_eigval=self.allow_neg_eigval,
                 safe_gate=self.safe_gate,
                 lower_bound=self.lower_bound,
                 state_v_first=True,
@@ -290,6 +289,8 @@ class KimiDeltaAttention(nn.Module):
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
                 use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                allow_neg_eigval=self.allow_neg_eigval,
                 lower_bound=self.lower_bound,
                 state_v_first=True,
                 cu_seqlens=cu_seqlens,
