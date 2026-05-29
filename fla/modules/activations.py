@@ -5,6 +5,13 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+"""Fused activation kernels.
+
+The kernels address their inputs through the row stride instead of assuming a fully contiguous buffer.
+An inner-contiguous input — such as one half of ``x.chunk(2, dim=-1)`` — is therefore read in place, sparing the extra
+``.contiguous()`` copy (and its memory traffic) that a plain flat element-wise kernel would force on every call.
+"""
+
 import torch
 import torch.nn.functional as F
 import triton
@@ -67,7 +74,11 @@ def _ensure_inner_contiguous(x: torch.Tensor) -> torch.Tensor:
 
 
 def _alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
-    """Allocate output tensor: contiguous buffer or same layout as input."""
+    """Allocate the output: a fresh contiguous buffer, or ``empty_like`` otherwise.
+
+    ``empty_like`` keeps the input's memory format only when it is dense; a non-dense
+    strided view (e.g. a ``chunk`` slice) falls back to contiguous, not the input stride.
+    """
     if contiguous:
         return x.new_empty(x.shape)
     return torch.empty_like(x)
@@ -85,22 +96,20 @@ def _alloc_output(x: torch.Tensor, contiguous: bool = False) -> torch.Tensor:
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_fwd_kernel(
     x, y,
-    T,
-    D: tl.constexpr,
     stride_x_row,
     stride_y_row,
+    T,
+    D: tl.constexpr,
     B: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * B + tl.arange(0, B)
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
     mask = offs < T
     row = offs // D
     col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    y_val = 1.0 / (1.0 + exp(-x_val))
-    tl.store(y + y_off, y_val.to(y.dtype.element_ty), mask=mask)
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.sigmoid(b_x)
+    tl.store(y + row * stride_y_row + col, b_y.to(y.dtype.element_ty), mask=mask)
 
 
 @triton.autotune(
@@ -115,26 +124,23 @@ def sigmoid_fwd_kernel(
 @triton.jit(do_not_specialize=['T'])
 def sigmoid_bwd_kernel(
     x, dy, dx,
-    T,
-    D: tl.constexpr,
     stride_x_row,
     stride_dy_row,
     stride_dx_row,
+    T,
+    D: tl.constexpr,
     B: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * B + tl.arange(0, B)
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
     mask = offs < T
     row = offs // D
     col = offs % D
-    x_off = row * stride_x_row + col
-    dy_off = row * stride_dy_row + col
-    dx_off = row * stride_dx_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    g_val = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
-    s = 1.0 / (1.0 + exp(-x_val))
-    dx_val = g_val * s * (1.0 - s)
-    tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_dy = tl.load(dy + row * stride_dy_row + col, mask=mask, other=0.).to(tl.float32)
+    b_s = tl.sigmoid(b_x)
+    b_dx = b_dy * b_s * (1.0 - b_s)
+    tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
 @torch.compiler.disable
@@ -143,9 +149,12 @@ def sigmoid_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tenso
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x, output_contiguous)
     sigmoid_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
-        x, y, T=T, D=D,
+        x=x,
+        y=y,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
+        T=T,
+        D=D,
     )
     return y
 
@@ -157,10 +166,14 @@ def sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = Fal
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
     sigmoid_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
-        x, dy, dx, T=T, D=D,
+        x=x,
+        dy=dy,
+        dx=dx,
         stride_x_row=_get_stride(x),
         stride_dy_row=_get_stride(dy),
         stride_dx_row=_get_stride(dx),
+        T=T,
+        D=D,
     )
     return dx
 
@@ -196,26 +209,23 @@ sigmoid = SigmoidFunction.apply
 def logsigmoid_fwd_kernel(
     x,
     y,
+    stride_x_row,
+    stride_y_row,
     temperature,
     T,
     D: tl.constexpr,
-    stride_x_row,
-    stride_y_row,
     B: tl.constexpr,
 ):
-    i = tl.program_id(0)
-    o_i = i * B + tl.arange(0, B)
-    m_i = o_i < T
-    row = o_i // D
-    col = o_i % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-
-    b_x = tl.load(x + x_off, mask=m_i, other=0.).to(tl.float32)
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
     b_m = tl.minimum(0., b_x)
     b_z = 1. + exp(-tl.abs(b_x))
     b_y = (b_m - log(b_z)) / temperature
-    tl.store(y + y_off, b_y.to(y.dtype.element_ty), mask=m_i)
+    tl.store(y + row * stride_y_row + col, b_y.to(y.dtype.element_ty), mask=mask)
 
 
 @triton.autotune(
@@ -230,29 +240,25 @@ def logsigmoid_fwd_kernel(
 @triton.jit(do_not_specialize=['T'])
 def logsigmoid_bwd_kernel(
     x,
-    dx,
     dy,
+    dx,
+    stride_x_row,
+    stride_dy_row,
+    stride_dx_row,
     temperature,
     T,
     D: tl.constexpr,
-    stride_x_row,
-    stride_dx_row,
-    stride_dy_row,
     B: tl.constexpr,
 ):
-    i = tl.program_id(0)
-    o_i = i * B + tl.arange(0, B)
-    m_i = o_i < T
-    row = o_i // D
-    col = o_i % D
-    x_off = row * stride_x_row + col
-    dx_off = row * stride_dx_row + col
-    dy_off = row * stride_dy_row + col
-
-    b_x = tl.load(x + x_off, mask=m_i, other=0.).to(tl.float32)
-    b_dy = tl.load(dy + dy_off, mask=m_i, other=0.).to(tl.float32)
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_dy = tl.load(dy + row * stride_dy_row + col, mask=mask, other=0.).to(tl.float32)
     b_dx = b_dy * ((1. - tl.sigmoid(b_x)) / temperature)
-    tl.store(dx + dx_off, b_dx.to(dx.dtype.element_ty), mask=m_i)
+    tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
 @torch.compiler.disable
@@ -263,31 +269,36 @@ def logsigmoid_fwd(x: torch.Tensor, temperature: float = 1., output_contiguous: 
     logsigmoid_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
         y=y,
+        stride_x_row=_get_stride(x),
+        stride_y_row=_get_stride(y),
         temperature=temperature,
         T=T,
         D=D,
-        stride_x_row=_get_stride(x),
-        stride_y_row=_get_stride(y),
     )
     return y
 
 
 @torch.compiler.disable
-def logsigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, temperature: float = 1., output_contiguous: bool = False) -> torch.Tensor:
+def logsigmoid_bwd(
+    x: torch.Tensor,
+    dy: torch.Tensor,
+    temperature: float = 1.,
+    output_contiguous: bool = False,
+) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
     dy = _ensure_inner_contiguous(dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
     logsigmoid_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
         x=x,
-        dx=dx,
         dy=dy,
+        dx=dx,
+        stride_x_row=_get_stride(x),
+        stride_dy_row=_get_stride(dy),
+        stride_dx_row=_get_stride(dx),
         temperature=temperature,
         T=T,
         D=D,
-        stride_x_row=_get_stride(x),
-        stride_dx_row=_get_stride(dx),
-        stride_dy_row=_get_stride(dy),
     )
     return dx
 
@@ -324,23 +335,20 @@ def logsigmoid(x: torch.Tensor, temperature: float = 1.) -> torch.Tensor:
 @triton.jit(do_not_specialize=['T'])
 def swish_fwd_kernel(
     x, y,
-    T,
-    D: tl.constexpr,
     stride_x_row,
     stride_y_row,
+    T,
+    D: tl.constexpr,
     B: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * B + tl.arange(0, B)
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
     mask = offs < T
     row = offs // D
     col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    s = 1.0 / (1.0 + exp(-x_val))
-    y_val = x_val * s
-    tl.store(y + y_off, y_val.to(y.dtype.element_ty), mask=mask)
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_y = b_x * tl.sigmoid(b_x)
+    tl.store(y + row * stride_y_row + col, b_y.to(y.dtype.element_ty), mask=mask)
 
 
 @triton.autotune(
@@ -355,26 +363,23 @@ def swish_fwd_kernel(
 @triton.jit(do_not_specialize=['T'])
 def swish_bwd_kernel(
     x, dy, dx,
-    T,
-    D: tl.constexpr,
     stride_x_row,
     stride_dy_row,
     stride_dx_row,
+    T,
+    D: tl.constexpr,
     B: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * B + tl.arange(0, B)
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
     mask = offs < T
     row = offs // D
     col = offs % D
-    x_off = row * stride_x_row + col
-    dy_off = row * stride_dy_row + col
-    dx_off = row * stride_dx_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    g_val = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
-    s = 1.0 / (1.0 + exp(-x_val))
-    dx_val = g_val * s * (1.0 + x_val * (1.0 - s))
-    tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_dy = tl.load(dy + row * stride_dy_row + col, mask=mask, other=0.).to(tl.float32)
+    b_s = tl.sigmoid(b_x)
+    b_dx = b_dy * b_s * (1.0 + b_x * (1.0 - b_s))
+    tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
 @torch.compiler.disable
@@ -383,9 +388,12 @@ def swish_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     T, D = x.numel(), x.shape[-1]
     y = _alloc_output(x, output_contiguous)
     swish_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
-        x, y, T=T, D=D,
+        x=x,
+        y=y,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
+        T=T,
+        D=D,
     )
     return y
 
@@ -397,10 +405,14 @@ def swish_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
     swish_bwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
-        x, dy, dx, T=T, D=D,
+        x=x,
+        dy=dy,
+        dx=dx,
         stride_x_row=_get_stride(x),
         stride_dy_row=_get_stride(dy),
         stride_dx_row=_get_stride(dx),
+        T=T,
+        D=D,
     )
     return dx
 
@@ -463,8 +475,7 @@ class GeLUFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         input, bias = ctx.saved_tensors
-        tmp = bias_gelu_bwd(grad_output, input, bias)
-        return tmp, tmp
+        return bias_gelu_bwd(grad_output, input, bias)
 
 
 bias_gelu_impl = GeLUFunction.apply
@@ -552,26 +563,22 @@ sqrelu = SquaredReLUFunction.apply
 @triton.jit(do_not_specialize=['T'])
 def swiglu_fwd_kernel(
     x, y, z,
-    T,
-    D: tl.constexpr,
     stride_x_row,
     stride_y_row,
     stride_z_row,
+    T,
+    D: tl.constexpr,
     B: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * B + tl.arange(0, B)
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
     mask = offs < T
     row = offs // D
     col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-    z_off = row * stride_z_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    y_val = tl.load(y + y_off, mask=mask, other=0.).to(tl.float32)
-    s = 1.0 / (1.0 + exp(-x_val))
-    z_val = x_val * s * y_val
-    tl.store(z + z_off, z_val.to(z.dtype.element_ty), mask=mask)
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.load(y + row * stride_y_row + col, mask=mask, other=0.).to(tl.float32)
+    b_z = b_x * tl.sigmoid(b_x) * b_y
+    tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
 
 
 @triton.heuristics({
@@ -589,42 +596,36 @@ def swiglu_fwd_kernel(
 @triton.jit(do_not_specialize=['T'])
 def swiglu_fwdbwd_kernel(
     x, y, g, dx, dy, z,
-    T,
-    D: tl.constexpr,
     stride_x_row,
     stride_y_row,
     stride_g_row,
     stride_dx_row,
     stride_dy_row,
     stride_z_row,
+    T,
+    D: tl.constexpr,
     B: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * B + tl.arange(0, B)
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
     mask = offs < T
     row = offs // D
     col = offs % D
-    x_off = row * stride_x_row + col
-    y_off = row * stride_y_row + col
-    g_off = row * stride_g_row + col
-    dx_off = row * stride_dx_row + col
-    dy_off = row * stride_dy_row + col
-    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
-    y_val = tl.load(y + y_off, mask=mask, other=0.).to(tl.float32)
-    g_val = tl.load(g + g_off, mask=mask, other=0.).to(tl.float32)
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.load(y + row * stride_y_row + col, mask=mask, other=0.).to(tl.float32)
+    b_g = tl.load(g + row * stride_g_row + col, mask=mask, other=0.).to(tl.float32)
 
-    s = 1.0 / (1.0 + exp(-x_val))
-    x_s = x_val * s
-    dx_val = g_val * s * (1.0 + x_val * (1.0 - s)) * y_val
-    dy_val = g_val * x_s
+    b_s = tl.sigmoid(b_x)
+    b_xs = b_x * b_s
+    b_dx = b_g * b_s * (1.0 + b_x * (1.0 - b_s)) * b_y
+    b_dy = b_g * b_xs
 
-    tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
-    tl.store(dy + dy_off, dy_val.to(dy.dtype.element_ty), mask=mask)
+    tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
+    tl.store(dy + row * stride_dy_row + col, b_dy.to(dy.dtype.element_ty), mask=mask)
     if HAS_WEIGHT:
-        z_off = row * stride_z_row + col
-        z_val = x_s * y_val
-        tl.store(z + z_off, z_val.to(z.dtype.element_ty), mask=mask)
+        b_z = b_xs * b_y
+        tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
 
 
 @torch.compiler.disable
@@ -635,10 +636,14 @@ def swiglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x, output_contiguous)
     swiglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
-        x, y, z, T=T, D=D,
+        x=x,
+        y=y,
+        z=z,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
         stride_z_row=_get_stride(z),
+        T=T,
+        D=D,
     )
     return z
 
@@ -663,13 +668,20 @@ def swiglu_fwdbwd(
     else:
         z = None
     swiglu_fwdbwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
-        x, y, g, dx, dy, z, T=T, D=D,
+        x=x,
+        y=y,
+        g=g,
+        dx=dx,
+        dy=dy,
+        z=z,
         stride_x_row=_get_stride(x),
         stride_y_row=_get_stride(y),
         stride_g_row=_get_stride(g),
         stride_dx_row=_get_stride(dx),
         stride_dy_row=_get_stride(dy),
         stride_z_row=_get_stride(z) if z is not None else 0,
+        T=T,
+        D=D,
     )
     if use_weight:
         return dx, dy, z
@@ -734,6 +746,202 @@ swiglu = SwiGLUFunction.apply
 
 
 swiglu_linear = SwiGLULinearFunction.apply
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def sigmoidglu_fwd_kernel(
+    x, y, z,
+    stride_x_row,
+    stride_y_row,
+    stride_z_row,
+    T,
+    D: tl.constexpr,
+    B: tl.constexpr,
+):
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.load(y + row * stride_y_row + col, mask=mask, other=0.).to(tl.float32)
+    b_z = tl.sigmoid(b_x) * b_y
+    tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
+
+
+@triton.heuristics({
+    'HAS_WEIGHT': lambda args: args['z'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def sigmoidglu_fwdbwd_kernel(
+    x, y, g, dx, dy, z,
+    stride_x_row,
+    stride_y_row,
+    stride_g_row,
+    stride_dx_row,
+    stride_dy_row,
+    stride_z_row,
+    T,
+    D: tl.constexpr,
+    B: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
+):
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.load(y + row * stride_y_row + col, mask=mask, other=0.).to(tl.float32)
+    b_g = tl.load(g + row * stride_g_row + col, mask=mask, other=0.).to(tl.float32)
+
+    b_s = tl.sigmoid(b_x)
+    b_dx = b_g * b_s * (1.0 - b_s) * b_y
+    b_dy = b_g * b_s
+
+    tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
+    tl.store(dy + row * stride_dy_row + col, b_dy.to(dy.dtype.element_ty), mask=mask)
+    if HAS_WEIGHT:
+        b_z = b_s * b_y
+        tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
+
+
+@torch.compiler.disable
+def sigmoidglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
+    assert x.shape == y.shape, f"sigmoidglu_fwd: shape mismatch x={x.shape} y={y.shape}"
+    x = _ensure_inner_contiguous(x)
+    y = _ensure_inner_contiguous(y)
+    T, D = x.numel(), x.shape[-1]
+    z = _alloc_output(x, output_contiguous)
+    sigmoidglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+        x=x,
+        y=y,
+        z=z,
+        stride_x_row=_get_stride(x),
+        stride_y_row=_get_stride(y),
+        stride_z_row=_get_stride(z),
+        T=T,
+        D=D,
+    )
+    return z
+
+
+@torch.compiler.disable
+def sigmoidglu_fwdbwd(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    g: torch.Tensor,
+    use_weight: bool = False,
+    output_contiguous: bool = False,
+):
+    assert x.shape == y.shape == g.shape, f"sigmoidglu_fwdbwd: shape mismatch x={x.shape} y={y.shape} g={g.shape}"
+    x = _ensure_inner_contiguous(x)
+    y = _ensure_inner_contiguous(y)
+    g = _ensure_inner_contiguous(g)
+    T, D = x.numel(), x.shape[-1]
+    dx = _alloc_output(x, output_contiguous)
+    dy = _alloc_output(y, output_contiguous)
+    if use_weight:
+        z = _alloc_output(x, output_contiguous)
+    else:
+        z = None
+    sigmoidglu_fwdbwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+        x=x,
+        y=y,
+        g=g,
+        dx=dx,
+        dy=dy,
+        z=z,
+        stride_x_row=_get_stride(x),
+        stride_y_row=_get_stride(y),
+        stride_g_row=_get_stride(g),
+        stride_dx_row=_get_stride(dx),
+        stride_dy_row=_get_stride(dy),
+        stride_z_row=_get_stride(z) if z is not None else 0,
+        T=T,
+        D=D,
+    )
+    if use_weight:
+        return dx, dy, z
+    return dx, dy
+
+
+class SigmoidGLUFunction(torch.autograd.Function):
+    r"""
+    Sigmoid-Gated Linear Unit (SigmoidGLU) function.
+
+    .. math::
+        \text{SigmoidGLU}(x, y) = sigmoid(x) * y = \frac{1}{1 + \exp(-x)} * y
+    """
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    def forward(ctx, x, y):
+        ctx.save_for_backward(x, y)
+        return sigmoidglu_fwd(x, y)
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    def backward(ctx, dout):
+        x, y = ctx.saved_tensors
+        return sigmoidglu_fwdbwd(x, y, dout)
+
+
+class SigmoidGLULinearFunction(torch.autograd.Function):
+    r"""
+    Sigmoid-Gated Linear Unit (SigmoidGLU) function followed by a linear transformation.
+
+    .. math::
+        \text{SigmoidGLULinear}(x, y, W, b) = (sigmoid(x) * y) W + b
+
+    This simple wrap discards the intermediate results of SigmoidGLU(x, y) to save memory.
+    """
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    @autocast_custom_fwd
+    def forward(ctx, x, y, weight, bias):
+        z = sigmoidglu_fwd(x, y, output_contiguous=True)
+        out = F.linear(z, weight, bias)
+        ctx.save_for_backward(x, y, weight)
+        ctx.linear_bias_is_none = bias is None
+        return out
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    @autocast_custom_bwd
+    def backward(ctx, dout, *args):
+        x, y, weight = ctx.saved_tensors
+        dout = dout.reshape(-1, dout.shape[-1])
+        dz = F.linear(dout, weight.t()).view_as(x)
+        dx, dy, z = sigmoidglu_fwdbwd(x, y, dz, use_weight=True, output_contiguous=True)
+        dlinear_weight = torch.einsum("bo,bi->oi", dout, z.reshape(-1, z.shape[-1]))
+        dlinear_bias = None if ctx.linear_bias_is_none else dout.sum(0)
+        return dx, dy, dlinear_weight, dlinear_bias
+
+
+sigmoidglu = SigmoidGLUFunction.apply
+
+
+sigmoidglu_linear = SigmoidGLULinearFunction.apply
 
 
 ACT2FN = {

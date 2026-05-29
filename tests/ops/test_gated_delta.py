@@ -87,7 +87,7 @@ def test_fused_recurrent(
             id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
-            # non-GVA (HV == H)
+            (4, 1024, 4, 4, 128, 0.1, 1, 1.0, False, torch.float16),
             (2, 75, 4, 4, 64, 1, 0.01, 0, False, torch.float16),
             (2, 500, 3, 3, 60, 1, 1, 0, False, torch.float16),
             (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, torch.float16),
@@ -95,7 +95,6 @@ def test_fused_recurrent(
             (4, 1024, 4, 4, 128, 0.1, 1, 0, True, torch.float16),
             (2, 1500, 4, 4, 128, 0.1, 10, 0, False, torch.float16),
             (4, 2048, 8, 8, 64, 0.1, 1, 0, False, torch.float16),
-            # GVA (HV > H)
             (2, 256, 2, 4, 64, 1, 1, 0, False, torch.float16),
             (2, 512, 2, 8, 64, 1, 0.1, 0, True, torch.float16),
             (2, 1024, 4, 8, 128, 0.1, 1, 0, False, torch.float16),

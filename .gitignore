@@ -30,13 +30,18 @@ log.*
 *.cfg
 *.ini
 
+# virtual environments
+.env
+.venv
+env
+venv
+
 # pycache
 __pycache__
 
 # saved model
 *.pkl
 *.pt
-
 
 # vscode
 .vscode
