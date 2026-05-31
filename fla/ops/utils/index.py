@@ -111,13 +111,16 @@ def prepare_split_cu_seqlens(
 
 
 def _segmented_arange(counts: torch.LongTensor) -> tuple[torch.LongTensor, torch.LongTensor]:
-    """Build per-segment flat indices from segment counts ``[c0, c1, ...]``.
+    """Expand per-segment counts into flat per-slot index tensors.
 
-    Returns two 1-D tensors of length ``counts.sum()``:
+    Given segment sizes ``counts = [c0, c1, ...]``, return two 1-D tensors of
+    length ``counts.sum()`` that together label every slot with its segment and
+    its position within that segment.
 
-      - ``seg_id`` -- segment id per slot: ``[0]*c0 + [1]*c1 + ...``
-      - ``intra_idx`` -- within-segment index ``[0, 1, ..., c_i - 1]`` for
-        segment ``i``
+    Example -- ``counts = [2, 3]`` (segment 0 spans 2 slots, segment 1 spans 3)::
+
+        seg_id    = [0, 0, 1, 1, 1]   # which segment each slot belongs to
+        intra_idx = [0, 1, 0, 1, 2]   # running index within that segment
 
     With CUDA ``counts``, ``repeat_interleave`` reads ``counts.sum()`` on the
     host (one device sync). Pass host-side counts to avoid it.
