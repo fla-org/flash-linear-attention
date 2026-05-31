@@ -82,7 +82,7 @@ def test_mean_pooling_varlen(
     x = torch.randn(1, T, H, D, dtype=dtype).to(device).requires_grad_(True)
     ref = torch.cat([
         torch.cat([x[:, i:min(end, i+C), :].float().mean(1, True) for i in range(start, end, C)], 1)
-        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
+        for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False)
     ], 1).to(dtype)
     do = torch.randn_like(ref)
     ref.backward(do)

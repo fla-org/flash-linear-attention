@@ -84,7 +84,7 @@ def test_global_cumsum_varlen(
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([
         s[:, start:end].float().cumsum(1)
-        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+        for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())
     ], 1).to(dtype)
     tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     assert_close('global_cumsum', ref, tri, 1e-3)
@@ -92,7 +92,7 @@ def test_global_cumsum_varlen(
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
     ref = torch.cat([
         s[:, start:end].float().cumsum(1)
-        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:])
+        for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())
     ], 1).to(dtype)
     tri = chunk_global_cumsum(s, cu_seqlens=cu_seqlens)
     assert_close('global_cumsum', ref, tri, 1e-3)
@@ -159,13 +159,13 @@ def test_global_reversed_cumsum_varlen(
 
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([reversed_cumsum(s[:, start:end], 1)
-                    for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
+                    for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False)], 1).to(dtype)
     tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
     assert_close('global_reversed_cumsum', ref, tri, 1e-3)
 
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
     ref = torch.cat([reversed_cumsum(s[:, start:end], 1)
-                    for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)], 1).to(dtype)
+                    for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False)], 1).to(dtype)
     tri = chunk_global_cumsum(s, reverse=True, cu_seqlens=cu_seqlens)
     assert_close('global_reversed_cumsum', ref, tri, 1e-3)
 
@@ -234,7 +234,7 @@ def test_local_cumsum_varlen(
     s = torch.randn(1, T, H, dtype=dtype).to(device)
     ref = torch.cat([
         torch.cat([s[:, i:min(end, i+C), :].float().cumsum(1) for i in range(start, end, C)], 1)
-        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
+        for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False)
     ], 1)
     tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     assert_close('local_cumsum', ref, tri, 1e-3)
@@ -242,7 +242,7 @@ def test_local_cumsum_varlen(
     s = torch.randn(1, T, H, D, dtype=dtype).to(device)
     ref = torch.cat([
         torch.cat([s[:, i:min(end, i+C), :].float().cumsum(1) for i in range(start, end, C)], 1)
-        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False)
+        for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=False)
     ], 1)
     tri = chunk_local_cumsum(s, chunk_size=C, cu_seqlens=cu_seqlens)
     assert_close('local_cumsum', ref, tri, 1e-3)
