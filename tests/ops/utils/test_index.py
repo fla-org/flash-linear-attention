@@ -13,8 +13,10 @@ from torch._dynamo.utils import counters
 import fla.utils as fu
 from fla.ops.utils.index import (
     prepare_chunk_indices,
+    prepare_chunk_offsets,
     prepare_position_ids,
     prepare_sequence_ids,
+    prepare_split_cu_seqlens,
     prepare_token_indices,
 )
 from fla.utils import device
@@ -47,6 +49,25 @@ def ref_prepare_chunk_indices(cu_seqlens, chunk_size=CHUNK_SIZE):
         for n in n_chunks_per_seq
     ])
     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1)
+
+
+def ref_prepare_chunk_offsets(cu_seqlens, chunk_size=CHUNK_SIZE):
+    lens = cu_seqlens[1:] - cu_seqlens[:-1]
+    chunk_counts = (lens + chunk_size - 1) // chunk_size
+    return torch.cat([cu_seqlens.new_tensor([0]), chunk_counts]).cumsum(-1)
+
+
+def ref_prepare_split_cu_seqlens(batch_size, seq_len, split_size, cu_seqlens=None, dtype=torch.int32):
+    if cu_seqlens is None:
+        total_tokens = batch_size * seq_len
+        cu_seqlens = list(range(0, total_tokens, seq_len)) + [total_tokens]
+    else:
+        cu_seqlens = cu_seqlens.tolist()
+    return torch.tensor(
+        [i for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:]) for i in range(bos, eos, split_size)] + [cu_seqlens[-1]],
+        dtype=dtype,
+        device=device,
+    )
 
 
 def _prepare_chunk_indices(cu_seqlens, cu_seqlens_cpu=None):
@@ -109,6 +130,43 @@ def test_cu_seqlens_cpu_matches_device(name, impl, ref):
     cu_seqlens = make_cu_seqlens([5, 7, 8, 13, 14])
     cu_seqlens_cpu = cu_seqlens.cpu()
     torch.testing.assert_close(impl(cu_seqlens).long(), impl(cu_seqlens, cu_seqlens_cpu).long(), msg=f"{name} mismatch")
+
+
+@pytest.mark.parametrize("batch_size", [1, 4])
+@pytest.mark.parametrize("max_seq_len", [100, 500])
+@pytest.mark.parametrize("chunk_size", [16, 64, 128])
+def test_chunk_offsets_correctness(batch_size, max_seq_len, chunk_size):
+    torch.manual_seed(42)
+    cu_seqlens = make_cu_seqlens(torch.randint(1, max_seq_len, (batch_size,)).tolist())
+    ref = ref_prepare_chunk_offsets(cu_seqlens, chunk_size)
+    opt = prepare_chunk_offsets(cu_seqlens, chunk_size)
+    torch.testing.assert_close(ref.long(), opt.long(), msg="Chunk offsets mismatch")
+
+
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize("seq_len", [128, 1024])
+@pytest.mark.parametrize("split_size", [32, 128, 129])
+def test_split_cu_seqlens_correctness(batch_size, seq_len, split_size):
+    torch.manual_seed(42)
+    # Case A: cu_seqlens is None -> fixed-length sequences.
+    ref = ref_prepare_split_cu_seqlens(batch_size, seq_len, split_size, cu_seqlens=None)
+    opt = prepare_split_cu_seqlens(batch_size, seq_len, split_size, cu_seqlens=None, device=device)
+    torch.testing.assert_close(ref, opt, msg="Split cu_seqlens (fixed len) mismatch")
+
+    # Case B: variable-length cu_seqlens.
+    cu_seqlens = make_cu_seqlens(torch.randint(1, seq_len, (batch_size,)).tolist())
+    ref = ref_prepare_split_cu_seqlens(batch_size, seq_len, split_size, cu_seqlens=cu_seqlens)
+    opt = prepare_split_cu_seqlens(batch_size, seq_len, split_size, cu_seqlens=cu_seqlens, device=device)
+    torch.testing.assert_close(ref, opt, msg="Split cu_seqlens (var len) mismatch")
+
+
+def test_edge_cases():
+    chunk_size = 32
+    for seqlens in ([32, 64], [5, 10]):
+        cu_seqlens = make_cu_seqlens(seqlens)
+        ref = ref_prepare_chunk_indices(cu_seqlens, chunk_size)
+        opt = prepare_chunk_indices(cu_seqlens, chunk_size)
+        torch.testing.assert_close(ref.long(), opt.long())
 
 
 @pytest.mark.parametrize("name,impl,ref", HELPERS, ids=HELPER_IDS)
