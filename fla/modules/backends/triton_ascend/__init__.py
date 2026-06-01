@@ -50,7 +50,7 @@ class TritonAscendBackend(BaseBackend):
             chunk_indices=chunk_indices,
         )
 
-    def fused_cross_entropy_forward(
+    def cross_entropy_loss(
         self,
         logits,
         target,
@@ -59,12 +59,13 @@ class TritonAscendBackend(BaseBackend):
         lse_square_scale=0.0,
         logit_softcapping=None,
         ignore_index=-100,
+        inplace_backward=False,
         process_group=None,
     ):
         from fla.modules.backends.triton_ascend.fused_cross_entropy import (
-            fused_cross_entropy_forward_npu,
+            cross_entropy_loss_npu,
         )
-        return fused_cross_entropy_forward_npu(
+        return cross_entropy_loss_npu(
             logits,
             target,
             label_smoothing,
@@ -72,40 +73,8 @@ class TritonAscendBackend(BaseBackend):
             lse_square_scale,
             logit_softcapping,
             ignore_index,
+            inplace_backward,
             process_group,
-        )
-
-    def fused_cross_entropy_backward(
-        self,
-        dlogits,
-        grad_losses,
-        logits,
-        lse,
-        target,
-        label_smoothing,
-        logit_scale,
-        lse_square_scale,
-        logit_softcapping,
-        ignore_index,
-        total_classes,
-        class_start_idx,
-    ):
-        from fla.modules.backends.triton_ascend.fused_cross_entropy import (
-            fused_cross_entropy_backward_npu,
-        )
-        return fused_cross_entropy_backward_npu(
-            dlogits,
-            grad_losses,
-            logits,
-            lse,
-            target,
-            label_smoothing,
-            logit_scale,
-            lse_square_scale,
-            logit_softcapping,
-            ignore_index,
-            total_classes,
-            class_start_idx,
         )
 
     def logsumexp_fwd(

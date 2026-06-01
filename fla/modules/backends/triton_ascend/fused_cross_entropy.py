@@ -13,6 +13,7 @@ import triton.language as tl
 from triton.language.math import tanh
 
 from fla.ops.utils.op import exp, log
+from fla.utils import input_guard
 
 
 @triton.heuristics({
@@ -273,3 +274,90 @@ def fused_cross_entropy_backward_npu(
         num_warps=num_warps,
     )
     return dlogits
+
+
+class CrossEntropyLossFunctionNPU(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    def forward(
+        ctx,
+        logits,
+        target,
+        label_smoothing=0.0,
+        logit_scale=1.0,
+        lse_square_scale=0.0,
+        logit_softcapping=None,
+        ignore_index=-100,
+        inplace_backward=False,
+        process_group=None,
+    ):
+        losses, z_losses, lse, total_classes, class_start_idx = fused_cross_entropy_forward_npu(
+            logits,
+            target,
+            label_smoothing,
+            logit_scale,
+            lse_square_scale,
+            logit_softcapping,
+            ignore_index,
+            process_group,
+        )
+        ctx.save_for_backward(logits, lse, target)
+        ctx.mark_non_differentiable(z_losses)
+        ctx.label_smoothing = label_smoothing
+        ctx.logit_scale = logit_scale
+        ctx.lse_square_scale = lse_square_scale
+        ctx.logit_softcapping = logit_softcapping
+        ctx.ignore_index = ignore_index
+        ctx.total_classes = total_classes
+        ctx.class_start_idx = class_start_idx
+        ctx.inplace_backward = inplace_backward
+
+        return losses, z_losses
+
+    @staticmethod
+    @input_guard
+    def backward(ctx, grad_losses, grad_z_losses):
+        del grad_z_losses
+
+        logits, lse, target = ctx.saved_tensors
+        dlogits = logits if ctx.inplace_backward else torch.empty_like(logits)
+        fused_cross_entropy_backward_npu(
+            dlogits,
+            grad_losses,
+            logits,
+            lse,
+            target,
+            ctx.label_smoothing,
+            ctx.logit_scale,
+            ctx.lse_square_scale,
+            ctx.logit_softcapping,
+            ctx.ignore_index,
+            ctx.total_classes,
+            ctx.class_start_idx,
+        )
+        return dlogits, None, None, None, None, None, None, None, None, None
+
+
+def cross_entropy_loss_npu(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    label_smoothing: float = 0.0,
+    logit_scale: float = 1.0,
+    lse_square_scale: float = 0.0,
+    logit_softcapping: float = None,
+    ignore_index: int = -100,
+    inplace_backward: bool = False,
+    process_group=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return CrossEntropyLossFunctionNPU.apply(
+        logits,
+        target,
+        label_smoothing,
+        logit_scale,
+        lse_square_scale,
+        logit_softcapping,
+        ignore_index,
+        inplace_backward,
+        process_group,
+    )

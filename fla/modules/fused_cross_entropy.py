@@ -157,7 +157,6 @@ def cross_entropy_bwd_kernel(
     tl.store(dlogits_ptr + col_offsets, (dloss * logit_scale) * probs, mask=col_offsets < n_cols)
 
 
-@dispatch('modules')
 def fused_cross_entropy_forward(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -251,49 +250,6 @@ def fused_cross_entropy_forward(
     return losses, z_losses, lse, total_classes, class_start_idx
 
 
-@dispatch('modules')
-def fused_cross_entropy_backward(
-    dlogits: torch.Tensor,
-    grad_losses: torch.Tensor,
-    logits: torch.Tensor,
-    lse: torch.Tensor,
-    target: torch.Tensor,
-    label_smoothing: float,
-    logit_scale: float,
-    lse_square_scale: float,
-    logit_softcapping: float | None,
-    ignore_index: int,
-    total_classes: int,
-    class_start_idx: int,
-) -> torch.Tensor:
-    n_rows, n_cols = logits.shape
-    BLOCK_SIZE = min(triton.next_power_of_2(n_cols), 4 * 1024)
-    num_warps = 4 if BLOCK_SIZE < 2048 else (8 if BLOCK_SIZE < 8192 else 16)
-
-    def grid(META): return (n_rows, triton.cdiv(n_cols, META["BLOCK_SIZE"]))  # noqa
-    cross_entropy_bwd_kernel[grid](
-        dlogits,
-        grad_losses,
-        logits,
-        lse,
-        target,
-        label_smoothing,
-        logit_scale,
-        lse_square_scale,
-        logit_softcapping,
-        ignore_index,
-        total_classes,
-        class_start_idx,
-        n_cols,
-        logits.stride(0),
-        dlogits.stride(0),
-        grad_losses.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=num_warps,
-    )
-    return dlogits
-
-
 class CrossEntropyLossFunction(torch.autograd.Function):
 
     @staticmethod
@@ -340,8 +296,12 @@ class CrossEntropyLossFunction(torch.autograd.Function):
 
         logits, lse, target = ctx.saved_tensors
         dlogits = logits if ctx.inplace_backward else torch.empty_like(logits)
-        fused_cross_entropy_backward(
-            dlogits,
+        n_rows, n_cols = logits.shape
+        BLOCK_SIZE = min(triton.next_power_of_2(n_cols), 4 * 1024)
+        num_warps = 4 if BLOCK_SIZE < 2048 else (8 if BLOCK_SIZE < 8192 else 16)
+        def grid(META): return (n_rows, triton.cdiv(n_cols, META["BLOCK_SIZE"]))  # noqa
+        cross_entropy_bwd_kernel[grid](
+            dlogits,  # data ptrs
             grad_losses,
             logits,
             lse,
@@ -353,10 +313,17 @@ class CrossEntropyLossFunction(torch.autograd.Function):
             ctx.ignore_index,
             ctx.total_classes,
             ctx.class_start_idx,
+            n_cols,  # shapes
+            logits.stride(0),  # strides
+            dlogits.stride(0),
+            grad_losses.stride(0),
+            BLOCK_SIZE=BLOCK_SIZE,  # constants
+            num_warps=num_warps,
         )
         return dlogits, None, None, None, None, None, None, None, None, None
 
 
+@dispatch('modules')
 def cross_entropy_loss(
     logits: torch.Tensor,
     target: torch.Tensor,
