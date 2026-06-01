@@ -194,3 +194,59 @@ class TritonAscendBackend(BaseBackend):
     def fused_kl_div_backward(self, do, dx, dw):
         from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_backward_npu
         return fused_kl_div_backward_npu(do, dx, dw)
+
+    def layer_norm_fwd(
+        self,
+        x,
+        weight,
+        bias,
+        eps=1e-5,
+        residual=None,
+        out_dtype=None,
+        residual_dtype=None,
+        is_rms_norm=False,
+        num_groups=1,
+    ):
+        from fla.modules.backends.triton_ascend.layernorm import layer_norm_fwd_npu
+        return layer_norm_fwd_npu(
+            x,
+            weight,
+            bias,
+            eps,
+            residual,
+            out_dtype,
+            residual_dtype,
+            is_rms_norm,
+            num_groups,
+        )
+
+    def layer_norm_bwd(
+        self,
+        dy,
+        x,
+        weight,
+        bias,
+        mean=None,
+        rstd=None,
+        dres=None,
+        has_residual=False,
+        is_rms_norm=False,
+        x_dtype=None,
+        recompute_output=False,
+        num_groups=1,
+    ):
+        from fla.modules.backends.triton_ascend.layernorm import layer_norm_bwd_npu
+        return layer_norm_bwd_npu(
+            dy,
+            x,
+            weight,
+            bias,
+            mean,
+            rstd,
+            dres,
+            has_residual,
+            is_rms_norm,
+            x_dtype,
+            recompute_output,
+            num_groups,
+        )
