@@ -18,6 +18,8 @@ from functools import cache, wraps
 from importlib.util import find_spec
 from typing import Any, ClassVar, TypeVar
 
+import torch
+
 logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable)
 
@@ -179,7 +181,8 @@ def dispatch(operation: str):
             backends_list = registry._get_sorted_backends()
 
             for be in backends_list:
-                if not be.can_use():
+                # Avoid be.can_use(): its @cache wrapper breaks torch.compile tracing.
+                if not (be.is_available() and be.is_enabled()):
                     continue
 
                 can_use, reason = be.verify(func_name, *args, **kwargs)
@@ -208,6 +211,9 @@ def dispatch(operation: str):
 
             # No backend can handle this call, use default implementation
             return func(*args, **kwargs)
+
+        # Dispatch performs runtime backend selection; keep it out of torch.compile graphs.
+        wrapper = torch.compiler.disable(wrapper)
 
         return wrapper
     return decorator

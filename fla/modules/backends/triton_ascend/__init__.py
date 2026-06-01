@@ -135,3 +135,39 @@ class TritonAscendBackend(BaseBackend):
             fused_linear_cross_entropy_backward_npu,
         )
         return fused_linear_cross_entropy_backward_npu(do, dx, dw, db)
+
+    def sigmoid_fwd(self, x, output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import sigmoid_fwd_npu
+        return sigmoid_fwd_npu(x, output_contiguous=output_contiguous)
+
+    def sigmoid_bwd(self, x, dy, output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import sigmoid_bwd_npu
+        return sigmoid_bwd_npu(x, dy, output_contiguous=output_contiguous)
+
+    def logsigmoid_fwd(self, x, temperature=1., output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import logsigmoid_fwd_npu
+        return logsigmoid_fwd_npu(x, temperature=temperature, output_contiguous=output_contiguous)
+
+    def logsigmoid_bwd(self, x, dy, temperature=1., output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import logsigmoid_bwd_npu
+        return logsigmoid_bwd_npu(x, dy, temperature=temperature, output_contiguous=output_contiguous)
+
+    def swish_fwd(self, x, output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import swish_fwd_npu
+        return swish_fwd_npu(x, output_contiguous=output_contiguous)
+
+    def swish_bwd(self, x, dy, output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import swish_bwd_npu
+        return swish_bwd_npu(x, dy, output_contiguous=output_contiguous)
+
+    def swiglu_fwd(self, x, y, output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import swiglu_fwd_npu
+        return swiglu_fwd_npu(x, y, output_contiguous=output_contiguous)
+
+    def swiglu_fwdbwd(self, x, y, g, use_weight=False, output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import swiglu_fwdbwd_npu
+        return swiglu_fwdbwd_npu(x, y, g, use_weight=use_weight, output_contiguous=output_contiguous)
+
+    def swiglu_linear(self, x, y, weight, bias):
+        from fla.modules.backends.triton_ascend.activations import swiglu_linear_npu
+        return swiglu_linear_npu(x, y, weight, bias)
