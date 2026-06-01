@@ -250,3 +250,26 @@ class TritonAscendBackend(BaseBackend):
             recompute_output,
             num_groups,
         )
+
+    def fused_grpo_loss(
+        self,
+        logits,
+        ref_logp,
+        input_ids,
+        advantages,
+        beta=0.1,
+        completion_mask=None,
+        save_kl=False,
+        inplace=False,
+    ):
+        from fla.modules.backends.triton_ascend.grpo import fused_grpo_loss_npu
+        return fused_grpo_loss_npu(
+            logits,
+            ref_logp,
+            input_ids,
+            advantages,
+            beta,
+            completion_mask,
+            save_kl,
+            inplace,
+        )
