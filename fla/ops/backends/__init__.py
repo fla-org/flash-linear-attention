@@ -85,6 +85,11 @@ class BaseBackend:
             return False, str(e)
 
 
+_OPERATION_BACKEND_MODULES: dict[str, str] = {
+    'modules': 'fla.modules.backends',
+}
+
+
 class BackendRegistry:
     """Per-operation backend registry."""
 
@@ -139,8 +144,12 @@ class BackendRegistry:
                 return
 
             # Import backend module to trigger registration
+            module_path = _OPERATION_BACKEND_MODULES.get(
+                operation,
+                f'fla.ops.{operation}.backends',
+            )
             with contextlib.suppress(ImportError):
-                __import__(f'fla.ops.{operation}.backends', fromlist=[''])
+                __import__(module_path, fromlist=[''])
 
             cls._initialized.add(operation)
 

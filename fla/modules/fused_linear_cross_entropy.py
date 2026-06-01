@@ -19,11 +19,9 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
+from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log, tanh
-from fla.utils import IS_AMD, IS_NPU, input_guard
-
-if IS_NPU:
-    from triton.language.math import tanh  # Ascend: tldevice.tanh fails in softcap kernels
+from fla.utils import IS_AMD, input_guard
 
 try:
     from torch.distributed.tensor import DTensor
@@ -35,56 +33,39 @@ except (ImportError, AttributeError):
 # However, setting limit as 65536 as in LayerNorm tutorial is faster because of less register spilling
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
 MAX_FUSED_SIZE = 65536 // 2
-STATIC_WARPS = (2 if IS_NPU else (32 if not IS_AMD else 16))
+STATIC_WARPS = 32 if not IS_AMD else 16
 
 
 @triton.heuristics({
     'HAS_SCALE': lambda args: args['scale'] is not None,
+    'HAS_SOFTCAPPING': lambda args: args['softcapping'] is not None,
 })
 @triton.jit
 def logsumexp_fwd_kernel(
     x,
     z,
     scale,
-    softcapping: tl.constexpr,
+    softcapping,
     D: tl.constexpr,
     B: tl.constexpr,
-    ROWWISE: tl.constexpr,
     HAS_SCALE: tl.constexpr,
     HAS_SOFTCAPPING: tl.constexpr,
 ):
-    i_n = tl.program_id(0).to(tl.int64)
-    if ROWWISE:
-        row = x + i_n * D
-        m = float('-inf')
-        d = 0.0
-        for start in range(0, D, B):
-            o = start + tl.arange(0, B)
-            b_x = tl.load(row + o, mask=o < D, other=float('-inf')).to(tl.float32)
-            if HAS_SCALE:
-                b_x = b_x * scale
-            if HAS_SOFTCAPPING:
-                b_x = softcapping * tanh(b_x / softcapping)
-            blk_max = tl.max(b_x, 0)
-            new_m = tl.maximum(m, blk_max)
-            d = d * exp(m - new_m) + tl.sum(exp(b_x - new_m), 0)
-            m = new_m
-        tl.store(z + i_n, m + log(d))
-    else:
-        i_d = tl.program_id(1).to(tl.int64)
-        o_d = i_d * B + tl.arange(0, B)
-        m_d = o_d < D
+    i_n, i_d = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
+    o_d = i_d * B + tl.arange(0, B)
+    m_d = o_d < D
 
-        b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=-float('inf'))
-        if HAS_SCALE:
-            b_x = b_x * scale
-        if HAS_SOFTCAPPING:
-            b_x = softcapping * tanh(b_x / softcapping)
-        b_m = tl.max(b_x, 0)
-        b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
-        tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
+    b_x = tl.load(x + i_n * D + o_d, mask=m_d, other=-float('inf'))
+    if HAS_SCALE:
+        b_x = b_x * scale
+    if HAS_SOFTCAPPING:
+        b_x = softcapping * tanh(b_x / softcapping)
+    b_m = tl.max(b_x, 0)
+    b_z = log(tl.sum(exp(b_x - b_m), 0)) + b_m
+    tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
 
 
+@dispatch('modules')
 def logsumexp_fwd(
     x,
     scale: float | None = None,
@@ -94,42 +75,19 @@ def logsumexp_fwd(
     shape = x.shape
     x = x.view(-1, shape[-1])
     N, D = x.shape
-    if IS_NPU:
-        B = 1024 if D <= 32768 else (2048 if D <= 131072 else 4096)
-        max_splits = max(1, 65535 // max(N, 1))
-        B = min(max(B, triton.next_power_of_2((D + max_splits - 1) // max_splits)), 8192)
-    else:
-        B = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
-    has_softcapping = softcapping is not None
-    softcap_val = float(softcapping) if has_softcapping else 0.0
+    B = min(triton.next_power_of_2(D), 64 * 1024)
+    ND = triton.cdiv(D, B)
 
-    if IS_NPU:
-        z = x.new_empty(N, dtype=torch.float)
-        logsumexp_fwd_kernel[(N,)](
-            x=x,
-            z=z,
-            scale=scale,
-            softcapping=softcap_val,
-            D=D,
-            B=B,
-            ROWWISE=True,
-            HAS_SOFTCAPPING=has_softcapping,
-        )
-    else:
-        ND = triton.cdiv(D, B)
-        z = x.new_empty(N, ND, dtype=torch.float)
-        logsumexp_fwd_kernel[(N, ND)](
-            x=x,
-            z=z,
-            scale=scale,
-            softcapping=softcap_val,
-            D=D,
-            B=B,
-            ROWWISE=False,
-            HAS_SOFTCAPPING=has_softcapping,
-        )
-        z = z.logsumexp(-1)
-    z = z.view(*shape[:-1])
+    z = x.new_empty(N, ND, dtype=torch.float)
+    logsumexp_fwd_kernel[(N, ND)](
+        x=x,
+        z=z,
+        scale=scale,
+        softcapping=softcapping,
+        D=D,
+        B=B,
+    )
+    z = z.logsumexp(-1).view(*shape[:-1])
     if dtype is not None and dtype != torch.float:
         z = z.to(dtype)
     return z
@@ -146,8 +104,6 @@ def cross_entropy_kernel(
     label_smoothing: tl.constexpr,
     logit_scale: tl.constexpr,
     logit_softcapping: tl.constexpr,
-    HAS_SOFTCAPPING: tl.constexpr,
-    USE_DEBUG_BARRIER: tl.constexpr,
     reduction: tl.constexpr,
     V: tl.constexpr,
     BV: tl.constexpr,
@@ -203,7 +159,7 @@ def cross_entropy_kernel(
     # 3. [Online softmax] first pass: compute logsumexp
     # we did this in another kernel
     b_l = tl.load(logits + b_y).to(tl.float32) * logit_scale
-    if HAS_SOFTCAPPING:
+    if logit_softcapping is not None:
         b_t_y = tanh(b_l / logit_softcapping)
         b_l = logit_softcapping * b_t_y
         # Save the softcap derivative for the target position for use in step 6
@@ -219,9 +175,9 @@ def cross_entropy_kernel(
     b_z = 0.0
     eps = label_smoothing / V
 
-    if USE_DEBUG_BARRIER:
-        # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/ops/cross_entropy.py#L34
-        tl.debug_barrier()
+    # We need tl.debug_barrier() as mentioned in
+    # https://github.com/triton-lang/triton/blob/ba42a5c68fd0505f8c42f4202d53be0f8d9a5fe0/python/triton/ops/cross_entropy.py#L34
+    tl.debug_barrier()
 
     # 5. [Online Softmax] Second pass: compute gradients
     # For 'mean' reduction, gradients are normalized by number of non-ignored elements
@@ -234,7 +190,7 @@ def cross_entropy_kernel(
     for iv in range(0, NV):
         o_v = iv * BV + tl.arange(0, BV)
         b_logits = tl.load(logits + o_v, mask=o_v < V, other=float('-inf')).to(tl.float32) * logit_scale
-        if HAS_SOFTCAPPING:
+        if logit_softcapping is not None:
             b_t = tanh(b_logits / logit_softcapping)
             b_capped = logit_softcapping * b_t
         else:
@@ -244,14 +200,13 @@ def cross_entropy_kernel(
             b_z += tl.sum(tl.where(o_v < V, -eps * b_capped, 0.0))
         b_p = (exp(b_capped - b_lse) - eps) * logit_scale
         # d(softcap * tanh(x/softcap))/dx = 1 - tanh(x/softcap)^2
-        if HAS_SOFTCAPPING:
+        if logit_softcapping is not None:
             b_p = b_p * (1.0 - b_t * b_t)
         if reduction == "mean":
             b_p = b_p / total
         tl.store(logits + o_v, b_p, mask=o_v < V)
 
-        if USE_DEBUG_BARRIER:
-            tl.debug_barrier()
+        tl.debug_barrier()
 
     # Original loss = H(q, p),  with label smoothing regularization = H(q', p) and (label_smoothing / V) = eps
     # H(q', p) = (1 - label_smoothing) * H(q, p) + label_smoothing * H(u, p)
@@ -270,7 +225,7 @@ def cross_entropy_kernel(
     b_l = tl.load(logits + b_y)
 
     # The correction term also needs the softcap chain rule factor
-    if HAS_SOFTCAPPING:
+    if logit_softcapping is not None:
         b_sc_factor = b_softcap_deriv_y
     else:
         b_sc_factor = 1.0
@@ -318,6 +273,7 @@ def elementwise_mul_kernel(
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
 
+@dispatch('modules')
 def fused_linear_cross_entropy_forward(
     x: torch.Tensor,
     target: torch.LongTensor,
@@ -345,14 +301,7 @@ def fused_linear_cross_entropy_forward(
     # C = ceil(N / NC)
     # for ex: N = 4096*4, V = 32000, H = 4096 ==> NC = 8, C = ceil(N / NC) = 2048
     N, H, V = *x.shape, weight.shape[0]
-    if IS_NPU:
-        BV = 1024 if V <= 32768 else (2048 if V <= 131072 else 4096)
-        max_splits = max(1, 65535 // max(N, 1))
-        BV = min(max(BV, triton.next_power_of_2((V + max_splits - 1) // max_splits)), 8192)
-    else:
-        BV = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
-    has_softcapping = logit_softcapping is not None
-    softcap_val = float(logit_softcapping) if has_softcapping else 0.0
+    BV = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
     # TODO: in real cases, we may need to limit the number of chunks NC to
     # ensure the precisions of accumulated gradients
     NC = min(num_chunks, triton.cdiv(V, H))
@@ -404,9 +353,7 @@ def fused_linear_cross_entropy_forward(
             ignore_index=ignore_index,
             label_smoothing=label_smoothing,
             logit_scale=logit_scale,
-            logit_softcapping=softcap_val,
-            HAS_SOFTCAPPING=has_softcapping,
-            USE_DEBUG_BARRIER=not IS_NPU,
+            logit_softcapping=logit_softcapping,
             reduction=reduction,
             V=V,
             BV=BV,
@@ -442,22 +389,15 @@ def fused_linear_cross_entropy_forward(
 
         # gradient of logits is computed in-place by the above triton kernel and is of shape: C x V
         # thus dx should be of shape: C x H
-        c_grad = c_logits if c_logits.is_contiguous() else c_logits.contiguous()
-        dx[start:end] = torch.mm(c_grad, weight) + dx_l2_contribution
+        dx[start:end] = torch.mm(c_logits, weight) + dx_l2_contribution
 
         if weight is not None:
-            grad_w = c_grad.t().to(dtype=grad_dtype)
-            grad_x = c_x if c_x.dtype == grad_dtype else c_x.to(dtype=grad_dtype)
-            if IS_NPU:
-                # MatMulV3 diy binary is missing for some [V, C] x [C, H] shapes on Ascend.
-                dw.add_(grad_w @ grad_x)
-            else:
-                torch.addmm(
-                    input=dw,
-                    mat1=grad_w,
-                    mat2=grad_x,
-                    out=dw,
-                )
+            torch.addmm(
+                input=dw,
+                mat1=c_logits.t().to(dtype=grad_dtype),
+                mat2=c_x,
+                out=dw,
+            )
 
         if bias is not None:
             torch.add(input=db, other=c_logits.sum(0, dtype=bias_grad_dtype), out=db)
@@ -470,6 +410,7 @@ def fused_linear_cross_entropy_forward(
     return loss, dx, dw, db
 
 
+@dispatch('modules')
 def fused_linear_cross_entropy_backward(
     do: torch.Tensor,
     dx: torch.Tensor,
@@ -481,10 +422,7 @@ def fused_linear_cross_entropy_backward(
         # We use a Triton kernel instead of a PyTorch operation because modifying inputs in-place
         # for gradient storage and backward multiple times causes anomalies with PyTorch but not with Triton.
         N, H = dx.shape
-        if IS_NPU:
-            B = min(MAX_FUSED_SIZE, max(1024, triton.next_power_of_2((N * H + 65534) // 65535)))
-        else:
-            B = min(MAX_FUSED_SIZE, triton.next_power_of_2(N * H))
+        B = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
 
         elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
             x=dx,
@@ -497,29 +435,21 @@ def fused_linear_cross_entropy_backward(
         # handle dw
         if dw is not None:
             V, H = dw.shape
-            if IS_NPU:
-                B_dw = min(MAX_FUSED_SIZE, max(1024, triton.next_power_of_2((V * H + 65534) // 65535)))
-            else:
-                B_dw = min(MAX_FUSED_SIZE, triton.next_power_of_2(V * H))
-            elementwise_mul_kernel[(triton.cdiv(V * H, B_dw),)](
+            elementwise_mul_kernel[(triton.cdiv(V * H, B),)](
                 x=dw,
                 g=do,
                 N=V*H,
-                B=B_dw,
+                B=B,
                 num_warps=STATIC_WARPS,
             )
 
         if db is not None:
             V = db.shape[0]
-            if IS_NPU:
-                B_db = min(MAX_FUSED_SIZE, max(1024, triton.next_power_of_2((V + 65534) // 65535)))
-            else:
-                B_db = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
-            elementwise_mul_kernel[(triton.cdiv(V, B_db),)](
+            elementwise_mul_kernel[(triton.cdiv(V, B),)](
                 x=db,
                 g=do,
                 N=V,
-                B=B_db,
+                B=B,
                 num_warps=STATIC_WARPS,
             )
     return dx, dw, db
