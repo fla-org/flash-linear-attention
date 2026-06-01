@@ -171,3 +171,26 @@ class TritonAscendBackend(BaseBackend):
     def swiglu_linear(self, x, y, weight, bias):
         from fla.modules.backends.triton_ascend.activations import swiglu_linear_npu
         return swiglu_linear_npu(x, y, weight, bias)
+
+    def fused_kl_div_forward(
+        self,
+        x,
+        target_x,
+        weight,
+        target_weight,
+        reduction='batchmean',
+        accumulate_grad_in_fp32=True,
+    ):
+        from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_forward_npu
+        return fused_kl_div_forward_npu(
+            x,
+            target_x,
+            weight,
+            target_weight,
+            reduction,
+            accumulate_grad_in_fp32,
+        )
+
+    def fused_kl_div_backward(self, do, dx, dw):
+        from fla.modules.backends.triton_ascend.fused_kl_div import fused_kl_div_backward_npu
+        return fused_kl_div_backward_npu(do, dx, dw)
