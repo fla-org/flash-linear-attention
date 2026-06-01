@@ -33,9 +33,6 @@ log.*
 # pycache
 __pycache__
 
-# torch.compile debug dumps (generated at runtime)
-torch_compile_debug/
-
 # saved model
 *.pkl
 *.pt
