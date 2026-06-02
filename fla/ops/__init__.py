@@ -33,8 +33,10 @@ from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_r
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from .simple_gla import chunk_simple_gla, fused_chunk_simple_gla, fused_recurrent_simple_gla, parallel_simple_gla
+from .wall_attn import build_wall_kv_cache, naive_wall_attn, parallel_wall_attn, parallel_wall_attn_decode
 
 __all__ = [
+    'build_wall_kv_cache',
     'chunk_abc',
     'chunk_comba',
     'chunk_delta_rule',
@@ -76,6 +78,7 @@ __all__ = [
     'fused_recurrent_rwkv6',
     'fused_recurrent_rwkv7',
     'fused_recurrent_simple_gla',
+    'naive_wall_attn',
     'parallel_attn',
     'parallel_based',
     'parallel_forgetting_attn',
@@ -83,4 +86,6 @@ __all__ = [
     'parallel_path_attn',
     'parallel_retention',
     'parallel_simple_gla',
+    'parallel_wall_attn',
+    'parallel_wall_attn_decode',
 ]
