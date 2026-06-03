@@ -40,6 +40,30 @@ class WallAttention(nn.Module):
     :math:`\mathrm{scale}\sum_n q_{in} k_{jn}\,\exp_2(P_{in} - P_{jn})`. The per-channel
     log-decay ``g`` is produced by ``g_proj`` followed by ``logsigmoid`` (so ``g <= 0``
     and the prefix is monotone). An optional FoX-style per-head scalar gate can be added.
+
+    Args:
+        hidden_size (int, Optional):
+            The hidden size of the input. Default: 2048.
+        num_heads (int, Optional):
+            The number of query heads. Default: 32.
+        num_kv_heads (int, Optional):
+            The number of key/value heads, equal to `num_heads` if `None`.
+            GQA is applied when `num_heads` is a multiple of `num_kv_heads`. Default: `None`.
+        qkv_bias (bool, Optional):
+            Whether to use bias in the q/k/v projections. Default: `False`.
+        qk_norm (bool, Optional):
+            Whether to apply RMS GroupNorm to queries and keys. Default: `False`.
+        window_size (int, Optional):
+            Sliding-window size; `None` for full causal attention. Default: `None`.
+        use_output_gate (bool, Optional):
+            Whether to apply a sigmoid output gate on the attention output. Default: `False`.
+        use_scalar_gate (bool, Optional):
+            Whether to add a FoX-style per-head scalar log-decay gate. Default: `False`.
+        gate_init_bias (float, Optional):
+            Init bias for the decay-gate projections, so `logsigmoid(bias) ~ 0`
+            (near-vanilla attention at init). Default: 8.0.
+        layer_idx (int, Optional):
+            The index of the layer, used for cache keying. Default: `None`.
     """
 
     def __init__(
