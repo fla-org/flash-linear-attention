@@ -19,3 +19,16 @@ Guidance for AI coding agents (Claude Code, Codex, etc.) working in this repo.
 ## Review comments
 
 Keep review/PR comments concise and natural — skip heavy `**1.** **2.**` scaffolding, write like a person.
+
+## Repo-local Skills
+
+This repo provides task-specific workflow skills under `.agents/skills/*/SKILL.md`:
+
+- **`fla-nvidia-performance`** — NVIDIA GPU kernel / Triton / Gluon / TileLang / CUDA backend performance work
+- **`fla-kda`** — KDA-specific gate, intra/inter, backend, and test workflow
+- **`fla-dispatch-backends`** — `@dispatch` decorator and backend registry workflow
+- **`fla-correctness-coverage`** — Kernel correctness testing and coverage for `fla/ops/**`
+- **`fla-mr-readiness`** — Preparing MR/PR, test plans, and contribution compliance
+
+Load the relevant skill when your task matches its scope. See `.agents/skills/README.md`
+for the directory convention.

@@ -19,6 +19,9 @@ dist-packages/*
 # experimental results
 exp
 results
+profile/
+*.ncu-rep
+*.nsys-rep
 wandb
 *.csv
 *.png
