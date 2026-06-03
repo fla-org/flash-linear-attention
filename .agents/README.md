@@ -17,7 +17,7 @@ Current skills:
 
 | Skill | Purpose |
 |-------|---------|
-| `fla-nvidia-performance` | NVIDIA GPU kernel / Triton / Gluon / CUDA backend performance work |
+| `fla-nvidia-performance` | NVIDIA GPU kernel / Triton / Gluon / TileLang / CUDA backend performance work |
 | `fla-kda` | KDA-specific gate, intra/inter, backend, and test workflow |
 | `fla-dispatch-backends` | `@dispatch` decorator and backend registry workflow |
 | `fla-correctness-coverage` | Kernel correctness testing and coverage for `fla/ops/**` |

@@ -18,7 +18,7 @@ entry point is `SKILL.md`.
 
 | Skill | Purpose |
 |-------|---------|
-| `fla-nvidia-performance` | NVIDIA GPU kernel performance workflow, hardware baselines, and MR-ready profiling evidence |
+| `fla-nvidia-performance` | NVIDIA GPU kernel performance workflow for Triton, Gluon, TileLang, CUDA backends, hardware baselines, and MR-ready profiling evidence |
 | `fla-kda` | KDA-specific gate, intra/inter, backend, and test workflow |
 | `fla-dispatch-backends` | `@dispatch` decorator and backend registry workflow |
 | `fla-correctness-coverage` | Coverage matrix and test guidance for `fla/ops/**` kernels |

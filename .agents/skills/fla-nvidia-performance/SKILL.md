@@ -1,23 +1,26 @@
 ---
 name: fla-nvidia-performance
 description: >
-  Guidelines for NVIDIA GPU kernel / Triton / Gluon / CUDA backend performance work
-  in the FLA repo. Covers profiling workflow, hardware baselines, and MR-ready
-  performance evidence requirements. Uses an installed ncu-report-skill when a
-  task needs detailed Nsight Compute collection and diagnosis.
+  Guidelines for NVIDIA GPU kernel / Triton / Gluon / TileLang / CUDA backend
+  performance work in the FLA repo. Covers profiling workflow, hardware baselines,
+  and MR-ready performance evidence requirements. Uses an installed
+  ncu-report-skill when a task needs detailed Nsight Compute collection and
+  diagnosis.
 ---
 
 # FLA NVIDIA Performance Skill
 
-Use this skill when working on GPU kernel optimizations, backend tuning, or any
-change that could affect throughput or latency in `fla/ops/` or related modules.
+Use this skill when working on Triton, Gluon, TileLang, CUDA, or other NVIDIA GPU
+kernel optimizations, backend tuning, or any change that could affect throughput
+or latency in `fla/ops/` or related modules.
 
 ## Hardware baseline
 
 - **Minimum effective baseline**: datacenter NVIDIA GPUs with sm_90 or newer; H100 / H20 are accepted.
 - **Preferred targets**: datacenter NVIDIA GPUs with sm_100 or sm_103.
-- **Reference only**: A100 (sm_80) and sm_120 consumer cards.
-  Do not use A100 or consumer-card numbers as the only MR performance conclusion.
+- **Reference only**: A100 (sm_80), pre-sm_80 GPUs, and all consumer cards
+  (including sm_86, sm_89, and sm_120).
+  Do not use these numbers as the only MR performance conclusion.
 
 ## Detailed NCU workflow
 
