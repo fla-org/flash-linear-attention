@@ -80,7 +80,11 @@ def tensor_cache(
     return wrapper
 
 
-def _skip_contiguous(no_guard_contiguous: bool | list[str], param_name: str, skip_params: set[str]) -> bool:
+def _skip_contiguous(
+    no_guard_contiguous: bool | list[str] | tuple[str, ...] | set[str],
+    param_name: str,
+    skip_params: set[str],
+) -> bool:
     return no_guard_contiguous is True or param_name in skip_params
 
 
@@ -93,21 +97,21 @@ def _contiguous_if_needed(arg: Any, skip: bool) -> Any:
 def input_guard(
     fn: Callable[..., torch.Tensor] | None = None,
     *,
-    no_guard_contiguous: bool | list[str] = False,
+    no_guard_contiguous: bool | list[str] | tuple[str, ...] | set[str] = False,
 ) -> Callable[[Callable[..., torch.Tensor]], Callable[..., torch.Tensor]] | Callable[..., torch.Tensor]:
     """
     A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
 
     Args:
-        no_guard_contiguous (bool | list[str]):
-            If True, skip all contiguous checks. If a list of parameter names, skip contiguous check for those parameters.
+        no_guard_contiguous (bool | list[str] | tuple[str, ...] | set[str]):
+            If True, skip all contiguous checks. If a list/tuple/set of parameter names, skip contiguous check for those parameters.
     """
 
     def decorator(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
         # Get function signature for parameter name mapping
         sig = inspect.signature(fn)
         param_names = list(sig.parameters.keys())
-        skip_params = set(no_guard_contiguous) if isinstance(no_guard_contiguous, list) else set()
+        skip_params = set(no_guard_contiguous) if isinstance(no_guard_contiguous, (list, tuple, set)) else set()
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):

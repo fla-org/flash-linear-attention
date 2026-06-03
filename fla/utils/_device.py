@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import contextlib
 import functools
 import logging
 import os
@@ -87,7 +88,7 @@ def get_multiprocessor_count(tensor_idx: int = 0) -> int:
             if triton.runtime.driver.active.get_current_target().backend == 'npu':
                 return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['num_vectorcore']
         except Exception:
-            pass
+            logger.debug('Failed to get NPU multiprocessor count, falling back to 1.', exc_info=True)
         return 1
 
 
@@ -197,11 +198,21 @@ if check_pytorch_version('2.4'):
     autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
 
     def custom_device_ctx(index: int):
-        return device_torch_lib.device(index)
+        if index is None:
+            return contextlib.nullcontext()
+        try:
+            return device_torch_lib.device(index)
+        except (AttributeError, AssertionError, RuntimeError):
+            return contextlib.nullcontext()
 else:
     assert device == 'cuda', 'Only cuda device is supported for PyTorch version < 2.4.0.'
     autocast_custom_fwd = device_torch_lib.amp.custom_fwd
     autocast_custom_bwd = device_torch_lib.amp.custom_bwd
 
     def custom_device_ctx(index: int):
-        return torch.cuda.device(index)
+        if index is None:
+            return contextlib.nullcontext()
+        try:
+            return torch.cuda.device(index)
+        except (AttributeError, AssertionError, RuntimeError):
+            return contextlib.nullcontext()

@@ -11,4 +11,7 @@ FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
 
 FLA_DISABLE_TENSOR_CACHE = os.getenv('FLA_DISABLE_TENSOR_CACHE', '0') == '1'
-FLA_TENSOR_CACHE_SIZE = int(os.getenv('FLA_TENSOR_CACHE_SIZE', "4"))
+try:
+    FLA_TENSOR_CACHE_SIZE = int(os.getenv('FLA_TENSOR_CACHE_SIZE', "4"))
+except ValueError:
+    FLA_TENSOR_CACHE_SIZE = 4
