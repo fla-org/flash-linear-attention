@@ -19,6 +19,15 @@ except ImportError:
     causal_conv1d_fn = None
 
 
+_CONV_REF_FP32_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _conv_ref_compute_dtype(*tensors):
+    if any(t is not None and t.dtype in _CONV_REF_FP32_DTYPES for t in tensors):
+        return torch.float32
+    return tensors[0].dtype
+
+
 def causal_conv1d_ref_torch(
     x,
     weight,
@@ -40,17 +49,20 @@ def causal_conv1d_ref_torch(
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
     dtype_in = x.dtype
-    x = x.to(weight.dtype)
+    compute_dtype = _conv_ref_compute_dtype(x, weight, bias, initial_state)
     seqlen = x.shape[-1]
     dim, width = weight.shape
+    weight_conv = weight.to(compute_dtype)
+    bias_conv = bias.to(compute_dtype) if bias is not None else None
     if initial_state is None:
-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=width - 1, groups=dim)
+        x_full = x
+        out = F.conv1d(x_full.to(compute_dtype), weight_conv.unsqueeze(1), bias_conv, padding=width - 1, groups=dim)
     else:
-        x = torch.cat([initial_state, x], dim=-1)
-        out = F.conv1d(x, weight.unsqueeze(1), bias, padding=0, groups=dim)
+        x_full = torch.cat([initial_state, x], dim=-1)
+        out = F.conv1d(x_full.to(compute_dtype), weight_conv.unsqueeze(1), bias_conv, padding=0, groups=dim)
     out = out[..., :seqlen]
     if output_final_state:
-        final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(
+        final_states = F.pad(x_full, (width - 1 - x_full.shape[-1], 0)).to(
             dtype_in,
         )  # (batch, dim, width - 1)
         if final_states_out is not None:
@@ -80,22 +92,25 @@ def causal_conv1d_update_ref_torch(x, conv_state, weight, bias=None, activation=
     unsqueeze = x.dim() == 2
     if unsqueeze:
         x = x.unsqueeze(-1)
+    compute_dtype = _conv_ref_compute_dtype(x, weight, bias, conv_state)
     batch, dim, seqlen = x.shape
     width = weight.shape[1]
     state_len = conv_state.shape[-1]
     assert conv_state.shape == (batch, dim, state_len)
     assert weight.shape == (dim, width)
     if cache_seqlens is None:
-        x_new = torch.cat([conv_state, x], dim=-1).to(weight.dtype)  # (batch, dim, state_len + seqlen)
+        x_new = torch.cat([conv_state, x], dim=-1)  # (batch, dim, state_len + seqlen)
         conv_state.copy_(x_new[:, :, -state_len:])
     else:
         width_idx = torch.arange(-(width - 1), 0, dtype=torch.long, device=x.device).unsqueeze(0) + cache_seqlens.unsqueeze(1)
         width_idx = torch.remainder(width_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
-        x_new = torch.cat([conv_state.gather(2, width_idx), x], dim=-1).to(weight.dtype)
+        x_new = torch.cat([conv_state.gather(2, width_idx), x], dim=-1)
         copy_idx = torch.arange(seqlen, dtype=torch.long, device=x.device).unsqueeze(0) + cache_seqlens.unsqueeze(1)
         copy_idx = torch.remainder(copy_idx, state_len).unsqueeze(1).expand(-1, dim, -1)
         conv_state.scatter_(2, copy_idx, x)
-    out = F.conv1d(x_new, weight.unsqueeze(1), bias, padding=0, groups=dim)[:, :, -seqlen:]
+    weight_conv = weight.to(compute_dtype)
+    bias_conv = bias.to(compute_dtype) if bias is not None else None
+    out = F.conv1d(x_new.to(compute_dtype), weight_conv.unsqueeze(1), bias_conv, padding=0, groups=dim)[:, :, -seqlen:]
     if unsqueeze:
         out = out.squeeze(-1)
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)

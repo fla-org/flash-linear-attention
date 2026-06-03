@@ -52,7 +52,7 @@ jobs:
 
   run-pytest:
     needs: parse
-    runs-on: nvidia-h100-pt2-7
+    runs-on: nvidia-h100-1
     timeout-minutes: 60
     outputs:
       status: ${{ steps.pytest.outputs.status }}
@@ -82,8 +82,7 @@ jobs:
           TARGET_CONDA_ENV="pytorch_2_7"
           echo "Determining conda environment based on runner: ${{ runner.name }}"
           case "${{ runner.name }}" in
-            nvidia-h100-pt2-7|nvidia-h100-1) TARGET_CONDA_ENV="pytorch_2_7" ;;
-            nvidia-h100-2) TARGET_CONDA_ENV="pytorch_2_7_1" ;;
+            nvidia-h100-1) TARGET_CONDA_ENV="pytorch_2_7" ;;
           esac
           echo "--> Runner is '${{ runner.name }}', selected environment is '${TARGET_CONDA_ENV}'"
 
