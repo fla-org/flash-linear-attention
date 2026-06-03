@@ -8,11 +8,6 @@
 import math
 import os
 
-# Wall's log-space `R` factoring and the gate-gradient reverse-cumsum are sensitive
-# to TF32 matmuls (catastrophic cancellation for small gates), so force IEEE fp32
-# dots for these correctness checks -- matching the convention in `test_attn.py`.
-os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-
 import pytest
 import torch
 
@@ -20,6 +15,12 @@ from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.wall_attn import build_wall_kv_cache, naive_wall_attn, parallel_wall_attn, parallel_wall_attn_decode
 from fla.utils import assert_close, device
+
+# Wall's log-space `R` factoring and the gate-gradient reverse-cumsum are sensitive
+# to TF32 matmuls (catastrophic cancellation for small gates), so force IEEE fp32
+# dots for these correctness checks -- matching the convention in `test_attn.py`.
+# Read by Triton at kernel-launch time, so setting it after imports is sufficient.
+os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
 # Wall scores with a per-block log-space reference `R` for the `exp2(P_i - P_j)`
 # rescaling, where `P = cumsum(g)`. The factoring assumes `P` is monotonically
