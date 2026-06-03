@@ -8,111 +8,26 @@
 import contextlib
 import functools
 import inspect
-import logging
-import os
-import platform
 import sys
 import warnings
 from collections import deque
 from collections.abc import Callable
 from enum import Enum
-from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
-import triton
-from packaging import version
+from packaging import version as package_version
 
-logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from fla import __version__
-
-FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
-FLA_CACHE_RESULTS = os.getenv('FLA_CACHE_RESULTS', '1') == '1'
-
-FLA_DISABLE_TENSOR_CACHE = os.getenv('FLA_DISABLE_TENSOR_CACHE', '0') == '1'
-TRITON_ABOVE_3_4_0 = version.parse(triton.__version__) >= version.parse("3.4.0")
-TRITON_ABOVE_3_5_1 = version.parse(triton.__version__) >= version.parse("3.5.1")
-FLA_TENSOR_CACHE_SIZE = int(os.getenv('FLA_TENSOR_CACHE_SIZE', "4"))
+from .. import __version__
+from ._config import FLA_DISABLE_TENSOR_CACHE, FLA_TENSOR_CACHE_SIZE
+from ._device import custom_device_ctx
 
 
-SUPPORTS_AUTOTUNE_CACHE = "cache_results" in inspect.signature(triton.autotune).parameters
-
-autotune_cache_kwargs = {"cache_results": FLA_CACHE_RESULTS} if SUPPORTS_AUTOTUNE_CACHE else {}
-
-
-@lru_cache(maxsize=1)
-def check_environments():
-    """
-    Checks the current operating system, Triton version, and Python version,
-    issuing warnings if they don't meet recommendations.
-    This function's body only runs once due to lru_cache.
-    """
-    # Check Operating System
-    if sys.platform == 'win32':
-        # Check if triton-windows is installed
-        try:
-            from importlib.metadata import PackageNotFoundError, metadata
-            metadata('triton-windows')
-            # triton-windows is installed, no warning needed
-        except PackageNotFoundError:
-            logger.warning(
-                "Detected Windows operating system. Consider installing triton-windows "
-                "(https://github.com/triton-lang/triton-windows) for better compatibility. "
-                "Without it, some features may not work correctly.",
-            )
-
-    triton_version = version.parse(triton.__version__)
-    required_triton_version = version.parse("3.3.0")
-
-    if triton_version < required_triton_version:
-        logger.warning(
-            f"Current Triton version {triton_version} is below the recommended 3.3.0 version. "
-            "Errors may occur and these issues will not be fixed. "
-            "Please consider upgrading Triton.",
-        )
-
-    # Check Python version
-    py_version = version.parse(f"{sys.version_info.major}.{sys.version_info.minor}")
-    required_py_version = version.parse("3.11")
-
-    if py_version < required_py_version:
-        logger.warning(
-            f"Current Python version {py_version} is below the recommended 3.11 version. "
-            "It is recommended to upgrade to Python 3.11 or higher for the best experience.",
-        )
-
-    return None
-
-
-check_environments()
-
-
-def get_abs_err(x, y):
-    return (x.detach()-y.detach()).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x.detach()-y.detach()).flatten().square().mean().sqrt().item()
-    base = (x.detach()).flatten().square().mean().sqrt().item()
-    return err / (base + 1e-8)
-
-
-def assert_close(prefix, ref, tri, ratio, warning=False, err_atol=1e-6):
-    abs_atol = get_abs_err(ref, tri)
-    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    logger.info(msg)
-    error_rate = get_err_ratio(ref, tri)
-    if abs_atol <= err_atol:
-        return
-    assert not torch.isnan(ref).any(), f"{prefix}: NaN detected in ref"
-    assert not torch.isnan(tri).any(), f"{prefix}: NaN detected in tri"
-    if warning or (FLA_CI_ENV and (error_rate < 0.01 or abs_atol <= 0.3)):
-        if error_rate > ratio:
-            warnings.warn(msg)
-    else:
-        assert error_rate < ratio, msg
+class Action(Enum):
+    NONE = "none"
+    NOTIFY = "notify"
+    NOTIFY_ALWAYS = "notify_always"
+    RAISE = "raise"
 
 
 def tensor_cache(
@@ -142,9 +57,13 @@ def tensor_cache(
     """
     cached: deque = deque(maxlen=FLA_TENSOR_CACHE_SIZE)
 
+    def cache_disabled() -> bool:
+        utils_module = sys.modules.get('fla.utils')
+        return getattr(utils_module, 'FLA_DISABLE_TENSOR_CACHE', FLA_DISABLE_TENSOR_CACHE)
+
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if FLA_DISABLE_TENSOR_CACHE:
+        if cache_disabled():
             return fn(*args, **kwargs)
 
         for cached_args, cached_kwargs, cached_result in cached:
@@ -159,6 +78,16 @@ def tensor_cache(
         return result
 
     return wrapper
+
+
+def _skip_contiguous(no_guard_contiguous: bool | list[str], param_name: str, skip_params: set[str]) -> bool:
+    return no_guard_contiguous is True or param_name in skip_params
+
+
+def _contiguous_if_needed(arg: Any, skip: bool) -> Any:
+    if isinstance(arg, torch.Tensor) and not skip:
+        return arg.contiguous()
+    return arg
 
 
 def input_guard(
@@ -178,14 +107,10 @@ def input_guard(
         # Get function signature for parameter name mapping
         sig = inspect.signature(fn)
         param_names = list(sig.parameters.keys())
+        skip_params = set(no_guard_contiguous) if isinstance(no_guard_contiguous, list) else set()
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            # Convert no_guard_contiguous to list of parameter names if it's a list
-            skip_params = set()
-            if isinstance(no_guard_contiguous, list):
-                skip_params = set(no_guard_contiguous)
-
             # Process args with parameter name mapping
             processed_args = []
             for i, arg in enumerate(args):
@@ -195,24 +120,13 @@ def input_guard(
                     # For *args beyond signature, use position as name
                     param_name = f"__arg_{i}"
 
-                if isinstance(arg, torch.Tensor):
-                    if no_guard_contiguous is True or param_name in skip_params:
-                        processed_args.append(arg)
-                    else:
-                        processed_args.append(arg.contiguous())
-                else:
-                    processed_args.append(arg)
+                processed_args.append(_contiguous_if_needed(
+                    arg, _skip_contiguous(no_guard_contiguous, param_name, skip_params)))
 
             # Process kwargs
             processed_kwargs = {}
             for k, v in kwargs.items():
-                if isinstance(v, torch.Tensor):
-                    if no_guard_contiguous is True or k in skip_params:
-                        processed_kwargs[k] = v
-                    else:
-                        processed_kwargs[k] = v.contiguous()
-                else:
-                    processed_kwargs[k] = v
+                processed_kwargs[k] = _contiguous_if_needed(v, _skip_contiguous(no_guard_contiguous, k, skip_params))
 
             tensor = None
             for arg in args:
@@ -256,18 +170,13 @@ def require_version(version, hint):
         def wrapper(ctx, *args, **kwargs):
             from transformers.utils.versions import require_version
             require_version(version, hint)
-            return fn(ctx,
-                      *(i if not isinstance(i, torch.Tensor) else i.contiguous() for i in args),
-                      **{k: (v if not isinstance(v, torch.Tensor) else v.contiguous()) for k, v in kwargs.items()})
+            return fn(
+                ctx,
+                *(i if not isinstance(i, torch.Tensor) else i.contiguous() for i in args),
+                **{k: (v if not isinstance(v, torch.Tensor) else v.contiguous()) for k, v in kwargs.items()},
+            )
         return wrapper
     return decorator
-
-
-class Action(Enum):
-    NONE = "none"
-    NOTIFY = "notify"
-    NOTIFY_ALWAYS = "notify_always"
-    RAISE = "raise"
 
 
 def deprecate_kwarg(
@@ -337,8 +246,8 @@ def deprecate_kwarg(
         ```
 
     """
-    deprecated_version = version.parse(version)
-    current_version = version.parse(__version__)
+    deprecated_version = package_version.parse(version)
+    current_version = package_version.parse(__version__)
     is_greater_or_equal_version = current_version >= deprecated_version
 
     if is_greater_or_equal_version:
@@ -399,7 +308,6 @@ def deprecate_kwarg(
                     minimum_action = Action.RAISE
 
                 # change to NOTIFY -> NONE if specified (NOTIFY_ALWAYS can't be changed to NONE)
-                # in case we want to ignore notifications for already deprecated arguments
                 elif not warn_if_greater_or_equal_version and minimum_action == Action.NOTIFY:
                     minimum_action = Action.NONE
 
@@ -418,163 +326,7 @@ def deprecate_kwarg(
 
 
 def checkpoint(fn):
+    @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         return torch.utils.checkpoint.checkpoint(fn, *args, **kwargs)
     return wrapper
-
-
-@functools.cache
-def check_pytorch_version(version_s: str = '2.4') -> bool:
-    return version.parse(torch.__version__) >= version.parse(version_s)
-
-
-def _cpu_device_warning():
-    warnings.warn(('Triton is not supported on current platform, roll back to CPU.'), stacklevel=1)
-
-
-@functools.cache
-def get_multiprocessor_count(tensor_idx: int = 0) -> int:
-    try:
-        return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['multiprocessor_count']
-    except BaseException:
-        # Maybe we use a NPU device.
-        if triton.runtime.driver.active.get_current_target().backend == 'npu':
-            return triton.runtime.driver.active.utils.get_device_properties(tensor_idx)['num_vectorcore']
-        else:
-            return 1
-
-
-@functools.cache
-def get_available_device() -> str:
-    try:
-        return triton.runtime.driver.active.get_current_target().backend
-    except BaseException:
-        _cpu_device_warning()
-        return 'cpu'
-
-
-def map_triton_backend_to_torch_device() -> str:
-    backend = get_available_device()        # 'cuda' | 'hip' | 'xpu' | 'cpu' | ...
-    return {'cuda': 'cuda', 'hip': 'cuda', 'xpu': 'xpu'}.get(backend, backend)
-
-
-# For AMD GPUs, the triton backend is 'hip', while for Nvidia GPUs, the triton backend is 'cuda'.
-# However, the torch backend is 'cuda' for both Nvidia and AMD GPUs.
-# Therefore, we need to check the triton backend to determine the actual GPU vendor.
-device = get_available_device() if get_available_device() != 'hip' else 'cuda'
-device_torch_lib = getattr(torch, device)
-device_platform = get_available_device()
-device_name = map_triton_backend_to_torch_device()
-
-IS_AMD = (device_platform == 'hip')
-IS_ARM = platform.machine().lower() in ('aarch64', 'arm64')
-IS_INTEL = (device_platform == 'xpu')
-IS_INTEL_ALCHEMIST = (IS_INTEL and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
-IS_NVIDIA = (device_platform == 'cuda')
-IS_NPU = (device_platform == 'npu')
-IS_NVIDIA_BLACKWELL = (IS_NVIDIA and torch.cuda.get_device_capability()[0] == 10)
-IS_NVIDIA_HOPPER = (IS_NVIDIA and ('NVIDIA H' in torch.cuda.get_device_name(0) or torch.cuda.get_device_capability()[0] == 9))
-USE_CUDA_GRAPH = (IS_NVIDIA and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
-
-# Nvidia Ampere or newer, haven't check AMD and intel yet.
-IS_TF32_SUPPORTED = (IS_NVIDIA and torch.cuda.get_device_capability(0)[0] >= 8)
-IS_GATHER_SUPPORTED = hasattr(triton.language, 'gather')
-IS_TMA_SUPPORTED = (IS_NVIDIA and torch.cuda.get_device_capability(0)[0] >= 9) \
-    and os.environ.get('FLA_USE_TMA', '0') == '1' and \
-    (hasattr(triton.language, '_experimental_make_tensor_descriptor') or hasattr(triton.language, 'make_tensor_descriptor'))
-
-if IS_NVIDIA and not IS_TF32_SUPPORTED:
-    # Make old card happy, since triton will use tf32 by default.
-    # This is a workaround for old nvidia card.
-    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
-
-
-def _default_alloc_fn(size: int, alignment: int, stream: int | None):
-    return torch.empty(size, device=torch.device(device_name, device_torch_lib.current_device()), dtype=torch.int8)
-
-
-if IS_TMA_SUPPORTED:
-    logger.info('TMA is supported, using TMA by default.')
-    triton.set_allocator(_default_alloc_fn)
-elif IS_NVIDIA_BLACKWELL:
-    # Blackwell (SM 10.0+): Triton compiler may emit global_scratch for
-    # autotuned kernels even without TMA. Register a default allocator to
-    # prevent NullAllocator crashes. See triton-lang/triton#10002.
-    logger.info('Blackwell detected: registering default global_scratch allocator.')
-    triton.set_allocator(_default_alloc_fn)
-
-
-def get_all_max_shared_mem():
-    try:
-        return [
-            triton.runtime.driver.active.utils.get_device_properties(i)['max_shared_mem']
-            for i in range(device_torch_lib.device_count())
-        ]
-    except BaseException:
-        _cpu_device_warning()
-        return [-1]
-
-
-class Backend(Enum):
-    ADA = 101376       # RTX 4090
-    AMPERE = 166912    # A100
-    HOPPER = 232448    # H100
-    DEFAULT = 102400   # Default
-
-    @classmethod
-    def get_shared_memory(cls, arch: str) -> int:
-        try:
-            return cls[arch.upper()].value
-        except KeyError:
-            return cls.DEFAULT.value
-
-
-@functools.cache
-def check_shared_mem(arch: str = "none", tensor_idx: int = 0) -> bool:
-    try:
-        device_shared_mem_list = get_all_max_shared_mem()
-        max_shared_memory = device_shared_mem_list[tensor_idx]
-        return max_shared_memory >= Backend.get_shared_memory(arch)
-    except Exception:
-        return False
-
-
-if check_pytorch_version('2.4'):
-    device = 'cuda' if device == 'cpu' else device
-    autocast_custom_fwd = functools.partial(torch.amp.custom_fwd, device_type=device)
-    autocast_custom_bwd = functools.partial(torch.amp.custom_bwd, device_type=device)
-
-    def custom_device_ctx(index: int):
-        return device_torch_lib.device(index)
-else:
-    assert device == 'cuda', 'Only cuda device is supported for PyTorch version < 2.4.0.'
-    autocast_custom_fwd = device_torch_lib.amp.custom_fwd
-    autocast_custom_bwd = device_torch_lib.amp.custom_bwd
-
-    def custom_device_ctx(index: int):
-        return torch.cuda.device(index)
-
-
-def _register_aliases():
-    current_module = sys.modules[__name__]
-    for key in (
-        'IS_AMD',
-        'IS_ARM',
-        'IS_INTEL',
-        'IS_INTEL_ALCHEMIST',
-        'IS_NVIDIA',
-        'IS_NPU',
-        'IS_NVIDIA_BLACKWELL',
-        'IS_NVIDIA_HOPPER',
-        'USE_CUDA_GRAPH',
-        'IS_TF32_SUPPORTED',
-        'IS_GATHER_SUPPORTED',
-        'IS_TMA_SUPPORTED',
-    ):
-        if hasattr(current_module, key):
-            setattr(current_module, key.lower(), getattr(current_module, key))
-
-
-_register_aliases()
-
-del _register_aliases
