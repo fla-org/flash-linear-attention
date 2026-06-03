@@ -139,24 +139,30 @@ class WallAttention(nn.Module):
 
         if past_key_values is not None:
             assert cu_seqlens is None, "cu_seqlens should not be provided when past_key_values is not None"
-            cached = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
-            state = past_key_values.update(
-                attn_state=cached,
-                layer_idx=self.layer_idx,
-                offset=q_len,
-                cache_kwargs=dict(window_size=self.window_size),
-            )
-            cached = state['attn_state']
-            if self.use_scalar_gate:
-                k, v, g, gs = cached
+            if self.window_size is None:
+                # Non-windowed: cache the *pre-rescaled* decode state and extend it one
+                # column per step, so prep is O(q_len) instead of rebuilding k_tilde/P
+                # over the whole history every token.
+                o = self._decode_incremental(q, k, v, g, gs, past_key_values, q_len)
             else:
-                k, v, g = cached
-
-        kv_len = k.shape[1]
-        if past_key_values is not None and q_len < kv_len:
-            # Incremental decode: queries are the suffix; attend against the full cache
-            # via the pre-rescaled Wall decode kernel.
-            o = self._decode(q, k, v, g, gs)
+                # Windowed: a rolling raw (k, v, g) cache; chunk anchors must track the
+                # window, so rebuild the rescale each step from the cached suffix.
+                cached = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
+                state = past_key_values.update(
+                    attn_state=cached,
+                    layer_idx=self.layer_idx,
+                    offset=q_len,
+                    cache_kwargs=dict(window_size=self.window_size),
+                )['attn_state']
+                if self.use_scalar_gate:
+                    k, v, g, gs = state
+                else:
+                    k, v, g = state
+                kv_len = k.shape[1]
+                if q_len < kv_len:
+                    o = self._decode_rebuild(q, k, v, g, gs)
+                else:
+                    o = parallel_wall_attn(q, k, v, g, g_scalar=gs, window_size=self.window_size)
         elif attention_mask is not None:
             states = (k, v, g, gs) if self.use_scalar_gate else (k, v, g)
             q, states, indices_q, cu_seqlens, max_seq_lens = unpad_input(q, states, attention_mask, q_len, keepdim=True)
@@ -177,17 +183,104 @@ class WallAttention(nn.Module):
         o = self.o_proj(o)
         return o, None, past_key_values
 
-    def _decode(self, q, k, v, g, gs):
+    def _get_cached_state(self, past_key_values):
+        """Return this layer's cached ``attn_state`` tuple, or ``None`` if empty (prefill)."""
+        try:
+            attn_state = past_key_values[self.layer_idx]['attn_state']
+        except (KeyError, IndexError, TypeError):
+            return None
+        if attn_state is None or attn_state[0] is None:
+            return None
+        return attn_state
+
+    def _decode_incremental(self, q, k, v, g, gs, past_key_values, q_len):
+        r"""Non-windowed decode against a *pre-rescaled* KV cache.
+
+        The cache holds ``(k_tilde, v, P[, gs_cumsum])`` rather than raw ``(k, v, g)``.
+        Each step extends it by ``q_len`` columns in ``O(q_len)`` (the new prefix ``P`` is
+        ``P_prev[-1] + cumsum(g)``, and ``k_tilde`` rescales the new keys against their chunk
+        anchor ``R_c = P[chunk_start]``) instead of rebuilding the whole cache. ``r_cache`` is
+        just ``P`` sampled at chunk starts, so it never needs to be stored.
+        """
+        scale = self.head_dim ** -0.5
+        C = WALL_DECODE_CHUNK
+        G = self.num_kv_groups
+        prior = self._get_cached_state(past_key_values)
+
+        # Running prefix P (base-2) for the new tokens, offset by the cached tail.
+        p_offset = prior[2][:, -1:].float() if prior is not None else 0.0
+        p_new = p_offset + torch.cumsum(g.float(), dim=1) * RCP_LN2  # [B, q_len, HQ, K]
+
+        if prior is None:
+            # Prefill: lean on the tested builder for the full pass.
+            k_tilde_new, _ = build_wall_kv_cache(k, p_new, C)
+        else:
+            prior_len = prior[2].shape[1]
+            k_tilde_new = self._rescale_new_keys(k, p_new, prior[2], prior_len, C, G)
+
+        if self.use_scalar_gate:
+            gs_offset = prior[3][:, -1:].float() if prior is not None else 0.0
+            gs_new = gs_offset + torch.cumsum(gs.float(), dim=1) * RCP_LN2  # [B, q_len, HQ]
+            cached = (k_tilde_new, v, p_new, gs_new)
+        else:
+            gs_new = None
+            cached = (k_tilde_new, v, p_new)
+
+        state = past_key_values.update(
+            attn_state=cached,
+            layer_idx=self.layer_idx,
+            offset=q_len,
+        )['attn_state']
+        if self.use_scalar_gate:
+            k_tilde, v_all, p_all, gs_all = state
+        else:
+            k_tilde, v_all, p_all = state
+            gs_all = None
+
+        if prior is None:
+            # Prefill output via the optimized full-attention kernel on raw inputs.
+            return parallel_wall_attn(q, k, v, g, g_scalar=gs, scale=scale)
+
+        r_cache = p_all[:, ::C].contiguous()           # anchors R_c = P[chunk_start]
+        p_curr = p_all[:, -q_len:].contiguous()
+        o, _ = parallel_wall_attn_decode(
+            q, v_all, p_curr, k_tilde, r_cache,
+            sink_bias=None,
+            scale=scale,
+            cache_chunk_size=C,
+            g_scalar_cumsum=gs_all,
+        )
+        return o
+
+    @staticmethod
+    def _rescale_new_keys(k, p_new, prior_p, prior_len, C, G):
+        """``k_tilde[i] = k[i] * exp2(R_{c(i)} - P[i])`` for the new tokens only."""
+        q_len = k.shape[1]
+        abs_idx = torch.arange(prior_len, prior_len + q_len, device=k.device)
+        chunk_start = (abs_idx // C) * C
+        # Anchors live in the prior cache (open chunk) or in p_new (a chunk opened this step).
+        in_prior = chunk_start < prior_len
+        idx_prior = chunk_start.clamp(max=prior_len - 1)
+        idx_new = (chunk_start - prior_len).clamp(min=0)
+        r_prior = prior_p.index_select(1, idx_prior).float()
+        r_new = p_new.index_select(1, idx_new).float()
+        r = torch.where(in_prior[None, :, None, None], r_prior, r_new)  # [B, q_len, HQ, K]
+        k_q = k.repeat_interleave(G, dim=2).float()
+        return (k_q * torch.exp2(r - p_new)).to(k.dtype)
+
+    def _decode_rebuild(self, q, k, v, g, gs):
+        """Windowed decode: rebuild the rescale from the cached raw suffix each step."""
         scale = self.head_dim ** -0.5
         # P carries the base-2 conversion (RCP_LN2), matching the training forward.
         p = chunk_global_cumsum(g, scale=RCP_LN2)
         k_tilde, r_cache = build_wall_kv_cache(k, p, WALL_DECODE_CHUNK)
         p_curr = p[:, -q.shape[1]:].contiguous()
         gs_cumsum = chunk_global_cumsum(gs, scale=RCP_LN2) if gs is not None else None
-        return parallel_wall_attn_decode(
+        o, _ = parallel_wall_attn_decode(
             q, v, p_curr, k_tilde, r_cache,
             sink_bias=None,
             scale=scale,
             cache_chunk_size=WALL_DECODE_CHUNK,
             g_scalar_cumsum=gs_cumsum,
         )
+        return o

@@ -163,7 +163,7 @@ class WallTransformerModel(WallTransformerPreTrainedModel):
     def __init__(
         self,
         config: WallTransformerConfig,
-    ) -> WallTransformerModel:
+    ) -> None:
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -326,7 +326,9 @@ class WallTransformerForCausalLM(WallTransformerPreTrainedModel, FLAGenerationMi
 
         hidden_states = outputs[0]
 
-        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(hidden_states[:, -logits_to_keep:])
+        logits = None if self.config.fuse_linear_cross_entropy else self.lm_head(
+            hidden_states if logits_to_keep is None else hidden_states[:, -logits_to_keep:]
+        )
 
         loss = None
         if labels is not None:

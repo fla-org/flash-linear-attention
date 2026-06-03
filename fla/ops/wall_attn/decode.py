@@ -203,6 +203,8 @@ def parallel_wall_attn_decode(
     for t in (q, v, p_curr, k_tilde, r_cache):
         if t.stride(-1) != 1:
             raise ValueError("decode tensors must be contiguous in the last (K or V) dim")
+    if g_scalar_cumsum is not None and g_scalar_cumsum.stride(-1) != 1:
+        raise ValueError("g_scalar_cumsum must be contiguous in the last dim")
 
     if check_shared_mem('hopper', q.device.index):
         BK = min(256, max(16, triton.next_power_of_2(K)))

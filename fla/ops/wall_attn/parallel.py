@@ -996,6 +996,8 @@ def parallel_wall_attn(
     """
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if g_scalar is not None and g_scalar.shape != q.shape[:-1]:
+        raise ValueError(f"`g_scalar` must be [B, T, HQ] matching q.shape[:-1]; got {g_scalar.shape}")
     if cu_seqlens is not None and q.shape[0] != 1:
         raise ValueError("`cu_seqlens` (varlen) requires batch size 1")
     if sink_bias is not None and sink_bias.shape != (q.shape[2],):
