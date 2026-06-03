@@ -16,9 +16,10 @@ on:
         required: true
         type: string
       pytorch_version:
-        description: 'The PyTorch version to install (e.g., 2.7.0, nightly)'
-        required: true
+        description: 'The PyTorch version to install (e.g., 2.7.0, nightly). Leave empty to use the pre-installed torch.'
+        required: false
         type: string
+        default: ''
       pytorch_cuda_version:
         description: 'The PyTorch CUDA version to use (e.g., cu128 for CUDA 12.8)'
         required: false
