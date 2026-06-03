@@ -151,12 +151,13 @@ def test_fused_recurrent(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "dtype"),
+    ("B", "T", "H", "D", "allow_neg_eigval", "dtype"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-allow_neg_eigval{}-{}".format(*test))
         for test in [
-            (2, 256, 4, 64, torch.float),
-            (1, 512, 3, 60, torch.float),
+            (2, 256, 4, 64, False, torch.float),
+            (2, 256, 4, 64, True, torch.float),
+            (1, 512, 3, 60, True, torch.float),
         ]
     ],
 )
@@ -165,6 +166,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
     T: int,
     H: int,
     D: int,
+    allow_neg_eigval: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -185,7 +187,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
         g=g.clone(),
-        beta=beta_post.clone(),
+        beta=beta_post.clone() * (2 if allow_neg_eigval else 1),
         scale=None,
         initial_state=h0.clone(),
         output_final_state=True,
@@ -202,6 +204,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
         use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=allow_neg_eigval,
     )
     assert_close("o", ref, tri, 0.005)
     assert_close("ht", ref_ht, tri_ht, 0.005)
@@ -222,7 +225,7 @@ def test_fused_recurrent_use_beta_sigmoid_in_kernel(
         ]
     ],
 )
-def test_fused_recurrent_transpose_state(
+def test_fused_recurrent_state_v_first(
     B: int,
     T: int,
     H: int,
@@ -251,7 +254,7 @@ def test_fused_recurrent_transpose_state(
         initial_state=h0_kv.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        transpose_state_layout=False,
+        state_v_first=False,
     )
     tri, tri_ht = fused_recurrent_kda(
         q=F.normalize(q.clone(), p=2, dim=-1),
@@ -263,10 +266,17 @@ def test_fused_recurrent_transpose_state(
         initial_state=h0_vk.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
     assert_close("o", ref, tri, 1e-4)
     assert_close("ht", ref_ht, tri_ht.transpose(-1, -2), 1e-4)
+
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning,
+    # and passing both names at once is rejected
+    with pytest.warns(DeprecationWarning):
+        fused_recurrent_kda(q=q, k=k, v=v, g=g, beta=beta, transpose_state_layout=True)
+    with pytest.raises(ValueError):
+        fused_recurrent_kda(q=q, k=k, v=v, g=g, beta=beta, state_v_first=True, transpose_state_layout=True)
 
 
 @pytest.mark.parametrize(
@@ -634,7 +644,7 @@ def test_chunk(
         ]
     ],
 )
-def test_chunk_transpose_state(
+def test_chunk_state_v_first(
     B: int,
     T: int,
     H: int,
@@ -667,7 +677,7 @@ def test_chunk_transpose_state(
         initial_state=h0_vk.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
     ((tri * do).sum() + (tri_ht * dht_vk).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_vk.grad
@@ -683,7 +693,7 @@ def test_chunk_transpose_state(
         initial_state=h0_kv.clone(),
         output_final_state=True,
         use_qk_l2norm_in_kernel=False,
-        transpose_state_layout=False,
+        state_v_first=False,
     )
     ((ref * do).sum() + (ref_ht * dht_kv).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dg, ref_db, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_kv.grad
@@ -699,12 +709,13 @@ def test_chunk_transpose_state(
 
 
 @pytest.mark.parametrize(
-    ("B", "T", "H", "D", "dtype"),
+    ("B", "T", "H", "D", "allow_neg_eigval", "dtype"),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-allow_neg_eigval{}-{}".format(*test))
         for test in [
-            (1, 8192, 96, 128, torch.bfloat16),
-            (2, 96, 2, 64, torch.float16),
+            (1, 8192, 96, 128, False, torch.bfloat16),
+            (1, 8192, 96, 128, True, torch.bfloat16),
+            (2, 96, 2, 64, True, torch.float16),
         ]
     ],
 )
@@ -713,6 +724,7 @@ def test_chunk_use_beta_sigmoid_in_kernel(
     T: int,
     H: int,
     D: int,
+    allow_neg_eigval: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -737,7 +749,7 @@ def test_chunk_use_beta_sigmoid_in_kernel(
         k=F.normalize(k.clone(), p=2, dim=-1),
         v=v.clone(),
         g=g.clone(),
-        beta=beta_post.clone(),
+        beta=beta_post.clone() * (2 if allow_neg_eigval else 1),
         scale=None,
         initial_state=h0.clone(),
         output_final_state=True,
@@ -758,6 +770,7 @@ def test_chunk_use_beta_sigmoid_in_kernel(
         initial_state=h0.clone(),
         output_final_state=True,
         use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=allow_neg_eigval,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
     tri_dq, tri_dk, tri_dv, tri_dg, tri_db_raw, tri_dh0 = (
@@ -1165,7 +1178,7 @@ _FLASHKDA_REQUIRED_KWARGS = dict(
     use_beta_sigmoid_in_kernel=True,
     safe_gate=True,
     lower_bound=-5.0,
-    transpose_state_layout=True,
+    state_v_first=True,
 )
 
 _FLASHKDA_RTOL = 0.006
@@ -1202,7 +1215,7 @@ def _flashkda_gold(q, k, v, g, beta_raw, A_log, dt_bias, scale, initial_state,
         use_qk_l2norm_in_kernel=True,
         use_gate_in_kernel=True,
         lower_bound=lower_bound,
-        transpose_state_layout=True,
+        state_v_first=True,
         **kwargs,
     )
 

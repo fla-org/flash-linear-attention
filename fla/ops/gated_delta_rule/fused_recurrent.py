@@ -5,6 +5,8 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import warnings
+
 import torch
 import triton
 import triton.language as tl
@@ -54,10 +56,12 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
-    TRANSPOSE_STATE: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GATE_IN_KERNEL: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
+    APPLY_BETA_SIGMOID: tl.constexpr,
+    ALLOW_NEG_EIGVAL: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -89,17 +93,17 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
     mask_k = o_k < K
     mask_v = o_v < V
-    if TRANSPOSE_STATE:
+    if STATE_V_FIRST:
         mask_h = mask_v[:, None] & mask_k[None, :]
     else:
         mask_h = mask_k[:, None] & mask_v[None, :]
 
-    if TRANSPOSE_STATE:
+    if STATE_V_FIRST:
         b_h = tl.zeros([BV, BK], dtype=tl.float32)
     else:
         b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_h0 = h0 + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -117,6 +121,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_beta = tl.load(p_beta).to(tl.float32)
         else:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
+        if APPLY_BETA_SIGMOID:
+            b_beta = tl.sigmoid(b_beta)
+            if ALLOW_NEG_EIGVAL:
+                b_beta = b_beta * 2
 
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
@@ -129,19 +137,19 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         if USE_GK:
             b_gk = tl.load(p_gk).to(tl.float32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h *= exp(b_gk[None, :])
             else:
                 b_h *= exp(b_gk[:, None])
 
         if USE_GV:
             b_gv = tl.load(p_gv).to(tl.float32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h *= exp(b_gv[:, None])
             else:
                 b_h *= exp(b_gv[None, :])
 
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_v = b_beta * (b_v - tl.sum(b_h * b_k[None, :], 1))
             b_h += b_v[:, None] * b_k[None, :]
             b_o = tl.sum(b_h * b_q[None, :], 1)
@@ -164,7 +172,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_o += HV*V
 
     if STORE_FINAL_STATE:
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_ht = ht + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
@@ -185,8 +193,10 @@ def fused_recurrent_gated_delta_rule_fwd(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -197,7 +207,7 @@ def fused_recurrent_gated_delta_rule_fwd(
 
     o = torch.empty_like(v)
     if output_final_state:
-        if transpose_state_layout:
+        if state_v_first:
             final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
         else:
             final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
@@ -229,7 +239,9 @@ def fused_recurrent_gated_delta_rule_fwd(
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim != v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        TRANSPOSE_STATE=transpose_state_layout,
+        APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
+        ALLOW_NEG_EIGVAL=allow_neg_eigval,
+        STATE_V_FIRST=state_v_first,
         num_warps=1,
         num_stages=3,
     )
@@ -255,8 +267,10 @@ class FusedRecurrentFunction(torch.autograd.Function):
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
+        use_beta_sigmoid_in_kernel: bool = False,
+        allow_neg_eigval: bool = False,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
-        transpose_state_layout: bool = False,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
             q=q,
@@ -272,8 +286,10 @@ class FusedRecurrentFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
-            transpose_state_layout=transpose_state_layout,
         )
 
         return o, final_state
@@ -303,8 +319,11 @@ def fused_recurrent_gated_delta_rule(
     use_gate_in_kernel: bool = False,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    transpose_state_layout: bool = False,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
@@ -346,11 +365,20 @@ def fused_recurrent_gated_delta_rule(
         dt_bias (Optional[torch.Tensor]):
             Bias added to `g` before activation, of shape `[HV]`.
             Only used when `use_gate_in_kernel=True`.
+        use_beta_sigmoid_in_kernel (Optional[bool]):
+            Whether to apply `torch.sigmoid(beta)` inside the kernel.
+            - If `True`, the passed `beta` acts as the raw beta logits.
+            - If `False`, `beta` is expected to already be in post-sigmoid space.
+            Default: `False`.
+        allow_neg_eigval (Optional[bool]):
+            Whether to allow negative eigenvalues by scaling `beta` to `[0, 2)`.
+            Only takes effect together with `use_beta_sigmoid_in_kernel=True`, in which case
+            the kernel computes `2 * sigmoid(beta)` instead of `sigmoid(beta)`. Default: `False`.
+        state_v_first (Optional[bool]):
+            Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        transpose_state_layout (bool):
-            Whether to use transposed state layout `[V, K]` instead of `[K, V]`. Default: `False`.
 
     Returns:
         o (torch.Tensor):
@@ -387,6 +415,16 @@ def fused_recurrent_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if 'transpose_state_layout' in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        warnings.warn(
+            "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        state_v_first = kwargs.pop('transpose_state_layout')
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -410,6 +448,8 @@ def fused_recurrent_gated_delta_rule(
     else:
         A_log = None
         dt_bias = None
+    if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
+        raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
 
     o, final_state = FusedRecurrentFunction.apply(
         q,
@@ -425,8 +465,10 @@ def fused_recurrent_gated_delta_rule(
         initial_state,
         output_final_state,
         use_qk_l2norm_in_kernel,
+        use_beta_sigmoid_in_kernel,
+        allow_neg_eigval,
+        state_v_first,
         cu_seqlens,
-        transpose_state_layout,
     )
     return o, final_state
 

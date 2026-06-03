@@ -49,10 +49,10 @@ class IntraCardCPBackend(BaseBackend):
         output_final_state: bool = False,
         chunk_size: int = 64,
         save_new_value: bool = True,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        transpose_state_layout: bool = False,
     ) -> tuple[bool, str | None]:
         """Check if intracard CP should handle this call."""
         # Only in inference mode
@@ -76,10 +76,10 @@ class IntraCardCPBackend(BaseBackend):
         output_final_state: bool = False,
         chunk_size: int = 64,
         save_new_value: bool = True,
+        state_v_first: bool = False,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
         chunk_indices: torch.LongTensor | None = None,
-        transpose_state_layout: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Intra-card CP implementation of chunk_gated_delta_rule_fwd_h."""
         from fla.ops.common.intracard_cp import intracard_fwd_h
@@ -94,5 +94,5 @@ class IntraCardCPBackend(BaseBackend):
             cu_seqlens_cpu=cu_seqlens_cpu,
             chunk_indices=chunk_indices,
             max_splits=MAX_SUBSEQS,
-            transpose_state_layout=transpose_state_layout,
+            state_v_first=state_v_first,
         )

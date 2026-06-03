@@ -87,7 +87,7 @@ def test_fused_recurrent(
             id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
-            # non-GVA (HV == H)
+            (4, 1024, 4, 4, 128, 0.1, 1, 1.0, False, torch.float16),
             (2, 75, 4, 4, 64, 1, 0.01, 0, False, torch.float16),
             (2, 500, 3, 3, 60, 1, 1, 0, False, torch.float16),
             (2, 1000, 3, 3, 64, 0.1, 1, 0.5, False, torch.float16),
@@ -95,7 +95,6 @@ def test_fused_recurrent(
             (4, 1024, 4, 4, 128, 0.1, 1, 0, True, torch.float16),
             (2, 1500, 4, 4, 128, 0.1, 10, 0, False, torch.float16),
             (4, 2048, 8, 8, 64, 0.1, 1, 0, False, torch.float16),
-            # GVA (HV > H)
             (2, 256, 2, 4, 64, 1, 1, 0, False, torch.float16),
             (2, 512, 2, 8, 64, 1, 0.1, 0, True, torch.float16),
             (2, 1024, 4, 8, 128, 0.1, 1, 0, False, torch.float16),
@@ -171,6 +170,93 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'scale', 'use_qk_l2norm_in_kernel', 'allow_neg_eigval', 'dtype'),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-use_qk_l2norm_in_kernel{}-allow_neg_eigval{}-{}".format(*test),
+        )
+        for test in [
+            (2, 500, 4, 4, 64, 1, False, False, torch.float16),
+            (3, 1024, 4, 4, 128, 0.1, True, True, torch.float16),
+            (2, 1024, 4, 8, 128, 0.1, False, True, torch.float16),
+            (4, 2048, 8, 8, 64, 0.1, True, False, torch.float16),
+        ]
+    ],
+)
+def test_chunk_beta_sigmoid_in_kernel(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    use_qk_l2norm_in_kernel: bool,
+    allow_neg_eigval: bool,
+    dtype: torch.dtype,
+):
+    """`use_beta_sigmoid_in_kernel=True` (raw beta logits) matches manual sigmoid + autograd."""
+    torch.manual_seed(42)
+    if IS_INTEL_ALCHEMIST and D > 128:
+        pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
+    assert HV % H == 0
+
+    q = torch.rand(B, T, H, D, dtype=dtype)
+    k = torch.rand(B, T, H, D, dtype=dtype)
+    v = torch.rand(B, T, HV, D, dtype=dtype)
+    beta = torch.randn(B, T, HV, dtype=torch.float)
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32))
+    h0 = torch.zeros(B, HV, D, D, dtype=torch.float32)
+    q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(True), (q, k, v, beta, g, h0))
+
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    # in-kernel sigmoid: `beta` is passed as raw logits
+    tri, tri_ht = chunk_gated_delta_rule(
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=allow_neg_eigval,
+    )
+    ((tri * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
+    q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
+
+    # reference: apply sigmoid (and the allow_neg_eigval x2) in PyTorch, then default path
+    ref, ref_ht = chunk_gated_delta_rule(
+        q=F.normalize(q.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else q.clone(),
+        k=F.normalize(k.clone(), p=2, dim=-1) if not use_qk_l2norm_in_kernel else k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone().sigmoid() * (2 if allow_neg_eigval else 1),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_beta_sigmoid_in_kernel=False,
+    )
+    ((ref * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad
+
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
+    assert_close('dq', ref_dq, tri_dq, 0.008)
+    assert_close('dk', ref_dk, tri_dk, 0.008)
+    assert_close('dv', ref_dv, tri_dv, 0.008)
+    assert_close('db', ref_dbeta, tri_dbeta, 0.02)
+    assert_close('dg', ref_dg, tri_dg, 0.008)
+    assert_close('dh0', ref_dh0, tri_dh0, 0.008)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'H', 'D', 'scale', 'gate_logit_normalizer', 'dtype'),
     [
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-{}".format(*test))
@@ -182,7 +268,7 @@ def test_chunk(
         ]
     ],
 )
-def test_chunk_transpose_state(
+def test_chunk_state_v_first(
     B: int,
     T: int,
     H: int,
@@ -215,7 +301,7 @@ def test_chunk_transpose_state(
         scale=scale,
         initial_state=h0_vk.clone(),
         output_final_state=True,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
     do = torch.randn_like(v)
     dht_vk = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
@@ -233,7 +319,7 @@ def test_chunk_transpose_state(
         scale=scale,
         initial_state=h0_kv.clone(),
         output_final_state=True,
-        transpose_state_layout=False,
+        state_v_first=False,
     )
     ((ref * do).sum() + (ref_ht * dht_kv).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = q.grad, k.grad, v.grad, beta.grad, g.grad, h0_kv.grad
@@ -261,7 +347,7 @@ def test_chunk_transpose_state(
         ]
     ],
 )
-def test_fused_recurrent_transpose_state(
+def test_fused_recurrent_state_v_first(
     B: int,
     T: int,
     H: int,
@@ -292,7 +378,7 @@ def test_fused_recurrent_transpose_state(
         initial_state=h0_kv.clone(),
         use_qk_l2norm_in_kernel=True,
         output_final_state=True,
-        transpose_state_layout=False,
+        state_v_first=False,
     )
     tri, tri_ht = fused_recurrent_gated_delta_rule(
         q=q.clone(),
@@ -304,10 +390,17 @@ def test_fused_recurrent_transpose_state(
         initial_state=h0_vk.clone(),
         use_qk_l2norm_in_kernel=True,
         output_final_state=True,
-        transpose_state_layout=True,
+        state_v_first=True,
     )
     assert_close('o', ref, tri, 1e-4)
     assert_close('ht', ref_ht, tri_ht.transpose(-1, -2), 1e-4)
+
+    # the legacy `transpose_state_layout` kwarg maps to `state_v_first` with a warning,
+    # and passing both names at once is rejected
+    with pytest.warns(DeprecationWarning):
+        fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, transpose_state_layout=True)
+    with pytest.raises(ValueError):
+        fused_recurrent_gated_delta_rule(q=q, k=k, v=v, g=g, beta=beta, state_v_first=True, transpose_state_layout=True)
 
 
 @pytest.mark.parametrize(
@@ -375,6 +468,67 @@ def test_fused_recurrent_gate_in_kernel(
     )
     assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'scale', 'allow_neg_eigval', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-allow_neg_eigval{}-{}".format(*test))
+        for test in [
+            (1, 64, 1, 1, 64, 1, False, torch.float),
+            (2, 512, 2, 4, 64, 0.1, True, torch.float16),
+            (3, 1000, 2, 8, 128, 1, True, torch.float16),
+            (4, 1024, 4, 4, 128, 0.1, False, torch.float16),
+        ]
+    ],
+)
+def test_fused_recurrent_beta_sigmoid_in_kernel(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    allow_neg_eigval: bool,
+    dtype: torch.dtype,
+):
+    """fused_recurrent_gated_delta_rule with use_beta_sigmoid_in_kernel=True matches manual sigmoid."""
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.randn(B, T, HV, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32, device=device))
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+
+    # reference: apply sigmoid (and the allow_neg_eigval x2) in PyTorch, then default path
+    ref, ref_ht = fused_recurrent_gated_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone().sigmoid() * (2 if allow_neg_eigval else 1),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    # in-kernel sigmoid: `beta` is passed as raw logits
+    tri, tri_ht = fused_recurrent_gated_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=allow_neg_eigval,
+    )
+    assert_close('o', ref, tri, 0.005)
+    assert_close('ht', ref_ht, tri_ht, 0.005)
 
 
 @pytest.mark.parametrize(

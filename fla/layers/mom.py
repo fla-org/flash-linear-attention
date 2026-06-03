@@ -585,6 +585,7 @@ class MomAttention(nn.Module):
                 initial_state=recurrent_state[0],
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(
@@ -610,6 +611,7 @@ class MomAttention(nn.Module):
                 initial_state=memories,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
                 cu_seqlens=cu_seqlens,
             )
             recurrent_state[0] = self.handle_recurrent_state(
@@ -719,8 +721,9 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         elif mode == 'fused_recurrent':
             o, recurrent_state[-1] = fused_recurrent_gated_delta_rule(
@@ -731,8 +734,9 @@ class MomAttention(nn.Module):
                 beta=beta,
                 initial_state=recurrent_state[-1],
                 output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
                 use_qk_l2norm_in_kernel=True,
+                state_v_first=True,
+                cu_seqlens=cu_seqlens,
             )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

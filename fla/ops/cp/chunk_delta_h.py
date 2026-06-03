@@ -336,7 +336,7 @@ def merge_fwd_bwd_kernel(
     INTRACARD_MODE: tl.constexpr,          # True: intracard mode, False: CP mode
     NUM_SEQ_ENTRIES,         # num_split_seqs for intracard
     HAS_H0: tl.constexpr,                  # Heuristic: whether h0 is provided
-    TRANSPOSE_STATE: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
+    STATE_V_FIRST: tl.constexpr = False,  # When True, h0/h use [V, K] layout; ag_hm always [K, V+K]
 ):
     """
     Unified merge kernel for both CP and Intra-card modes.
@@ -349,7 +349,7 @@ def merge_fwd_bwd_kernel(
         Grid: (V/BV, NUM_SEQ_ENTRIES, HV)
         Merges across subseqs within card for intra-card context parallel.
 
-    When TRANSPOSE_STATE=True, h0 and output h use [V, K] layout.
+    When STATE_V_FIRST=True, h0 and output h use [V, K] layout.
     ag_hm always uses [K, V+K] layout (from pre_scan).
     The recurrence h' = M @ h + he becomes h_T' = h_T @ M^T + he^T.
     """
@@ -373,7 +373,7 @@ def merge_fwd_bwd_kernel(
         # Initialize from h0 if provided
         if HAS_H0:
             orig_seq_id = tl.load(h0_seq_ids + i_seq).to(tl.int32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 p_h0 = tl.make_block_ptr(
                     h0 + (orig_seq_id * HV + i_h) * V * K,
                     (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0)
@@ -386,7 +386,7 @@ def merge_fwd_bwd_kernel(
                 )
                 b_h = tl.load(p_h0, boundary_check=(0, 1)).to(tl.float32)
         else:
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h = tl.zeros([BV, BK], dtype=tl.float32)
             else:
                 b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -405,7 +405,7 @@ def merge_fwd_bwd_kernel(
                 ag_hm + base + V, (K, K), (V + K, 1), (0, 0), (BK, BK), (1, 0)
             )
             b_m = tl.load(p_m, boundary_check=(0, 1)).to(tl.float32)
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 # h_T' = h_T @ M^T + he^T
                 b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_m)) + tl.trans(b_he)
             else:
@@ -415,7 +415,7 @@ def merge_fwd_bwd_kernel(
             if idx < num_subseqs - 1:
                 init_idx = init_base + idx
                 stride_init = HV * K * V
-                if TRANSPOSE_STATE:
+                if STATE_V_FIRST:
                     p_out = tl.make_block_ptr(
                         h + init_idx * stride_init + i_h * V * K,
                         (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0)
@@ -433,7 +433,7 @@ def merge_fwd_bwd_kernel(
         h += i_h * K * V
         ag_hm += i_h * K * (K + V)
         stride = HV * K * (K + V)
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             b_h = tl.zeros([BV, BK], dtype=tl.float32)
         else:
             b_h = tl.zeros([BK, BV], dtype=tl.float32)
@@ -446,11 +446,11 @@ def merge_fwd_bwd_kernel(
             b_ag_h = tl.load(p_ag_h, boundary_check=(0, 1))
             p_ag_m = tl.make_block_ptr(ag_hm + cur_rank * stride + V, (K, K), (K + V, 1), (0, 0), (BK, BK), (1, 0))
             b_ag_m = tl.load(p_ag_m, boundary_check=(0, 1))
-            if TRANSPOSE_STATE:
+            if STATE_V_FIRST:
                 b_h = tl.dot(b_h.to(tl.float32), tl.trans(b_ag_m).to(tl.float32)) + tl.trans(b_ag_h).to(tl.float32)
             else:
                 b_h = tl.dot(b_ag_m.to(tl.float32), b_h.to(tl.float32)) + b_ag_h.to(tl.float32)
-        if TRANSPOSE_STATE:
+        if STATE_V_FIRST:
             p_h = tl.make_block_ptr(h, (V, K), (K, 1), (i_v * BV, 0), (BV, BK), (1, 0))
         else:
             p_h = tl.make_block_ptr(h, (K, V), (V, 1), (0, i_v * BV), (BK, BV), (1, 0))
@@ -742,10 +742,10 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     bg: torch.Tensor | None = None,
     v: torch.Tensor | None = None,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext = None,
-    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return initial_state
@@ -764,7 +764,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     hm = k.new_zeros(HV, K, (V + K), dtype=torch.float32)
-    if transpose_state_layout:
+    if state_v_first:
         initial_state = k.new_zeros(N, HV, V, K, dtype=torch.float32)
     else:
         initial_state = k.new_zeros(N, HV, K, V, dtype=torch.float32)
@@ -812,7 +812,7 @@ def chunk_gated_delta_rule_fwd_h_pre_process(
             FORWARD=True,
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
-            TRANSPOSE_STATE=transpose_state_layout,
+            STATE_V_FIRST=state_v_first,
         )
     return initial_state
 
@@ -827,12 +827,12 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
     gk: torch.Tensor | None = None,
     bg: torch.Tensor | None = None,
     scale: float | None = None,
+    state_v_first: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     dht: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     context: FLACPContext | None = None,
     chunk_size: int = 64,
-    transpose_state_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if context is None or context.group is None:
         return dht, initial_state
@@ -851,7 +851,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
         N = len(cu_seqlens) - 1
 
     dhm = q.new_zeros(HV, K, V + K, dtype=torch.float32)
-    if transpose_state_layout:
+    if state_v_first:
         dht = q.new_zeros(N, HV, V, K, dtype=torch.float32)
     else:
         dht = q.new_zeros(N, HV, K, V, dtype=torch.float32)
@@ -901,7 +901,7 @@ def chunk_gated_delta_rule_bwd_dhu_pre_process(
             FORWARD=False,
             INTRACARD_MODE=False,
             NUM_SEQ_ENTRIES=0,
-            TRANSPOSE_STATE=transpose_state_layout,
+            STATE_V_FIRST=state_v_first,
         )
 
     # initial_state is None in the CP mode
