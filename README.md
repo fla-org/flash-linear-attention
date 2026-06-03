@@ -1,6 +1,7 @@
 <div align="center">
 
-<img width="50%" alt="Flash Linear Attention" src="images/logo.png" style="margin-bottom: 20px">
+<img width="50%" alt="Flash Linear Attention" src="images/logo.png">
+<br>
 
 [![hf_model](https://img.shields.io/badge/-Models-gray.svg?logo=huggingface&style=flat-square)](https://huggingface.co/fla-hub) [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white&style=flat-square)](https://discord.gg/vDaJTmKNcS)
 
@@ -29,6 +30,7 @@
 
 ## News
 
+- [2026-06] 🧱 Add Wall attention implementation to `fla` ([blog](https://blog.tilderesearch.com/blog/wall-attn)) — full softmax attention with a learned per-channel multiplicative decay, a RoPE-free positional encoding from Tilde Research.
 - [2026-05] 🚪 Add Gated DeltaNet 2 (GDN-2) implementation to `fla` ([paper](https://arxiv.org/abs/2605.22791)) — decouples erase and write gates into independent channel-wise gates on top of KDA.
 - [2026-05] 🦅 Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
 - [2026-05] 🚀 Add [YOCO](https://arxiv.org/abs/2405.05254) (You Only Cache Once) implementation to `fla`.
@@ -45,12 +47,12 @@
 - [2025-08] 🎓 Add MoM implementation to `fla` ([paper](https://arxiv.org/abs/2502.13685)).
 - [2025-07] 🐳 Add MLA implementation to `fla` ([paper](https://arxiv.org/abs/2405.04434)).
 - [2025-07] 🛣️ Add PaTH Attention implementation to `fla` ([paper](https://arxiv.org/abs/2505.16381)).
-- [2025-06] 🎉 Add MesaNet implementation to `fla` ([paper](https://arxiv.org/abs/2506.05233)).
-- [2025-06] 🐍 Add Comba implementation to `fla` ([paper](https://arxiv.org/abs/2506.02475)).
 
 <details>
 <summary>Older news</summary>
 
+- [2025-06] 🎉 Add MesaNet implementation to `fla` ([paper](https://arxiv.org/abs/2506.05233)).
+- [2025-06] 🐍 Add Comba implementation to `fla` ([paper](https://arxiv.org/abs/2506.02475)).
 - [2025-05] 🎉 Add Rodimus&ast; implementation to `fla` ([paper](https://arxiv.org/abs/2410.06577)).
 - [2025-04] 🎉 Add DeltaProduct implementation to `fla` ([paper](https://arxiv.org/abs/2502.10297)).
 - [2025-04] 🎉 Add FoX implementation to `fla` ([paper](https://arxiv.org/abs/2503.02130)).
@@ -74,7 +76,7 @@
 
 ## Models
 
-| Year  |        Model         | Paper                                                                                                                                         | Code                                                                                                  |                                                                                                 |
+| Year  |        Model         | Paper                                                                                                                                         |                                                                                                       |                                                                                                 |
 | :---: | :------------------: | :-------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------: |
 | 2022  |         ABC          | [ABC: Attention with Bounded-memory Control](https://arxiv.org/abs/2110.02488)                                                                | [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/abc.py)                  |                                                                                                 |
 | 2023  |        RetNet        | [Retentive network: a successor to transformer for large language models](https://arxiv.org/abs/2307.08621)                                   | [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/multiscale_retention.py) |                  [official](https://github.com/microsoft/torchscale/tree/main)                  |
@@ -108,6 +110,7 @@
 | 2026  |        Mamba3        | [Mamba-3: Improved Sequence Modeling using State Space Principles](https://arxiv.org/abs/2603.15569)                                          | [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba3)                  |                        [official](https://github.com/state-spaces/mamba)                        |
 | 2026  |        Raven         | [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven/blob/main/raven.pdf)                     | [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/raven)                   |                         [official](https://github.com/goombalab/raven)                          |
 | 2026  |   Gated DeltaNet 2   | [Gated DeltaNet-2: Decoupling Erase and Write in Linear Attention](https://arxiv.org/abs/2605.22791)                                          | [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gdn2)                       |                      [official](https://github.com/NVlabs/GatedDeltaNet-2)                      |
+| 2026  |         Wall         | [Wall Attention: Length Generalization With Diagonal Gates](https://blog.tilderesearch.com/blog/wall-attn)                                    | [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/wall_attn)                  |                                                                                                 |
 
 ## Installation
 
