@@ -116,7 +116,26 @@ jobs:
               await sleep(pollMs);
             }
 
-  test-h100-pytorch-2-7-ops:
+  test-h100-pytorch-2-7-ops-maintainer:
+    name: Test H100 Ops (PyTorch 2.7)
+    needs: test-h100-pytorch-2-12
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      (
+        github.event.pull_request.author_association == 'OWNER' ||
+        github.event.pull_request.author_association == 'MEMBER' ||
+        github.event.pull_request.author_association == 'COLLABORATOR'
+      )
+    uses: ./.github/workflows/reusable-ci-tests.yml
+    with:
+      runner: 'nvidia-h100-1'
+      gpu_type: 'nvidia'
+      conda_env_name: 'pytorch_2_7'
+      skip_gpu_check: true
+      skip_models_tests: true
+
+  test-h100-pytorch-2-7-ops-approved:
     name: Test H100 Ops (PyTorch 2.7)
     needs: check_h100_pytorch_2_12
     if: needs.check_h100_pytorch_2_12.result == 'success'
