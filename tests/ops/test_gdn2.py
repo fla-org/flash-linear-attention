@@ -34,7 +34,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.gated_delta_net_v2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
+from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import assert_close, device
 

@@ -24,8 +24,8 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.gated_delta_net_v2.chunk_intra_token_parallel import chunk_gdn2_fwd_intra_token_parallel
-from fla.ops.gated_delta_net_v2.wy_fast import recompute_w_u_fwd_gdn2
+from fla.ops.gdn2.chunk_intra_token_parallel import chunk_gdn2_fwd_intra_token_parallel
+from fla.ops.gdn2.wy_fast import recompute_w_u_fwd_gdn2
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2, gather
