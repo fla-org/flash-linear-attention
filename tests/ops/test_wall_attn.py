@@ -6,6 +6,12 @@
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
+import os
+
+# Wall's log-space `R` factoring and the gate-gradient reverse-cumsum are sensitive
+# to TF32 matmuls (catastrophic cancellation for small gates), so force IEEE fp32
+# dots for these correctness checks -- matching the convention in `test_attn.py`.
+os.environ['TRITON_F32_DEFAULT'] = 'ieee'
 
 import pytest
 import torch
@@ -15,16 +21,21 @@ from fla.ops.utils.cumsum import chunk_global_cumsum
 from fla.ops.wall_attn import build_wall_kv_cache, naive_wall_attn, parallel_wall_attn, parallel_wall_attn_decode
 from fla.utils import assert_close, device
 
-# Wall kernels score with a per-block log-space reference (`R`) to keep the
-# `exp2(P_i - P_j)` rescaling in range. This is mathematically exact but, in
-# finite precision, parity with the exact eager reference is approximate and
-# degrades with sequence length / the number of sub-blocks. The tolerances below
-# are calibrated for the current torch/Triton toolchain; they can be tightened on
-# FLA's pinned stack where the kernel was originally validated.
-RTOL_FWD = 0.25     # Triton prefill vs. exact eager reference
-RTOL_GRAD = 0.12    # autograd grads vs. eager autograd
-RTOL_FD = 0.3       # finite-difference gate gradients (inherently noisy)
-RTOL_DECODE = 0.2   # cached decode vs. prefill self-consistency
+# Wall scores with a per-block log-space reference `R` for the `exp2(P_i - P_j)`
+# rescaling, where `P = cumsum(g)`. The factoring assumes `P` is monotonically
+# decreasing, i.e. the gate is a true log-decay (`g <= 0`) -- which is what the
+# layer produces via `logsigmoid` (initialized near zero, so per-step decay is
+# small). We seed gates as small negatives accordingly; out-of-domain (two-sided)
+# gates break the `R` factoring and are not a supported regime.
+RTOL_FWD = 5e-3     # Triton prefill vs. exact eager reference (fp32)
+RTOL_GRAD = 5e-3    # autograd dq/dk/dv vs. eager autograd (fp32)
+RTOL_FD = 2e-2      # finite-difference gate gradients (inherently noisy)
+RTOL_DECODE = 2e-2  # cached decode vs. prefill self-consistency (fp32/bf16)
+
+
+def log_decay(*shape, scale=0.05, dtype=torch.float32):
+    """A valid small Wall log-decay gate (`g <= 0`), as `logsigmoid` produces in practice."""
+    return (-torch.randn(*shape, device=device, dtype=torch.float32).abs() * scale).to(dtype)
 
 
 @pytest.mark.parametrize(
@@ -45,7 +56,7 @@ def test_parallel_matches_reference(B: int, T: int, H: int, HQ: int, K: int, V: 
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.05
+    g = log_decay(B, T, HQ, K, dtype=dtype)
     scale = K**-0.5
 
     ref = naive_wall_attn(q, k, v, g, scale=scale, window_size=window_size)
@@ -61,7 +72,7 @@ def test_parallel_gqa_matches_reference():
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.04
+    g = log_decay(B, T, HQ, K, dtype=dtype)
     scale = K**-0.5
 
     ref = naive_wall_attn(q, k, v, g, scale=scale)
@@ -78,7 +89,7 @@ def test_parallel_varlen_matches_reference():
     q = torch.randn(1, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(1, T, H, K, device=device, dtype=dtype)
     v = torch.randn(1, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(1, T, HQ, K, device=device, dtype=dtype) * 0.06
+    g = log_decay(1, T, HQ, K, dtype=dtype)
     cu = torch.tensor([0, T1, T], dtype=torch.long, device=device)
     scale = K**-0.5
 
@@ -94,7 +105,7 @@ def test_parallel_sink_bias_matches_reference():
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.05
+    g = log_decay(B, T, HQ, K, dtype=dtype)
     sink_bias = torch.randn(HQ, device=device, dtype=dtype) * 0.1
     scale = K**-0.5
 
@@ -126,7 +137,7 @@ def test_backward_matches_eager_reference():
     q0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k0 = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v0 = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.03
+    g0 = log_decay(B, T, HQ, K, dtype=dtype)
     scale = K**-0.5
 
     q = q0.clone().requires_grad_(True)
@@ -158,19 +169,12 @@ def test_dg_nonzero_after_backward():
     q = torch.randn(B, T, HQ, K, device=device, requires_grad=True)
     k = torch.randn(B, T, H, K, device=device, requires_grad=True)
     v = torch.randn(B, T, H, V, device=device, requires_grad=True)
-    g = (torch.randn(B, T, HQ, K, device=device) * 0.04).requires_grad_(True)
+    g = log_decay(B, T, HQ, K).requires_grad_(True)
     o = parallel_wall_attn(q, k, v, g, scale=K**-0.5)
     o.sum().backward()
     assert g.grad is not None and torch.isfinite(g.grad).all()
 
 
-@pytest.mark.xfail(
-    reason="Per-channel dL/dg finite-difference parity is unstable on the current torch/Triton "
-           "toolchain (the analytic dg flows through a reverse cumsum of the derived dP). dq/dk/dv "
-           "are checked in test_backward_matches_eager_reference and dg finiteness in "
-           "test_dg_nonzero_after_backward; this tightens on FLA's pinned stack.",
-    strict=False,
-)
 def test_g_gradient_matches_finite_differences():
     """dL/dg for the Triton Wall path vs central finite differences.
 
@@ -185,7 +189,7 @@ def test_g_gradient_matches_finite_differences():
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.04
+    g0 = log_decay(B, T, HQ, K, dtype=dtype)
     go = torch.randn(B, T, HQ, V, device=device, dtype=dtype)
 
     g = g0.clone().requires_grad_(True)
@@ -228,8 +232,8 @@ def test_scalar_gate_matches_reference(B: int, T: int, H: int, HQ: int, K: int, 
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.05
-    g_scalar = torch.randn(B, T, HQ, device=device, dtype=dtype) * 0.1
+    g = log_decay(B, T, HQ, K, dtype=dtype)
+    g_scalar = log_decay(B, T, HQ, dtype=dtype)
     scale = K**-0.5
 
     ref = naive_wall_attn(q, k, v, g, scale=scale, g_scalar=g_scalar)
@@ -248,8 +252,8 @@ def test_scalar_gate_gradient_finite_differences():
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.04
-    gs0 = torch.randn(B, T, HQ, device=device, dtype=dtype) * 0.1
+    g0 = log_decay(B, T, HQ, K, dtype=dtype)
+    gs0 = log_decay(B, T, HQ, dtype=dtype)
     go = torch.randn(B, T, HQ, V, device=device, dtype=dtype)
 
     gs = gs0.clone().requires_grad_(True)
@@ -320,7 +324,7 @@ def test_decode_matches_training_forward(dtype, B: int, T: int, H: int, HQ: int,
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.02
+    g = log_decay(B, T, HQ, K, dtype=dtype)
 
     o_ref = parallel_wall_attn(q, k, v, g, scale=scale)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
@@ -339,7 +343,7 @@ def test_decode_matches_training_forward_long():
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.02
+    g = log_decay(B, T, HQ, K, dtype=dtype)
 
     o_ref = parallel_wall_attn(q, k, v, g, scale=scale)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
@@ -359,8 +363,8 @@ def test_decode_with_scalar_gate():
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.02
-    g_scalar = torch.randn(B, T, HQ, device=device, dtype=dtype) * 0.05
+    g = log_decay(B, T, HQ, K, dtype=dtype)
+    g_scalar = log_decay(B, T, HQ, dtype=dtype)
 
     o_ref = parallel_wall_attn(q, k, v, g, scale=scale, g_scalar=g_scalar)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
@@ -386,7 +390,7 @@ def test_decode_streaming_matches_full_forward(dtype):
     q = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k = torch.randn(B, T, H, K, device=device, dtype=dtype)
     v = torch.randn(B, T, H, V, device=device, dtype=dtype)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=dtype) * 0.02
+    g = log_decay(B, T, HQ, K, dtype=dtype)
 
     o_ref = parallel_wall_attn(q, k, v, g, scale=scale)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
@@ -436,7 +440,7 @@ def test_decode_cache_layout_shapes():
     torch.manual_seed(3)
     B, T, H, HQ, K = 2, 200, 2, 8, 32
     k = torch.randn(B, T, H, K, device=device, dtype=torch.bfloat16)
-    g = torch.randn(B, T, HQ, K, device=device, dtype=torch.bfloat16) * 0.02
+    g = log_decay(B, T, HQ, K, dtype=torch.bfloat16)
     P = chunk_global_cumsum(g, scale=RCP_LN2)
     for C in (32, 64, 128):
         k_tilde, r_cache = build_wall_kv_cache(k, P, chunk_size=C)

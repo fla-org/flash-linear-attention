@@ -935,7 +935,9 @@ class WallParallelAttentionFunction(torch.autograd.Function):
                 f"P abs max={P.abs().max()}, lse finite={torch.isfinite(lse).all()}"
             )
 
-        dg = chunk_global_cumsum(dP, cu_seqlens=ctx.cu_seqlens, reverse=True)
+        # The kernel emits dP with an LN2 factor (b_dg = LN2 * q * dq); the forward set
+        # P = cumsum(g) * RCP_LN2, so dL/dg = RCP_LN2 * reverse_cumsum(dP) (nets the LN2).
+        dg = chunk_global_cumsum(dP, cu_seqlens=ctx.cu_seqlens, reverse=True, scale=RCP_LN2)
         if _DEBUG_ASSERTS:
             assert torch.isfinite(dg).all(), (
                 f"[wall-attn bwd] NaN/Inf in dg (after rev cumsum): dg abs max={dg.abs().max()}, "
