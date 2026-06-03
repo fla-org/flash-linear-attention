@@ -258,7 +258,17 @@ Keep inline comments restrained, especially in Triton kernels: shape annotations
 
 - Kernel functions use `@triton.jit` with `do_not_specialize=['T']` for the sequence-length argument.
 - Use `tl.constexpr` for compile-time constants (block sizes, flags like `USE_INITIAL_STATE`).
-- Use `tl.make_block_ptr` for coalesced memory access.
+- Do not introduce new `tl.make_block_ptr` use; Triton marks it deprecated. Prefer
+  `TensorDescriptor` / `tl.make_tensor_descriptor` when descriptor semantics are
+  needed, or explicit `tl.load` / `tl.store` pointer arithmetic following an
+  existing validated kernel pattern.
+- Treat program IDs and grid-derived indices as potentially narrow integers.
+  Cast them to `tl.int64` before multiplying by sizes, strides, or sequence
+  offsets. This is especially important for non-first grid dimensions on NVIDIA
+  and for non-NVIDIA backends where every grid dimension may be narrow.
+- Keep all tensor address arithmetic in `tl.int64`: block bases, varlen offsets,
+  strides, sequence positions, and element offsets must not rely on `int16` or
+  `int32` overflow behavior.
 - Gate autotune configs with `autotune_cache_kwargs` for cache support.
 - Kernel naming: `<op>_fwd_kernel_<suffix>` / `<op>_bwd_kernel_<suffix>`.
 - When renaming a symbol or adding/moving a parameter, sweep **every** site in one pass: the tensor, its `b_*` value, the `p_*` block pointer, comments, and — across the forward/backward kernels, host wrappers, and autograd `Function` — every signature, launch, return tuple, and `save_for_backward`/`saved_tensors` list. Keyword-argument order at each call site must match the parameter order in the signature.
