@@ -19,6 +19,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
+from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log, tanh
 from fla.utils import IS_AMD, input_guard
 
@@ -64,6 +65,7 @@ def logsumexp_fwd_kernel(
     tl.store(z + i_n * tl.cdiv(D, B) + i_d, b_z)
 
 
+@dispatch('modules')
 def logsumexp_fwd(
     x,
     scale: float | None = None,
@@ -271,6 +273,7 @@ def elementwise_mul_kernel(
     tl.store(x + o_x, b_x * b_g, mask=o_x < N)
 
 
+@dispatch('modules')
 def fused_linear_cross_entropy_forward(
     x: torch.Tensor,
     target: torch.LongTensor,
@@ -407,6 +410,7 @@ def fused_linear_cross_entropy_forward(
     return loss, dx, dw, db
 
 
+@dispatch('modules')
 def fused_linear_cross_entropy_backward(
     do: torch.Tensor,
     dx: torch.Tensor,

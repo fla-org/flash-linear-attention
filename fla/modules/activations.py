@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log
 from fla.utils import IS_AMD, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
@@ -143,6 +144,7 @@ def sigmoid_bwd_kernel(
     tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
+@dispatch('modules')
 @torch.compiler.disable
 def sigmoid_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
@@ -159,6 +161,7 @@ def sigmoid_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tenso
     return y
 
 
+@dispatch('modules')
 @torch.compiler.disable
 def sigmoid_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
@@ -261,6 +264,7 @@ def logsigmoid_bwd_kernel(
     tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
+@dispatch('modules')
 @torch.compiler.disable
 def logsigmoid_fwd(x: torch.Tensor, temperature: float = 1., output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
@@ -278,6 +282,7 @@ def logsigmoid_fwd(x: torch.Tensor, temperature: float = 1., output_contiguous: 
     return y
 
 
+@dispatch('modules')
 @torch.compiler.disable
 def logsigmoid_bwd(
     x: torch.Tensor,
@@ -382,6 +387,7 @@ def swish_bwd_kernel(
     tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
 
 
+@dispatch('modules')
 @torch.compiler.disable
 def swish_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
@@ -398,6 +404,7 @@ def swish_fwd(x: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     return y
 
 
+@dispatch('modules')
 @torch.compiler.disable
 def swish_bwd(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     x = _ensure_inner_contiguous(x)
@@ -628,6 +635,7 @@ def swiglu_fwdbwd_kernel(
         tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
 
 
+@dispatch('modules')
 @torch.compiler.disable
 def swiglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"swiglu_fwd: shape mismatch x={x.shape} y={y.shape}"
@@ -648,6 +656,7 @@ def swiglu_fwd(x: torch.Tensor, y: torch.Tensor, output_contiguous: bool = False
     return z
 
 
+@dispatch('modules')
 @torch.compiler.disable
 def swiglu_fwdbwd(
     x: torch.Tensor,
@@ -745,7 +754,9 @@ class SwiGLULinearFunction(torch.autograd.Function):
 swiglu = SwiGLUFunction.apply
 
 
-swiglu_linear = SwiGLULinearFunction.apply
+@dispatch('modules')
+def swiglu_linear(x, y, weight, bias):
+    return SwiGLULinearFunction.apply(x, y, weight, bias)
 
 
 @triton.autotune(

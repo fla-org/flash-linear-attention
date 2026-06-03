@@ -28,6 +28,7 @@ from torch.distributed import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard, distribute_module
 from torch.distributed.tensor.parallel import ParallelStyle
 
+from fla.modules.backends import dispatch
 from fla.utils import autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
 try:
@@ -538,6 +539,7 @@ def layer_norm_bwd_kernel1(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
+@dispatch('modules')
 def layer_norm_fwd(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -621,6 +623,7 @@ def layer_norm_fwd(
     return y, mean, rstd, res_out if res_out is not None else x
 
 
+@dispatch('modules')
 def layer_norm_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,

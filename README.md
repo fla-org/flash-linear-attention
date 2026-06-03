@@ -29,6 +29,7 @@
 
 ## News
 
+- [2026-05] 🚪 Add Gated DeltaNet 2 (GDN-2) implementation to `fla` ([paper](https://arxiv.org/abs/2605.22791)) — decouples erase and write gates into independent channel-wise gates on top of KDA.
 - [2026-05] 🦅 Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
 - [2026-05] 🚀 Add [YOCO](https://arxiv.org/abs/2405.05254) (You Only Cache Once) implementation to `fla`.
 - [2026-05] ⚡ Add fused [AttnRes](fla/ops/attnres) support to `fla` ([paper](https://arxiv.org/abs/2603.15031)).
@@ -106,6 +107,7 @@
 | 2025 | MoBA                 | [MoBA: Mixture of Block Attention for Long-Context LLMs](https://arxiv.org/abs/2502.13189)                                                    | [official](https://github.com/MoonshotAI/MoBA)                                                  |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/layers/moba.py)         |
 | 2026 | Mamba3               | [Mamba-3: Improved Sequence Modeling using State Space Principles](https://arxiv.org/abs/2603.15569)                                          | [official](https://github.com/state-spaces/mamba)                                               |         [fla](https://github.com/fla-org/flash-linear-attention/blob/main/fla/models/mamba3)          |
 | 2026 | Raven                | [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven/blob/main/raven.pdf)                     | [official](https://github.com/goombalab/raven)                                                  |          [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/raven)          |
+| 2026 | Gated DeltaNet 2     | [Gated DeltaNet-2: Decoupling Erase and Write in Linear Attention](https://arxiv.org/abs/2605.22791)                                          | [official](https://github.com/NVlabs/GatedDeltaNet-2)                                           |     [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gated_delta_net_v2)     |
 
 ## Installation
 

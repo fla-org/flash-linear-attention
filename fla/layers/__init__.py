@@ -14,6 +14,7 @@ from .delta_net import DeltaNet
 from .deltaformer import DeltaFormerAttention
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
+from .gated_deltanet_v2 import GatedDeltaNet2
 from .gated_deltaproduct import GatedDeltaProduct
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
@@ -51,6 +52,7 @@ __all__ = [
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
+    'GatedDeltaNet2',
     'GatedDeltaProduct',
     'GatedLinearAttention',
     'GatedSlotAttention',
