@@ -142,8 +142,6 @@ runs:
             $CONDA_BIN_PATH/pip install .
           fi
           if [[ "${{ inputs.runner_name }}" == nvidia-h100* ]]; then
-            echo "Installing flash-attn for NVIDIA"
-            $CONDA_BIN_PATH/pip install -U flash-attn --no-cache-dir --no-build-isolation
             if [ "${{ inputs.install_tilelang }}" = "true" ]; then
               echo "Installing tilelang for NVIDIA H100"
               $CONDA_BIN_PATH/pip uninstall tilelang -y
