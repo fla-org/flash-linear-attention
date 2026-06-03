@@ -37,21 +37,21 @@ jobs:
     if: >
       github.event_name == 'pull_request_review' &&
       github.event.review.state == 'approved' &&
-      github.event.pull_request.state == 'open' &&
-      (
-        github.event.review.author_association == 'OWNER' ||
-        github.event.review.author_association == 'MEMBER' ||
-        github.event.review.author_association == 'COLLABORATOR'
-      )
+      github.event.pull_request.state == 'open'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    outputs:
+      allowed: ${{ steps.check.outputs.allowed }}
     steps:
       - name: Check PyTorch 2.12 H100 jobs
+        id: check
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
             const ref = context.payload.pull_request.head.sha;
+            const reviewer = context.payload.review.user.login;
+            const association = context.payload.review.author_association;
             const timeoutMs = 85 * 60 * 1000;
             const pollMs = 60 * 1000;
             const deadline = Date.now() + timeoutMs;
@@ -60,6 +60,26 @@ jobs:
               'Test H100 (PyTorch 2.12) / test-models',
             ];
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            let permission = 'none';
+            let allowed = association === 'OWNER';
+            if (!allowed) {
+              try {
+                const response = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner,
+                  repo,
+                  username: reviewer,
+                });
+                permission = response.data.permission;
+                allowed = permission === 'admin';
+              } catch (error) {
+                core.info(`Could not read ${reviewer}'s repo permission: ${error.message}`);
+              }
+            }
+            core.info(`${reviewer}: association=${association}, permission=${permission}`);
+            if (!allowed) {
+              core.setOutput('allowed', 'false');
+              return;
+            }
 
             while (true) {
               const checkRuns = await github.paginate(github.rest.checks.listForRef, {
@@ -105,6 +125,7 @@ jobs:
               }
 
               if (allPassed) {
+                core.setOutput('allowed', 'true');
                 return;
               }
 
@@ -116,17 +137,44 @@ jobs:
               await sleep(pollMs);
             }
 
+  check_h100_pytorch_2_7_auto:
+    name: Check H100 PyTorch 2.7 Auto Eligibility
+    needs: test-h100-pytorch-2-12
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    outputs:
+      allowed: ${{ steps.permission.outputs.allowed }}
+    steps:
+      - name: Check PR author permission
+        id: permission
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const username = pr.user.login;
+            let permission = 'none';
+            let allowed = pr.author_association === 'OWNER';
+            if (!allowed) {
+              try {
+                const response = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner,
+                  repo,
+                  username,
+                });
+                permission = response.data.permission;
+                allowed = permission === 'admin';
+              } catch (error) {
+                core.info(`Could not read ${username}'s repo permission: ${error.message}`);
+              }
+            }
+            core.info(`${username}: association=${pr.author_association}, permission=${permission}`);
+            core.setOutput('allowed', allowed ? 'true' : 'false');
+
   test-h100-pytorch-2-7-ops-maintainer:
     name: Test H100 Ops (PyTorch 2.7)
-    needs: test-h100-pytorch-2-12
-    if: >
-      github.event_name == 'pull_request' &&
-      github.event.action != 'closed' &&
-      (
-        github.event.pull_request.author_association == 'OWNER' ||
-        github.event.pull_request.author_association == 'MEMBER' ||
-        github.event.pull_request.author_association == 'COLLABORATOR'
-      )
+    needs: check_h100_pytorch_2_7_auto
+    if: needs.check_h100_pytorch_2_7_auto.outputs.allowed == 'true'
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
       runner: 'nvidia-h100-1'
@@ -138,7 +186,7 @@ jobs:
   test-h100-pytorch-2-7-ops-approved:
     name: Test H100 Ops (PyTorch 2.7)
     needs: check_h100_pytorch_2_12
-    if: needs.check_h100_pytorch_2_12.result == 'success'
+    if: needs.check_h100_pytorch_2_12.outputs.allowed == 'true'
     uses: ./.github/workflows/reusable-ci-tests.yml
     with:
       runner: 'nvidia-h100-1'
