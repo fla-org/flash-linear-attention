@@ -14,8 +14,8 @@ from .delta_net import DeltaNet
 from .deltaformer import DeltaFormerAttention
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
-from .gated_deltanet_v2 import GatedDeltaNet2
 from .gated_deltaproduct import GatedDeltaProduct
+from .gdn2 import GatedDeltaNet2
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
 from .hgrn import HGRNAttention

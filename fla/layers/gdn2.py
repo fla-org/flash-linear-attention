@@ -9,7 +9,7 @@
 #
 # Adapted from NVIDIA's reference implementation at
 # https://github.com/NVlabs/GatedDeltaNet-2 to fit fla's module style. The
-# recurrence itself lives in fla.ops.gated_delta_net_v2; this module only
+# recurrence itself lives in fla.ops.gdn2; this module only
 # prepares its inputs and consumes its outputs.
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, ShortConvolution
-from fla.ops.gated_delta_net_v2 import chunk_gdn2, fused_recurrent_gdn2
+from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -51,30 +51,38 @@ class GatedDeltaNet2(nn.Module):
     `Gated DeltaNet-2: Decoupling Erase and Write in Linear Attention`.
 
     Args:
-        hidden_size (int, optional): hidden size of the input. Default: 2048.
-        expand_v (float, optional): value-dim expansion ratio. Default: 1.0.
-        head_dim (int, optional): per-head dimension. Default: 128.
-        num_heads (int, optional): number of QK heads. Default: 16.
-        num_v_heads (int, optional): number of value heads. Defaults to
-            ``num_heads``. GVA is applied if ``num_v_heads > num_heads``;
-            in that case the QK-side tensors (q, k, g, b) are broadcast to
-            the value-head dimension before the kernel.
-        mode (str, optional): ``"chunk"`` (training + long inference) or
-            ``"fused_recurrent"`` (decode). The layer automatically falls back
-            to ``"fused_recurrent"`` for short inference sequences
-            (``q_len <= 64``). Default: ``"chunk"``.
-        use_short_conv (bool, optional): use depthwise short conv on q/k/v.
-            Default: ``True``.
-        allow_neg_eigval (bool, optional): when ``True``, scale ``b`` to
-            ``[0, 2)`` to allow negative eigenvalues in the state transition.
-            See `Unlocking State-Tracking in Linear RNNs Through Negative
-            Eigenvalues`. Default: ``False``.
-        conv_size (int, optional): kernel size of the short conv. Default: 4.
-        conv_bias (bool, optional): bias on the short conv. Default: ``False``.
-        layer_idx (int, optional): layer index used for cache keying. Default:
-            ``None``.
-        norm_eps (float, optional): epsilon for the gated RMSNorm. Default:
-            ``1e-5``.
+        hidden_size (int, Optional):
+            The hidden size of the input. Default: 2048.
+        expand_v (float, Optional):
+            The expansion ratio for the value dimension. Default: 1.0.
+        head_dim (int, Optional):
+            The dimension of each head. Default: 128.
+        num_heads (int, Optional):
+            The number of QK heads. Default: 16.
+        num_v_heads (int, Optional):
+            The number of heads for the value projection, equal to `num_heads` if `None`.
+            GVA (Grouped Value Attention) is applied if `num_v_heads` > `num_heads`,
+            where the QK-side tensors (q, k, g, b) are broadcast to the value-head
+            dimension before the kernel. Default: `None`.
+        mode (str, Optional):
+            Which GDN-2 kernel to use.
+            Currently available: `chunk` and `fused_recurrent`.
+            The layer automatically falls back to `fused_recurrent` for short
+            inference sequences (`q_len <= 64`). Default: `chunk`.
+        use_short_conv (bool, Optional):
+            Whether to use short convolutions. Default: `True`.
+        allow_neg_eigval (bool, Optional):
+            Allow negative eigenvalues. Default: `False`. If set to `True`, the erase gate `b` will be multiplied by 2.
+            See reference:
+            `Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues <https://arxiv.org/abs/2411.12537>`_
+        conv_size (int, Optional):
+            The kernel size of the short convolution, only used when `use_short_conv` is `True`. Default: 4.
+        conv_bias (bool, Optional):
+            Whether to use bias in the short convolution, only used when `use_short_conv` is `True`. Default: `False`.
+        layer_idx (int, Optional):
+            The index of the layer. Default: None.
+        norm_eps (float, Optional):
+            The epsilon value for the normalization layer. Default: 1e-5.
     """
 
     def __init__(
@@ -144,13 +152,22 @@ class GatedDeltaNet2(nn.Module):
 
         if use_short_conv:
             self.q_conv1d = ShortConvolution(
-                hidden_size=self.key_dim, kernel_size=conv_size, bias=conv_bias, activation="silu",
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation="silu",
             )
             self.k_conv1d = ShortConvolution(
-                hidden_size=self.key_dim, kernel_size=conv_size, bias=conv_bias, activation="silu",
+                hidden_size=self.key_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation="silu",
             )
             self.v_conv1d = ShortConvolution(
-                hidden_size=self.value_dim, kernel_size=conv_size, bias=conv_bias, activation="silu",
+                hidden_size=self.value_dim,
+                kernel_size=conv_size,
+                bias=conv_bias,
+                activation="silu",
             )
 
         # Decay-gate projection: low-rank bottleneck through head_v_dim to key_dim.
@@ -203,7 +220,7 @@ class GatedDeltaNet2(nn.Module):
         last_state = get_layer_cache(self, past_key_values)
 
         cu_seqlens = kwargs.get("cu_seqlens")
-        if attention_mask is not None:
+        if cu_seqlens is None and attention_mask is not None:
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
@@ -212,16 +229,22 @@ class GatedDeltaNet2(nn.Module):
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state["conv_state"]
             q, conv_state_q = self.q_conv1d(
-                x=self.q_proj(hidden_states), cache=conv_state_q,
-                output_final_state=use_cache, cu_seqlens=cu_seqlens,
+                x=self.q_proj(hidden_states),
+                cache=conv_state_q,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
             )
             k, conv_state_k = self.k_conv1d(
-                x=self.k_proj(hidden_states), cache=conv_state_k,
-                output_final_state=use_cache, cu_seqlens=cu_seqlens,
+                x=self.k_proj(hidden_states),
+                cache=conv_state_k,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
             )
             v, conv_state_v = self.v_conv1d(
-                x=self.v_proj(hidden_states), cache=conv_state_v,
-                output_final_state=use_cache, cu_seqlens=cu_seqlens,
+                x=self.v_proj(hidden_states),
+                cache=conv_state_v,
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
             )
         else:
             q = F.silu(self.q_proj(hidden_states))
@@ -259,7 +282,12 @@ class GatedDeltaNet2(nn.Module):
         recurrent_state = last_state["recurrent_state"] if last_state is not None else None
         if mode == "chunk":
             o, recurrent_state = chunk_gdn2(
-                q=q, k=k, v=v, g=g, b=b, w=w,
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                b=b,
+                w=w,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,
@@ -267,7 +295,12 @@ class GatedDeltaNet2(nn.Module):
             )
         elif mode == "fused_recurrent":
             o, recurrent_state = fused_recurrent_gdn2(
-                q=q, k=k, v=v, g=g, b=b, w=w,
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                b=b,
+                w=w,
                 initial_state=recurrent_state,
                 output_final_state=use_cache,
                 use_qk_l2norm_in_kernel=True,

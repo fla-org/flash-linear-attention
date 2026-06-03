@@ -30,8 +30,8 @@ import warnings
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
-from fla.ops.gated_delta_net_v2.chunk_bwd import chunk_gdn2_bwd
-from fla.ops.gated_delta_net_v2.chunk_fwd import chunk_gdn2_fwd
+from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd
+from fla.ops.gdn2.chunk_fwd import chunk_gdn2_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
@@ -269,7 +269,7 @@ def chunk_gdn2(
 
         >>> import torch
         >>> import torch.nn.functional as F
-        >>> from fla.ops.gated_delta_net_v2 import chunk_gdn2
+        >>> from fla.ops.gdn2 import chunk_gdn2
         >>> B, T, H, K, V = 2, 1024, 4, 128, 128
         >>> q = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')
         >>> k = torch.randn(B, T, H, K, dtype=torch.bfloat16, device='cuda')

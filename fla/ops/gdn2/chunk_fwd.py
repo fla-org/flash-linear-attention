@@ -10,7 +10,7 @@
 import torch
 
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
-from fla.ops.gated_delta_net_v2.chunk_intra import chunk_gdn2_fwd_intra
+from fla.ops.gdn2.chunk_intra import chunk_gdn2_fwd_intra
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
 from fla.ops.kda.gate import kda_gate_chunk_cumsum
 from fla.ops.utils import chunk_local_cumsum
