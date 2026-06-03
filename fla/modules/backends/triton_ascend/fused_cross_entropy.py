@@ -5,32 +5,23 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import Any
+"""Fused cross-entropy kernels adapted for triton-ascend on Huawei NPU."""
 
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
+from triton.language.math import tanh
 
-from fla.modules.backends import dispatch
-from fla.ops.utils.op import exp, log, tanh
+from fla.ops.utils.op import exp, log
 from fla.utils import input_guard
-
-# `all_gather_into_tensor` and `reduce_scatter_tensor` are new placeholders for
-# `_all_gather_base` and `_reduce_scatter_base`. They require the most recent
-# version of PyTorch. The following 2 lines are for backward compatibility with
-# older PyTorch.
-if "all_gather_into_tensor" not in dir(torch.distributed):
-    torch.distributed.all_gather_into_tensor = torch.distributed._all_gather_base
 
 
 @triton.heuristics({
     "HAS_SMOOTHING": lambda args: args["label_smoothing"] > 0.0,
-    "HAS_SOFTCAPPING": lambda args: args["logit_softcapping"] is not None,
 })
 @triton.jit
 def cross_entropy_fwd_kernel(
-    loss_ptr,  # data ptrs
+    loss_ptr,
     lse_ptr,
     z_loss_ptr,
     logits_ptr,
@@ -38,17 +29,16 @@ def cross_entropy_fwd_kernel(
     label_smoothing,
     logit_scale,
     lse_square_scale,
-    logit_softcapping,
+    logit_softcapping: tl.constexpr,
     ignore_index,
     total_classes,
-    class_start_idx,  # Useful for tensor parallel when each rank only has a subset of classes
-    n_cols,  # shapes
+    class_start_idx,
+    n_cols,
     n_rows,
-    logits_row_stride,  # strides
+    logits_row_stride,
     BLOCK_SIZE: tl.constexpr,
     HAS_SMOOTHING: tl.constexpr,
     HAS_SOFTCAPPING: tl.constexpr,
-    # if SPLIT (e.g. tensor parallel), don't include the LSE in the loss since it's not the final LSE
     SPLIT: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
@@ -85,7 +75,6 @@ def cross_entropy_fwd_kernel(
             else:
                 loss = (lse if not SPLIT else 0.0) - logits_label
         else:
-            # If label is out of bounds, we set the CE loss to 0.0. But we still want the label_smoothing loss
             if HAS_SMOOTHING:
                 loss = label_smoothing * ((lse if not SPLIT else 0.0) - sum_logits / total_classes)
             else:
@@ -102,11 +91,10 @@ def cross_entropy_fwd_kernel(
 
 @triton.heuristics({
     "HAS_SMOOTHING": lambda args: args["label_smoothing"] > 0.0,
-    "HAS_SOFTCAPPING": lambda args: args["logit_softcapping"] is not None,
 })
 @triton.jit
 def cross_entropy_bwd_kernel(
-    dlogits_ptr,  # data ptrs
+    dlogits_ptr,
     dloss_ptr,
     logits_ptr,
     lse_ptr,
@@ -114,12 +102,12 @@ def cross_entropy_bwd_kernel(
     label_smoothing,
     logit_scale,
     lse_square_scale,
-    logit_softcapping,
+    logit_softcapping: tl.constexpr,
     ignore_index,
     total_classes,
-    class_start_idx,  # Useful for tensor parallel when each rank only has a subset of classes
-    n_cols,  # shapes
-    logits_row_stride,  # strides
+    class_start_idx,
+    n_cols,
+    logits_row_stride,
     dlogits_row_stride,
     dloss_row_stride,
     BLOCK_SIZE: tl.constexpr,
@@ -151,13 +139,23 @@ def cross_entropy_bwd_kernel(
         probs = tl.where(col_offsets == label_idx, probs - (1 - label_smoothing), probs) - smooth_negative
     else:
         probs = tl.where(col_offsets == label_idx, probs - 1.0, probs)
-    # d(softcap * tanh(x/softcap))/dx = 1 - tanh(x/softcap)^2
     if HAS_SOFTCAPPING:
         probs = probs * (1.0 - t * t)
     tl.store(dlogits_ptr + col_offsets, (dloss * logit_scale) * probs, mask=col_offsets < n_cols)
 
 
-def fused_cross_entropy_forward(
+def _npu_block_size(n_cols: int, n_rows: int) -> tuple[int, int]:
+    block_size = 1024 if n_cols <= 32768 else (2048 if n_cols <= 131072 else 4096)
+    max_splits = max(1, 65535 // max(n_rows, 1))
+    block_size = min(
+        max(block_size, triton.next_power_of_2((n_cols + max_splits - 1) // max_splits)),
+        8192,
+    )
+    num_warps = 2 if block_size <= 2048 else 4
+    return block_size, num_warps
+
+
+def fused_cross_entropy_forward_npu(
     logits: torch.Tensor,
     target: torch.Tensor,
     label_smoothing: float = 0.0,
@@ -176,26 +174,20 @@ def fused_cross_entropy_forward(
 
     if logits.stride(-1) != 1:
         logits = logits.contiguous()
-    # Set these similar to https://github.com/triton-lang/triton/blob/main/python/tutorials/02-fused-softmax.py
+
     MAX_BLOCK_SIZE = 64 * 1024
-    BLOCK_SIZE = min(triton.next_power_of_2(n_cols), MAX_BLOCK_SIZE)
-    num_warps = (
-        4
-        if BLOCK_SIZE < 2048
-        else (8 if BLOCK_SIZE < 8192 else (16 if BLOCK_SIZE < 128 * 1024 else 32))
-    )
-    # We may split the lse computation across multiple blocks, then do a reduction
-    # lse(local_lse) to get the final LSE. This is faster for large n_cols (e.g., > 64k)
-    # where having just one thread block processing more than 64k elements is slow.
-    split = world_size > 1 or n_cols > MAX_BLOCK_SIZE
+    BLOCK_SIZE, num_warps = _npu_block_size(n_cols, n_rows)
+    has_softcapping = logit_softcapping is not None
+    softcap_val = float(logit_softcapping) if has_softcapping else 0.0
     n_splits = (n_cols + BLOCK_SIZE - 1) // BLOCK_SIZE
+    split = world_size > 1 or n_cols > MAX_BLOCK_SIZE or n_splits > 1
     loss_shape = (n_splits, n_rows) if n_splits > 1 else (n_rows,)
     losses = torch.empty(*loss_shape, dtype=torch.float, device=logits.device)
     lse = torch.empty(*loss_shape, dtype=torch.float, device=logits.device)
     z_losses = torch.empty(*loss_shape, dtype=torch.float, device=logits.device)
 
     cross_entropy_fwd_kernel[(n_rows, n_splits)](
-        losses,  # data ptrs
+        losses,
         lse,
         z_losses,
         logits,
@@ -203,25 +195,20 @@ def fused_cross_entropy_forward(
         label_smoothing,
         logit_scale,
         lse_square_scale,
-        logit_softcapping,
+        softcap_val,
         ignore_index,
         total_classes,
         class_start_idx,
-        n_cols,  # shapes
+        n_cols,
         n_rows,
-        logits.stride(0),  # strides
-        BLOCK_SIZE=BLOCK_SIZE,  # constants
+        logits.stride(0),
+        BLOCK_SIZE=BLOCK_SIZE,
+        HAS_SOFTCAPPING=has_softcapping,
         num_warps=num_warps,
         SPLIT=split,
     )
 
     if split:
-        # If there's no label_smoothing, if target are in the vocab of this partition, losses contains
-        # - predicted logit, and 0 otherwise.
-        # If there's label_smoothing=0.1, for target in the vocab of this partition, losses contains
-        # -0.9 * predicted logit - 0.1 * sum logit / total_classes.
-        # For target not in the vocab of this partition, losses contains
-        # -0.1 * sum logit / total_classes.
         if n_splits > 1:
             lse = torch.logsumexp(lse, dim=0)
             losses = losses.sum(dim=0)
@@ -233,11 +220,6 @@ def fused_cross_entropy_forward(
             )
             lse = torch.logsumexp(lse_allgather, dim=0)
             handle_losses.wait()
-        # After the allreduce, if there's no label_smoothing, the total losses are - predicted_logit,
-        # we just have to add the (global) lse.
-        # If there's label_smoothing=0.1, the total losses are
-        # -0.9 * predicted_logit - 0.1 * sum logit / total_classes.
-        # Again, we just have to add the (global) lse.
         losses += lse
         if lse_square_scale != 0.0:
             z_losses = lse_square_scale * lse.square()
@@ -250,7 +232,51 @@ def fused_cross_entropy_forward(
     return losses, z_losses, lse, total_classes, class_start_idx
 
 
-class CrossEntropyLossFunction(torch.autograd.Function):
+def fused_cross_entropy_backward_npu(
+    dlogits: torch.Tensor,
+    grad_losses: torch.Tensor,
+    logits: torch.Tensor,
+    lse: torch.Tensor,
+    target: torch.Tensor,
+    label_smoothing: float,
+    logit_scale: float,
+    lse_square_scale: float,
+    logit_softcapping: float | None,
+    ignore_index: int,
+    total_classes: int,
+    class_start_idx: int,
+) -> torch.Tensor:
+    n_rows, n_cols = logits.shape
+    BLOCK_SIZE, num_warps = _npu_block_size(n_cols, n_rows)
+    has_softcapping = logit_softcapping is not None
+    softcap_val = float(logit_softcapping) if has_softcapping else 0.0
+
+    def grid(META): return (n_rows, triton.cdiv(n_cols, META["BLOCK_SIZE"]))  # noqa
+    cross_entropy_bwd_kernel[grid](
+        dlogits,
+        grad_losses,
+        logits,
+        lse,
+        target,
+        label_smoothing,
+        logit_scale,
+        lse_square_scale,
+        softcap_val,
+        ignore_index,
+        total_classes,
+        class_start_idx,
+        n_cols,
+        logits.stride(0),
+        dlogits.stride(0),
+        grad_losses.stride(0),
+        BLOCK_SIZE=BLOCK_SIZE,
+        HAS_SOFTCAPPING=has_softcapping,
+        num_warps=num_warps,
+    )
+    return dlogits
+
+
+class CrossEntropyLossFunctionNPU(torch.autograd.Function):
 
     @staticmethod
     @input_guard
@@ -266,7 +292,7 @@ class CrossEntropyLossFunction(torch.autograd.Function):
         inplace_backward=False,
         process_group=None,
     ):
-        losses, z_losses, lse, total_classes, class_start_idx = fused_cross_entropy_forward(
+        losses, z_losses, lse, total_classes, class_start_idx = fused_cross_entropy_forward_npu(
             logits,
             target,
             label_smoothing,
@@ -292,16 +318,12 @@ class CrossEntropyLossFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, grad_losses, grad_z_losses):
-        del grad_z_losses  # z_losses are only for logging.
+        del grad_z_losses
 
         logits, lse, target = ctx.saved_tensors
         dlogits = logits if ctx.inplace_backward else torch.empty_like(logits)
-        n_rows, n_cols = logits.shape
-        BLOCK_SIZE = min(triton.next_power_of_2(n_cols), 4 * 1024)
-        num_warps = 4 if BLOCK_SIZE < 2048 else (8 if BLOCK_SIZE < 8192 else 16)
-        def grid(META): return (n_rows, triton.cdiv(n_cols, META["BLOCK_SIZE"]))  # noqa
-        cross_entropy_bwd_kernel[grid](
-            dlogits,  # data ptrs
+        fused_cross_entropy_backward_npu(
+            dlogits,
             grad_losses,
             logits,
             lse,
@@ -313,54 +335,22 @@ class CrossEntropyLossFunction(torch.autograd.Function):
             ctx.ignore_index,
             ctx.total_classes,
             ctx.class_start_idx,
-            n_cols,  # shapes
-            logits.stride(0),  # strides
-            dlogits.stride(0),
-            grad_losses.stride(0),
-            BLOCK_SIZE=BLOCK_SIZE,  # constants
-            num_warps=num_warps,
         )
         return dlogits, None, None, None, None, None, None, None, None, None
 
 
-@dispatch('modules')
-def cross_entropy_loss(
+def cross_entropy_loss_npu(
     logits: torch.Tensor,
     target: torch.Tensor,
     label_smoothing: float = 0.0,
     logit_scale: float = 1.0,
     lse_square_scale: float = 0.0,
     logit_softcapping: float = None,
-    ignore_index=-100,
+    ignore_index: int = -100,
     inplace_backward: bool = False,
     process_group=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Arguments:
-        logits: [batch, vocab_size]
-        target: [batch,]
-        label_smoothing: float
-        logit_scale: float.
-            Multiply logits by this scale before calculating the loss.
-        lse_square_scale: float.
-            If > 0, we add lse_square_scale * lse(logits) ^ 2 to the loss.
-            This is also referred to as "z-loss".
-        logit_softcapping: float.
-            If > 0, apply logit softcapping: logits = softcap * tanh(logits / softcap).
-            This prevents logit magnitudes from growing unboundedly.
-        ignore_index: int.
-            If target == ignore_index, the loss is set to 0.0.
-        inplace_backward: bool.
-            If True, we do the backward pass in-place by modifying the logits.
-            This saves memory.
-        process_group:
-            if not None, we're doing Tensor Parallel: each process is responsible for
-            one part of the vocab. The loss will be aggregated across processes.
-    Returns:
-        losses: [batch,], float
-        z_losses: [batch,], float
-    """
-    return CrossEntropyLossFunction.apply(
+    return CrossEntropyLossFunctionNPU.apply(
         logits,
         target,
         label_smoothing,
@@ -371,87 +361,3 @@ def cross_entropy_loss(
         inplace_backward,
         process_group,
     )
-
-
-class FusedCrossEntropyLoss(nn.Module):
-    def __init__(
-        self,
-        ignore_index: int = -100,
-        reduction: str = "mean",
-        label_smoothing: float = 0.0,
-        logit_scale: float = 1.0,
-        lse_square_scale: float = 0.0,
-        logit_softcapping: float = None,
-        inplace_backward: bool = False,
-        process_group: Any = None,
-        return_z_loss: bool = False,
-    ):
-        """
-        Arguments:
-            ignore_index: int. If target == ignore_index, the loss is set to 0.0.
-            label_smoothing: float
-            lse_square_scale: float. If > 0, we add lse_square_scale * lse(logits) ^ 2 to the loss.
-                This is also referred to as "z-loss".
-            logit_softcapping: float. If > 0, apply logit softcapping:
-                logits = softcap * tanh(logits / softcap).
-                This prevents logit magnitudes from growing unboundedly.
-            inplace_backward: bool. If True, we do the backward pass in-place by modifying the logits.
-                This saves memory.
-            process_group: if not None, we're doing Tensor Parallel: each process is responsible for
-                one part of the vocab. The loss will be aggregated across processes.
-            return_z_loss: bool. If True, we return the component of the loss contributed by
-                the lse_square_scale value. This value is only for logging and does not support
-                backprop.
-        """
-        super().__init__()
-        if reduction not in ["mean", "none", "sum"]:
-            raise NotImplementedError("Only support reduction = 'mean' or 'none' or 'sum'")
-        self.ignore_index = ignore_index
-        self.reduction = reduction
-        self.label_smoothing = label_smoothing
-        self.logit_scale = logit_scale
-        self.lse_square_scale = lse_square_scale
-        self.logit_softcapping = logit_softcapping
-        self.inplace_backward = inplace_backward
-        self.process_group = process_group
-        self.return_z_loss = return_z_loss
-
-    def forward(self, input, target):
-        """
-        Arguments:
-            input: (batch, vocab_size)
-            target: (batch,)
-        Returns:
-            losses: (batch,) if reduction is 'none', else (1,), dtype float
-            z_loss: (batch,) if reduction is 'none', else (1,), dtype float (if self.return_z_loss)
-        """
-        assert input.is_cuda and target.is_cuda, "Only support CUDA tensors"
-        loss, z_loss = cross_entropy_loss(
-            input,
-            target,
-            label_smoothing=self.label_smoothing,
-            logit_scale=self.logit_scale,
-            lse_square_scale=self.lse_square_scale,
-            logit_softcapping=self.logit_softcapping,
-            ignore_index=self.ignore_index,
-            inplace_backward=self.inplace_backward,
-            process_group=self.process_group,
-        )
-        if self.reduction == "mean":
-            loss = loss.sum() / (target != self.ignore_index).sum()
-        elif self.reduction == "sum":
-            loss = loss.sum()
-        else:
-            loss = loss
-
-        if not self.return_z_loss:
-            return loss
-
-        if self.reduction == "mean":
-            z_loss = z_loss.sum() / (target != self.ignore_index).sum()
-        elif self.reduction == "sum":
-            z_loss = z_loss.sum()
-        else:
-            z_loss = z_loss
-
-        return loss, z_loss

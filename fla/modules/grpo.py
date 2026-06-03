@@ -60,6 +60,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.modules.backends import dispatch
 from fla.ops.utils.op import exp, log
 from fla.utils import IS_AMD, autotune_cache_kwargs, input_guard
 
@@ -295,6 +296,7 @@ class GrpoLoss(torch.autograd.Function):
         return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 
 
+@dispatch('modules')
 def fused_grpo_loss(logits, ref_logp, input_ids, advantages,
                     beta=0.1, completion_mask=None, save_kl=False, inplace=False) -> torch.Tensor:
     '''
