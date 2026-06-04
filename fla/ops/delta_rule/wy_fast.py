@@ -223,7 +223,7 @@ def recompute_w_u_fwd(
     chunk_indices: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
-    BT = 64
+    BT = A.shape[-1]
     CONST_TILING = 64 if check_shared_mem() else 32
     BK = min(max(triton.next_power_of_2(K), 16), CONST_TILING)
     BV = min(max(triton.next_power_of_2(V), 16), CONST_TILING)
