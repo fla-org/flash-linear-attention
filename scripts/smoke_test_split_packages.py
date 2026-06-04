@@ -67,6 +67,7 @@ def assert_core_only_import(python: Path, version: str) -> None:
         assert not hasattr(fla, "models")
         assert importlib.util.find_spec("fla.ops") is not None
         assert importlib.util.find_spec("fla.modules") is not None
+        assert importlib.util.find_spec("fla.utils") is not None
         assert importlib.util.find_spec("fla.layers") is None
         assert importlib.util.find_spec("fla.models") is None
         assert "fla.layers" not in sys.modules
@@ -113,6 +114,7 @@ def assert_split_namespace_installed(python: Path) -> None:
         assert "fla/__init__.py" in core_files
         assert "fla/ops/__init__.py" in core_files
         assert "fla/modules/__init__.py" in core_files
+        assert "fla/utils/__init__.py" in core_files
         assert "fla/layers/__init__.py" in ext_files
         assert "fla/models/__init__.py" in ext_files
 
