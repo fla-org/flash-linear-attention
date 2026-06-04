@@ -92,7 +92,7 @@ def test_chunk(
         pytest.param(*test, id="B{}-T{}-H{}-D{}-scale{}-{}-chunk{}".format(*test))
         for chunk_size in [16, 32, 64]
         for test in [
-            (1, 64, 2, 32, 0.1, torch.float16, chunk_size),
+            (1, 64, 2, 32, 0.1, torch.bfloat16, chunk_size),
         ]
     ],
 )
@@ -150,13 +150,13 @@ def test_chunk_with_chunk_size(
     ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dh0 = run_ref()
     tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dh0 = run_tri(chunk_size)
 
-    assert_close(f'o@{chunk_size}', ref_o, tri_o, 0.002)
-    assert_close(f'ht@{chunk_size}', ref_ht, tri_ht, 0.002)
-    assert_close(f'dq@{chunk_size}', ref_dq, tri_dq, 0.002)
-    assert_close(f'dk@{chunk_size}', ref_dk, tri_dk, 0.002)
-    assert_close(f'dv@{chunk_size}', ref_dv, tri_dv, 0.002)
-    assert_close(f'db@{chunk_size}', ref_dbeta, tri_dbeta, 0.002)
-    assert_close(f'dh0@{chunk_size}', ref_dh0, tri_dh0, 0.002)
+    assert_close(f'o@{chunk_size}', ref_o, tri_o, 0.006)
+    assert_close(f'ht@{chunk_size}', ref_ht, tri_ht, 0.006)
+    assert_close(f'dq@{chunk_size}', ref_dq, tri_dq, 0.008)
+    assert_close(f'dk@{chunk_size}', ref_dk, tri_dk, 0.008)
+    assert_close(f'dv@{chunk_size}', ref_dv, tri_dv, 0.008)
+    assert_close(f'db@{chunk_size}', ref_dbeta, tri_dbeta, 0.008)
+    assert_close(f'dh0@{chunk_size}', ref_dh0, tri_dh0, 0.008)
 
 
 @pytest.mark.parametrize(
