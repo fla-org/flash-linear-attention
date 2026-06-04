@@ -188,12 +188,13 @@ def prepare_wy_repr_fwd(
     beta: torch.Tensor,
     cu_seqlens: torch.LongTensor | None,
     chunk_indices: torch.LongTensor | None = None,
+    chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
         beta=beta,
         cu_seqlens=cu_seqlens,
-        chunk_size=64,
+        chunk_size=chunk_size,
         output_dtype=torch.float32,
         chunk_indices=chunk_indices,
     )

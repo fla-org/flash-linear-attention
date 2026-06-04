@@ -393,8 +393,10 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
         cu_seqlens_cpu: torch.LongTensor | None = None,
+        chunk_size: int | None = None,
     ):
-        chunk_size = min(64, max(triton.next_power_of_2(q.shape[1]), 16))
+        if chunk_size is None:
+            chunk_size = 64
         chunk_indices = prepare_chunk_indices(
             cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
         o, final_state = chunk_generalized_iplr_delta_rule_fwd(
@@ -477,6 +479,9 @@ def chunk_iplr_delta_rule(
         raise DeprecationWarning(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
+    chunk_size = kwargs.pop('chunk_size', None)
+    if chunk_size is not None and chunk_size != 2 ** (chunk_size.bit_length() - 1):
+        raise ValueError(f"`chunk_size` must be a power of 2, got {chunk_size}.")
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -500,5 +505,6 @@ def chunk_iplr_delta_rule(
         output_final_state,
         cu_seqlens,
         cu_seqlens_cpu,
+        chunk_size,
     )
     return o, final_state
