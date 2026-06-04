@@ -1,6 +1,8 @@
 [project]
 name = "flash-linear-attention"
-dynamic = ["version"]
+# `dependencies` is dynamic so setup.py can resolve the torch/triton flavor
+# from FLA_TARGET_DEVICE / installed torch at build time.
+dynamic = ["version", "dependencies"]
 description = "Fast Triton-based implementations of causal linear attention"
 readme = "README.md"
 authors = [
@@ -15,14 +17,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 requires-python = ">=3.10"
-dependencies = [
-    "torch>=2.7.0",
-    "triton>=3.3",
-    "transformers>=4.45.0",
-    "einops",
-]
+# `dependencies` is resolved dynamically by setup.py based on
+# FLA_TARGET_DEVICE (or auto-detected from an installed torch). Users
+# installing from a built wheel pick the backend via the extras below.
 
 [project.optional-dependencies]
+cuda = ["torch>=2.7.0", "triton>=3.3"]
+rocm = ["torch>=2.7.0", "pytorch-triton-rocm>=3.3"]
+xpu  = ["torch>=2.7.0", "pytorch-triton-xpu>=3.3"]
+cpu  = ["torch>=2.7.0"]
 tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]
 benchmark = ["matplotlib", "datasets>=3.3.0"]

@@ -125,30 +125,53 @@ The following requirements should be satisfied
 
 Starting from v0.3.2, the packages published on PyPI are `fla-core` and `flash-linear-attention`. The former contains all our customized kernels and only depends on PyTorch, Triton, and einops. The latter is an extension package of the former, containing `fla/layers` and `fla/models`, and depends on transformers. We also provide Triton implementations for conv1d operations, so causal-conv1d is not required.
 
-You can install `fla` with pip:
+### Pick a backend
+
+`fla` resolves its `torch` and `triton` flavor from the backend you select. Pick the row that matches your hardware:
+
+| Backend | Extra     | Wheel index                                              |
+| ------- | --------- | -------------------------------------------------------- |
+| CUDA    | `[cuda]`  | `https://download.pytorch.org/whl/cu128` (or your CUDA)  |
+| ROCm    | `[rocm]`  | `https://download.pytorch.org/whl/rocm7.2` (or your ROCm)|
+| XPU     | `[xpu]`   | `https://download.pytorch.org/whl/xpu`                   |
+| CPU     | `[cpu]`   | `https://download.pytorch.org/whl/cpu`                   |
+
+PyPI install:
 ```sh
-pip install flash-linear-attention
+# CUDA (default behavior of plain PyPI)
+pip install flash-linear-attention[cuda]
+
+# ROCm
+pip install flash-linear-attention[rocm] --extra-index-url https://download.pytorch.org/whl/rocm7.2
+
+# XPU
+pip install flash-linear-attention[xpu] --extra-index-url https://download.pytorch.org/whl/xpu
 ```
 
-As `fla` is actively developed now, for the latest features and updates, an alternative way is to install the package from source. Note that installing from git uses the default mode, so you need to uninstall both `fla-core` and `flash-linear-attention` first:
+From source (latest):
 ```sh
-# uninstall both packages first to ensure a successful upgrade
-pip uninstall fla-core flash-linear-attention -y && pip install -U git+https://github.com/fla-org/flash-linear-attention
+pip uninstall fla-core flash-linear-attention -y
+pip install -U "git+https://github.com/fla-org/flash-linear-attention#egg=flash-linear-attention[rocm]" \
+    --extra-index-url https://download.pytorch.org/whl/rocm7.2
 ```
-or manage `fla` with submodules
+
+Or with submodules:
 ```sh
 git submodule add https://github.com/fla-org/flash-linear-attention.git 3rdparty/flash-linear-attention
 ln -s 3rdparty/flash-linear-attention/fla fla
 ```
 
 > [!NOTE]
-> For AMD GPUs, make sure to install the [Triton ROCm backend](https://github.com/triton-lang/triton). For Intel GPUs, use the [Triton XPU backend](https://github.com/intel/intel-xpu-backend-for-triton). See [FAQs](FAQs.md) for more details.
+> Already have a working `torch` install for your backend? `setup.py` auto-detects it via `torch.version.{hip,xpu,cuda}` and pins the matching `triton` flavor, so plain `pip install -e .` will not re-pull CUDA wheels on a ROCm or XPU machine. Override detection with `FLA_TARGET_DEVICE=cuda|rocm|xpu|cpu` before `pip install`.
 
-If you have installed `triton-nightly` and `torch` pre-release version, please use the following command:
+> [!NOTE]
+> For AMD GPUs the `[rocm]` extra pulls `pytorch-triton-rocm`. For Intel GPUs the `[xpu]` extra pulls `pytorch-triton-xpu`. See [FAQs](FAQs.md) for backend-specific issues.
+
+If you have installed `triton-nightly` and `torch` pre-release version, skip the dep resolver:
 ```sh
 pip install einops ninja datasets transformers numpy
-# uninstall both packages first to ensure a successful upgrade
-pip uninstall fla-core flash-linear-attention -y && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
+pip uninstall fla-core flash-linear-attention -y
+pip install -U --no-use-pep517 --no-deps git+https://github.com/fla-org/flash-linear-attention
 ```
 
 
