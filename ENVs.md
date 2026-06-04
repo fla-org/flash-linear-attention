@@ -1,9 +1,8 @@
 # FLA Environment Variables
 
 This page documents the environment variables that influence FLA's behavior at
-install time and at runtime. Variables are grouped by what they control:
+runtime. Variables are grouped by what they control:
 
-- [Install-time](#install-time)
 - [Convolution backend](#convolution-backend)
 - [Numerical precision](#numerical-precision)
 - [Hardware acceleration](#hardware-acceleration)
@@ -15,32 +14,6 @@ install time and at runtime. Variables are grouped by what they control:
 > **Boolean convention.** Unless noted otherwise, boolean flags accept `0` / `1`.
 > A few flags also accept `true` / `yes` (case-insensitive); this is called out
 > in the relevant rows.
-
----
-
-## Install-time
-
-Read by `setup.py` when resolving the `torch` / `triton` flavor to pin in
-`install_requires`. Runtime code does not read this.
-
-| Variable            | Default | Options                                | Description                                                                                                                                  |
-| ------------------- | ------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FLA_TARGET_DEVICE` | `auto`  | `auto` / `cuda` / `rocm` / `xpu` / `cpu` | Which backend's torch/triton pins to use. `auto` probes the installed torch (`torch.version.{hip,xpu,cuda}`) and falls back to `cuda`.   |
-
-Examples:
-```sh
-# Force ROCm pins even if no torch is installed yet
-FLA_TARGET_DEVICE=rocm pip install -e . --extra-index-url https://download.pytorch.org/whl/rocm7.2
-
-# Auto-detect (default) — picks rocm/xpu/cuda from the installed torch
-pip install -e .
-```
-
-The `[cuda]` / `[rocm]` / `[xpu]` / `[cpu]` extras in `pyproject.toml` are the
-equivalent of setting `FLA_TARGET_DEVICE` explicitly:
-```sh
-pip install -e .[rocm] --extra-index-url https://download.pytorch.org/whl/rocm7.2
-```
 
 ---
 

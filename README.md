@@ -127,18 +127,18 @@ Starting from v0.3.2, the packages published on PyPI are `fla-core` and `flash-l
 
 ### Pick a backend
 
-`fla` resolves its `torch` and `triton` flavor from the backend you select. Pick the row that matches your hardware:
+`torch` and the matching `triton` flavor live in backend extras (they are *not* in the base dependencies) — that way wheel metadata is the same across backends and `pip` only pulls the flavor you ask for. Pick the row that matches your hardware:
 
-| Backend | Extra     | Wheel index                                              |
-| ------- | --------- | -------------------------------------------------------- |
-| CUDA    | `[cuda]`  | `https://download.pytorch.org/whl/cu128` (or your CUDA)  |
-| ROCm    | `[rocm]`  | `https://download.pytorch.org/whl/rocm7.2` (or your ROCm)|
-| XPU     | `[xpu]`   | `https://download.pytorch.org/whl/xpu`                   |
-| CPU     | `[cpu]`   | `https://download.pytorch.org/whl/cpu`                   |
+| Backend | Extra     | Wheel index                                              | `triton` flavor          |
+| ------- | --------- | -------------------------------------------------------- | ------------------------ |
+| CUDA    | `[cuda]`  | `https://download.pytorch.org/whl/cu128` (or your CUDA)  | `triton`                 |
+| ROCm    | `[rocm]`  | `https://download.pytorch.org/whl/rocm7.2` (or your ROCm)| `pytorch-triton-rocm`    |
+| XPU     | `[xpu]`   | `https://download.pytorch.org/whl/xpu`                   | `pytorch-triton-xpu`     |
+| CPU     | `[cpu]`   | `https://download.pytorch.org/whl/cpu`                   | (none)                   |
 
 PyPI install:
 ```sh
-# CUDA (default behavior of plain PyPI)
+# CUDA (the typical PyPI default)
 pip install flash-linear-attention[cuda]
 
 # ROCm
@@ -162,7 +162,7 @@ ln -s 3rdparty/flash-linear-attention/fla fla
 ```
 
 > [!NOTE]
-> Already have a working `torch` install for your backend? `setup.py` auto-detects it via `torch.version.{hip,xpu,cuda}` and pins the matching `triton` flavor, so plain `pip install -e .` will not re-pull CUDA wheels on a ROCm or XPU machine. Override detection with `FLA_TARGET_DEVICE=cuda|rocm|xpu|cpu` before `pip install`.
+> Already have a working `torch` for your backend? `pip install -e .[rocm]` (or the matching extra) will leave it alone because the extra's pin (`torch>=2.7.0`) is satisfied. The base install has no `torch` dep at all, so bare `pip install -e .` won't import — pick an extra.
 
 > [!NOTE]
 > For AMD GPUs the `[rocm]` extra pulls `pytorch-triton-rocm`. For Intel GPUs the `[xpu]` extra pulls `pytorch-triton-xpu`. See [FAQs](FAQs.md) for backend-specific issues.

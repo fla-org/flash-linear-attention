@@ -1,15 +1,7 @@
 name: amd-mi300-ci
 
-# AMD ROCm CI mirroring nvidia-h100-ci/intel-b580-ci shape but using a ROCm
-# pytorch docker image directly. The base image already ships a ROCm build of
-# torch + pytorch-triton-rocm, so install into it without creating a fresh
-# venv (that would reinstall a CUDA torch from PyPI and break ROCm).
-#
-# Manual-only by default because it needs a self-hosted AMD GPU runner that
-# the fla project does not yet operate (transformers' AMD runners are
-# dedicated to that project and not shared). Once an `amd-mi300` runner group
-# is provisioned: point `runs-on` at it and add the desired trigger
-# (e.g. `pull_request:` matching nvidia-h100-ci or a nightly `schedule:`).
+# Manual-only until fla provisions its own AMD runner. Once available, point
+# `runs-on` at it and add `pull_request:` / `schedule:` triggers.
 
 on:
   workflow_dispatch:
@@ -20,22 +12,16 @@ permissions:
 jobs:
   test-mi300:
     name: Test MI300 (PyTorch 2.10 / ROCm 7.2)
-    # TODO: point this at your provisioned AMD runner group.
     runs-on:
       group: amd-mi300
     container:
-      # Stable ROCm torch image. Bump in lockstep with the FA wheel below.
       image: rocm/pytorch:rocm7.2.2_ubuntu22.04_py3.10_pytorch_release_2.10.0
-      # ROCR_VISIBLE_DEVICES forwards the runner's GPU-isolation assignment into the container.
       options: --device /dev/kfd --device /dev/dri --group-add video --env ROCR_VISIBLE_DEVICES --ipc=host --shm-size "16gb"
     defaults:
       run:
         shell: bash
     env:
       FLA_CI_ENV: 1
-      # Lock fla's install-time backend detection to rocm regardless of what
-      # torch.version reports at probe time.
-      FLA_TARGET_DEVICE: rocm
     steps:
       - name: Git checkout
         uses: actions/checkout@v4
@@ -46,8 +32,6 @@ jobs:
       - name: Install fla and test deps
         run: |
           python3 -m pip install --upgrade pip
-          # [rocm] resolves torch + pytorch-triton-rocm; the base image already
-          # satisfies them so pip leaves the ROCm wheels in place.
           python3 -m pip install -e ".[rocm,test]"
 
       - name: Verify ROCm torch is intact
@@ -57,5 +41,4 @@ jobs:
 
       - name: Run ops tests
         if: always()
-        run: |
-          python3 -m pytest tests/ops/ -x -v --tb=short
+        run: python3 -m pytest tests/ops/ -x -v --tb=short

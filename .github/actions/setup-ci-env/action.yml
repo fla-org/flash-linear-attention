@@ -121,7 +121,6 @@ runs:
         $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
 
         if [ "${{ inputs.gpu_type }}" = "nvidia" ]; then
-          export FLA_TARGET_DEVICE=cuda
           $CONDA/bin/conda install -n $CONDA_ENV_NAME nvidia/label/cuda-${{ inputs.nvcc_toolkit_version }}::cuda-nvcc -y
           if [ -z "${{ inputs.pytorch_version }}" ]; then
             echo "Using pre-installed PyTorch in $CONDA_ENV_NAME"
@@ -150,7 +149,6 @@ runs:
             fi
           fi
         elif [ "${{ inputs.gpu_type }}" = "intel" ]; then
-          export FLA_TARGET_DEVICE=xpu
           if [ -z "${{ inputs.pytorch_version }}" ]; then
             echo "::error::pytorch_version is required for Intel CI."
             exit 1
