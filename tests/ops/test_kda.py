@@ -84,6 +84,18 @@ def test_naive_chunk(
     assert_close("ht", ref_ht, tri_ht, 0.005)
 
 
+def test_chunk_invalid_chunk_size():
+    B, T, H, D = 1, 64, 1, 64
+    q = torch.randn(B, T, H, D, dtype=torch.float, device=device)
+    k = torch.randn(B, T, H, D, dtype=torch.float, device=device)
+    v = torch.randn(B, T, H, D, dtype=torch.float, device=device)
+    g = torch.randn(B, T, H, D, dtype=torch.float, device=device)
+    beta = torch.randn(B, T, H, dtype=torch.float, device=device)
+
+    with pytest.raises(ValueError, match=r"`chunk_size` must be either 32 or 64"):
+        chunk_kda(q, k, v, g, beta, chunk_size=16)
+
+
 @pytest.mark.parametrize(
     ("B", "T", "H", "HV", "D", "scale", "gate_logit_normalizer", "use_qk_l2norm_in_kernel", "dtype"),
     [
