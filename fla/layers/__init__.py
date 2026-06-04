@@ -15,6 +15,7 @@ from .deltaformer import DeltaFormerAttention
 from .forgetting_attn import ForgettingAttention
 from .gated_deltanet import GatedDeltaNet
 from .gated_deltaproduct import GatedDeltaProduct
+from .gdn2 import GatedDeltaNet2
 from .gla import GatedLinearAttention
 from .gsa import GatedSlotAttention
 from .hgrn import HGRNAttention
@@ -38,6 +39,7 @@ from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
 from .rwkv6 import RWKV6Attention
 from .rwkv7 import RWKV7Attention
+from .wall_attn import WallAttention
 from .yoco import YOCOCrossAttention, YOCOGatedRetention, YOCOSharedKVBuilder
 
 __all__ = [
@@ -50,6 +52,7 @@ __all__ = [
     'DeltaNet',
     'ForgettingAttention',
     'GatedDeltaNet',
+    'GatedDeltaNet2',
     'GatedDeltaProduct',
     'GatedLinearAttention',
     'GatedSlotAttention',
@@ -75,6 +78,7 @@ __all__ = [
     'ReBasedLinearAttention',
     'RodimusAttention',
     'SlidingWindowSharedKeyAttention',
+    'WallAttention',
     'YOCOCrossAttention',
     'YOCOGatedRetention',
     'YOCOSharedKVBuilder',

@@ -11,6 +11,7 @@ import triton
 import triton.language as tl
 from einops import rearrange, repeat
 
+from fla.modules.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard
 
@@ -137,6 +138,7 @@ def rotary_embedding_kernel(
         tl.store(p_y, b_y, mask=mask)
 
 
+@dispatch('modules')
 def rotary_embedding_fwdbwd(
     x: torch.Tensor,
     cos: torch.Tensor,
