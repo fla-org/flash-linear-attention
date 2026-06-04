@@ -5,13 +5,14 @@ name: amd-mi300-ci
 # torch + pytorch-triton-rocm, so install into it without creating a fresh
 # venv (that would reinstall a CUDA torch from PyPI and break ROCm).
 #
-# scheduled + manual rather than on-push because it needs a self-hosted AMD GPU
-# runner; set `runs-on` below to your AMD runner group to enable it.
+# Manual-only by default because it needs a self-hosted AMD GPU runner that
+# the fla project does not yet operate (transformers' AMD runners are
+# dedicated to that project and not shared). Once an `amd-mi300` runner group
+# is provisioned: point `runs-on` at it and add the desired trigger
+# (e.g. `pull_request:` matching nvidia-h100-ci or a nightly `schedule:`).
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 4 * * *"
 
 permissions:
   contents: read
