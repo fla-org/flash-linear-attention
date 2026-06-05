@@ -8,7 +8,7 @@
 </div>
 
 <p>
-  💥 Flash Linear Attention brings together hardware-efficient building blocks, training-ready layers, and components for modern sequence models, spanning linear attention, sparse attention, state space models, and hybrid LLM architectures. All implementations are platform-agnostic and verified on NVIDIA, AMD, and Intel hardware. Pull requests are welcome!
+  💥 Flash Linear Attention brings together hardware-efficient building blocks, training-ready layers, and components for modern sequence models, spanning linear attention, sparse attention, state space models, and hybrid LLM architectures. All implementations are platform-agnostic and verified on NVIDIA, AMD, Intel and NPU hardware. Pull requests are welcome!
 </p>
 
 --------
@@ -16,6 +16,8 @@
 * [News](#news)
 * [Models](#models)
 * [Installation](#installation)
+  * [NVIDIA / AMD / XPU](#nvidia--amd--xpu)
+  * [Ascend NPU](#ascend-npu)
 * [Usage](#usage)
   * [Token Mixing](#token-mixing)
   * [Fused Modules](#fused-modules)
@@ -114,6 +116,8 @@
 
 ## Installation
 
+### NVIDIA / AMD / XPU
+
 [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml)
 
 The following requirements should be satisfied
@@ -151,6 +155,28 @@ pip install einops ninja datasets transformers numpy
 pip uninstall fla-core flash-linear-attention -y && pip install -U --no-use-pep517 git+https://github.com/fla-org/flash-linear-attention --no-deps
 ```
 
+### Ascend NPU
+
+Ascend NPUs use [triton-ascend](https://github.com/triton-lang/triton-ascend), not the upstream [triton](https://github.com/triton-lang/triton) package from PyPI. Installing both in one environment can cause import or kernel dispatch issues.
+
+**Recommended order**
+
+1. Install CANN and set environment variables (`source` the CANN `set_env.sh` script).
+2. Clone this repo and run `pip install -e ./`.
+3. Install `torch` and `torch_npu` builds that match your CANN version.
+4. Uninstall triton: `pip uninstall -y triton`.
+5. Install `triton-ascend`.
+
+**Example**
+
+```sh
+git clone https://github.com/fla-org/flash-linear-attention.git
+cd flash-linear-attention
+pip install -e ./
+pip install torch==2.7.1 torch_npu==2.7.1
+pip uninstall -y triton
+pip install triton-ascend==3.2.0
+```
 
 ## Usage
 
