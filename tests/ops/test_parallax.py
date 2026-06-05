@@ -28,6 +28,7 @@ def _ref_varlen(q, r, k, v, cu_seqlens, window_size=None):
         ).to(q.dtype)
     return out
 
+
 # bf16 carries fewer mantissa bits than fp16, and the `r` correction amplifies
 # rounding, so it gets a looser ratio (bf16 backward grads run ~1e-2 relative).
 TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
