@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 #
-# Parallax (parameterized/centered local linear attention), contributed by
+# Parallax (parameterized local linear attention), contributed by
 # Yifei Zuo et al. (https://arxiv.org/abs/2605.29157).
 
 from __future__ import annotations
@@ -28,10 +28,10 @@ logger = logging.get_logger(__name__)
 
 
 class Parallax(nn.Module):
-    r"""Parallax: parameterized (centered) local linear attention.
+    r"""Parallax: parameterized local linear attention.
 
     A quadratic, causal, softmax-attention-style layer with an extra query-side
-    projection ``r`` that injects a first-order centering correction onto the
+    projection ``r`` that injects a first-order correction onto the
     softmax-weighted values (see :func:`fla.ops.parallax.naive_parallax`).
     The mechanism is positionless (no rotary embedding); causality is enforced
     by the kernel mask.

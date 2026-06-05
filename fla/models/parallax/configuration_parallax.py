@@ -5,7 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 #
-# Parallax (parameterized/centered local linear attention), contributed by
+# Parallax (parameterized local linear attention), contributed by
 # Yifei Zuo et al. (https://arxiv.org/abs/2605.29157).
 
 import warnings

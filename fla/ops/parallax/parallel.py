@@ -753,7 +753,7 @@ def parallel_parallax(
     **kwargs,
 ) -> torch.Tensor:
     r"""
-    Causal Parallax (parameterized/centered local linear attention) with autograd,
+    Causal Parallax (parameterized local linear attention) with autograd,
     backed by Triton kernels. See `fla.ops.parallax.naive.naive_parallax` for
     the reference math.
 
@@ -761,7 +761,7 @@ def parallel_parallax(
         q (torch.Tensor):
             queries of shape `[B, T, HQ, D]`.
         r (torch.Tensor):
-            centering queries of shape `[B, T, HQ, D]` (same shape as `q`). NOTE:
+            secondary queries of shape `[B, T, HQ, D]` (same shape as `q`). NOTE:
             `r` is *not* scaled by `scale`; pass it un-pre-scaled.
         k (torch.Tensor):
             keys of shape `[B, T, H, D]`. GQA is applied when `HQ` is divisible by `H`.

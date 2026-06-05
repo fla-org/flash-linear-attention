@@ -18,7 +18,7 @@ def naive_parallax(
     causal: bool = True,
 ) -> torch.Tensor:
     r"""
-    Reference PyTorch implementation of Parallax (parameterized/centered local
+    Reference PyTorch implementation of Parallax (parameterized local
     linear attention, Algorithm 1 of https://arxiv.org/abs/2605.29157).
 
     With ``s1 = scale * (q @ k^T)`` and ``s2 = r @ k^T`` (note: ``s2`` is NOT
@@ -35,7 +35,7 @@ def naive_parallax(
         q (torch.Tensor):
             queries of shape `[B, T, HQ, D]`.
         r (torch.Tensor):
-            centering queries of shape `[B, T, HQ, D]` (same shape as `q`).
+            secondary queries of shape `[B, T, HQ, D]` (same shape as `q`).
         k (torch.Tensor):
             keys of shape `[B, T, H, D]`. GQA is applied when `HQ` is divisible by `H`.
         v (torch.Tensor):

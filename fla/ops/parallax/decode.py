@@ -135,7 +135,7 @@ def parallax_decode(
         q (torch.Tensor):
             new queries of shape `[B, Sq, HQ, D]`.
         r (torch.Tensor):
-            new centering queries of shape `[B, Sq, HQ, D]`.
+            new secondary queries of shape `[B, Sq, HQ, D]`.
         k (torch.Tensor):
             cached keys of shape `[B, Skv, H, D]` (`Skv >= Sq`).
         v (torch.Tensor):
