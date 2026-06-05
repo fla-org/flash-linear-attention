@@ -28,7 +28,7 @@ from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recur
 from .log_linear_attn import chunk_log_linear_attn
 from .mesa_net import chunk_mesa_net
 from .nsa import parallel_nsa
-from .parallax import naive_parallax, parallax_decode, parallel_parallax
+from .parallax import naive_parallax, parallax_decode, parallax_decode_onestep, parallel_parallax
 from .path_attn import parallel_path_attn
 from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
@@ -82,6 +82,7 @@ __all__ = [
     'naive_parallax',
     'naive_wall_attn',
     'parallax_decode',
+    'parallax_decode_onestep',
     'parallel_attn',
     'parallel_based',
     'parallel_forgetting_attn',

@@ -19,7 +19,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm
-from fla.ops.parallax import parallax_decode, parallel_parallax
+from fla.ops.parallax import parallax_decode, parallax_decode_onestep, parallel_parallax
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -137,7 +137,9 @@ class Parallax(nn.Module):
             cache_start = None
             if attention_mask is not None:
                 cache_start = (k.shape[1] - attention_mask.sum(-1)).to(torch.int32)
-            o = parallax_decode(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
+            # single-token step -> optimized vector decode; chunked prefill -> tile kernel
+            decode_fn = parallax_decode_onestep if q_len == 1 else parallax_decode
+            o = decode_fn(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
         elif attention_mask is not None:
             # Unpad to a single packed sequence (batch folded into the seq axis).
             q, (r, k, v), indices_q, cu_seqlens, _ = unpad_input(
