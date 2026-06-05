@@ -31,7 +31,6 @@ class ParallaxConfig(PretrainedConfig):
         intermediate_size: int | None = None,
         hidden_act: str = "swish",
         initializer_range: float = 0.02,
-        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
         use_cache: bool = True,
         pad_token_id: int | None = None,
@@ -60,7 +59,6 @@ class ParallaxConfig(PretrainedConfig):
         self.hidden_act = hidden_act
 
         self.initializer_range = initializer_range
-        self.elementwise_affine = elementwise_affine
         self.norm_eps = norm_eps
         self.use_cache = use_cache
 

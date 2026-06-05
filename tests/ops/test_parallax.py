@@ -315,7 +315,7 @@ def test_decode_matches_parallel(B: int, T: int, H: int, HQ: int, D: int, W, dty
     for the corresponding positions: decode(last m queries | full KV) == parallel[last m]."""
     if not check_shared_mem('hopper') and D > 128:
         pytest.skip(reason="Skip test, do not have enough shared mem")
-    torch.manual_seed(0)
+    torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     tol = TOL[dtype]
     q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
@@ -346,7 +346,7 @@ def test_decode_onestep(B: int, T: int, H: int, HQ: int, D: int, W, dtype: torch
     and the prefill-shaped decode kernel."""
     if not check_shared_mem('hopper') and D > 128:
         pytest.skip(reason="Skip test, do not have enough shared mem")
-    torch.manual_seed(0)
+    torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
     tol = TOL[dtype]
     q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
