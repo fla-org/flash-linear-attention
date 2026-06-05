@@ -93,8 +93,19 @@ jobs:
             echo "dispatch_changed=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Run pytest on ops test files (dispatch DISABLED, Triton baseline)
+      - name: Detect Triton baseline support
         if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
+        id: triton-baseline
+        shell: bash
+        run: |
+          RUN_TRITON_BASELINE=$($CONDA_BIN_PATH/python -c "from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0; print('false' if IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0 else 'true')")
+          echo "run=$RUN_TRITON_BASELINE" >> $GITHUB_OUTPUT
+          if [ "$RUN_TRITON_BASELINE" = "false" ]; then
+            echo "Skipping dispatch-disabled Triton baseline: gated chunk_bwd_dqkwg is blocked on Hopper with Triton >= 3.4.0 (#640)."
+          fi
+
+      - name: Run pytest on ops test files (dispatch DISABLED, Triton baseline)
+        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.triton-baseline.outputs.run == 'true'
         shell: bash
         env:
           FLA_DISABLE_BACKEND_DISPATCH: "1"
@@ -102,7 +113,7 @@ jobs:
           $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
 
       - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
-        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
+        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && (steps.triton-baseline.outputs.run == 'false' || steps.check-dispatch.outputs.dispatch_changed == 'true')
         shell: bash
         run: |
           $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}

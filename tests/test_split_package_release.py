@@ -96,7 +96,9 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/__init__.py" in core_names
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
-    assert "fla/utils.py" in core_names
+    assert "fla/utils/__init__.py" in core_names
+    assert "fla/utils/_device.py" in core_names
+    assert "fla/utils.py" not in core_names
     assert not any(name.startswith("fla/layers/") for name in core_names)
     assert not any(name.startswith("fla/models/") for name in core_names)
 
@@ -105,6 +107,7 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/models/__init__.py" in ext_names
     assert not any(name.startswith("fla/ops/") for name in ext_names)
     assert not any(name.startswith("fla/modules/") for name in ext_names)
+    assert not any(name.startswith("fla/utils/") for name in ext_names)
     assert "fla/utils.py" not in ext_names
 
     assert read_wheel_metadata(core_wheel)["Version"] == version
@@ -138,6 +141,7 @@ def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Pat
         assert not hasattr(fla, "models")
         assert importlib.util.find_spec("fla.ops") is not None
         assert importlib.util.find_spec("fla.modules") is not None
+        assert importlib.util.find_spec("fla.utils") is not None
         assert importlib.util.find_spec("fla.layers") is None
         assert importlib.util.find_spec("fla.models") is None
         assert "fla.layers" not in sys.modules
@@ -162,6 +166,7 @@ def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Pat
         ext_files = {str(file) for file in metadata.files("flash-linear-attention")}
 
         assert "fla/__init__.py" in core_files
+        assert "fla/utils/__init__.py" in core_files
         assert "fla/layers/__init__.py" in ext_files
         assert "fla/models/__init__.py" in ext_files
 

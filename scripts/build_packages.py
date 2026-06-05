@@ -158,7 +158,7 @@ def build_split_packages(output_dir: str | Path | None = None):
     ignore = shutil.ignore_patterns('__pycache__')
     shutil.copytree(root_dir / 'fla' / 'ops', fla_core / 'ops', ignore=ignore)
     shutil.copytree(root_dir / 'fla' / 'modules', fla_core / 'modules', ignore=ignore)
-    shutil.copy(root_dir / 'fla' / 'utils.py', fla_core / 'utils.py')
+    shutil.copytree(root_dir / 'fla' / 'utils', fla_core / 'utils', ignore=ignore)
 
     # keep the source and split-wheel top-level import contract identical.
     # the source __init__.py is split-package-safe: it always exposes core
