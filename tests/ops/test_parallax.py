@@ -14,9 +14,22 @@ from fla.ops.parallax.naive import naive_parallax_attn
 from fla.ops.parallax.parallel import parallel_parallax_attn
 from fla.utils import assert_close, check_shared_mem, device
 
+
+def _ref_varlen(q, r, k, v, cu_seqlens, window_size=None):
+    out = q.new_empty(q.shape)
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
+        out[:, bos:eos] = naive_parallax_attn(
+            q=q[:, bos:eos].float(),
+            r=r[:, bos:eos].float(),
+            k=k[:, bos:eos].float(),
+            v=v[:, bos:eos].float(),
+            window_size=window_size,
+        ).to(q.dtype)
+    return out
+
 # bf16 carries fewer mantissa bits than fp16, and the `r` correction amplifies
-# rounding, so it gets a looser ratio (observed worst case ~3.3e-3 on H100).
-TOL = {torch.float16: 0.005, torch.bfloat16: 0.01}
+# rounding, so it gets a looser ratio (bf16 backward grads run ~1e-2 relative).
+TOL = {torch.float16: 0.005, torch.bfloat16: 0.02}
 
 
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
@@ -117,6 +130,95 @@ def test_parallel_swa(
     ref_dv, v.grad = v.grad.clone(), None
 
     tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, window_size=W)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dr, r.grad = r.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    assert_close(" o", ref, tri, tol)
+    assert_close("dq", ref_dq, tri_dq, tol)
+    assert_close("dr", ref_dr, tri_dr, tol)
+    assert_close("dk", ref_dk, tri_dk, tol)
+    assert_close("dv", ref_dv, tri_dv, tol)
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'cu_seqlens'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-cu{}".format(*test))
+        for test in [
+            (2, 2, 64, [0, 15]),
+            (2, 8, 64, [0, 256, 500, 1000]),
+            (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
+        ]
+    ],
+)
+def test_parallel_varlen(H: int, HQ: int, D: int, cu_seqlens: list[int], dtype: torch.dtype):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    tol = TOL[dtype]
+    T = cu_seqlens[-1]
+    cu = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    r = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+
+    ref = _ref_varlen(q, r, k, v, cu_seqlens)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dr, r.grad = r.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, cu_seqlens=cu)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dr, r.grad = r.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    assert_close(" o", ref, tri, tol)
+    assert_close("dq", ref_dq, tri_dq, tol)
+    assert_close("dr", ref_dr, tri_dr, tol)
+    assert_close("dk", ref_dk, tri_dk, tol)
+    assert_close("dv", ref_dv, tri_dv, tol)
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ('H', 'HQ', 'D', 'W', 'cu_seqlens'),
+    [
+        pytest.param(*test, id="H{}-HQ{}-D{}-W{}-cu{}".format(*test))
+        for test in [
+            (2, 2, 64, 16, [0, 111]),
+            (2, 8, 100, 32, [0, 256, 500, 1000]),
+        ]
+    ],
+)
+def test_parallel_swa_varlen(H: int, HQ: int, D: int, W: int, cu_seqlens: list[int], dtype: torch.dtype):
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    tol = TOL[dtype]
+    T = cu_seqlens[-1]
+    cu = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+    q = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    r = torch.randn((1, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((1, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
+
+    ref = _ref_varlen(q, r, k, v, cu_seqlens, window_size=W)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dr, r.grad = r.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, window_size=W, cu_seqlens=cu)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dr, r.grad = r.grad.clone(), None

@@ -17,7 +17,7 @@ from fla.utils import device
 MODELING_UNSUPPORTED_VARLEN = [
     "ABCConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
-    "RodimusConfig", "WallTransformerConfig", "ParallaxTransformerConfig",
+    "RodimusConfig", "WallTransformerConfig",
 ]
 
 # Models not yet ready for basic testing
