@@ -26,7 +26,7 @@ dependencies = [
 cuda = ["torch>=2.7.0", "triton>=3.3"]
 rocm = ["torch>=2.7.0", "pytorch-triton-rocm>=3.3"]
 xpu  = ["torch>=2.7.0", "pytorch-triton-xpu>=3.3"]
-cpu  = ["torch>=2.7.0"]
+cpu  = ["torch>=2.7.0", "triton>=3.3"]
 tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]
 benchmark = ["matplotlib", "datasets>=3.3.0"]
@@ -37,7 +37,7 @@ Homepage = "https://github.com/fla-org/flash-linear-attention"
 Repository = "https://github.com/fla-org/flash-linear-attention"
 
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=64", "wheel"]
 
 [tool.setuptools.dynamic]
 version = {attr = "fla.__version__"}
