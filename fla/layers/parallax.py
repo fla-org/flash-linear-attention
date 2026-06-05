@@ -141,7 +141,7 @@ class Parallax(nn.Module):
             if attention_mask is not None:
                 # account for left-padding when indexing rotary positions
                 seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
-                max_seqlen = q_len + max(seqlen_offset)
+                max_seqlen = q_len + seqlen_offset.max().item()
         if self.max_position_embeddings is not None:
             max_seqlen = max(max_seqlen, self.max_position_embeddings)
         # rope on q, k and r; `r` shares q's positions (same cos/sin), then is rotated alone.
