@@ -8,7 +8,7 @@
 import pytest
 import torch
 
-from fla.models import ParallaxTransformerConfig
+from fla.models import ParallaxConfig
 
 from .test_modeling_base import run_test_generation, run_test_model_forward_backward
 
@@ -36,7 +36,7 @@ def test_modeling(
     use_l2warp: bool,
     dtype: torch.dtype,
 ):
-    run_test_model_forward_backward(L, B, T, H, D, ParallaxTransformerConfig, use_l2warp=use_l2warp, dtype=dtype)
+    run_test_model_forward_backward(L, B, T, H, D, ParallaxConfig, use_l2warp=use_l2warp, dtype=dtype)
 
 
 # ===================================================================================
@@ -59,4 +59,4 @@ def test_generation(
     D: int,
     dtype: torch.dtype,
 ):
-    run_test_generation(L, B, T, H, D, ParallaxTransformerConfig, dtype)
+    run_test_generation(L, B, T, H, D, ParallaxConfig, dtype)

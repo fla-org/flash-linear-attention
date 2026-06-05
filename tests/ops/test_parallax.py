@@ -10,16 +10,16 @@ import os
 import pytest
 import torch
 
-from fla.ops.parallax.decode import parallax_attn_decode
-from fla.ops.parallax.naive import naive_parallax_attn
-from fla.ops.parallax.parallel import parallel_parallax_attn
+from fla.ops.parallax.decode import parallax_decode
+from fla.ops.parallax.naive import naive_parallax
+from fla.ops.parallax.parallel import parallel_parallax
 from fla.utils import assert_close, check_shared_mem, device
 
 
 def _ref_varlen(q, r, k, v, cu_seqlens, window_size=None):
     out = q.new_empty(q.shape)
     for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
-        out[:, bos:eos] = naive_parallax_attn(
+        out[:, bos:eos] = naive_parallax(
             q=q[:, bos:eos].float(),
             r=r[:, bos:eos].float(),
             k=k[:, bos:eos].float(),
@@ -67,7 +67,7 @@ def test_parallel(
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
     do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
 
-    ref = naive_parallax_attn(q=q.float(), r=r.float(), k=k.float(), v=v.float(), scale=scale)
+    ref = naive_parallax(q=q.float(), r=r.float(), k=k.float(), v=v.float(), scale=scale)
     ref = ref.to(dtype)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -75,7 +75,7 @@ def test_parallel(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, scale=scale)
+    tri = parallel_parallax(q=q, r=r, k=k, v=v, scale=scale)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dr, r.grad = r.grad.clone(), None
@@ -122,7 +122,7 @@ def test_parallel_swa(
     v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
     do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
 
-    ref = naive_parallax_attn(q=q.float(), r=r.float(), k=k.float(), v=v.float(), window_size=W)
+    ref = naive_parallax(q=q.float(), r=r.float(), k=k.float(), v=v.float(), window_size=W)
     ref = ref.to(dtype)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -130,7 +130,7 @@ def test_parallel_swa(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, window_size=W)
+    tri = parallel_parallax(q=q, r=r, k=k, v=v, window_size=W)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dr, r.grad = r.grad.clone(), None
@@ -175,7 +175,7 @@ def test_parallel_varlen(H: int, HQ: int, D: int, cu_seqlens: list[int], dtype: 
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, cu_seqlens=cu)
+    tri = parallel_parallax(q=q, r=r, k=k, v=v, cu_seqlens=cu)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dr, r.grad = r.grad.clone(), None
@@ -219,7 +219,7 @@ def test_parallel_swa_varlen(H: int, HQ: int, D: int, W: int, cu_seqlens: list[i
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, window_size=W, cu_seqlens=cu)
+    tri = parallel_parallax(q=q, r=r, k=k, v=v, window_size=W, cu_seqlens=cu)
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None
     tri_dr, r.grad = r.grad.clone(), None
@@ -292,5 +292,5 @@ def test_decode(B: int, Sq: int, Skv: int, H: int, HQ: int, D: int, W, dtype: to
     v = torch.randn((B, Skv, H, D), dtype=dtype, device=device)
 
     ref = _decode_ref(q, r, k, v, scale=D ** -0.5, window_size=W)
-    tri = parallax_attn_decode(q, r, k, v, window_size=W)
+    tri = parallax_decode(q, r, k, v, window_size=W)
     assert_close(" o", ref, tri, tol)

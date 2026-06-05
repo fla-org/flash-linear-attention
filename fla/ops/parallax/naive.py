@@ -8,7 +8,7 @@
 import torch
 
 
-def naive_parallax_attn(
+def naive_parallax(
     q: torch.Tensor,
     r: torch.Tensor,
     k: torch.Tensor,

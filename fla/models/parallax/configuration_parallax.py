@@ -13,9 +13,9 @@ import warnings
 from transformers.configuration_utils import PretrainedConfig
 
 
-class ParallaxTransformerConfig(PretrainedConfig):
+class ParallaxConfig(PretrainedConfig):
 
-    model_type = 'parallax_transformer'
+    model_type = 'parallax'
     keys_to_ignore_at_inference = ['past_key_values']
 
     def __init__(

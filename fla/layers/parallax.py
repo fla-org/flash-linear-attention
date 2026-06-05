@@ -19,7 +19,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm
-from fla.ops.parallax import parallax_attn_decode, parallel_parallax_attn
+from fla.ops.parallax import parallax_decode, parallel_parallax
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -27,12 +27,12 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
-class ParallaxAttention(nn.Module):
+class Parallax(nn.Module):
     r"""Parallax: parameterized (centered) local linear attention.
 
     A quadratic, causal, softmax-attention-style layer with an extra query-side
     projection ``r`` that injects a first-order centering correction onto the
-    softmax-weighted values (see :func:`fla.ops.parallax.naive_parallax_attn`).
+    softmax-weighted values (see :func:`fla.ops.parallax.naive_parallax`).
     The mechanism is positionless (no rotary embedding); causality is enforced
     by the kernel mask.
 
@@ -137,17 +137,17 @@ class ParallaxAttention(nn.Module):
             cache_start = None
             if attention_mask is not None:
                 cache_start = (k.shape[1] - attention_mask.sum(-1)).to(torch.int32)
-            o = parallax_attn_decode(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
+            o = parallax_decode(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
         elif attention_mask is not None:
             # Unpad to a single packed sequence (batch folded into the seq axis).
             q, (r, k, v), indices_q, cu_seqlens, _ = unpad_input(
                 q, (r, k, v), attention_mask, q_len, keepdim=True,
             )
             _, cu_seqlens_k = cu_seqlens
-            o = parallel_parallax_attn(q, r, k, v, window_size=self.window_size, cu_seqlens=cu_seqlens_k)
+            o = parallel_parallax(q, r, k, v, window_size=self.window_size, cu_seqlens=cu_seqlens_k)
             o = pad_input(o.squeeze(0), indices_q, batch_size, q_len)
         else:
-            o = parallel_parallax_attn(q, r, k, v, window_size=self.window_size, cu_seqlens=cu_seqlens)
+            o = parallel_parallax(q, r, k, v, window_size=self.window_size, cu_seqlens=cu_seqlens)
 
         o = rearrange(o, '... h d -> ... (h d)')
         o = self.o_proj(o)

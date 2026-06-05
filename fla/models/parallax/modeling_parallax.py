@@ -21,11 +21,11 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers.utils.deprecation import deprecate_kwarg
 
-from fla.layers.parallax_attn import ParallaxAttention
-from fla.models.parallax_transformer.configuration_parallax_transformer import ParallaxTransformerConfig
+from fla.layers.parallax import Parallax
+from fla.models.parallax.configuration_parallax import ParallaxConfig
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
-from fla.modules import GatedMLP as ParallaxTransformerMLP
+from fla.modules import GatedMLP as ParallaxMLP
 from fla.modules.l2warp import l2_warp
 from fla.ops.attnres import fused_attnres
 
@@ -41,16 +41,16 @@ except ImportError:
 logger = logging.get_logger(__name__)
 
 
-class ParallaxTransformerBlock(GradientCheckpointingLayer):
+class ParallaxBlock(GradientCheckpointingLayer):
 
-    def __init__(self, config: ParallaxTransformerConfig, layer_idx: int):
+    def __init__(self, config: ParallaxConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
         self.layer_idx = layer_idx
 
         self.attn_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.attn = ParallaxAttention(
+        self.attn = Parallax(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
             num_kv_heads=config.num_kv_heads,
@@ -61,7 +61,7 @@ class ParallaxTransformerBlock(GradientCheckpointingLayer):
         )
 
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
-        self.mlp = ParallaxTransformerMLP(
+        self.mlp = ParallaxMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
@@ -154,12 +154,12 @@ class ParallaxTransformerBlock(GradientCheckpointingLayer):
         return outputs
 
 
-class ParallaxTransformerPreTrainedModel(PreTrainedModel):
+class ParallaxPreTrainedModel(PreTrainedModel):
 
-    config_class = ParallaxTransformerConfig
+    config_class = ParallaxConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
-    _no_split_modules = ['ParallaxTransformerBlock']
+    _no_split_modules = ['ParallaxBlock']
     _supports_cache_class = True
 
     def __init__(self, *inputs, **kwargs):
@@ -209,16 +209,16 @@ class ParallaxTransformerPreTrainedModel(PreTrainedModel):
                     p /= math.sqrt(num_residuals_per_layer * self.config.num_hidden_layers)
 
 
-class ParallaxTransformerModel(ParallaxTransformerPreTrainedModel):
+class ParallaxModel(ParallaxPreTrainedModel):
 
-    def __init__(self, config: ParallaxTransformerConfig):
+    def __init__(self, config: ParallaxConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([
-            ParallaxTransformerBlock(config, layer_idx)
+            ParallaxBlock(config, layer_idx)
             for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
@@ -253,7 +253,7 @@ class ParallaxTransformerModel(ParallaxTransformerPreTrainedModel):
     ) -> tuple | BaseModelOutputWithPast:
         if output_attentions:
             warnings.warn(
-                "`ParallaxTransformerModel` does not support output attention weights now, "
+                "`ParallaxModel` does not support output attention weights now, "
                 "so `output_attentions` is set to `False`.",
             )
             output_attentions = False
@@ -325,13 +325,13 @@ class ParallaxTransformerModel(ParallaxTransformerPreTrainedModel):
         )
 
 
-class ParallaxTransformerForCausalLM(ParallaxTransformerPreTrainedModel, FLAGenerationMixin):
+class ParallaxForCausalLM(ParallaxPreTrainedModel, FLAGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = ParallaxTransformerModel(config)
+        self.model = ParallaxModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None

@@ -14,7 +14,7 @@ from fla.ops.utils.op import exp2
 
 
 @triton.jit(do_not_specialize=['Sq', 'Skv'])
-def parallel_parallax_attn_decode_kernel(
+def parallel_parallax_decode_kernel(
     q,
     r,
     k,
@@ -113,7 +113,7 @@ def parallel_parallax_attn_decode_kernel(
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
-def parallax_attn_decode(
+def parallax_decode(
     q: torch.Tensor,
     r: torch.Tensor,
     k: torch.Tensor,
@@ -166,7 +166,7 @@ def parallax_attn_decode(
     BT = _block_size(K, q.device.index)
     o = torch.empty_like(q)
     grid = (triton.cdiv(Sq, BT), B * HQ)
-    parallel_parallax_attn_decode_kernel[grid](
+    parallel_parallax_decode_kernel[grid](
         q, r, k, v, o, float(scale), cache_start, Sq, Skv,
         HQ=HQ, H=H, G=G, K=K, BD=BD,
         WINDOW_SIZE_LEFT=window_size_left,

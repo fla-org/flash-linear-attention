@@ -33,7 +33,7 @@ from .moba import MoBA
 from .mom import MomAttention
 from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
-from .parallax_attn import ParallaxAttention
+from .parallax import Parallax
 from .path_attn import PaTHAttention
 from .raven import Raven
 from .rebased import ReBasedLinearAttention
@@ -73,7 +73,7 @@ __all__ = [
     'MultiheadLatentAttention',
     'NativeSparseAttention',
     'PaTHAttention',
-    'ParallaxAttention',
+    'Parallax',
     'RWKV6Attention',
     'RWKV7Attention',
     'Raven',

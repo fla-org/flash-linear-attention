@@ -8,12 +8,12 @@
 # Parallax (parameterized/centered local linear attention), contributed by
 # Yifei Zuo et al. (https://arxiv.org/abs/2605.29157).
 
-from .decode import parallax_attn_decode
-from .naive import naive_parallax_attn
-from .parallel import parallel_parallax_attn
+from .decode import parallax_decode
+from .naive import naive_parallax
+from .parallel import parallel_parallax
 
 __all__ = [
-    'naive_parallax_attn',
-    'parallax_attn_decode',
-    'parallel_parallax_attn',
+    'naive_parallax',
+    'parallax_decode',
+    'parallel_parallax',
 ]

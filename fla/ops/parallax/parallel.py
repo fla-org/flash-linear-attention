@@ -28,7 +28,7 @@ def _block_size(head_dim: int, device_index: int) -> int:
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def parallel_parallax_attn_fwd_kernel(
+def parallel_parallax_fwd_kernel(
     q,
     r,
     k,
@@ -202,7 +202,7 @@ def parallel_parallax_attn_fwd_kernel(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def parallel_parallax_attn_bwd_kernel_preprocess(
+def parallel_parallax_bwd_kernel_preprocess(
     grad_o,
     o,
     barv,
@@ -249,7 +249,7 @@ def parallel_parallax_attn_bwd_kernel_preprocess(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def parallel_parallax_attn_bwd_kernel_dqr(
+def parallel_parallax_bwd_kernel_dqr(
     q,
     r,
     k,
@@ -418,7 +418,7 @@ def parallel_parallax_attn_bwd_kernel_dqr(
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
-def parallel_parallax_attn_bwd_kernel_dkv(
+def parallel_parallax_bwd_kernel_dkv(
     q,
     r,
     k,
@@ -655,7 +655,7 @@ def parallax_fwd(q, r, k, v, scale, cu_seqlens=None, chunk_indices=None, window_
 
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     grid = (NT, B * HQ)
-    parallel_parallax_attn_fwd_kernel[grid](
+    parallel_parallax_fwd_kernel[grid](
         q, r, k, v, o, barv, d1, bart, m,
         scale, cu_seqlens, chunk_indices, T,
         HQ=HQ, H=H, G=G, K=K, BD=BD,
@@ -684,20 +684,20 @@ def parallax_bwd(q, r, k, v, o, barv, d1, bart, m, grad_o, scale, cu_seqlens=Non
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     grid = (NT, B * HQ)
 
-    parallel_parallax_attn_bwd_kernel_preprocess[grid](
+    parallel_parallax_bwd_kernel_preprocess[grid](
         grad_o, o, barv, delta_t, delta_b,
         cu_seqlens, chunk_indices, T,
         HQ=HQ, K=K, BD=BD, BT=BT,
         num_warps=4, num_stages=2,
     )
-    parallel_parallax_attn_bwd_kernel_dqr[grid](
+    parallel_parallax_bwd_kernel_dqr[grid](
         q, r, k, v, d1, bart, m, delta_t, delta_b, grad_o, grad_q, grad_r,
         scale, cu_seqlens, chunk_indices, T,
         HQ=HQ, H=H, G=G, K=K, BD=BD,
         WINDOW_SIZE_LEFT=window_size_left, BT=BT, BS=BT,
         num_warps=8, num_stages=2,
     )
-    parallel_parallax_attn_bwd_kernel_dkv[grid](
+    parallel_parallax_bwd_kernel_dkv[grid](
         q, r, k, v, d1, bart, m, delta_t, delta_b, grad_o, grad_k_buf, grad_v_buf,
         scale, cu_seqlens, chunk_indices, T,
         HQ=HQ, H=H, G=G, K=K, BD=BD,
@@ -714,7 +714,7 @@ def parallax_bwd(q, r, k, v, o, barv, d1, bart, m, grad_o, scale, cu_seqlens=Non
     return grad_q, grad_r, grad_k, grad_v
 
 
-class ParallaxAttentionFunction(torch.autograd.Function):
+class ParallaxFunction(torch.autograd.Function):
 
     @staticmethod
     @contiguous
@@ -742,7 +742,7 @@ class ParallaxAttentionFunction(torch.autograd.Function):
         return gq.to(q), gr.to(r), gk.to(k), gv.to(v), None, None, None
 
 
-def parallel_parallax_attn(
+def parallel_parallax(
     q: torch.Tensor,
     r: torch.Tensor,
     k: torch.Tensor,
@@ -754,7 +754,7 @@ def parallel_parallax_attn(
 ) -> torch.Tensor:
     r"""
     Causal Parallax (parameterized/centered local linear attention) with autograd,
-    backed by Triton kernels. See `fla.ops.parallax.naive.naive_parallax_attn` for
+    backed by Triton kernels. See `fla.ops.parallax.naive.naive_parallax` for
     the reference math.
 
     Args:
@@ -787,7 +787,7 @@ def parallel_parallax_attn(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if q.dtype not in (torch.bfloat16, torch.float16):
-        raise TypeError(f"parallel_parallax_attn requires bf16 or fp16 inputs, got q.dtype={q.dtype}")
+        raise TypeError(f"parallel_parallax requires bf16 or fp16 inputs, got q.dtype={q.dtype}")
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None and q.shape[0] != 1:
@@ -798,4 +798,4 @@ def parallel_parallax_attn(
     # The kernel keeps cols [i - W + 1, i] (W keys total, diagonal included),
     # matching FLA's `window_size=W` semantics exactly (no off-by-one).
     window_size_left = -1 if window_size is None else window_size
-    return ParallaxAttentionFunction.apply(q, r, k, v, float(scale), window_size_left, cu_seqlens)
+    return ParallaxFunction.apply(q, r, k, v, float(scale), window_size_left, cu_seqlens)
