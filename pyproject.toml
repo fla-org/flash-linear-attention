@@ -15,7 +15,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 requires-python = ">=3.10"
-# torch and triton are NOT in base deps — pick a backend extra
+# torch and triton are NOT in base deps. Pick a backend extra
 # ([cuda] / [rocm] / [xpu] / [cpu]) plus the matching --extra-index-url.
 dependencies = [
     "transformers>=4.45.0",

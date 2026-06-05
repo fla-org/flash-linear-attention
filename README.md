@@ -127,7 +127,7 @@ Starting from v0.3.2, the packages published on PyPI are `fla-core` and `flash-l
 
 ### Pick a backend
 
-`torch` and the matching `triton` flavor live in backend extras (they are *not* in the base dependencies) — that way wheel metadata is the same across backends and `pip` only pulls the flavor you ask for. Pick the row that matches your hardware:
+`torch` and the matching `triton` flavor live in backend extras (they are *not* in the base dependencies), so wheel metadata is the same across backends and `pip` only pulls the flavor you ask for. Pick the row that matches your hardware:
 
 | Backend | Extra     | Wheel index                                              | `triton` flavor          |
 | ------- | --------- | -------------------------------------------------------- | ------------------------ |
@@ -162,16 +162,16 @@ ln -s 3rdparty/flash-linear-attention/fla fla
 ```
 
 > [!NOTE]
-> Already have a working `torch` for your backend? `pip install -e .[rocm]` (or the matching extra) will leave it alone because the extra's pin (`torch>=2.7.0`) is satisfied. The base install has no `torch` dep at all, so bare `pip install -e .` won't import — pick an extra.
+> Already have a working `torch` for your backend? `pip install -e .[rocm]` (or the matching extra) will leave it alone because the extra's pin (`torch>=2.7.0`) is satisfied. The base install has no `torch` dep at all, so bare `pip install -e .` won't import. Pick an extra.
 
 > [!NOTE]
 > For AMD GPUs the `[rocm]` extra pulls `pytorch-triton-rocm`. For Intel GPUs the `[xpu]` extra pulls `pytorch-triton-xpu`. See [FAQs](FAQs.md) for backend-specific issues.
 
-If you have installed `triton-nightly` and `torch` pre-release version, skip the dep resolver:
+If you're on a `torch` pre-release / `triton-nightly` you can also skip the dep resolver. Install the base deps yourself, then drop `fla` in with `--no-deps`:
 ```sh
-pip install einops ninja datasets transformers numpy
+pip install transformers einops
 pip uninstall fla-core flash-linear-attention -y
-pip install -U --no-use-pep517 --no-deps git+https://github.com/fla-org/flash-linear-attention
+pip install -U --no-deps git+https://github.com/fla-org/flash-linear-attention
 ```
 
 
