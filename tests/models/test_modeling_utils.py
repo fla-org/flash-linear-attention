@@ -17,7 +17,7 @@ from fla.utils import device
 MODELING_UNSUPPORTED_VARLEN = [
     "ABCConfig", "ForgettingTransformerConfig", "LinearAttentionConfig", "LightNetConfig",
     "Mamba2Config", "MambaConfig", "MesaNetConfig", "SambaConfig",
-    "RodimusConfig", "WallTransformerConfig",
+    "RodimusConfig", "WallTransformerConfig", "ParallaxTransformerConfig",
 ]
 
 # Models not yet ready for basic testing
@@ -32,6 +32,7 @@ GENERATION_UNSUPPORTED = [
     "DeltaFormerConfig",
     "MoBAConfig",
     "WallTransformerConfig",
+    "ParallaxTransformerConfig",
 ]
 
 
