@@ -1,0 +1,130 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
+import os
+
+import pytest
+import torch
+
+from fla.ops.parallax.naive import naive_parallax_attn
+from fla.ops.parallax.parallel import parallel_parallax_attn
+from fla.utils import assert_close, check_shared_mem, device
+
+# bf16 carries fewer mantissa bits than fp16, and the `r` correction amplifies
+# rounding, so it gets a looser ratio (observed worst case ~3.3e-3 on H100).
+TOL = {torch.float16: 0.005, torch.bfloat16: 0.01}
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'scale'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-scale{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 1.0),
+            (3, 111, 2, 2, 100, 1.0),
+            (3, 1024, 2, 8, 60, 0.1),
+            (3, 1024, 2, 8, 128, 0.1),
+            (4, 2048, 2, 8, 64, 0.1),
+        ]
+    ],
+)
+def test_parallel(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    D: int,
+    scale: float,
+    dtype: torch.dtype,
+):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shared mem")
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    tol = TOL[dtype]
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    r = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+
+    ref = naive_parallax_attn(q=q.float(), r=r.float(), k=k.float(), v=v.float(), scale=scale)
+    ref = ref.to(dtype)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dr, r.grad = r.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, scale=scale)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dr, r.grad = r.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    assert_close(" o", ref, tri, tol)
+    assert_close("dq", ref_dq, tri_dq, tol)
+    assert_close("dr", ref_dr, tri_dr, tol)
+    assert_close("dk", ref_dk, tri_dk, tol)
+    assert_close("dv", ref_dv, tri_dv, tol)
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'W'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-W{}".format(*test))
+        for test in [
+            (1, 63, 1, 1, 64, 16),
+            (3, 111, 2, 2, 100, 32),
+            (3, 1024, 2, 8, 128, 64),
+            (2, 2048, 2, 8, 64, 256),
+        ]
+    ],
+)
+def test_parallel_swa(
+    B: int,
+    T: int,
+    H: int,
+    HQ: int,
+    D: int,
+    W: int,
+    dtype: torch.dtype,
+):
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shared mem")
+    torch.manual_seed(42)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    tol = TOL[dtype]
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    r = torch.randn((B, T, HQ, D), dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_(True)
+    do = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+
+    ref = naive_parallax_attn(q=q.float(), r=r.float(), k=k.float(), v=v.float(), window_size=W)
+    ref = ref.to(dtype)
+    ref.backward(do)
+    ref_dq, q.grad = q.grad.clone(), None
+    ref_dr, r.grad = r.grad.clone(), None
+    ref_dk, k.grad = k.grad.clone(), None
+    ref_dv, v.grad = v.grad.clone(), None
+
+    tri = parallel_parallax_attn(q=q, r=r, k=k, v=v, window_size=W)
+    tri.backward(do)
+    tri_dq, q.grad = q.grad.clone(), None
+    tri_dr, r.grad = r.grad.clone(), None
+    tri_dk, k.grad = k.grad.clone(), None
+    tri_dv, v.grad = v.grad.clone(), None
+
+    assert_close(" o", ref, tri, tol)
+    assert_close("dq", ref_dq, tri_dq, tol)
+    assert_close("dr", ref_dr, tri_dr, tol)
+    assert_close("dk", ref_dk, tri_dk, tol)
+    assert_close("dv", ref_dv, tri_dv, tol)
