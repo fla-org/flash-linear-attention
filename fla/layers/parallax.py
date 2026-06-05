@@ -18,8 +18,9 @@ from einops import rearrange
 from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
-from fla.modules import RMSNorm
+from fla.modules import RMSNorm, RotaryEmbedding
 from fla.ops.parallax import parallax_decode, parallax_decode_onestep, parallel_parallax
+from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -33,8 +34,9 @@ class Parallax(nn.Module):
     A quadratic, causal, softmax-attention-style layer with an extra query-side
     projection ``r`` that injects a first-order correction onto the
     softmax-weighted values (see :func:`fla.ops.parallax.naive_parallax`).
-    The mechanism is positionless (no rotary embedding); causality is enforced
-    by the kernel mask.
+    Rotary position embeddings are applied to ``q``, ``k`` and ``r`` (``r`` is
+    rotated with the same ``cos``/``sin`` as ``q``); causality is enforced by the
+    kernel mask.
 
     Args:
         hidden_size (int, Optional):
@@ -50,6 +52,10 @@ class Parallax(nn.Module):
             Whether to apply per-head RMSNorm to `q`, `r` and `k`. Default: `False`.
         window_size (int, Optional):
             Sliding-window size; `None` for full causal attention. Default: `None`.
+        rope_theta (float, Optional):
+            The base frequency for the rotary position embedding. Default: 10000.
+        max_position_embeddings (int, Optional):
+            The maximum sequence length for the rotary cache. Default: `None`.
         layer_idx (int, Optional):
             The index of the layer, used for cache keying. Default: `None`.
     """
@@ -62,6 +68,8 @@ class Parallax(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: int | None = None,
+        rope_theta: float | None = 10000.,
+        max_position_embeddings: int | None = None,
         layer_idx: int = None,
     ):
         super().__init__()
@@ -79,6 +87,8 @@ class Parallax(nn.Module):
         self.qk_norm = qk_norm
 
         self.window_size = window_size
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
 
         # `r` is a second query-side stream, so `r_proj` mirrors `q_proj`.
@@ -92,6 +102,8 @@ class Parallax(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, dtype=torch.float32)
             self.r_norm = RMSNorm(self.head_dim, dtype=torch.float32)
             self.k_norm = RMSNorm(self.head_dim, dtype=torch.float32)
+
+        self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
     def forward(
         self,
@@ -121,6 +133,20 @@ class Parallax(nn.Module):
 
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens')
+
+        seqlen_offset, max_seqlen = 0, q_len
+        if past_key_values is not None:
+            seqlen_offset = past_key_values.get_seq_length(self.layer_idx)
+            max_seqlen = q_len + seqlen_offset
+            if attention_mask is not None:
+                # account for left-padding when indexing rotary positions
+                seqlen_offset = seqlen_offset + prepare_lens_from_mask(attention_mask) - attention_mask.shape[-1]
+                max_seqlen = q_len + max(seqlen_offset)
+        if self.max_position_embeddings is not None:
+            max_seqlen = max(max_seqlen, self.max_position_embeddings)
+        # rope on q, k and r; `r` shares q's positions (same cos/sin), then is rotated alone.
+        q, k = self.rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
+        r, _ = self.rotary(r, r, seqlen_offset=seqlen_offset, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens)
 
         if past_key_values is not None:
             # Decode / cached prefill. `r` is regenerated each step (like `q`), so only

@@ -27,6 +27,8 @@ class ParallaxConfig(PretrainedConfig):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         window_size: int | None = None,
+        rope_theta: float | None = 10000.,
+        max_position_embeddings: int | None = None,
         hidden_ratio: int | None = 4,
         intermediate_size: int | None = None,
         hidden_act: str = "swish",
@@ -53,6 +55,8 @@ class ParallaxConfig(PretrainedConfig):
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
         self.window_size = window_size
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
 
         self.hidden_ratio = hidden_ratio
         self.intermediate_size = intermediate_size

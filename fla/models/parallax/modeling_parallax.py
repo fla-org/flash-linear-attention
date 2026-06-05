@@ -57,6 +57,8 @@ class ParallaxBlock(GradientCheckpointingLayer):
             qkv_bias=config.qkv_bias,
             qk_norm=config.qk_norm,
             window_size=config.window_size,
+            rope_theta=config.rope_theta,
+            max_position_embeddings=config.max_position_embeddings,
             layer_idx=layer_idx,
         )
 
