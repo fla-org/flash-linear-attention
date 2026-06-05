@@ -32,7 +32,6 @@ GENERATION_UNSUPPORTED = [
     "DeltaFormerConfig",
     "MoBAConfig",
     "WallTransformerConfig",
-    "ParallaxTransformerConfig",
 ]
 
 

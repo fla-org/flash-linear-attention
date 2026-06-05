@@ -19,7 +19,7 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm
-from fla.ops.parallax import parallel_parallax_attn
+from fla.ops.parallax import parallax_attn_decode, parallel_parallax_attn
 
 if TYPE_CHECKING:
     from fla.models.utils import Cache
@@ -109,12 +109,6 @@ class ParallaxAttention(nn.Module):
                 "Arbitrary attention masks of shape [batch_size, seq_len, seq_len] are not allowed."
             )
 
-        if past_key_values is not None:
-            raise NotImplementedError(
-                "ParallaxAttention does not support incremental decoding yet: the dense Triton "
-                "op assumes the query and key/value lengths match. Use it for training/prefill."
-            )
-
         batch_size, q_len, _ = hidden_states.size()
 
         q = rearrange(self.q_proj(hidden_states), '... (h d) -> ... h d', d=self.head_dim)
@@ -128,7 +122,23 @@ class ParallaxAttention(nn.Module):
         # equivalent to cu_seqlens in `flash_attn`
         cu_seqlens = kwargs.get('cu_seqlens')
 
-        if attention_mask is not None:
+        if past_key_values is not None:
+            # Decode / cached prefill. `r` is regenerated each step (like `q`), so only
+            # `(k, v)` are cached; the new queries attend to the full cached KV.
+            k_cached, v_cached = past_key_values.update(
+                attn_state=(k.flatten(-2, -1), v.flatten(-2, -1)),
+                layer_idx=self.layer_idx,
+                offset=q_len,
+                cache_kwargs=dict(window_size=self.window_size),
+            )['attn_state']
+            k = rearrange(k_cached, '... (h d) -> ... h d', d=self.head_dim)
+            v = rearrange(v_cached, '... (h d) -> ... h d', d=self.head_dim)
+            # left-padding: the first `kv_len - valid_len` cached keys are padding.
+            cache_start = None
+            if attention_mask is not None:
+                cache_start = (k.shape[1] - attention_mask.sum(-1)).to(torch.int32)
+            o = parallax_attn_decode(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
+        elif attention_mask is not None:
             # Unpad to a single packed sequence (batch folded into the seq axis).
             q, (r, k, v), indices_q, cu_seqlens, _ = unpad_input(
                 q, (r, k, v), attention_mask, q_len, keepdim=True,
