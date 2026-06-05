@@ -294,3 +294,34 @@ def test_decode(B: int, Sq: int, Skv: int, H: int, HQ: int, D: int, W, dtype: to
     ref = _decode_ref(q, r, k, v, scale=D ** -0.5, window_size=W)
     tri = parallax_decode(q, r, k, v, window_size=W)
     assert_close(" o", ref, tri, tol)
+
+
+@pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'D', 'W'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-W{}".format(*test))
+        for test in [
+            (2, 256, 2, 2, 64, None),
+            (2, 256, 2, 8, 64, None),     # GQA
+            (2, 200, 2, 2, 128, None),    # D128
+            (2, 256, 2, 4, 64, 64),       # sliding window
+        ]
+    ],
+)
+def test_decode_matches_parallel(B: int, T: int, H: int, HQ: int, D: int, W, dtype: torch.dtype):
+    """The decode kernel must reproduce the (reference-verified) training kernel
+    for the corresponding positions: decode(last m queries | full KV) == parallel[last m]."""
+    if not check_shared_mem('hopper') and D > 128:
+        pytest.skip(reason="Skip test, do not have enough shared mem")
+    torch.manual_seed(0)
+    os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    tol = TOL[dtype]
+    q = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    r = torch.randn((B, T, HQ, D), dtype=dtype, device=device)
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    v = torch.randn((B, T, H, D), dtype=dtype, device=device)
+    o_full = parallel_parallax(q, r, k, v, window_size=W)
+    for m in (1, T // 2, T):
+        o_dec = parallax_decode(q[:, T - m:], r[:, T - m:], k, v, window_size=W)
+        assert_close(f"o(m={m})", o_full[:, T - m:], o_dec, tol)
