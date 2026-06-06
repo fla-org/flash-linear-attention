@@ -39,10 +39,11 @@ else:
 
 if IS_NVIDIA_BLACKWELL:
     """
-    Compute tl.dot with SM100 workaround.
+    Compute tl.dot with Blackwell workaround.
 
-    On SM100 (Blackwell) GPUs, wraps the result in inline assembly to prevent
-    the TritonGPUHoistTMEMAlloc pass from incorrectly fusing add and dot operations.
+    On SM100 datacenter and SM120 consumer Blackwell GPUs, wraps the result in
+    inline assembly to prevent the TritonGPUHoistTMEMAlloc pass from incorrectly
+    fusing add and dot operations.
     See: https://github.com/fla-org/flash-linear-attention/issues/638
 
     TODO: Remove this workaround once the Triton compiler bug is fixed.
