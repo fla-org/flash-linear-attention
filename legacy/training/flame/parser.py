@@ -10,9 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import transformers
-from transformers import HfArgumentParser, TrainingArguments
-
 from flame.logging import get_logger
+from transformers import HfArgumentParser, TrainingArguments
 
 logger = get_logger(__name__)
 
