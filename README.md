@@ -116,64 +116,18 @@
 
 [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml)
 
-The following requirements should be satisfied
-- [PyTorch](https://pytorch.org/) >= 2.7.0
-- [Triton](https://github.com/triton-lang/triton) >= 3.3 (or nightly version, see [FAQs](FAQs.md))
-- [einops](https://einops.rocks/)
-- [transformers](https://github.com/huggingface/transformers) >=4.45.0
-- [datasets](https://github.com/huggingface/datasets) >=3.3.0
+`torch` and the matching `triton` flavor live in a backend extra (`[cuda]` / `[rocm]` / `[xpu]` / `[npu]` / `[cpu]`), so wheel metadata is the same across backends and `pip` only pulls the flavor you ask for.
 
-Starting from v0.3.2, the packages published on PyPI are `fla-core` and `flash-linear-attention`. The former contains all our customized kernels and only depends on PyTorch, Triton, and einops. The latter is an extension package of the former, containing `fla/layers` and `fla/models`, and depends on transformers. We also provide Triton implementations for conv1d operations, so causal-conv1d is not required.
-
-### Pick a backend
-
-`torch` and the matching `triton` flavor live in backend extras (they are *not* in the base dependencies), so wheel metadata is the same across backends and `pip` only pulls the flavor you ask for. Pick the row that matches your hardware:
-
-| Backend | Extra     | Wheel index                                              | `triton` flavor          |
-| ------- | --------- | -------------------------------------------------------- | ------------------------ |
-| CUDA    | `[cuda]`  | `https://download.pytorch.org/whl/cu128` (or your CUDA)  | `triton`                 |
-| ROCm    | `[rocm]`  | `https://download.pytorch.org/whl/rocm7.2` (or your ROCm)| `pytorch-triton-rocm`    |
-| XPU     | `[xpu]`   | `https://download.pytorch.org/whl/xpu`                   | `pytorch-triton-xpu`     |
-| NPU     | `[npu]`   | (use your CANN-matched `torch` / `torch_npu`)            | `triton-ascend`          |
-| CPU     | `[cpu]`   | `https://download.pytorch.org/whl/cpu`                   | `triton` (import-only)   |
-
-PyPI install:
 ```sh
-# CUDA (the typical PyPI default)
 pip install flash-linear-attention[cuda]
-
-# ROCm
 pip install flash-linear-attention[rocm] --extra-index-url https://download.pytorch.org/whl/rocm7.2
-
-# XPU
-pip install flash-linear-attention[xpu] --extra-index-url https://download.pytorch.org/whl/xpu
+pip install flash-linear-attention[xpu]  --extra-index-url https://download.pytorch.org/whl/xpu
 ```
 
-From source (latest):
-```sh
-pip uninstall fla-core flash-linear-attention -y
-pip install -U "git+https://github.com/fla-org/flash-linear-attention#egg=flash-linear-attention[rocm]" \
-    --extra-index-url https://download.pytorch.org/whl/rocm7.2
-```
-
-Or with submodules:
-```sh
-git submodule add https://github.com/fla-org/flash-linear-attention.git 3rdparty/flash-linear-attention
-ln -s 3rdparty/flash-linear-attention/fla fla
-```
+See [INSTALL.md](INSTALL.md) for the full backend table, NPU (Ascend) flow, source installs, and the `--no-deps` path for `torch` pre-release / `triton-nightly`.
 
 > [!NOTE]
-> Already have a working `torch` for your backend? `pip install -e .[rocm]` (or the matching extra) will leave it alone because the extra's pin (`torch>=2.7.0`) is satisfied. The base install has no `torch` dep at all, so bare `pip install -e .` won't import. Pick an extra.
-
-> [!NOTE]
-> For AMD GPUs the `[rocm]` extra pulls `pytorch-triton-rocm`. For Intel GPUs the `[xpu]` extra pulls `pytorch-triton-xpu`. See [FAQs](FAQs.md) for backend-specific issues.
-
-If you're on a `torch` pre-release / `triton-nightly` you can also skip the dep resolver. Install the base deps yourself, then drop `fla` in with `--no-deps`:
-```sh
-pip install transformers einops
-pip uninstall fla-core flash-linear-attention -y
-pip install -U --no-deps git+https://github.com/fla-org/flash-linear-attention
-```
+> Behavior change vs. pre-v0.5: bare `pip install flash-linear-attention` no longer pulls `torch` / `triton`. Pick a backend extra. This fixes ROCm / XPU / NPU users silently getting CUDA wheels.
 
 
 ## Usage
