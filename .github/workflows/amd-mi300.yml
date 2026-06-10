@@ -42,5 +42,4 @@ jobs:
           python3 -c "import triton; print('triton', triton.__version__)"
 
       - name: Run ops tests
-        if: always()
         run: python3 -m pytest tests/ops/ -x -v --tb=short
