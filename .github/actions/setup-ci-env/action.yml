@@ -159,18 +159,6 @@ runs:
           $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} pytorch-triton-xpu --index-url $XPU_URL
           $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
           $CONDA_BIN_PATH/pip install .
-        elif [ "${{ inputs.gpu_type }}" = "amd" ]; then
-          export FLA_TARGET_DEVICE=rocm
-          if [ -z "${{ inputs.pytorch_version }}" ]; then
-            echo "::error::pytorch_version is required for AMD CI."
-            exit 1
-          fi
-          echo "Installing PyTorch version: ${{ inputs.pytorch_version }} for GPU: ${{ inputs.gpu_type }}"
-          ROCM_URL="https://download.pytorch.org/whl/${{ inputs.pytorch_cuda_version }}"
-          echo "Using ROCm index URL: $ROCM_URL"
-          $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} pytorch-triton-rocm --index-url $ROCM_URL
-          $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
-          $CONDA_BIN_PATH/pip install .
         else
           echo "::error::Unsupported GPU type: ${{ inputs.gpu_type }}"
           exit 1
