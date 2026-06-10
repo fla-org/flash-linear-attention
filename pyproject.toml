@@ -26,6 +26,7 @@ dependencies = [
 cuda = ["torch>=2.7.0", "triton>=3.3"]
 rocm = ["torch>=2.7.0", "pytorch-triton-rocm>=3.3"]
 xpu  = ["torch>=2.7.0", "pytorch-triton-xpu>=3.3"]
+npu  = ["torch>=2.7.0", "torch-npu", "triton-ascend"]
 cpu  = ["torch>=2.7.0", "triton>=3.3"]
 tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]

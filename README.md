@@ -134,6 +134,7 @@ Starting from v0.3.2, the packages published on PyPI are `fla-core` and `flash-l
 | CUDA    | `[cuda]`  | `https://download.pytorch.org/whl/cu128` (or your CUDA)  | `triton`                 |
 | ROCm    | `[rocm]`  | `https://download.pytorch.org/whl/rocm7.2` (or your ROCm)| `pytorch-triton-rocm`    |
 | XPU     | `[xpu]`   | `https://download.pytorch.org/whl/xpu`                   | `pytorch-triton-xpu`     |
+| NPU     | `[npu]`   | (use your CANN-matched `torch` / `torch_npu`)            | `triton-ascend`          |
 | CPU     | `[cpu]`   | `https://download.pytorch.org/whl/cpu`                   | `triton` (import-only)   |
 
 PyPI install:
