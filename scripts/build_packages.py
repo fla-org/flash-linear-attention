@@ -5,59 +5,38 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-import ast
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+BACKEND_EXTRAS = {'cuda', 'rocm', 'xpu', 'npu', 'cpu'}
+
 
 def extract_dependencies():
-    """Extract dependencies from setup.py using AST."""
-    # get script directory and find setup.py in parent directory
+    """Read base dependencies and optional-dependency extras from pyproject.toml."""
     script_dir = Path(__file__).parent
-    setup_py = script_dir.parent / 'setup.py'
+    pyproject = script_dir.parent / 'pyproject.toml'
 
-    with open(setup_py, encoding='utf-8') as f:
-        tree = ast.parse(f.read(), filename=str(setup_py))
-
-    all_deps = []
-    extras = {}
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and getattr(node.func, 'id', '') == 'setup':
-            for keyword in node.keywords:
-                if (keyword.arg == 'install_requires' and
-                        isinstance(keyword.value, (ast.List, ast.Tuple))):
-                    all_deps.extend([
-                        elt.value for elt in keyword.value.elts
-                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-                    ])
-                elif (keyword.arg == 'extras_require' and
-                      isinstance(keyword.value, ast.Dict)):
-                    for key_node, val_node in zip(keyword.value.keys, keyword.value.values, strict=False):
-                        if (isinstance(key_node, ast.Constant) and
-                            isinstance(key_node.value, str) and
-                                isinstance(val_node, (ast.List, ast.Tuple))):
-                            key = key_node.value
-                            values = [
-                                elt.value for elt in val_node.elts
-                                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
-                            ]
-                            extras[key] = values
-            break  # assume only one setup() call
-
-    return all_deps, extras
+    with open(pyproject, 'rb') as f:
+        data = tomllib.load(f)
+    project = data.get('project', {})
+    return list(project.get('dependencies', [])), dict(project.get('optional-dependencies', {}))
 
 
 def categorize_dependencies(deps):
-    """Categorize dependencies based on core vs extension."""
+    """Split base deps: einops travels with the kernels, everything else with layers/models."""
     core_deps = []
     ext_deps = []
 
     for dep in deps:
-        if any(core in dep for core in ['torch', 'triton', 'einops']):
+        if 'einops' in dep:
             core_deps.append(dep)
         else:
             ext_deps.append(dep)
@@ -86,7 +65,7 @@ def create_pyproject_toml(package_dir, name, version, dependencies, extras=None)
         desc_text = 'Fast linear attention models and layers'
 
     content = f"""[build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -136,6 +115,11 @@ def build_split_packages(output_dir: str | Path | None = None):
     # extract dependencies
     all_deps, extras = extract_dependencies()
     core_deps, ext_deps = categorize_dependencies(all_deps)
+    core_extras = {k: v for k, v in extras.items() if k in BACKEND_EXTRAS}
+    # extension forwards backend extras to fla-core so flash-linear-attention[cuda]
+    # resolves the same torch/triton flavor as fla-core[cuda].
+    ext_extras = {k: [f'fla-core[{k}]=={version}'] for k in extras if k in BACKEND_EXTRAS}
+    ext_extras.update({k: v for k, v in extras.items() if k not in BACKEND_EXTRAS})
 
     # add version constraint for fla-core in extension package
     ext_deps.insert(0, f'fla-core=={version}')
@@ -173,7 +157,7 @@ def build_split_packages(output_dir: str | Path | None = None):
             shutil.copy(src, core_dir / fname)
 
     # create fla-core configs
-    create_pyproject_toml(core_dir, 'fla-core', version, core_deps)
+    create_pyproject_toml(core_dir, 'fla-core', version, core_deps, core_extras)
 
     # create flash-linear-attention package
     ext_dir = output_dir / 'flash-linear-attention'
@@ -196,7 +180,7 @@ def build_split_packages(output_dir: str | Path | None = None):
             shutil.copy(src, ext_dir / fname)
 
     # create extension configs
-    create_pyproject_toml(ext_dir, 'flash-linear-attention', version, ext_deps, extras)
+    create_pyproject_toml(ext_dir, 'flash-linear-attention', version, ext_deps, ext_extras)
 
     # create build script
     build_script = output_dir / 'build.sh'
