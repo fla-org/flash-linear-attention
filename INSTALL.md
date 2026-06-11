@@ -11,13 +11,13 @@ backend-extras layout.
 base deps. Wheel metadata is the same across backends; `pip` only pulls the
 flavor you ask for.
 
-| Backend | Extra    | Wheel index                                | `triton` flavor          |
-| ------- | -------- | ------------------------------------------ | ------------------------ |
-| CUDA    | `[cuda]` | `https://download.pytorch.org/whl/cu128`   | `triton`                 |
-| ROCm    | `[rocm]` | `https://download.pytorch.org/whl/rocm7.2` | `pytorch-triton-rocm`    |
-| XPU     | `[xpu]`  | `https://download.pytorch.org/whl/xpu`     | `pytorch-triton-xpu`     |
-| NPU     | `[npu]`  | (use your CANN-matched `torch` / `torch_npu`) | `triton-ascend`       |
-| CPU     | `[cpu]`  | `https://download.pytorch.org/whl/cpu`     | `triton` (import-only)   |
+| Backend | Extra    | Wheel index                                | `triton` flavor                                  |
+| ------- | -------- | ------------------------------------------ | ------------------------------------------------ |
+| CUDA    | `[cuda]` | `https://download.pytorch.org/whl/cu128`   | `triton` (PyPI)                                  |
+| ROCm    | `[rocm]` | `https://download.pytorch.org/whl/rocm7.2` | pulled by `torch` (`pytorch-triton-rocm` / `triton-rocm`) |
+| XPU     | `[xpu]`  | `https://download.pytorch.org/whl/xpu`     | pulled by `torch` (`pytorch-triton-xpu`)         |
+| NPU     | `[npu]`  | (use your CANN-matched `torch` / `torch_npu`) | `triton-ascend`                               |
+| CPU     | `[cpu]`  | `https://download.pytorch.org/whl/cpu`     | `triton` (PyPI, import-only)                     |
 
 ## From PyPI
 
@@ -26,25 +26,27 @@ CUDA can use a single command since `triton` lives on PyPI:
 pip install flash-linear-attention[cuda]
 ```
 
-For ROCm / XPU / CPU, do it in two steps so pip pulls the backend `torch` +
-`triton` flavor from the PyTorch index instead of letting the resolver pick a
-mix (pip docs are explicit that there is no priority across configured
-indices). Pick your index, install `torch` + the `triton` flavor first, then
-install `fla`:
+For ROCm / XPU / CPU, do it in two steps so `torch` (and the matching `triton`
+flavor that `torch` pulls transitively) come from the PyTorch wheel index
+instead of letting the resolver mix and match (pip docs are explicit that
+there is no priority across configured indices). This mirrors the
+[AMD-recommended pattern](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/native_linux/install-triton.html):
 
 ```sh
 # ROCm
-pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch pytorch-triton-rocm
+pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch
 pip install flash-linear-attention[rocm]
 
 # XPU
-pip install --index-url https://download.pytorch.org/whl/xpu torch pytorch-triton-xpu
+pip install --index-url https://download.pytorch.org/whl/xpu torch
 pip install flash-linear-attention[xpu]
 
 # CPU
 pip install --index-url https://download.pytorch.org/whl/cpu torch
 pip install flash-linear-attention[cpu]
 ```
+
+For nightly torch, swap `whl/<backend>` for `whl/nightly/<backend>` and add `--pre`.
 
 ## Ascend NPU
 

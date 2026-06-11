@@ -116,14 +116,14 @@
 
 [![nvidia-h100-ci](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml/badge.svg?branch=main&event=push)](https://github.com/fla-org/flash-linear-attention/actions/workflows/nvidia-h100.yml)
 
-`torch` and the matching `triton` flavor live in a backend extra (`[cuda]` / `[rocm]` / `[xpu]` / `[npu]` / `[cpu]`), so wheel metadata is the same across backends and `pip` only pulls the flavor you ask for. CUDA is one command; other backends are two so pip pulls torch + triton from the PyTorch index and not PyPI:
+`torch` lives in a backend extra (`[cuda]` / `[rocm]` / `[xpu]` / `[npu]` / `[cpu]`). CUDA is one command; other backends are two so `torch` (and the right `triton` flavor that `torch` pulls transitively) come from the PyTorch wheel index instead of PyPI:
 
 ```sh
 # CUDA
 pip install flash-linear-attention[cuda]
 
 # ROCm
-pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch pytorch-triton-rocm
+pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch
 pip install flash-linear-attention[rocm]
 ```
 
