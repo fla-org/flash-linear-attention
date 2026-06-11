@@ -23,14 +23,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cuda = ["torch>=2.7.0", "triton>=3.3"]
+cuda = ["torch>=2.12.0", "triton>=3.3"]
 # rocm / xpu intentionally don't pin a triton flavor: torch sourced from the
 # matching PyTorch wheel index pulls the right one transitively (pytorch-triton-rocm
 # on stable, triton-rocm on nightly, etc.).
-rocm = ["torch>=2.7.0"]
-xpu  = ["torch>=2.7.0"]
-npu  = ["torch==2.6.0", "torch_npu==2.6.0", "triton-ascend==3.2.0"]
-cpu  = ["torch>=2.7.0", "triton>=3.3"]
+rocm = ["torch>=2.12.0"]
+xpu  = ["torch>=2.12.0"]
+npu  = ["torch==2.12.0", "torch_npu==2.6.0", "triton-ascend==3.2.0"]
+cpu  = ["torch>=2.12.0", "triton>=3.3"]
 tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]
 benchmark = ["matplotlib", "datasets>=3.3.0"]
