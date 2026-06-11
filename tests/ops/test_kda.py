@@ -1302,3 +1302,178 @@ def test_flashkda_chunk_varlen(H, D, cu_seqlens, monkeypatch):
     )
     assert_close("o", ref_o, tri_o, _FLASHKDA_RTOL)
     assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHKDA_RTOL)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "HV", "D", "scale", "has_dt_bias", "use_gate_in_kernel", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="B{}-T{}-H{}-HV{}-D{}-scale{}-has_dt_bias{}-use_gate{}-{}".format(*test),
+        )
+        for test in [
+            # TLE backend compatible: has_dt_bias=True, use_gate_in_kernel=True, D in {64,128,256}
+            (4, 1024, 4, 4, 128, 0.1, True, True, torch.bfloat16),
+            (2, 2048, 4, 8, 64, 0.1, True, True, torch.bfloat16),
+            (1, 8192, 4, 4, 128, 0.1, True, True, torch.bfloat16),
+            (2, 1024, 2, 4, 128, 0.1, True, True, torch.float16),
+            (1, 2048, 4, 8, 256, 0.1, True, True, torch.bfloat16),
+        ]
+    ],
+)
+@torch.inference_mode()
+def test_chunk_fwd_inference(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    has_dt_bias: bool,
+    use_gate_in_kernel: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    beta_raw = torch.randn(B, T, HV, dtype=dtype, device=device)
+    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(HV * D, dtype=torch.float32, device=device) if has_dt_bias else None
+    h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
+
+    if use_gate_in_kernel:
+        g_activated = naive_kda_lowerbound_gate(
+            g.clone().float(), A_log.clone(),
+            dt_bias.clone() if dt_bias is not None else torch.zeros(HV * D, device=device),
+            lower_bound=-5.0
+        )
+    else:
+        g_activated = F.logsigmoid(g.clone().float())
+
+    q_norm = F.normalize(q.float(), p=2, dim=-1)
+    k_norm = F.normalize(k.float(), p=2, dim=-1)
+
+    ref, ref_ht = naive_recurrent_kda(
+        q=q_norm,
+        k=k_norm,
+        v=v.clone().float(),
+        g=g_activated,
+        beta=beta_raw.clone().float().sigmoid(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+
+    if use_gate_in_kernel:
+        tri, tri_ht = chunk_kda(
+            q=q, k=k, v=v, g=g, beta=beta_raw,
+            scale=scale,
+            initial_state=h0.clone(),
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            safe_gate=True,
+            lower_bound=-5.0,
+            A_log=A_log,
+            dt_bias=dt_bias,
+        )
+    else:
+        tri, tri_ht = chunk_kda(
+            q=q, k=k, v=v, g=g_activated.to(dtype), beta=beta_raw.sigmoid(),
+            scale=scale,
+            initial_state=h0.clone(),
+            output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=False,
+            use_beta_sigmoid_in_kernel=False,
+        )
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
+
+
+@pytest.mark.parametrize(
+    ("H", "HV", "D", "scale", "cu_seqlens", "has_dt_bias", "dtype"),
+    [
+        pytest.param(
+            *test,
+            id="H{}-HV{}-D{}-scale{}-cu_seqlens-has_dt_bias{}-{}".format(*test),
+        )
+        for test in [
+            (4, 4, 128, 0.1, [0, 256, 500, 1000], True, torch.bfloat16),
+            (4, 8, 128, 0.1, [0, 100, 300, 1200, 2000], True, torch.float16),
+            (4, 4, 64, 0.1, [0, 101, 303, 1205, 3007, 4096], True, torch.bfloat16),
+            (2, 4, 256, 0.1, [0, 512, 1024, 2048], True, torch.bfloat16),
+            (4, 8, 128, 0.1, [0, 300, 800], True, torch.float16),
+        ]
+    ],
+)
+@torch.inference_mode()
+def test_chunk_fwd_inference_varlen(
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    cu_seqlens: list[int],
+    has_dt_bias: bool,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+
+    cu_seqlens_t = torch.LongTensor(cu_seqlens).to(device)
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+
+    q = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    g = torch.randn(1, T, HV, D, dtype=dtype, device=device)
+    beta_raw = torch.randn(1, T, HV, dtype=dtype, device=device)
+    A_log = torch.log(torch.empty(HV, dtype=torch.float32, device=device).uniform_(1, 16))
+    dt_bias = torch.randn(HV * D, dtype=torch.float32, device=device) if has_dt_bias else None
+    h0 = torch.randn(N, HV, D, D, dtype=torch.float32, device=device)
+
+    g_activated = naive_kda_lowerbound_gate(
+        g.clone().float(), A_log.clone(),
+        dt_bias.clone() if dt_bias is not None else torch.zeros(HV * D, device=device),
+        lower_bound=-5.0
+    )
+    q_norm = F.normalize(q.float(), p=2, dim=-1)
+    k_norm = F.normalize(k.float(), p=2, dim=-1)
+
+    ref_list, ref_ht_list = [], []
+    for i in range(N):
+        ref_i, ref_ht_i = naive_recurrent_kda(
+            q=q_norm[:, cu_seqlens[i]:cu_seqlens[i + 1]],
+            k=k_norm[:, cu_seqlens[i]:cu_seqlens[i + 1]],
+            v=v[:, cu_seqlens[i]:cu_seqlens[i + 1]].clone().float(),
+            g=g_activated[:, cu_seqlens[i]:cu_seqlens[i + 1]],
+            beta=beta_raw[:, cu_seqlens[i]:cu_seqlens[i + 1]].clone().float().sigmoid(),
+            scale=scale,
+            initial_state=h0[i:i + 1].clone(),
+            output_final_state=True,
+        )
+        ref_list.append(ref_i)
+        ref_ht_list.append(ref_ht_i)
+    ref = torch.cat(ref_list, 1)
+    ref_ht = torch.cat(ref_ht_list, 0)
+
+    tri, tri_ht = chunk_kda(
+        q=q, k=k, v=v, g=g, beta=beta_raw,
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens_t,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        safe_gate=True,
+        lower_bound=-5.0,
+        A_log=A_log,
+        dt_bias=dt_bias,
+    )
+    assert_close("o", ref, tri, 0.005)
+    assert_close("ht", ref_ht, tri_ht, 0.005)
