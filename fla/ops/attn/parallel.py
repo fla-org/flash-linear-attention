@@ -610,6 +610,8 @@ def parallel_attn_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     G = HQ // H
+    # dq/dk are reduced over the full value dim in one program (no cross-program accumulation),
+    # so BV must span all of V (NV == 1). Don't cap it here -- the forward can, the backward can't.
     if check_shared_mem('hopper'):
         BT = 128
         BS = 64
@@ -626,7 +628,7 @@ def parallel_attn_bwd(
         BT = 64
         BS = 32
         BK = max(triton.next_power_of_2(K), 16)
-        BV = min(max(triton.next_power_of_2(V), 16), 64)
+        BV = max(triton.next_power_of_2(V), 16)
         num_warps = 2
 
     if chunk_indices is None and cu_seqlens is not None:
