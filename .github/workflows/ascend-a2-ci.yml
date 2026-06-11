@@ -1,5 +1,7 @@
 name: ascend-a2-ci
 
+# Pinned stack: CANN 8.5.0, torch 2.6.0, torch-npu 2.6.0, triton-ascend 3.2.0
+
 on:
   workflow_dispatch:
   push:
@@ -19,8 +21,8 @@ on:
       - ".github/workflows/*.yml"
 
 jobs:
-  test-a2-npu-pytorch-2-7:
-    name: Test A2 NPU (PyTorch 2.7.1)
+  test-a2-npu-pytorch-2-6:
+    name: Test A2 NPU (PyTorch 2.6.0)
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push' ||
@@ -41,8 +43,8 @@ jobs:
           - "3.11"
         os:
           - "linux-aarch64-a2-1"
-        pytorch_npu:
-          - "2.7.1"
+        torch:
+          - "2.6.0"
 
     runs-on: ${{ matrix.os }}
 
@@ -51,7 +53,6 @@ jobs:
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
     container:
-      # triton-ascend 3.2.0 官方标配 CANN 8.5.0
       image: ascendai/cann:8.5.0-910b-ubuntu22.04-py3.11
       options: >-
         --shm-size 16g
@@ -82,8 +83,8 @@ jobs:
           # triton-ascend imports pybind11 at runtime; see triton-ascend requirements.txt
           python -m pip install pybind11 cmake attrs sympy pyyaml scipy
           python -m pip install \
-            "torch==${{ matrix.pytorch_npu }}" \
-            "torch-npu==${{ matrix.pytorch_npu }}" \
+            "torch==${{ matrix.torch }}" \
+            "torch_npu==${{ matrix.torch }}" \
             "triton-ascend==3.2.0" \
             decorator \
             --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
