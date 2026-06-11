@@ -144,11 +144,13 @@ Before submitting, please go through the following checklist:
     git remote add upstream git@github.com:fla-org/flash-linear-attention.git
     ```
 
-2. Install in development mode:
+2. Install in development mode with a backend extra (`cuda` / `rocm` / `xpu` / `npu` / `cpu`):
 
     ```bash
-    pip install -e '.[test]'
+    pip install -e '.[cuda,test]'
     ```
+
+    For non-CUDA backends, install the matching `torch` + `triton` flavor from the PyTorch index first (see [INSTALL.md](INSTALL.md)), then run the editable install with the matching extra (e.g. `.[rocm,test]`).
 
     > [!TIP]
     > If the install fails, double-check that your PyTorch version matches your local CUDA toolkit and that `nvcc` is available in your `PATH`.
