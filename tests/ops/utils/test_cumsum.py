@@ -208,6 +208,7 @@ def test_local_cumsum(
     [
         pytest.param(*test, id="H{}-C{}-D{}-cu_seqlens{}-{}".format(*test))
         for test in [
+            (2, 16, 60, [0, 15], torch.float),
             (2, 32, 60, [0, 15], torch.float),
             (3, 64, 100, [0, 256, 500, 1000], torch.float),
             (4, 64, 256, [0, 15, 100, 300, 1200, 2000], torch.float),

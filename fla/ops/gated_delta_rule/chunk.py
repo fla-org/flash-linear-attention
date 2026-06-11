@@ -45,13 +45,14 @@ def chunk_gated_delta_rule_fwd(
     use_gate_in_kernel: bool = False,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
+    chunk_size: int = 64,
 ):
     g_input = g if use_gate_in_kernel else None
     if use_gate_in_kernel:
         g = gdn_gate_chunk_cumsum(
             g=g,
             A_log=A_log,
-            chunk_size=64,
+            chunk_size=chunk_size,
             scale=RCP_LN2,
             dt_bias=dt_bias,
             cu_seqlens=cu_seqlens,
@@ -60,7 +61,7 @@ def chunk_gated_delta_rule_fwd(
     else:
         g = chunk_local_cumsum(
             g,
-            chunk_size=64,
+            chunk_size=chunk_size,
             scale=RCP_LN2,
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
@@ -74,6 +75,7 @@ def chunk_gated_delta_rule_fwd(
         beta=beta,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_size=chunk_size,
     )
 
     if cp_context is not None:
@@ -86,6 +88,7 @@ def chunk_gated_delta_rule_fwd(
             initial_state=initial_state,
             context=cp_context,
             state_v_first=state_v_first,
+            chunk_size=chunk_size,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -98,6 +101,7 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
 
     if cp_context is not None:
@@ -113,6 +117,7 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     return g, o, A, final_state, initial_state, g_input
 
@@ -136,6 +141,7 @@ def chunk_gated_delta_rule_bwd(
     g_input: torch.Tensor | None = None,
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
+    chunk_size: int = 64,
 ):
     w, u = recompute_w_u_fwd(
         k=k,
@@ -160,6 +166,7 @@ def chunk_gated_delta_rule_bwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     dv = chunk_bwd_dv_local(
         q=q,
@@ -169,6 +176,7 @@ def chunk_gated_delta_rule_bwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_size=chunk_size,
     )
 
     if cp_context is not None:
@@ -187,6 +195,7 @@ def chunk_gated_delta_rule_bwd(
             initial_state=initial_state,
             context=cp_context,
             state_v_first=state_v_first,
+            chunk_size=chunk_size,
         )
 
     dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
@@ -202,6 +211,7 @@ def chunk_gated_delta_rule_bwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     dq, dk, dw, dg = chunk_bwd_dqkwg(
         q=q,
@@ -217,6 +227,7 @@ def chunk_gated_delta_rule_bwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         state_v_first=state_v_first,
+        chunk_size=chunk_size,
     )
     dk2, dv, db, dg2 = prepare_wy_repr_bwd(
         k=k,
@@ -231,7 +242,7 @@ def chunk_gated_delta_rule_bwd(
     )
     dk.add_(dk2)
     dg.add_(dg2)
-    dg = chunk_local_cumsum(dg, chunk_size=64, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
+    dg = chunk_local_cumsum(dg, chunk_size=chunk_size, reverse=True, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
     dA_log, ddt_bias = None, None
     if use_gate_in_kernel:
         dg, dA_log, ddt_bias = gdn_gate_bwd(g=g_input, A_log=A_log, dt_bias=dt_bias, dyg=dg)
@@ -263,6 +274,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_beta_sigmoid_in_kernel: bool = False,
         allow_neg_eigval: bool = False,
         cp_context: FLACPContext | None = None,
+        chunk_size: int = 64,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
@@ -275,7 +287,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 
         chunk_indices = None
         if cu_seqlens is not None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu)
+            chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
         g, o, A, final_state, initial_state, g_input = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
@@ -292,6 +304,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             use_gate_in_kernel=use_gate_in_kernel,
             A_log=A_log,
             dt_bias=dt_bias,
+            chunk_size=chunk_size,
         )
         ctx.save_for_backward(
             q,
@@ -311,6 +324,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             dt_bias,
         )
         ctx.scale = scale
+        ctx.chunk_size = chunk_size
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.use_beta_sigmoid_in_kernel = use_beta_sigmoid_in_kernel
         ctx.allow_neg_eigval = allow_neg_eigval
@@ -363,6 +377,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             g_input=g_input,
             A_log=A_log,
             dt_bias=dt_bias,
+            chunk_size=ctx.chunk_size,
         )
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
@@ -372,7 +387,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         return (
             dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta_raw),
             None, dh0, None, None, None, None, None, None, dA_log, ddt_bias,
-            None, None, None,
+            None, None, None, None,
         )
 
 
@@ -514,6 +529,10 @@ def chunk_gated_delta_rule(
             "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
 
+    chunk_size = kwargs.pop('chunk_size', 64)
+    if chunk_size not in (16, 32, 64):
+        raise ValueError(f"`chunk_size` must be 16, 32, or 64 for Gated Delta Rule, got {chunk_size}.")
+
     if cp_context is not None:
         assert initial_state is None, "Initial state is not supported for CP"
         assert output_final_state is False, "Output final state is not supported for CP"
@@ -562,6 +581,7 @@ def chunk_gated_delta_rule(
         use_beta_sigmoid_in_kernel,
         allow_neg_eigval,
         cp_context,
+        chunk_size,
     )
     return o, final_state
 
