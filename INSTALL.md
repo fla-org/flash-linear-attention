@@ -21,11 +21,29 @@ flavor you ask for.
 
 ## From PyPI
 
+CUDA can use a single command since `triton` lives on PyPI:
 ```sh
 pip install flash-linear-attention[cuda]
-pip install flash-linear-attention[rocm] --extra-index-url https://download.pytorch.org/whl/rocm7.2
-pip install flash-linear-attention[xpu]  --extra-index-url https://download.pytorch.org/whl/xpu
-pip install flash-linear-attention[cpu]  --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+For ROCm / XPU / CPU, do it in two steps so pip pulls the backend `torch` +
+`triton` flavor from the PyTorch index instead of letting the resolver pick a
+mix (pip docs are explicit that there is no priority across configured
+indices). Pick your index, install `torch` + the `triton` flavor first, then
+install `fla`:
+
+```sh
+# ROCm
+pip install --index-url https://download.pytorch.org/whl/rocm7.2 torch pytorch-triton-rocm
+pip install flash-linear-attention[rocm]
+
+# XPU
+pip install --index-url https://download.pytorch.org/whl/xpu torch pytorch-triton-xpu
+pip install flash-linear-attention[xpu]
+
+# CPU
+pip install --index-url https://download.pytorch.org/whl/cpu torch
+pip install flash-linear-attention[cpu]
 ```
 
 ## Ascend NPU
@@ -48,8 +66,11 @@ currently pins `torch==2.6.0`, `torch_npu==2.6.0`, `triton-ascend==3.2.0`.
 
 ```sh
 pip uninstall fla-core flash-linear-attention -y
+# CUDA
 pip install -U "git+https://github.com/fla-org/flash-linear-attention#egg=flash-linear-attention[cuda]"
-# replace [cuda] with [rocm] / [xpu] / [npu] / [cpu] and add the matching --extra-index-url for non-CUDA
+# Non-CUDA: install backend torch + triton from the PyTorch index first
+# (see the per-backend block above), then run the same git+ install with the
+# matching extra ([rocm] / [xpu] / [npu] / [cpu]).
 ```
 
 Or with submodules:

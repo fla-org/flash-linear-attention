@@ -116,7 +116,10 @@ def build_split_packages(output_dir: str | Path | None = None):
     all_deps, extras = extract_dependencies()
     core_deps, ext_deps = categorize_dependencies(all_deps)
     core_extras = {k: v for k, v in extras.items() if k in BACKEND_EXTRAS}
-    ext_extras = {k: v for k, v in extras.items() if k not in BACKEND_EXTRAS}
+    # extension forwards backend extras to fla-core so flash-linear-attention[cuda]
+    # resolves the same torch/triton flavor as fla-core[cuda].
+    ext_extras = {k: [f'fla-core[{k}]=={version}'] for k in extras if k in BACKEND_EXTRAS}
+    ext_extras.update({k: v for k, v in extras.items() if k not in BACKEND_EXTRAS})
 
     # add version constraint for fla-core in extension package
     ext_deps.insert(0, f'fla-core=={version}')
