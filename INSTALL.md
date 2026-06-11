@@ -7,9 +7,10 @@ backend-extras layout.
 
 ## Pick a backend
 
-`torch` and the matching `triton` flavor live in backend extras, not in the
-base deps. Wheel metadata is the same across backends; `pip` only pulls the
-flavor you ask for.
+`torch` lives in a backend extra, not in the base deps, so wheel metadata is
+the same across backends. The `triton` flavor either ships in the extra
+(cuda / cpu / npu) or comes transitively from `torch` when you source it
+from the matching PyTorch wheel index (rocm / xpu).
 
 | Backend | Extra    | Wheel index                                | `triton` flavor                                  |
 | ------- | -------- | ------------------------------------------ | ------------------------------------------------ |
