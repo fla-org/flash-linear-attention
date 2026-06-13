@@ -10,9 +10,12 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard, tensor_cache
+from fla.utils import IS_AMD, IS_NPU, autotune_cache_kwargs, get_multiprocessor_count, input_guard, tensor_cache
 
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
+# Ascend Triton rejects 2-D grids whose product exceeds 65535 unless
+# TRITON_ALL_BLOCKS_PARALLEL=1. Fall back to the long kernel instead.
+_NPU_MAX_TRITON_GRID = 65535
 
 
 def token_shift_ref(
@@ -391,6 +394,8 @@ def token_shift_fwd(
         N = B
 
     use_short_kernel = T <= 4096
+    if IS_NPU and use_short_kernel and N * T > _NPU_MAX_TRITON_GRID:
+        use_short_kernel = False
 
     if output_cache:
         cache_out = torch.empty((N, D), device=x.device, dtype=x.dtype)
