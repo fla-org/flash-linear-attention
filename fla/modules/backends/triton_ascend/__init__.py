@@ -172,6 +172,22 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.activations import swiglu_linear_npu
         return swiglu_linear_npu(x, y, weight, bias)
 
+    def gelu_fwd(self, x):
+        from fla.modules.backends.triton_ascend.activations import gelu_fwd_npu
+        return gelu_fwd_npu(x)
+
+    def gelu_bwd(self, g, x):
+        from fla.modules.backends.triton_ascend.activations import gelu_bwd_npu
+        return gelu_bwd_npu(g, x)
+
+    def sqrelu_fwd(self, x):
+        from fla.modules.backends.triton_ascend.activations import sqrelu_fwd_npu
+        return sqrelu_fwd_npu(x)
+
+    def sqrelu_bwd(self, g, x):
+        from fla.modules.backends.triton_ascend.activations import sqrelu_bwd_npu
+        return sqrelu_bwd_npu(g, x)
+
     def fused_kl_div_forward(
         self,
         x,
