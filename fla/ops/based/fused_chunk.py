@@ -9,6 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
+from fla.ops.backends import dispatch
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
@@ -354,6 +355,7 @@ class FusedChunkBasedFunction(torch.autograd.Function):
         return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), None
 
 
+@dispatch('based')
 def fused_chunk_based(
     q: torch.Tensor,
     k: torch.Tensor,
