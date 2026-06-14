@@ -1179,8 +1179,39 @@ def test_prepare_wy_repr_bwd_no_g(B: int, T: int, H: int, HV: int, D: int):
     assert_close('db', db_zero_g, db_no_g, 1e-4)
 
 
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="GDN Blackwell dispatch test requires an sm100/sm120 CUDA GPU")
+def test_chunk_blackwell_tilelang_dqkwg_rejected_for_supported_shape():
+    torch.manual_seed(42)
+    B, T, H, HV, D = 1, 1216, 2, 2, 128
+    dtype = torch.bfloat16
+
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device)) / 16
+    do = torch.randn_like(v)
+    h = torch.empty(B, (T + 63) // 64, HV, D, D, dtype=dtype, device=device)
+    dh = torch.empty_like(h)
+
+    from fla.ops.common.backends.tilelang import TileLangBackend
+
+    ok, reason = TileLangBackend().chunk_bwd_dqkwg_verifier(
+        q=q,
+        k=k,
+        v=v,
+        do=do,
+        h=h,
+        dh=dh,
+        g=g,
+        scale=D ** -0.5,
+    )
+    print(f"blackwell_gdn_dispatch verifier_ok={ok} reason={reason}", flush=True)
+    assert not ok
+    assert reason is not None and 'Blackwell' in reason
+
+
 @pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="GDN Blackwell precision test requires an sm100/sm120 CUDA GPU")
-def test_chunk_blackwell_ulysses_shape_precision_and_dispatch():
+def test_chunk_blackwell_gqa_bf16_precision():
     torch.manual_seed(42)
     B, T, H, HV, D = 1, 1216, 1, 3, 128
     dtype = torch.bfloat16
@@ -1194,25 +1225,6 @@ def test_chunk_blackwell_ulysses_shape_precision_and_dispatch():
     h0 = torch.zeros(B, HV, D, D, dtype=torch.float32, device=device).requires_grad_(True)
     do = (torch.randn_like(v) / 8).to(dtype)
     dht = (torch.randn_like(h0) / 8).to(torch.float32)
-
-    from fla.ops.common.backends.tilelang import TileLangBackend
-
-    h = torch.empty(B, (T + 63) // 64, HV, D, D, dtype=dtype, device=device)
-    dh = torch.empty_like(h)
-    ok, reason = TileLangBackend().chunk_bwd_dqkwg_verifier(
-        q=q,
-        k=k,
-        v=v,
-        do=do,
-        h=h,
-        dh=dh,
-        g=g,
-        scale=scale,
-    )
-    print(
-        f"blackwell_gdn_dispatch verifier_ok={ok} reason={reason}",
-        flush=True,
-    )
 
     tri, tri_ht = chunk_gated_delta_rule(
         q=q.clone(),
@@ -1243,14 +1255,22 @@ def test_chunk_blackwell_ulysses_shape_precision_and_dispatch():
     ref_grads = (q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad)
 
     def assert_blackwell_close(name, ref_tensor, tri_tensor, ratio, err_atol=1e-3):
+        abs_err = get_abs_err(ref_tensor, tri_tensor)
+        err_ratio = get_err_ratio(ref_tensor, tri_tensor)
         print(
             f"blackwell_gdn_metric name={name} "
-            f"max_abs={get_abs_err(ref_tensor, tri_tensor):.6g} "
-            f"err_ratio={get_err_ratio(ref_tensor, tri_tensor):.6g} "
+            f"max_abs={abs_err:.6g} "
+            f"err_ratio={err_ratio:.6g} "
             f"ratio_limit={ratio:.6g} err_atol={err_atol:.6g}",
             flush=True,
         )
-        assert_close(f'blackwell_{name}', ref_tensor, tri_tensor, ratio, err_atol=err_atol)
+        assert torch.isfinite(ref_tensor).all(), f"blackwell_{name}: non-finite reference"
+        assert torch.isfinite(tri_tensor).all(), f"blackwell_{name}: non-finite candidate"
+        assert abs_err <= err_atol or err_ratio < ratio, (
+            f"blackwell_{name} diff exceeded hard limit: "
+            f"max_abs={abs_err:.6g} err_ratio={err_ratio:.6g} "
+            f"ratio_limit={ratio:.6g} err_atol={err_atol:.6g}"
+        )
 
     assert_blackwell_close('o', ref, tri, 0.003)
     assert_blackwell_close('ht', ref_ht, tri_ht, 0.006)
@@ -1261,6 +1281,3 @@ def test_chunk_blackwell_ulysses_shape_precision_and_dispatch():
         (0.02, 0.02, 0.02, 0.04, 0.04, 0.02),
     ):
         assert_blackwell_close(name, ref_grad, tri_grad, ratio)
-
-    assert not ok
-    assert reason is not None and 'Blackwell' in reason

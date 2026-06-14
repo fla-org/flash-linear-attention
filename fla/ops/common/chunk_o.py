@@ -550,7 +550,7 @@ def chunk_fwd_o(
         V=V,
         BT=BT,
         STATE_V_FIRST=state_v_first,
-        USE_BLACKWELL_SAFE_O=IS_NVIDIA_BLACKWELL,
+        USE_BLACKWELL_SAFE_O=IS_NVIDIA_BLACKWELL and v.dtype == torch.bfloat16,
     )
     return o
 
