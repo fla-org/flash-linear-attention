@@ -16,6 +16,7 @@ from __future__ import annotations
 import torch
 
 from fla.ops.backends import BaseBackend
+from fla.utils import IS_NVIDIA_BLACKWELL
 
 
 class TileLangBackend(BaseBackend):
@@ -50,6 +51,11 @@ class TileLangBackend(BaseBackend):
         chunk_size: int = 64,
         chunk_indices: torch.LongTensor | None = None,
     ) -> tuple[bool, str | None]:
+        if IS_NVIDIA_BLACKWELL:
+            return False, (
+                "TileLang chunk_bwd_dqkwg is numerically incorrect on Blackwell; "
+                "use the default Triton FLA kernel"
+            )
         if g is None:
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
