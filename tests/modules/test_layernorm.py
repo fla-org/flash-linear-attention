@@ -329,3 +329,70 @@ def test_groupnorm_small_t(T: int, D: int, G: int, is_rms_norm: bool):
     ref_db = torch.autograd.grad(ref(ref_x).sum(), ref.bias)[0]
     tri_db = torch.autograd.grad(tri(x).sum(), tri.bias)[0]
     assert_close('db', ref_db, tri_db, 1e-3)
+
+
+# ============================================================
+# Regression tests: autotuner crash with varying NB on high-SM GPUs
+# ============================================================
+#
+# On Blackwell sm_120 (188 SMs), the Triton autotuner crashes with
+# "illegal memory access" when benchmarking the HAS_DRESIDUAL=False
+# kernel variant at large grid sizes. The crash happens because NB
+# (= cdiv(T, 2048)) was included in the autotuner key, forcing
+# re-autotuning for each new T range. Certain NB values produce
+# kernel compilations that crash during autotuner benchmarking.
+#
+# Fix: remove NB from the autotuner key so the kernel is autotuned
+# once per (D, HAS_DRESIDUAL, STORE_DRESIDUAL, IS_RMS_NORM) and
+# reused for all T values.
+#
+# These tests exercise multiple T values with different NB values
+# in sequence, both with and without residual (HAS_DRESIDUAL), to
+# catch regressions where re-autotuning at a new NB crashes.
+
+
+@pytest.mark.parametrize("T", [100, 500, 5000, 10000, 20000, 24000])
+@pytest.mark.parametrize("D", [256])
+def test_rmsnorm_varying_nb_no_residual(T: int, D: int):
+    """RMSNorm backward without residual must work across different NB values.
+
+    Catches the autotuner crash where NB in the key triggers re-autotuning
+    at large grid sizes on high-SM GPUs (Blackwell 188 SMs).
+    """
+    x = torch.randn(T, D).to(device).requires_grad_(True)
+    ref = LlamaRMSNorm(D, eps=0).to(device)
+    tri = RMSNorm(D, eps=0).to(device)
+    nn.init.normal_(ref.weight)
+    tri.weight.data.copy_(ref.weight.data)
+
+    ref_y = ref(x)
+    tri_y = tri(x)
+    assert_close(' y', ref_y, tri_y, 1e-3)
+
+    ref_dx = torch.autograd.grad(ref(x).sum(), x)[0]
+    tri_dx = torch.autograd.grad(tri(x).sum(), x)[0]
+    assert_close('dx', ref_dx, tri_dx, 1e-3)
+
+    ref_dw = torch.autograd.grad(ref(x).sum(), ref.weight)[0]
+    tri_dw = torch.autograd.grad(tri(x).sum(), tri.weight)[0]
+    assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+
+@pytest.mark.parametrize("T", [100, 500, 5000, 10000, 20000, 24000])
+@pytest.mark.parametrize("D", [256])
+def test_rmsnorm_varying_nb_with_residual(T: int, D: int):
+    """RMSNorm backward with residual must work across different NB values.
+
+    Tests HAS_DRESIDUAL=True path with the same T range to ensure both
+    kernel variants are exercised.
+    """
+    x = torch.randn(T, D).to(device).requires_grad_(True)
+    residual = torch.randn(T, D).to(device)
+    tri = RMSNorm(D, eps=0).to(device)
+    nn.init.normal_(tri.weight)
+
+    y, _ = tri(x, residual=residual, prenorm=True)
+    y.sum().backward()
+    assert x.grad is not None
+    assert x.grad.abs().sum() > 0
+    assert tri.weight.grad is not None
