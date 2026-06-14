@@ -12,8 +12,8 @@ import triton.language as tl
 from fla.ops.common.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
-from fla.ops.utils.op import exp2
-from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, autotune_cache_kwargs, check_shared_mem
+from fla.ops.utils.op import exp2, safe_dot
+from fla.utils import IS_NVIDIA_BLACKWELL, IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0, autotune_cache_kwargs, check_shared_mem
 
 BKV_LIST = [64, 128] if check_shared_mem() else ([32, 64] if check_shared_mem('ada') else [32])
 NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
@@ -30,7 +30,7 @@ NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
         triton.Config({'BK': 64, 'BV': 64}, num_warps=4, num_stages=3),
         triton.Config({'BK': 32, 'BV': 32}, num_warps=2, num_stages=3),
     ],
-    key=['H', 'HV', 'K', 'V', 'BT', 'STATE_V_FIRST'],
+    key=['H', 'HV', 'K', 'V', 'BT', 'STATE_V_FIRST', 'USE_BLACKWELL_SAFE_O'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -56,6 +56,7 @@ def chunk_fwd_kernel_o(
     USE_G: tl.constexpr,
     USE_G_GAMMA: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
+    USE_BLACKWELL_SAFE_O: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
@@ -125,7 +126,13 @@ def chunk_fwd_kernel_o(
     b_v = tl.load(p_v, boundary_check=(0, 1))
     # to fix mma -> mma layout conversion
     # already solved by triton v3.2 or higher
-    b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
+    if USE_BLACKWELL_SAFE_O:
+        # sm100 can produce sparse high-magnitude errors in this final bf16 MMA
+        # on long packed GDN sequences. Keep the computation inside this Triton
+        # kernel but force the local causal contribution through fp32/ieee dot.
+        b_o = b_o * scale + safe_dot(b_A, b_v.to(tl.float32), input_precision="ieee") * scale
+    else:
+        b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -543,6 +550,7 @@ def chunk_fwd_o(
         V=V,
         BT=BT,
         STATE_V_FIRST=state_v_first,
+        USE_BLACKWELL_SAFE_O=IS_NVIDIA_BLACKWELL,
     )
     return o
 

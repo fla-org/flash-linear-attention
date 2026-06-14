@@ -16,7 +16,14 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gat
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import (
+    IS_INTEL_ALCHEMIST,
+    IS_NVIDIA_BLACKWELL,
+    assert_close,
+    device,
+    get_abs_err,
+    get_err_ratio,
+)
 
 
 @pytest.mark.parametrize(
@@ -1170,3 +1177,90 @@ def test_prepare_wy_repr_bwd_no_g(B: int, T: int, H: int, HV: int, D: int):
     assert_close('dk', dk_zero_g, dk_no_g, 1e-4)
     assert_close('dv', dv_zero_g, dv_no_g, 1e-4)
     assert_close('db', db_zero_g, db_no_g, 1e-4)
+
+
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="GDN Blackwell precision test requires an sm100/sm120 CUDA GPU")
+def test_chunk_blackwell_ulysses_shape_precision_and_dispatch():
+    torch.manual_seed(42)
+    B, T, H, HV, D = 1, 1216, 1, 3, 128
+    dtype = torch.bfloat16
+    scale = D ** -0.5
+
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device).requires_grad_(True)
+    v = torch.randn(B, T, HV, D, dtype=dtype, device=device).requires_grad_(True)
+    beta = torch.randn(B, T, HV, dtype=torch.float32, device=device).sigmoid().requires_grad_(True)
+    g = (F.logsigmoid(torch.randn(B, T, HV, dtype=torch.float32, device=device)) / 16).requires_grad_(True)
+    h0 = torch.zeros(B, HV, D, D, dtype=torch.float32, device=device).requires_grad_(True)
+    do = (torch.randn_like(v) / 8).to(dtype)
+    dht = (torch.randn_like(h0) / 8).to(torch.float32)
+
+    from fla.ops.common.backends.tilelang import TileLangBackend
+
+    h = torch.empty(B, (T + 63) // 64, HV, D, D, dtype=dtype, device=device)
+    dh = torch.empty_like(h)
+    ok, reason = TileLangBackend().chunk_bwd_dqkwg_verifier(
+        q=q,
+        k=k,
+        v=v,
+        do=do,
+        h=h,
+        dh=dh,
+        g=g,
+        scale=scale,
+    )
+    print(
+        f"blackwell_gdn_dispatch verifier_ok={ok} reason={reason}",
+        flush=True,
+    )
+
+    tri, tri_ht = chunk_gated_delta_rule(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=g.clone(),
+        beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    ((tri.float() * do.float()).sum() + (tri_ht.float() * dht.float()).sum()).backward(retain_graph=True)
+    tri_grads = (q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad)
+    q.grad = k.grad = v.grad = beta.grad = g.grad = h0.grad = None
+
+    ref, ref_ht = naive_recurrent_gated_delta_rule(
+        q=F.normalize(repeat(q.clone(), 'b t h d -> b t (h g) d', g=HV // H), p=2, dim=-1),
+        k=F.normalize(repeat(k.clone(), 'b t h d -> b t (h g) d', g=HV // H), p=2, dim=-1),
+        v=v.clone(),
+        beta=beta.clone(),
+        g=g.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+    )
+    ((ref.float() * do.float()).sum() + (ref_ht.float() * dht.float()).sum()).backward(retain_graph=True)
+    ref_grads = (q.grad, k.grad, v.grad, beta.grad, g.grad, h0.grad)
+
+    def assert_blackwell_close(name, ref_tensor, tri_tensor, ratio, err_atol=1e-3):
+        print(
+            f"blackwell_gdn_metric name={name} "
+            f"max_abs={get_abs_err(ref_tensor, tri_tensor):.6g} "
+            f"err_ratio={get_err_ratio(ref_tensor, tri_tensor):.6g} "
+            f"ratio_limit={ratio:.6g} err_atol={err_atol:.6g}",
+            flush=True,
+        )
+        assert_close(f'blackwell_{name}', ref_tensor, tri_tensor, ratio, err_atol=err_atol)
+
+    assert_blackwell_close('o', ref, tri, 0.003)
+    assert_blackwell_close('ht', ref_ht, tri_ht, 0.006)
+    for name, ref_grad, tri_grad, ratio in zip(
+        ('dq', 'dk', 'dv', 'dbeta', 'dg', 'dh0'),
+        ref_grads,
+        tri_grads,
+        (0.02, 0.02, 0.02, 0.04, 0.04, 0.02),
+    ):
+        assert_blackwell_close(name, ref_grad, tri_grad, ratio)
+
+    assert not ok
+    assert reason is not None and 'Blackwell' in reason
