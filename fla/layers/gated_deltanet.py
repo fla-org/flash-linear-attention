@@ -18,6 +18,7 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
+from fla.modules.convolution import causal_conv1d
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 
 if TYPE_CHECKING:
@@ -227,8 +228,46 @@ class GatedDeltaNet(nn.Module):
             indices, cu_seqlens, _ = get_unpad_data(attention_mask[:, -q_len:])
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
-        if self.use_short_conv:
-            conv_state_q, conv_state_k, conv_state_v = None, None, None
+        conv_state_q, conv_state_k, conv_state_v = None, None, None
+        use_fused_qkv_conv = (
+            self.use_short_conv and
+            last_state is None and
+            not use_cache and
+            cu_seqlens is None and
+            self.q_conv1d.backend == self.k_conv1d.backend == self.v_conv1d.backend and
+            self.q_conv1d.activation == self.k_conv1d.activation == self.v_conv1d.activation and
+            self.q_conv1d.kernel_size == self.k_conv1d.kernel_size == self.v_conv1d.kernel_size
+        )
+        if use_fused_qkv_conv:
+            qkv = torch.cat(
+                [
+                    self.q_proj(hidden_states),
+                    self.k_proj(hidden_states),
+                    self.v_proj(hidden_states),
+                ],
+                dim=-1,
+            )
+            qkv_weight = torch.cat(
+                [
+                    rearrange(self.q_conv1d.weight, "d 1 w -> d w"),
+                    rearrange(self.k_conv1d.weight, "d 1 w -> d w"),
+                    rearrange(self.v_conv1d.weight, "d 1 w -> d w"),
+                ],
+                dim=0,
+            )
+            if self.conv_bias:
+                qkv_bias = torch.cat([self.q_conv1d.bias, self.k_conv1d.bias, self.v_conv1d.bias], dim=0)
+            else:
+                qkv_bias = None
+            qkv, _ = causal_conv1d(
+                x=qkv,
+                weight=qkv_weight,
+                bias=qkv_bias,
+                activation=self.q_conv1d.activation,
+                backend=self.q_conv1d.backend,
+            )
+            q, k, v = torch.split(qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        elif self.use_short_conv:
             if last_state is not None:
                 conv_state_q, conv_state_k, conv_state_v = last_state['conv_state']
             q, conv_state_q = self.q_conv1d(
