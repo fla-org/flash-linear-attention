@@ -15,32 +15,6 @@ from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.modules.convolution import causal_conv1d
 from fla.utils import device
 
-
-def _do_bench_kw(args):
-    return {'warmup': args.warmup_ms, 'rep': args.rep_ms, 'quantiles': [0.5, 0.2, 0.8]}
-
-
-def _make_layer(args):
-    return GatedDeltaNet(
-        hidden_size=args.hidden_size,
-        expand_v=args.expand_v,
-        head_dim=args.head_dim,
-        num_heads=args.num_heads,
-        num_v_heads=args.num_v_heads,
-        mode='chunk',
-        use_gate=True,
-        use_short_conv=True,
-        conv_size=args.conv_size,
-    ).to(device=device, dtype=args.dtype).train()
-
-
-def _prepare_conv_inputs(layer, x):
-    q = layer.q_proj(x)
-    k = layer.k_proj(x)
-    v = layer.v_proj(x)
-    return q, k, v
-
-
 def _separate_conv(layer, q, k, v):
     q = layer.q_conv1d(q)[0]
     k = layer.k_conv1d(k)[0]
@@ -73,9 +47,23 @@ def _fused_conv(layer, q, k, v):
 
 def benchmark(args):
     torch.manual_seed(args.seed)
-    layer = _make_layer(args)
+
+    layer = GatedDeltaNet(
+        hidden_size=args.hidden_size,
+        expand_v=args.expand_v,
+        head_dim=args.head_dim,
+        num_heads=args.num_heads,
+        num_v_heads=args.num_v_heads,
+        mode='chunk',
+        use_gate=True,
+        use_short_conv=True,
+        conv_size=args.conv_size,
+    ).to(device=device, dtype=args.dtype).train()
+
     x = torch.randn(args.batch_size, args.seq_len, args.hidden_size, device=device, dtype=args.dtype)
-    q, k, v = _prepare_conv_inputs(layer, x)
+    q = layer.q_proj(x)
+    k = layer.k_proj(x)
+    v = layer.v_proj(x)
 
     providers = args.providers.split(',')
     fns = {}
@@ -96,7 +84,7 @@ def benchmark(args):
         f"heads={args.num_heads} head_dim={args.head_dim} expand_v={args.expand_v} dtype={args.dtype}"
     )
     for name, fn in fns.items():
-        ms = triton.testing.do_bench(fn, **_do_bench_kw(args))
+        ms = triton.testing.do_bench(fn, warmup=args.warmup_ms, rep=args.rep_ms, quantiles=[0.5, 0.2, 0.8])
         print(f"{name:>14s}: median={ms[0]:.6f}ms p20={ms[1]:.6f}ms p80={ms[2]:.6f}ms")
 
 
