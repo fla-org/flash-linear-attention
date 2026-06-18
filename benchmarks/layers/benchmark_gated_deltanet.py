@@ -12,7 +12,9 @@ import json
 import logging
 import os
 import platform
+import random
 import socket
+import statistics
 import subprocess
 
 import torch
@@ -26,7 +28,11 @@ from fla.utils import device
 
 logger = logging.getLogger(__name__)
 
-QUANTILES = [0.5, 0.2, 0.8]
+QUANTILES = (
+    ("median", 0.5),
+    ("p20", 0.2),
+    ("p80", 0.8),
+)
 DTYPE = torch.bfloat16
 
 # Logical order: full layer, then the isolated op, then the conv prologue.
@@ -260,75 +266,108 @@ def make_runnable(provider, B, T, hidden_size, H, HV, D, V):
 # --------------------------------------------------------------------------- #
 # Timing
 # --------------------------------------------------------------------------- #
-def run(providers, shapes) -> tuple[list[dict], list[dict]]:
+def run(providers, shapes, repeat, warmup_iters, local_warmup_iters, do_bench_kw, order_seed) -> tuple[list[dict], list[dict]]:
     """Return (results, failures). *failures* is non-empty if any cell errored."""
-    warmup_iters = max(1, int(os.environ.get("FLA_BENCH_OP_WARMUP_ITERS", "5")))
-    do_bench_kw = {
-        "warmup": max(1, int(os.environ.get("FLA_BENCH_WARMUP_MS", "25"))),
-        "rep": max(1, int(os.environ.get("FLA_BENCH_REP_MS", "100"))),
-    }
     has_cuda = torch.cuda.is_available()
+    cases = [(provider, shape) for provider in providers for shape in shapes]
 
     # Phase 1: warm up every (provider, shape) so autotuning is cached before any timing.
     print(f"\n  Warming up {len(providers)} provider(s) x {len(shapes)} shape(s)...")
-    for provider in providers:
-        for shape in shapes:
+    for provider, shape in cases:
+        try:
+            fn = make_runnable(provider, *shape)
+            for _ in range(warmup_iters):
+                fn()
+            if has_cuda:
+                torch.cuda.synchronize()
+            del fn
+        except Exception as e:
+            logger.warning(f"Warmup failed for {provider} @ {tuple(shape)}: {e}")
+        finally:
+            gc.collect()
+            if has_cuda:
+                torch.cuda.empty_cache()
+    print("  Warmup done.")
+
+    # Phase 2: time each cell repeatedly. The display order stays stable, but the
+    # measurement order changes per repeat to reduce provider/shape order effects.
+    timings = {case: {name: [] for name, _ in QUANTILES} for case in cases}
+    failures = []
+    print(f"\n  Timing {len(cases)} cell(s) x {repeat} repeat(s)...")
+    for repeat_idx in range(repeat):
+        ordered_cases = list(cases)
+        random.Random(order_seed + repeat_idx).shuffle(ordered_cases)
+        print(f"  Repeat {repeat_idx + 1}/{repeat}...")
+        for provider, shape in ordered_cases:
             try:
                 fn = make_runnable(provider, *shape)
-                for _ in range(warmup_iters):
+                for _ in range(local_warmup_iters):
                     fn()
                 if has_cuda:
                     torch.cuda.synchronize()
+                ms = triton.testing.do_bench(fn, quantiles=[quantile for _, quantile in QUANTILES], **do_bench_kw)
+                for (name, _), value in zip(QUANTILES, ms):
+                    timings[(provider, shape)][name].append(float(value))
                 del fn
             except Exception as e:
-                logger.warning(f"Warmup failed for {provider} @ {tuple(shape)}: {e}")
-            finally:
-                if has_cuda:
-                    gc.collect()
-                    torch.cuda.empty_cache()
-    print("  Warmup done.")
-
-    # Phase 2: time, then measure the per-call memory delta.
-    results = []
-    failures = []
-    for provider in providers:
-        for shape in shapes:
-            try:
-                fn = make_runnable(provider, *shape)
-                ms = triton.testing.do_bench(fn, quantiles=QUANTILES, **do_bench_kw)
-                del fn  # free the timing closure's layer/inputs before the memory probe
-
-                # peak_mb = peak CUDA memory of one call minus the resident setup (layer,
-                # inputs, ...). This per-call working set is comparable across providers,
-                # unlike a raw peak which folds in each provider's different resident tensors.
-                # Free leftover tensors first so the baseline (and thus the delta) is clean.
-                peak_mb = 0.0
-                if has_cuda:
-                    if has_cuda:
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                    mem_fn = make_runnable(provider, *shape)
-                    torch.cuda.synchronize()
-                    baseline = torch.cuda.memory_allocated()
-                    torch.cuda.reset_peak_memory_stats()
-                    mem_fn()
-                    torch.cuda.synchronize()
-                    peak_mb = max(0.0, (torch.cuda.max_memory_allocated() - baseline) / (1024**2))
-                    del mem_fn
-
-                results.append(
-                    {
-                        "provider": provider,
-                        "shape": list(shape),
-                        "median_ms": ms[0],
-                        "p20_ms": ms[1],
-                        "p80_ms": ms[2],
-                        "peak_mb": peak_mb,
-                    }
+                logger.warning(f"Bench failed for {provider} @ {tuple(shape)} repeat {repeat_idx + 1}: {e}")
+                failures.append(
+                    {"provider": provider, "shape": list(shape), "repeat": repeat_idx, "error": f"{type(e).__name__}: {e}"}
                 )
-            except Exception as e:
-                logger.warning(f"Bench failed for {provider} @ {tuple(shape)}: {e}")
-                failures.append({"provider": provider, "shape": list(shape), "error": f"{type(e).__name__}: {e}"})
+            finally:
+                gc.collect()
+                if has_cuda:
+                    torch.cuda.empty_cache()
+
+    # Phase 3: measure the per-call memory delta once per successful cell.
+    results = []
+    for provider, shape in cases:
+        repeat_medians = timings[(provider, shape)]["median"]
+        if not repeat_medians:
+            continue
+
+        # peak_mb = peak CUDA memory of one call minus the resident setup (layer,
+        # inputs, ...). This per-call working set is comparable across providers,
+        # unlike a raw peak which folds in each provider's different resident tensors.
+        # Free leftover tensors first so the baseline (and thus the delta) is clean.
+        peak_mb = 0.0
+        if has_cuda:
+            gc.collect()
+            torch.cuda.empty_cache()
+            try:
+                mem_fn = make_runnable(provider, *shape)
+                torch.cuda.synchronize()
+                baseline = torch.cuda.memory_allocated()
+                torch.cuda.reset_peak_memory_stats()
+                mem_fn()
+                torch.cuda.synchronize()
+                peak_mb = max(0.0, (torch.cuda.max_memory_allocated() - baseline) / (1024**2))
+                del mem_fn
+            finally:
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        median_ms = float(statistics.median(repeat_medians))
+        spread_pct = 0.0
+        if len(repeat_medians) > 1 and median_ms > 0:
+            spread_pct = float((max(repeat_medians) - min(repeat_medians)) / median_ms * 100)
+        results.append(
+            {
+                "provider": provider,
+                "shape": list(shape),
+                "median_ms": median_ms,
+                "p20_ms": float(statistics.median(timings[(provider, shape)]["p20"])),
+                "p80_ms": float(statistics.median(timings[(provider, shape)]["p80"])),
+                "repeat_medians_ms": repeat_medians,
+                "repeat_p20_ms": timings[(provider, shape)]["p20"],
+                "repeat_p80_ms": timings[(provider, shape)]["p80"],
+                "min_ms": min(repeat_medians),
+                "max_ms": max(repeat_medians),
+                "spread_pct": spread_pct,
+                "num_repeats": len(repeat_medians),
+                "peak_mb": peak_mb,
+            }
+        )
     return results, failures
 
 
@@ -399,9 +438,12 @@ def print_results(results, machine_info, baseline=None, baseline_info=None):
     col_w = max(12, len(new_label), len(base_label) if has_base else 0)
 
     if has_base:
-        header = f"  {'provider':<22s} {base_label:>{col_w}s} {new_label:>{col_w}s} {'speedup':>8s} {'dmem(MB)':>10s}"
+        header = (
+            f"  {'provider':<22s} {base_label:>{col_w}s} {new_label:>{col_w}s} "
+            f"{'speedup':>8s} {'spread':>8s} {'note':>7s} {'dmem(MB)':>10s}"
+        )
     else:
-        header = f"  {'provider':<22s} {new_label:>{col_w}s} {'dmem(MB)':>10s}"
+        header = f"  {'provider':<22s} {new_label:>{col_w}s} {'spread':>8s} {'dmem(MB)':>10s}"
     width = len(header) + 2
     sep = "=" * width
 
@@ -429,16 +471,62 @@ def print_results(results, machine_info, baseline=None, baseline_info=None):
         for r in rows:
             new_ms = r["median_ms"]
             peak = r["peak_mb"]
+            spread = float(r.get("spread_pct", 0.0))
+            if "spread_pct" not in r and new_ms > 0:
+                spread = max(0.0, float(r.get("p80_ms", new_ms)) - float(r.get("p20_ms", new_ms))) / new_ms * 100
             if has_base:
                 br = base_map.get((r["provider"], shape))
                 if br:
                     base_ms = br["median_ms"]
                     speedup = base_ms / new_ms if new_ms > 0 else float("inf")
-                    print(f"  {r['provider']:<22s} {base_ms:>{col_w}.4f} {new_ms:>{col_w}.4f} {speedup:>7.2f}x {peak:>10.1f}")
+                    base_spread = float(br.get("spread_pct", 0.0))
+                    if "spread_pct" not in br and base_ms > 0:
+                        base_spread = max(0.0, float(br.get("p80_ms", base_ms)) - float(br.get("p20_ms", base_ms))) / base_ms * 100
+                    note = "noisy" if abs(speedup - 1.0) * 100 <= max(spread, base_spread) else ""
+                    print(
+                        f"  {r['provider']:<22s} {base_ms:>{col_w}.4f} {new_ms:>{col_w}.4f} "
+                        f"{speedup:>7.2f}x {spread:>7.1f}% {note:>7s} {peak:>10.1f}"
+                    )
                 else:
-                    print(f"  {r['provider']:<22s} {'-':>{col_w}s} {new_ms:>{col_w}.4f} {'-':>8s} {peak:>10.1f}")
+                    print(
+                        f"  {r['provider']:<22s} {'-':>{col_w}s} {new_ms:>{col_w}.4f} "
+                        f"{'-':>8s} {spread:>7.1f}% {'':>7s} {peak:>10.1f}"
+                    )
             else:
-                print(f"  {r['provider']:<22s} {new_ms:>{col_w}.4f} {peak:>10.1f}")
+                print(f"  {r['provider']:<22s} {new_ms:>{col_w}.4f} {spread:>7.1f}% {peak:>10.1f}")
+
+    if has_base:
+        groups = {
+            "all": PROVIDERS,
+            "layer": ["layer_train_fwd", "layer_train_fwdbwd", "layer_eval_fwd"],
+            "op": ["op_fwd", "op_fwdbwd"],
+            "conv": ["conv_separate_fwd", "conv_fused_fwd", "conv_separate_fwdbwd", "conv_fused_fwdbwd"],
+            "layer_train": ["layer_train_fwd", "layer_train_fwdbwd"],
+        }
+        print("\n  Geomean speedups (main/reference median divided by current median):")
+        for name, providers in groups.items():
+            speedups = []
+            noisy = 0
+            for r in results:
+                if r["provider"] not in providers:
+                    continue
+                br = base_map.get((r["provider"], tuple(r["shape"])))
+                if not br:
+                    continue
+                new_ms = float(r["median_ms"])
+                base_ms = float(br["median_ms"])
+                speedup = base_ms / new_ms if new_ms > 0 else float("inf")
+                speedups.append(speedup)
+
+                spread = float(r.get("spread_pct", 0.0))
+                if "spread_pct" not in r and new_ms > 0:
+                    spread = max(0.0, float(r.get("p80_ms", new_ms)) - float(r.get("p20_ms", new_ms))) / new_ms * 100
+                base_spread = float(br.get("spread_pct", 0.0))
+                if "spread_pct" not in br and base_ms > 0:
+                    base_spread = max(0.0, float(br.get("p80_ms", base_ms)) - float(br.get("p20_ms", base_ms))) / base_ms * 100
+                noisy += int(abs(speedup - 1.0) * 100 <= max(spread, base_spread))
+            if speedups:
+                print(f"    - {name:<11s} {statistics.geometric_mean(speedups):.3f}x ({noisy}/{len(speedups)} noisy cells)")
     print(f"\n{sep}")
 
 
@@ -459,10 +547,62 @@ def main():
     parser.add_argument(
         "--custom-shapes", default=None, help="JSON list of [B,T,hidden,H,HV,D,V] shapes overriding the defaults"
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=int(os.environ.get("FLA_BENCH_REPEAT", "3")),
+        help="Number of independent timing repeats per provider/shape (default: env FLA_BENCH_REPEAT or 3)",
+    )
+    parser.add_argument(
+        "--warmup-ms",
+        type=int,
+        default=int(os.environ.get("FLA_BENCH_WARMUP_MS", "50")),
+        help="triton.testing.do_bench warmup window in ms (default: env FLA_BENCH_WARMUP_MS or 50)",
+    )
+    parser.add_argument(
+        "--rep-ms",
+        type=int,
+        default=int(os.environ.get("FLA_BENCH_REP_MS", "300")),
+        help="triton.testing.do_bench measurement window in ms (default: env FLA_BENCH_REP_MS or 300)",
+    )
+    parser.add_argument(
+        "--op-warmup-iters",
+        type=int,
+        default=int(os.environ.get("FLA_BENCH_OP_WARMUP_ITERS", "5")),
+        help="Initial untimed warmup calls per provider/shape (default: env FLA_BENCH_OP_WARMUP_ITERS or 5)",
+    )
+    parser.add_argument(
+        "--local-warmup-iters",
+        type=int,
+        default=int(os.environ.get("FLA_BENCH_LOCAL_WARMUP_ITERS", "1")),
+        help="Untimed calls before each timing repeat for the exact closure being measured "
+        "(default: env FLA_BENCH_LOCAL_WARMUP_ITERS or 1)",
+    )
+    parser.add_argument(
+        "--order-seed",
+        type=int,
+        default=int(os.environ.get("FLA_BENCH_ORDER_SEED", "42")),
+        help="Seed used to shuffle measurement order per repeat (default: env FLA_BENCH_ORDER_SEED or 42)",
+    )
     parser.add_argument("--json", dest="json_file", default=None, help="Write results to this JSON path")
     args = parser.parse_args()
 
     shapes = [tuple(s) for s in json.loads(args.custom_shapes)] if args.custom_shapes else list(SHAPES)
+    repeat = max(1, args.repeat)
+    warmup_iters = max(0, args.op_warmup_iters)
+    local_warmup_iters = max(0, args.local_warmup_iters)
+    do_bench_kw = {"warmup": max(1, args.warmup_ms), "rep": max(1, args.rep_ms)}
+    benchmark_config = {
+        "providers": args.providers,
+        "shapes": [list(s) for s in shapes],
+        "repeat": repeat,
+        "op_warmup_iters": warmup_iters,
+        "local_warmup_iters": local_warmup_iters,
+        "warmup_ms": do_bench_kw["warmup"],
+        "rep_ms": do_bench_kw["rep"],
+        "order_seed": args.order_seed,
+        "quantiles": {name: quantile for name, quantile in QUANTILES},
+    }
 
     machine_info = _get_machine_info()
     print(
@@ -471,8 +611,20 @@ def main():
     )
     print(f"Providers: {args.providers}")
     print(f"Shapes: {len(shapes)}")
+    print(
+        f"Timing config: repeat={repeat}, warmup_ms={do_bench_kw['warmup']}, rep_ms={do_bench_kw['rep']}, "
+        f"op_warmup_iters={warmup_iters}, local_warmup_iters={local_warmup_iters}, order_seed={args.order_seed}"
+    )
 
-    results, failures = run(args.providers, shapes)
+    results, failures = run(
+        providers=args.providers,
+        shapes=shapes,
+        repeat=repeat,
+        warmup_iters=warmup_iters,
+        local_warmup_iters=local_warmup_iters,
+        do_bench_kw=do_bench_kw,
+        order_seed=args.order_seed,
+    )
 
     baseline, baseline_info = None, None
     if args.baseline:
@@ -485,7 +637,16 @@ def main():
 
     if args.json_file:
         with open(args.json_file, "w") as f:
-            json.dump({"machine_info": machine_info, "results": results, "failures": failures}, f, indent=2)
+            json.dump(
+                {
+                    "machine_info": machine_info,
+                    "benchmark_config": benchmark_config,
+                    "results": results,
+                    "failures": failures,
+                },
+                f,
+                indent=2,
+            )
         print(f"\nResults saved to {args.json_file}")
 
     if failures:
