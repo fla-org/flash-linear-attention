@@ -30,6 +30,7 @@
 
 ## News
 
+- [2026-06] 🔭 Add Parallax implementation to `fla` ([paper](https://arxiv.org/abs/2605.29157)) — parameterized local linear attention: softmax attention with a learned first-order correction from a secondary query-side stream.
 - [2026-06] 🧱 Add Wall attention implementation to `fla` ([blog](https://blog.tilderesearch.com/blog/wall-attn)) — full softmax attention with a learned per-channel multiplicative decay, a RoPE-free positional encoding from Tilde Research.
 - [2026-05] 🚪 Add Gated DeltaNet 2 (GDN-2) implementation to `fla` ([paper](https://arxiv.org/abs/2605.22791)) — decouples erase and write gates into independent channel-wise gates on top of KDA.
 - [2026-05] 🦅 Add Raven implementation to `fla` ([repo](https://github.com/goombalab/raven)).
@@ -111,7 +112,7 @@
 | 2026  |        Raven         | [Raven: High-Recall Sequence Modeling with Sparse Memory Routing](https://github.com/goombalab/raven/blob/main/raven.pdf)                     | [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/models/raven)                   |                         [official](https://github.com/goombalab/raven)                          |
 | 2026  |   Gated DeltaNet 2   | [Gated DeltaNet-2: Decoupling Erase and Write in Linear Attention](https://arxiv.org/abs/2605.22791)                                          | [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/gdn2)                       |                      [official](https://github.com/NVlabs/GatedDeltaNet-2)                      |
 | 2026  |         Wall         | [Wall Attention: Length Generalization With Diagonal Gates](https://blog.tilderesearch.com/blog/wall-attn)                                    | [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/wall_attn)                  |                                                                                                 |
-| 2026  |       Parallax       | [Parallax: Parameterized Local Linear Attention for Language Modeling](https://arxiv.org/abs/2605.29157)                                       | [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/parallax)                   |                     [official](https://github.com/Yifei-Zuo/Parallax)                      |
+| 2026  |       Parallax       | [Parallax: Parameterized Local Linear Attention for Language Modeling](https://arxiv.org/abs/2605.29157)                                      | [fla](https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/parallax)                   |                        [official](https://github.com/Yifei-Zuo/Parallax)                        |
 
 ## Installation
 
