@@ -33,6 +33,7 @@ from fla.models.mla import MLAConfig, MLAForCausalLM, MLAModel
 from fla.models.moba import MoBAConfig, MoBAForCausalLM, MoBAModel
 from fla.models.mom import MomConfig, MomForCausalLM, MomModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
+from fla.models.parallax import ParallaxConfig, ParallaxForCausalLM, ParallaxModel
 from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
 from fla.models.raven import RavenConfig, RavenForCausalLM, RavenModel
 from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
@@ -120,6 +121,9 @@ __all__ = [
     'PaTHAttentionConfig',
     'PaTHAttentionForCausalLM',
     'PaTHAttentionModel',
+    'ParallaxConfig',
+    'ParallaxForCausalLM',
+    'ParallaxModel',
     'RWKV6Config',
     'RWKV6ForCausalLM',
     'RWKV6Model',
