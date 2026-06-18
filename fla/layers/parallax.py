@@ -19,7 +19,8 @@ from transformers.utils import logging
 
 from fla.layers.utils import pad_input, unpad_input
 from fla.modules import RMSNorm, RotaryEmbedding
-from fla.ops.parallax import parallax_decode, parallax_decode_onestep, parallel_parallax
+from fla.ops.parallax import parallel_parallax
+from fla.ops.parallax.decode import parallax_decode, parallax_decode_one_step
 from fla.ops.utils.index import prepare_lens_from_mask
 
 if TYPE_CHECKING:
@@ -164,7 +165,7 @@ class Parallax(nn.Module):
             if attention_mask is not None:
                 cache_start = (k.shape[1] - attention_mask.sum(-1)).to(torch.int32)
             # single-token step -> optimized vector decode; chunked prefill -> tile kernel
-            decode_fn = parallax_decode_onestep if q_len == 1 else parallax_decode
+            decode_fn = parallax_decode_one_step if q_len == 1 else parallax_decode
             o = decode_fn(q, r, k, v, window_size=self.window_size, cache_start=cache_start)
         elif attention_mask is not None:
             # Unpad to a single packed sequence (batch folded into the seq axis).

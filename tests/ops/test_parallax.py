@@ -10,7 +10,7 @@ import os
 import pytest
 import torch
 
-from fla.ops.parallax.decode import parallax_decode, parallax_decode_onestep
+from fla.ops.parallax.decode import parallax_decode, parallax_decode_one_step
 from fla.ops.parallax.naive import naive_parallax
 from fla.ops.parallax.parallel import parallel_parallax
 from fla.utils import assert_close, check_shared_mem, device
@@ -342,7 +342,7 @@ def test_decode_matches_parallel(B: int, T: int, H: int, HQ: int, D: int, W, dty
         ]
     ],
 )
-def test_decode_onestep(B: int, T: int, H: int, HQ: int, D: int, W, dtype: torch.dtype):
+def test_decode_one_step(B: int, T: int, H: int, HQ: int, D: int, W, dtype: torch.dtype):
     """Single-query decode kernel: must match the training kernel at the last position
     and the prefill-shaped decode kernel."""
     if not check_shared_mem('hopper') and D > 128:
@@ -356,14 +356,14 @@ def test_decode_onestep(B: int, T: int, H: int, HQ: int, D: int, W, dtype: torch
     v = torch.randn((B, T, H, D), dtype=dtype, device=device)
 
     o_train = parallel_parallax(q, r, k, v, window_size=W)[:, -1:]
-    o_one = parallax_decode_onestep(q[:, -1:], r[:, -1:], k, v, window_size=W)
+    o_one = parallax_decode_one_step(q[:, -1:], r[:, -1:], k, v, window_size=W)
     o_tile = parallax_decode(q[:, -1:], r[:, -1:], k, v, window_size=W)
-    assert_close("onestep vs train", o_train, o_one, tol)
-    assert_close("onestep vs tile ", o_tile, o_one, tol)
+    assert_close("one_step vs train", o_train, o_one, tol)
+    assert_close("one_step vs tile ", o_tile, o_one, tol)
 
-    # left-padding: onestep(cache_start=p) must equal training on the unpadded suffix
+    # left-padding: one_step(cache_start=p) must equal training on the unpadded suffix
     p = 23
     cs = torch.full((B,), p, device=device, dtype=torch.int32)
-    o_one_p = parallax_decode_onestep(q[:, -1:], r[:, -1:], k, v, window_size=W, cache_start=cs)
+    o_one_p = parallax_decode_one_step(q[:, -1:], r[:, -1:], k, v, window_size=W, cache_start=cs)
     o_ref_p = parallel_parallax(q[:, p:], r[:, p:], k[:, p:], v[:, p:], window_size=W)[:, -1:]
-    assert_close("onestep cache_start", o_ref_p, o_one_p, tol)
+    assert_close("one_step cache_start", o_ref_p, o_one_p, tol)
