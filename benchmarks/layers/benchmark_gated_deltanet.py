@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import os
@@ -278,8 +279,13 @@ def run(providers, shapes) -> tuple[list[dict], list[dict]]:
                     fn()
                 if has_cuda:
                     torch.cuda.synchronize()
+                del fn
             except Exception as e:
                 logger.warning(f"Warmup failed for {provider} @ {tuple(shape)}: {e}")
+            finally:
+                if has_cuda:
+                    gc.collect()
+                    torch.cuda.empty_cache()
     print("  Warmup done.")
 
     # Phase 2: time, then measure the per-call memory delta.
@@ -295,8 +301,12 @@ def run(providers, shapes) -> tuple[list[dict], list[dict]]:
                 # peak_mb = peak CUDA memory of one call minus the resident setup (layer,
                 # inputs, ...). This per-call working set is comparable across providers,
                 # unlike a raw peak which folds in each provider's different resident tensors.
+                # Free leftover tensors first so the baseline (and thus the delta) is clean.
                 peak_mb = 0.0
                 if has_cuda:
+                    if has_cuda:
+                        gc.collect()
+                        torch.cuda.empty_cache()
                     mem_fn = make_runnable(provider, *shape)
                     torch.cuda.synchronize()
                     baseline = torch.cuda.memory_allocated()
@@ -318,9 +328,7 @@ def run(providers, shapes) -> tuple[list[dict], list[dict]]:
                 )
             except Exception as e:
                 logger.warning(f"Bench failed for {provider} @ {tuple(shape)}: {e}")
-                failures.append(
-                    {"provider": provider, "shape": list(shape), "error": f"{type(e).__name__}: {e}"}
-                )
+                failures.append({"provider": provider, "shape": list(shape), "error": f"{type(e).__name__}: {e}"})
     return results, failures
 
 
@@ -446,7 +454,7 @@ def main():
         "--baseline",
         default=None,
         help="Path to a JSON file from a previous run; its results become the baseline (speedup) column. "
-             "Produce one with --json on the other checkout. Only the file is read; no code is executed.",
+        "Produce one with --json on the other checkout. Only the file is read; no code is executed.",
     )
     parser.add_argument(
         "--custom-shapes", default=None, help="JSON list of [B,T,hidden,H,HV,D,V] shapes overriding the defaults"
