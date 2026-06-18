@@ -131,9 +131,18 @@ def test_parallel_aggressive_gates_long_seq():
     assert_close(" o", ref, tri, RTOL_FWD)
 
 
-def test_backward_matches_eager_reference():
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HQ', 'K', 'V'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HQ{}-K{}-V{}".format(*test))
+        for test in [
+            (1, 24, 2, 4, 16, 12),
+            (1, 64, 2, 2, 64, 128),
+        ]
+    ],
+)
+def test_backward_matches_eager_reference(B: int, T: int, H: int, HQ: int, K: int, V: int):
     dtype = torch.float32
-    B, T, H, HQ, K, V = 1, 24, 2, 4, 16, 12
     torch.manual_seed(11)
     q0 = torch.randn(B, T, HQ, K, device=device, dtype=dtype)
     k0 = torch.randn(B, T, H, K, device=device, dtype=dtype)
