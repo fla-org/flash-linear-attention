@@ -4,8 +4,15 @@
 # LICENSE file in the root directory of this source tree.
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+from __future__ import annotations
 
 import argparse
+import json
+import logging
+import os
+import platform
+import socket
+import subprocess
 
 import torch
 import triton
@@ -13,7 +20,54 @@ from einops import rearrange
 
 from fla.layers.gated_deltanet import GatedDeltaNet
 from fla.modules.convolution import causal_conv1d
+from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.utils import device
+
+logger = logging.getLogger(__name__)
+
+QUANTILES = [0.5, 0.2, 0.8]
+DTYPE = torch.bfloat16
+
+# Logical order: full layer, then the isolated op, then the conv prologue.
+PROVIDERS = [
+    "layer_train_fwd",
+    "layer_train_fwdbwd",
+    "layer_eval_fwd",
+    "op_fwd",
+    "op_fwdbwd",
+    "conv_separate_fwd",
+    "conv_fused_fwd",
+    "conv_separate_fwdbwd",
+    "conv_fused_fwdbwd",
+]
+
+# (B, T, hidden_size, H, HV, D, V)
+SHAPES = [
+    (1, 128, 512, 6, 6, 64, 128),  # Small enough for a quick smoke run.
+    (2, 2048, 2048, 6, 6, 256, 512),  # GatedDeltaNetConfig defaults used by the layer-level q/k/v conv work.
+    (2, 4096, 2048, 6, 6, 256, 512),  # Longer default-config layer workload used for prologue/output-kernel changes.
+    (4, 2048, 2048, 8, 8, 64, 64),  # Dense K=V=64 path targeted by state/output fusion work.
+    (2, 2048, 2048, 4, 8, 64, 64),  # Grouped-value variant for dense K=V=64 guarded paths.
+    (2, 4096, 2048, 16, 16, 128, 128),  # D128 chunk-output style workload.
+]
+
+
+# --------------------------------------------------------------------------- #
+# Section builders
+# --------------------------------------------------------------------------- #
+def _build_layer(hidden_size, H, HV, D, V):
+    return GatedDeltaNet(
+        hidden_size=hidden_size,
+        expand_v=V / D,
+        head_dim=D,
+        num_heads=H,
+        num_v_heads=HV,
+        mode="chunk",
+        use_gate=True,
+        use_short_conv=True,
+        conv_size=4,
+    ).to(device=device, dtype=DTYPE)
+
 
 def _separate_conv(layer, q, k, v):
     q = layer.q_conv1d(q)[0]
@@ -22,22 +76,33 @@ def _separate_conv(layer, q, k, v):
     return q, k, v
 
 
-def _fused_conv(layer, q, k, v):
-    qkv = torch.cat([q, k, v], dim=-1)
-    qkv_weight = torch.cat(
+def _pack_qkv_conv_weight(layer):
+    """Concatenate the q/k/v depthwise conv weights/bias once.
+
+    In a real fused module this packing is a one-time init cost, so callers that
+    time the fused path pre-pack here and keep it out of the measured function.
+    """
+    weight = torch.cat(
         [
-            rearrange(layer.q_conv1d.weight, 'd 1 w -> d w'),
-            rearrange(layer.k_conv1d.weight, 'd 1 w -> d w'),
-            rearrange(layer.v_conv1d.weight, 'd 1 w -> d w'),
+            rearrange(layer.q_conv1d.weight, "d 1 w -> d w"),
+            rearrange(layer.k_conv1d.weight, "d 1 w -> d w"),
+            rearrange(layer.v_conv1d.weight, "d 1 w -> d w"),
         ],
         dim=0,
     )
     bias = None
     if layer.conv_bias:
         bias = torch.cat([layer.q_conv1d.bias, layer.k_conv1d.bias, layer.v_conv1d.bias], dim=0)
+    return weight, bias
+
+
+def _fused_conv(layer, q, k, v, weight, bias):
+    # Per-call cost only: concat the three (separately projected) inputs, one conv, split.
+    # `weight`/`bias` are pre-packed by _pack_qkv_conv_weight so weight concat isn't timed.
+    qkv = torch.cat([q, k, v], dim=-1)
     qkv = causal_conv1d(
         x=qkv,
-        weight=qkv_weight,
+        weight=weight,
         bias=bias,
         activation=layer.q_conv1d.activation,
         backend=layer.q_conv1d.backend,
@@ -45,69 +110,385 @@ def _fused_conv(layer, q, k, v):
     return torch.split(qkv, [layer.key_dim, layer.key_dim, layer.value_dim], dim=-1)
 
 
-def benchmark(args):
-    torch.manual_seed(args.seed)
+def _op_inputs(layer, x):
+    """Build the post-conv ``chunk_gated_delta_rule`` inputs as grad-enabled leaves."""
+    with torch.no_grad():
+        q = layer.q_conv1d(layer.q_proj(x))[0]
+        k = layer.k_conv1d(layer.k_proj(x))[0]
+        v = layer.v_conv1d(layer.v_proj(x))[0]
+        g = layer.a_proj(x)
+        beta = layer.b_proj(x)
+    q = rearrange(q, "... (h d) -> ... h d", d=layer.head_k_dim).detach().requires_grad_(True)
+    k = rearrange(k, "... (h d) -> ... h d", d=layer.head_k_dim).detach().requires_grad_(True)
+    v = rearrange(v, "... (h d) -> ... h d", d=layer.head_v_dim).detach().requires_grad_(True)
+    g = g.detach().requires_grad_(True)
+    beta = beta.detach().requires_grad_(True)
+    return q, k, v, g, beta
 
-    layer = GatedDeltaNet(
-        hidden_size=args.hidden_size,
-        expand_v=args.expand_v,
-        head_dim=args.head_dim,
-        num_heads=args.num_heads,
-        num_v_heads=args.num_v_heads,
-        mode='chunk',
-        use_gate=True,
-        use_short_conv=True,
-        conv_size=args.conv_size,
-    ).to(device=device, dtype=args.dtype).train()
 
-    x = torch.randn(args.batch_size, args.seq_len, args.hidden_size, device=device, dtype=args.dtype)
-    q = layer.q_proj(x)
-    k = layer.k_proj(x)
-    v = layer.v_proj(x)
-
-    providers = args.providers.split(',')
-    fns = {}
-    if 'full' in providers:
-        fns['full'] = lambda: layer(x)[0]
-    if 'separate_conv' in providers:
-        fns['separate_conv'] = lambda: _separate_conv(layer, q, k, v)
-    if 'fused_conv' in providers:
-        fns['fused_conv'] = lambda: _fused_conv(layer, q, k, v)
-
-    for fn in fns.values():
-        for _ in range(args.warmup_iters):
-            fn()
-    torch.cuda.synchronize()
-
-    print(
-        f"shape B={args.batch_size} T={args.seq_len} hidden={args.hidden_size} "
-        f"heads={args.num_heads} head_dim={args.head_dim} expand_v={args.expand_v} dtype={args.dtype}"
+def _op_call(layer, q, k, v, g, beta):
+    o, _ = chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        A_log=layer.A_log,
+        dt_bias=layer.dt_bias,
+        initial_state=None,
+        output_final_state=False,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=layer.allow_neg_eigval,
+        state_v_first=True,
+        cu_seqlens=None,
     )
-    for name, fn in fns.items():
-        ms = triton.testing.do_bench(fn, warmup=args.warmup_ms, rep=args.rep_ms, quantiles=[0.5, 0.2, 0.8])
-        print(f"{name:>14s}: median={ms[0]:.6f}ms p20={ms[1]:.6f}ms p80={ms[2]:.6f}ms")
+    return o
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Benchmark the GatedDeltaNet layer and q/k/v short-conv section.")
-    parser.add_argument('--batch-size', type=int, default=2)
-    parser.add_argument('--seq-len', type=int, default=2048)
-    parser.add_argument('--hidden-size', type=int, default=2048)
-    parser.add_argument('--head-dim', type=int, default=256)
-    parser.add_argument('--num-heads', type=int, default=6)
-    parser.add_argument('--num-v-heads', type=int, default=None)
-    parser.add_argument('--expand-v', type=float, default=2.0)
-    parser.add_argument('--conv-size', type=int, default=4)
-    parser.add_argument('--dtype', type=str, default='bfloat16', choices=['float16', 'bfloat16'])
-    parser.add_argument('--providers', type=str, default='full,separate_conv,fused_conv')
-    parser.add_argument('--warmup-iters', type=int, default=5)
-    parser.add_argument('--warmup-ms', type=int, default=25)
-    parser.add_argument('--rep-ms', type=int, default=100)
-    parser.add_argument('--seed', type=int, default=42)
+def make_runnable(provider, B, T, hidden_size, H, HV, D, V):
+    """Return a zero-arg callable that runs *provider* once.
+
+    Tensors/layer are captured in the closure so they stay alive for the
+    lifetime of the returned callable.
+    """
+    torch.manual_seed(42)
+    layer = _build_layer(hidden_size, H, HV, D, V)
+
+    if provider == "layer_eval_fwd":
+        # NOTE: eval-mode *prefill* only. GatedDeltaNet.forward switches to the
+        # fused_recurrent decode kernel only for q_len <= 64; all default SHAPES have
+        # T >= 128, so this measures the chunk path under inference_mode, not the
+        # short-token / cache decode path.
+        layer.eval()
+        x = torch.randn(B, T, hidden_size, device=device, dtype=DTYPE)
+
+        def fn():
+            with torch.inference_mode():
+                return layer(x)[0]
+
+        return fn
+
+    layer.train()
+
+    if provider == "layer_train_fwd":
+        x = torch.randn(B, T, hidden_size, device=device, dtype=DTYPE, requires_grad=True)
+
+        def fn():
+            return layer(x)[0]
+
+        return fn
+
+    if provider == "layer_train_fwdbwd":
+        x = torch.randn(B, T, hidden_size, device=device, dtype=DTYPE, requires_grad=True)
+        do = torch.randn(B, T, hidden_size, device=device, dtype=DTYPE)
+
+        def fn():
+            layer.zero_grad(set_to_none=True)
+            x.grad = None
+            layer(x)[0].backward(do)
+
+        return fn
+
+    if provider in ("op_fwd", "op_fwdbwd"):
+        x = torch.randn(B, T, hidden_size, device=device, dtype=DTYPE)
+        q, k, v, g, beta = _op_inputs(layer, x)
+        if provider == "op_fwd":
+
+            def fn():
+                return _op_call(layer, q, k, v, g, beta)
+
+            return fn
+
+        with torch.no_grad():
+            do = torch.randn_like(_op_call(layer, q, k, v, g, beta))
+
+        def fn():
+            layer.zero_grad(set_to_none=True)
+            for t in (q, k, v, g, beta):
+                t.grad = None
+            torch.autograd.backward(_op_call(layer, q, k, v, g, beta), do)
+
+        return fn
+
+    # conv providers
+    x = torch.randn(B, T, hidden_size, device=device, dtype=DTYPE)
+    q = layer.q_proj(x).detach().requires_grad_(True)
+    k = layer.k_proj(x).detach().requires_grad_(True)
+    v = layer.v_proj(x).detach().requires_grad_(True)
+
+    if "fused" in provider:
+        weight, bias = _pack_qkv_conv_weight(layer)  # one-time pack, kept out of the timed path
+
+        def conv_fn(layer, q, k, v):
+            return _fused_conv(layer, q, k, v, weight, bias)
+
+        # Validate fused == separate before timing so we never benchmark a wrong kernel.
+        with torch.no_grad():
+            separate = _separate_conv(layer, q.detach(), k.detach(), v.detach())
+            fused = conv_fn(layer, q.detach(), k.detach(), v.detach())
+        for name, actual, expected in zip(("q", "k", "v"), fused, separate):
+            torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3, msg=f"fused conv {name} mismatch")
+    else:
+        conv_fn = _separate_conv
+
+    if provider.endswith("_fwd"):
+
+        def fn():
+            return conv_fn(layer, q, k, v)
+
+        return fn
+
+    if provider.endswith("_fwdbwd"):
+        with torch.no_grad():
+            grad_outputs = tuple(torch.randn_like(o) for o in _separate_conv(layer, q, k, v))
+
+        def fn():
+            layer.zero_grad(set_to_none=True)
+            q.grad = None
+            k.grad = None
+            v.grad = None
+            torch.autograd.backward(conv_fn(layer, q, k, v), grad_outputs)
+
+        return fn
+
+    raise ValueError(provider)
+
+
+# --------------------------------------------------------------------------- #
+# Timing
+# --------------------------------------------------------------------------- #
+def run(providers, shapes) -> tuple[list[dict], list[dict]]:
+    """Return (results, failures). *failures* is non-empty if any cell errored."""
+    warmup_iters = max(1, int(os.environ.get("FLA_BENCH_OP_WARMUP_ITERS", "5")))
+    do_bench_kw = {
+        "warmup": max(1, int(os.environ.get("FLA_BENCH_WARMUP_MS", "25"))),
+        "rep": max(1, int(os.environ.get("FLA_BENCH_REP_MS", "100"))),
+    }
+    has_cuda = torch.cuda.is_available()
+
+    # Phase 1: warm up every (provider, shape) so autotuning is cached before any timing.
+    print(f"\n  Warming up {len(providers)} provider(s) x {len(shapes)} shape(s)...")
+    for provider in providers:
+        for shape in shapes:
+            try:
+                fn = make_runnable(provider, *shape)
+                for _ in range(warmup_iters):
+                    fn()
+                if has_cuda:
+                    torch.cuda.synchronize()
+            except Exception as e:
+                logger.warning(f"Warmup failed for {provider} @ {tuple(shape)}: {e}")
+    print("  Warmup done.")
+
+    # Phase 2: time, then measure the per-call memory delta.
+    results = []
+    failures = []
+    for provider in providers:
+        for shape in shapes:
+            try:
+                fn = make_runnable(provider, *shape)
+                ms = triton.testing.do_bench(fn, quantiles=QUANTILES, **do_bench_kw)
+                del fn  # free the timing closure's layer/inputs before the memory probe
+
+                # peak_mb = peak CUDA memory of one call minus the resident setup (layer,
+                # inputs, ...). This per-call working set is comparable across providers,
+                # unlike a raw peak which folds in each provider's different resident tensors.
+                peak_mb = 0.0
+                if has_cuda:
+                    mem_fn = make_runnable(provider, *shape)
+                    torch.cuda.synchronize()
+                    baseline = torch.cuda.memory_allocated()
+                    torch.cuda.reset_peak_memory_stats()
+                    mem_fn()
+                    torch.cuda.synchronize()
+                    peak_mb = max(0.0, (torch.cuda.max_memory_allocated() - baseline) / (1024**2))
+                    del mem_fn
+
+                results.append(
+                    {
+                        "provider": provider,
+                        "shape": list(shape),
+                        "median_ms": ms[0],
+                        "p20_ms": ms[1],
+                        "p80_ms": ms[2],
+                        "peak_mb": peak_mb,
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Bench failed for {provider} @ {tuple(shape)}: {e}")
+                failures.append(
+                    {"provider": provider, "shape": list(shape), "error": f"{type(e).__name__}: {e}"}
+                )
+    return results, failures
+
+
+# --------------------------------------------------------------------------- #
+# Machine info / git
+# --------------------------------------------------------------------------- #
+def _get_machine_info() -> dict:
+    # Branch+sha via subprocess, matching the convention in benchmarks/ops/run.py and
+    # benchmarks/benchmark_training_throughput.py (no extra git dependency).
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        git_label = f"{branch}[{sha}]"
+    except Exception:
+        git_label = "unknown"
+
+    info = {
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "pytorch_version": torch.__version__,
+        "cuda_version": torch.version.cuda or "N/A",
+        "git_label": git_label,
+        "gpu_name": "N/A",
+    }
+    try:
+        info["triton_version"] = triton.__version__
+    except Exception:
+        info["triton_version"] = "N/A"
+    if torch.cuda.is_available():
+        info["gpu_name"] = torch.cuda.get_device_name(0)
+    return info
+
+
+# --------------------------------------------------------------------------- #
+# Reporting
+# --------------------------------------------------------------------------- #
+def _short_label(git_label: str) -> str:
+    """``feature-branch[abc1234]`` -> ``feature...[abc1234]`` (branch capped at 8 chars)."""
+    if "[" in git_label:
+        branch, sha = git_label.split("[", 1)
+        sha = "[" + sha
+    else:
+        branch, sha = git_label, ""
+    if len(branch) > 8:
+        branch = branch[:8] + "..."
+    return f"{branch}{sha}"
+
+
+def print_results(results, machine_info, baseline=None, baseline_info=None):
+    if not results:
+        print("\n  No results to display.")
+        return
+
+    has_base = bool(baseline)
+    base_map = {(r["provider"], tuple(r["shape"])): r for r in baseline} if has_base else {}
+
+    new_label = _short_label(machine_info.get("git_label", "new"))
+    base_label = _short_label((baseline_info or {}).get("git_label", "base")) if has_base else None
+
+    col_w = max(12, len(new_label), len(base_label) if has_base else 0)
+
+    if has_base:
+        header = f"  {'provider':<22s} {base_label:>{col_w}s} {new_label:>{col_w}s} {'speedup':>8s} {'dmem(MB)':>10s}"
+    else:
+        header = f"  {'provider':<22s} {new_label:>{col_w}s} {'dmem(MB)':>10s}"
+    width = len(header) + 2
+    sep = "=" * width
+
+    print(f"\n{sep}")
+    print(
+        f"  Machine: {machine_info.get('gpu_name', 'N/A')} | "
+        f"CUDA {machine_info.get('cuda_version', 'N/A')} | "
+        f"PyTorch {machine_info.get('pytorch_version', 'N/A')}"
+    )
+    print("  dmem(MB) = per-call peak CUDA memory minus resident setup (working set)")
+    print(sep)
+
+    # Group rows by shape, preserving the order shapes first appear in results
+    # (so --custom-shapes that aren't in the module-level SHAPES still print).
+    by_shape = {}
+    for r in results:
+        by_shape.setdefault(tuple(r["shape"]), []).append(r)
+
+    for shape in by_shape:
+        B, T, hidden, H, HV, D, V = shape
+        print(f"\n  shape: B={B} T={T} hidden={hidden} H={H} HV={HV} D={D} V={V}")
+        print(f"  {'-' * (width - 2)}")
+        print(header)
+        rows = sorted(by_shape[shape], key=lambda r: PROVIDERS.index(r["provider"]))
+        for r in rows:
+            new_ms = r["median_ms"]
+            peak = r["peak_mb"]
+            if has_base:
+                br = base_map.get((r["provider"], shape))
+                if br:
+                    base_ms = br["median_ms"]
+                    speedup = base_ms / new_ms if new_ms > 0 else float("inf")
+                    print(f"  {r['provider']:<22s} {base_ms:>{col_w}.4f} {new_ms:>{col_w}.4f} {speedup:>7.2f}x {peak:>10.1f}")
+                else:
+                    print(f"  {r['provider']:<22s} {'-':>{col_w}s} {new_ms:>{col_w}.4f} {'-':>8s} {peak:>10.1f}")
+            else:
+                print(f"  {r['provider']:<22s} {new_ms:>{col_w}.4f} {peak:>10.1f}")
+    print(f"\n{sep}")
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def main():
+    parser = argparse.ArgumentParser(description="Layer-level GatedDeltaNet benchmark")
+    parser.add_argument(
+        "--providers", nargs="+", default=PROVIDERS, choices=PROVIDERS, help="Subset of providers to run (default: all)"
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        help="Path to a JSON file from a previous run; its results become the baseline (speedup) column. "
+             "Produce one with --json on the other checkout. Only the file is read; no code is executed.",
+    )
+    parser.add_argument(
+        "--custom-shapes", default=None, help="JSON list of [B,T,hidden,H,HV,D,V] shapes overriding the defaults"
+    )
+    parser.add_argument("--json", dest="json_file", default=None, help="Write results to this JSON path")
     args = parser.parse_args()
-    args.dtype = getattr(torch, args.dtype)
-    return args
+
+    shapes = [tuple(s) for s in json.loads(args.custom_shapes)] if args.custom_shapes else list(SHAPES)
+
+    machine_info = _get_machine_info()
+    print(
+        f"Machine: {machine_info['gpu_name']} | CUDA {machine_info['cuda_version']} | "
+        f"PyTorch {machine_info['pytorch_version']} | {machine_info['git_label']}"
+    )
+    print(f"Providers: {args.providers}")
+    print(f"Shapes: {len(shapes)}")
+
+    results, failures = run(args.providers, shapes)
+
+    baseline, baseline_info = None, None
+    if args.baseline:
+        with open(args.baseline) as f:
+            data = json.load(f)
+        baseline = data.get("results", [])
+        baseline_info = data.get("machine_info")
+
+    print_results(results, machine_info, baseline=baseline, baseline_info=baseline_info)
+
+    if args.json_file:
+        with open(args.json_file, "w") as f:
+            json.dump({"machine_info": machine_info, "results": results, "failures": failures}, f, indent=2)
+        print(f"\nResults saved to {args.json_file}")
+
+    if failures:
+        print(f"\n  {len(failures)} benchmark cell(s) FAILED:")
+        for fail in failures:
+            print(f"    - {fail['provider']} @ {tuple(fail['shape'])}: {fail['error']}")
+        # Exit non-zero so a broken provider can't masquerade as a clean run in PR evidence/CI.
+        raise SystemExit(1)
+
+    return results
 
 
-if __name__ == '__main__':
-    benchmark(parse_args())
+if __name__ == "__main__":
+    main()
