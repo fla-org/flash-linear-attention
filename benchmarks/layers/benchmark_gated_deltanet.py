@@ -481,7 +481,9 @@ def print_results(results, machine_info, baseline=None, baseline_info=None):
                     speedup = base_ms / new_ms if new_ms > 0 else float("inf")
                     base_spread = float(br.get("spread_pct", 0.0))
                     if "spread_pct" not in br and base_ms > 0:
-                        base_spread = max(0.0, float(br.get("p80_ms", base_ms)) - float(br.get("p20_ms", base_ms))) / base_ms * 100
+                        base_spread = (
+                            max(0.0, float(br.get("p80_ms", base_ms)) - float(br.get("p20_ms", base_ms))) / base_ms * 100
+                        )
                     note = "noisy" if abs(speedup - 1.0) * 100 <= max(spread, base_spread) else ""
                     print(
                         f"  {r['provider']:<22s} {base_ms:>{col_w}.4f} {new_ms:>{col_w}.4f} "
