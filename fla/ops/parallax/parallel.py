@@ -12,14 +12,14 @@ from einops import reduce
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import exp2
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
+from fla.utils import IS_NVIDIA_BLACKWELL, autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
 
 
 def _block_size(head_dim: int, device_index: int) -> int:
     # A single square tile size shared by all kernels so one `chunk_indices`
     # (built host-side for varlen) matches every grid. Kept modest to bound the
     # fp32 accumulator footprint Parallax carries (barv/Rv/grad accumulators).
-    if check_shared_mem('hopper', device_index) and head_dim <= 64:
+    if check_shared_mem('hopper', device_index) and not IS_NVIDIA_BLACKWELL and head_dim <= 64:
         return 128
     return 64
 
@@ -74,7 +74,10 @@ def parallel_parallax_fwd_kernel(
     if WINDOW_SIZE_LEFT >= 0:
         leftmost_valid = tl.maximum(0, row_offset - WINDOW_SIZE_LEFT + 1)
         FIRST_COL_BLOCK = leftmost_valid // BS
-        SAFE_LEFT_START = (leftmost_valid + BS - 1) // BS
+        # Phase A is unmasked, so the safe zone must clear the window's left edge for
+        # the tile's LAST row (row_offset + BT - 1), not its first.
+        safe_left_valid = tl.maximum(0, row_offset + BT - WINDOW_SIZE_LEFT)
+        SAFE_LEFT_START = (safe_left_valid + BS - 1) // BS
     else:
         FIRST_COL_BLOCK = 0
         SAFE_LEFT_START = 0
@@ -297,7 +300,10 @@ def parallel_parallax_bwd_kernel_dqr(
     if WINDOW_SIZE_LEFT >= 0:
         leftmost_valid = tl.maximum(0, row_offset - WINDOW_SIZE_LEFT + 1)
         FIRST_COL_BLOCK = leftmost_valid // BS
-        SAFE_LEFT_START = (leftmost_valid + BS - 1) // BS
+        # Phase A is unmasked, so the safe zone must clear the window's left edge for
+        # the tile's LAST row (row_offset + BT - 1), not its first.
+        safe_left_valid = tl.maximum(0, row_offset + BT - WINDOW_SIZE_LEFT)
+        SAFE_LEFT_START = (safe_left_valid + BS - 1) // BS
     else:
         FIRST_COL_BLOCK = 0
         SAFE_LEFT_START = 0

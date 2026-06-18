@@ -100,6 +100,7 @@ def test_parallel(
             (3, 111, 2, 2, 100, 32),
             (3, 1024, 2, 8, 128, 64),
             (2, 2048, 2, 8, 64, 256),
+            (2, 1024, 2, 2, 64, 200),    # W > tile_size and W % tile_size != 0 (safe-zone boundary)
         ]
     ],
 )
