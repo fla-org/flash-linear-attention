@@ -28,15 +28,15 @@ from .linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recur
 from .log_linear_attn import chunk_log_linear_attn
 from .mesa_net import chunk_mesa_net
 from .nsa import parallel_nsa
+from .parallax import parallel_parallax
 from .path_attn import parallel_path_attn
 from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
 from .simple_gla import chunk_simple_gla, fused_chunk_simple_gla, fused_recurrent_simple_gla, parallel_simple_gla
-from .wall_attn import build_wall_kv_cache, naive_wall_attn, parallel_wall_attn, parallel_wall_attn_decode
+from .wall_attn import parallel_wall_attn, parallel_wall_attn_decode
 
 __all__ = [
-    'build_wall_kv_cache',
     'chunk_abc',
     'chunk_comba',
     'chunk_delta_rule',
@@ -78,11 +78,11 @@ __all__ = [
     'fused_recurrent_rwkv6',
     'fused_recurrent_rwkv7',
     'fused_recurrent_simple_gla',
-    'naive_wall_attn',
     'parallel_attn',
     'parallel_based',
     'parallel_forgetting_attn',
     'parallel_nsa',
+    'parallel_parallax',
     'parallel_path_attn',
     'parallel_retention',
     'parallel_simple_gla',
