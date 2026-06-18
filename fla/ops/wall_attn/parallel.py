@@ -16,6 +16,7 @@ import triton
 import triton.language as tl
 from einops import reduce
 
+from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
@@ -211,25 +212,6 @@ def parallel_wall_attn_fwd_kernel(
     b_m += log2(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
-
-
-@triton.jit
-def parallel_attn_bwd_kernel_preprocess(
-    o,
-    do,
-    delta,
-    B: tl.constexpr,
-    V: tl.constexpr,
-):
-    i_n = tl.program_id(0)
-    o_d = tl.arange(0, B)
-    m_d = o_d < V
-
-    b_o = tl.load(o + i_n * V + o_d, mask=m_d, other=0)
-    b_do = tl.load(do + i_n * V + o_d, mask=m_d, other=0).to(tl.float32)
-    b_delta = tl.sum(b_o * b_do)
-
-    tl.store(delta + i_n, b_delta.to(delta.dtype.element_ty))
 
 
 @triton.autotune(
@@ -681,22 +663,6 @@ def parallel_wall_attn_fwd(
     return o, lse
 
 
-def parallel_attn_bwd_preprocess(
-    o: torch.Tensor,
-    do: torch.Tensor,
-):
-    V = o.shape[-1]
-    delta = torch.empty_like(o[..., 0], dtype=torch.float)
-    parallel_attn_bwd_kernel_preprocess[(delta.numel(),)](
-        o=o,
-        do=do,
-        delta=delta,
-        B=triton.next_power_of_2(V),
-        V=V,
-    )
-    return delta
-
-
 @dispatch('attn')
 def parallel_wall_attn_bwd(
     q: torch.Tensor,
@@ -720,12 +686,10 @@ def parallel_wall_attn_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     G = HQ // H
-    if check_shared_mem('hopper') or check_shared_mem('ampere'):
-        BK = max(triton.next_power_of_2(K), 16)
-        BV = max(triton.next_power_of_2(V), 16)
-    else:
-        BK = max(triton.next_power_of_2(K), 16)
-        BV = min(max(triton.next_power_of_2(V), 16), 64)
+    # dq/dk are reduced over the full value dim in one program (no cross-program accumulation),
+    # so BV must span all of V (NV == 1). Don't cap it here -- the forward can, the backward can't.
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
 
     NV = triton.cdiv(V, BV)
 
