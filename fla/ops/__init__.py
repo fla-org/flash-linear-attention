@@ -30,6 +30,8 @@ from .mesa_net import chunk_mesa_net
 from .nsa import parallel_nsa
 from .parallax import parallel_parallax
 from .path_attn import parallel_path_attn
+from .precond_gated_delta_rule import chunk_precond_gated_delta_rule, fused_recurrent_precond_gated_delta_rule
+from .precond_kda import chunk_precond_kda, fused_recurrent_precond_kda
 from .retention import chunk_retention, fused_chunk_retention, fused_recurrent_retention, parallel_retention
 from .rwkv6 import chunk_rwkv6, fused_recurrent_rwkv6
 from .rwkv7 import chunk_rwkv7, fused_recurrent_rwkv7
@@ -51,6 +53,8 @@ __all__ = [
     'chunk_linear_attn',
     'chunk_log_linear_attn',
     'chunk_mesa_net',
+    'chunk_precond_gated_delta_rule',
+    'chunk_precond_kda',
     'chunk_retention',
     'chunk_rwkv6',
     'chunk_rwkv7',
@@ -74,6 +78,8 @@ __all__ = [
     'fused_recurrent_kda',
     'fused_recurrent_lightning_attn',
     'fused_recurrent_linear_attn',
+    'fused_recurrent_precond_gated_delta_rule',
+    'fused_recurrent_precond_kda',
     'fused_recurrent_retention',
     'fused_recurrent_rwkv6',
     'fused_recurrent_rwkv7',
