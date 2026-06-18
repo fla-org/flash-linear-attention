@@ -118,15 +118,15 @@ def assert_split_namespace_installed(python: Path) -> None:
         assert "fla/layers/__init__.py" in ext_files
         assert "fla/models/__init__.py" in ext_files
 
-        try:
-            import fla
-        except ModuleNotFoundError as exc:
-            assert exc.name not in {"fla.layers", "fla.models"}
-            assert exc.name in {"torch", "triton", "transformers", "einops"}
-        else:
-            assert "GLAModel" in fla.__all__
-            assert "GatedLinearAttention" in fla.__all__
-            assert "GLAConfig" not in fla.__all__
+        import fla
+        exported = bool(fla.__all__)
+        assert hasattr(fla, 'layers') == exported
+        assert hasattr(fla, 'models') == exported
+        if exported:
+            assert 'GLAModel' in fla.__all__
+            assert 'GatedLinearAttention' in fla.__all__
+            assert 'GLAConfig' not in fla.__all__
+            assert not hasattr(fla, 'GLAConfig')
         """
     )
     run([str(python), "-c", code], cwd=tempfile.gettempdir(), env=python_env())

@@ -14,23 +14,31 @@ __version__ = "0.5.1"
 __all__: list[str] = []
 
 
-def _export_optional_public_api(module_name: str) -> None:
+def _import_optional_public_module(module_name: str):
     try:
-        module = importlib.import_module(module_name)
+        return importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
-        if exc.name == module_name:
-            return
+        missing = exc.name
+        # The extension package is optional. Treat its absence, or the absence
+        # of an external runtime dependency, as the extension being unavailable.
+        if missing == module_name or (missing is not None and missing.split('.', 1)[0] != 'fla'):
+            return None
         raise
 
-    globals()[module_name.rsplit(".", maxsplit=1)[-1]] = module
+
+def _export_public_api(module) -> None:
+    globals()[module.__name__.rsplit('.', maxsplit=1)[-1]] = module
     for name in module.__all__:
-        if name.endswith("Config"):
+        if name.endswith('Config'):
             continue
         globals()[name] = getattr(module, name)
         __all__.append(name)
 
 
-_export_optional_public_api("fla.layers")
-_export_optional_public_api("fla.models")
+_layers = _import_optional_public_module('fla.layers')
+_models = _import_optional_public_module('fla.models')
+if _layers is not None and _models is not None:
+    _export_public_api(_layers)
+    _export_public_api(_models)
 
-del _export_optional_public_api
+del _import_optional_public_module, _export_public_api, _layers, _models
