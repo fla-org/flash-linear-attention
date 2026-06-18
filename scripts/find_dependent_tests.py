@@ -335,7 +335,14 @@ if __name__ == "__main__":
 
     BLACKLIST = ['fla/utils.py', 'utils/convert_from_llama.py', 'utils/convert_from_rwkv6.py',
                  'utils/convert_from_rwkv7.py', 'tests/conftest.py']
-    changed_files = [file for file in changed_files if not any(file.endswith(b) for b in BLACKLIST)]
+    # `fla/utils.py` was split into `fla/utils/**`; keep the same test-selection behavior
+    # for broad utility changes instead of accidentally unblacklisting the new package paths.
+    BLACKLIST_PREFIXES = ['fla/utils/']
+    changed_files = [
+        file for file in changed_files
+        if not any(file.endswith(b) for b in BLACKLIST)
+        and not any(file.startswith(b) for b in BLACKLIST_PREFIXES)
+    ]
 
     changed_files = [file for file in changed_files if file.endswith('.py')]
 

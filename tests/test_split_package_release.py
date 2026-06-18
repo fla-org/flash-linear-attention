@@ -72,13 +72,35 @@ def _wheel_names(wheel: Path) -> set[str]:
         return set(zf.namelist())
 
 
-def _requires_dist(wheel: Path) -> dict[str, Requirement]:
+def _requires_by_name(wheel: Path) -> dict[str, Requirement]:
     return {
         requirement.name: requirement
-        for requirement in (
-            Requirement(value) for value in read_wheel_metadata(wheel).get_all("Requires-Dist") or []
-        )
+        for requirement in _requires_dist_entries(wheel)
     }
+
+
+def _requires_dist_entries(wheel: Path) -> list[Requirement]:
+    return [Requirement(value) for value in read_wheel_metadata(wheel).get_all("Requires-Dist") or []]
+
+
+def _base_requirement_names(wheel: Path) -> set[str]:
+    return {requirement.name for requirement in _requires_dist_entries(wheel) if requirement.marker is None}
+
+
+def _public_api_contract() -> str:
+    return textwrap.dedent(
+        """
+        import fla
+        exported = bool(fla.__all__)
+        assert hasattr(fla, 'layers') == exported
+        assert hasattr(fla, 'models') == exported
+        if exported:
+            assert 'GLAModel' in fla.__all__
+            assert 'GatedLinearAttention' in fla.__all__
+            assert 'GLAConfig' not in fla.__all__
+            assert not hasattr(fla, 'GLAConfig')
+        """
+    ).strip()
 
 
 def _create_venv(tmp_path: Path, *, system_site_packages: bool = False) -> Path:
@@ -96,7 +118,9 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/__init__.py" in core_names
     assert "fla/ops/__init__.py" in core_names
     assert "fla/modules/__init__.py" in core_names
-    assert "fla/utils.py" in core_names
+    assert "fla/utils/__init__.py" in core_names
+    assert "fla/utils/_device.py" in core_names
+    assert "fla/utils.py" not in core_names
     assert not any(name.startswith("fla/layers/") for name in core_names)
     assert not any(name.startswith("fla/models/") for name in core_names)
 
@@ -105,17 +129,22 @@ def test_split_wheels_match_release_contract(tmp_path: Path) -> None:
     assert "fla/models/__init__.py" in ext_names
     assert not any(name.startswith("fla/ops/") for name in ext_names)
     assert not any(name.startswith("fla/modules/") for name in ext_names)
+    assert not any(name.startswith("fla/utils/") for name in ext_names)
     assert "fla/utils.py" not in ext_names
 
     assert read_wheel_metadata(core_wheel)["Version"] == version
     assert read_wheel_metadata(ext_wheel)["Version"] == version
-    core_requires = _requires_dist(core_wheel)
-    ext_requires = _requires_dist(ext_wheel)
-    assert str(core_requires["torch"].specifier) == ">=2.7.0"
-    assert str(core_requires["triton"].specifier) == ">=3.3"
-    assert str(core_requires["einops"].specifier) == ""
-    assert str(ext_requires["fla-core"].specifier) == f"=={version}"
-    assert str(ext_requires["transformers"].specifier) == ">=4.45.0"
+    core_requires = _requires_by_name(core_wheel)
+    ext_requires = _requires_by_name(ext_wheel)
+    assert _base_requirement_names(core_wheel) == {'einops'}
+    assert str(core_requires['torch'].specifier) == '>=2.7.0'
+    assert core_requires['torch'].marker is not None
+    assert str(core_requires['triton'].specifier) == '>=3.3'
+    assert core_requires['triton'].marker is not None
+    assert str(core_requires['einops'].specifier) == ''
+    assert _base_requirement_names(ext_wheel) == {'fla-core', 'transformers'}
+    assert str(ext_requires['fla-core'].specifier) == f'=={version}'
+    assert str(ext_requires['transformers'].specifier) == '>=4.45.0'
 
 
 def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Path) -> None:
@@ -138,6 +167,7 @@ def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Pat
         assert not hasattr(fla, "models")
         assert importlib.util.find_spec("fla.ops") is not None
         assert importlib.util.find_spec("fla.modules") is not None
+        assert importlib.util.find_spec("fla.utils") is not None
         assert importlib.util.find_spec("fla.layers") is None
         assert importlib.util.find_spec("fla.models") is None
         assert "fla.layers" not in sys.modules
@@ -162,21 +192,56 @@ def test_core_then_extension_install_sequence_without_runtime_deps(tmp_path: Pat
         ext_files = {str(file) for file in metadata.files("flash-linear-attention")}
 
         assert "fla/__init__.py" in core_files
+        assert "fla/utils/__init__.py" in core_files
         assert "fla/layers/__init__.py" in ext_files
         assert "fla/models/__init__.py" in ext_files
+        """
+    ) + "\n" + _public_api_contract()
+    _run([str(python), "-c", extension_check], cwd=tmp_path)
+
+
+def test_core_only_import_with_repo_root_on_path(tmp_path: Path) -> None:
+    """fla-core installed alone should still be importable from the repo root.
+
+    This guards against the case where the source tree (containing fla/layers/ and
+    fla/models/) is on sys.path but the extension package is not installed and the
+    runtime deps (torch/triton/transformers) are absent. The top-level fla package
+    must gracefully skip the optional extension rather than surfacing an import
+    error from inside fla.layers.
+    """
+    core_wheel, _, version = _build_split_wheels(tmp_path)
+    python = _create_venv(tmp_path)
+
+    _run([str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(core_wheel)], cwd=tmp_path)
+
+    # Put the repo root on PYTHONPATH (simulates running from the project directory
+    # or using an editable-src checkout) and try to import fla with no torch/triton.
+    core_check = textwrap.dedent(
+        f"""
+        import importlib.util
+        import sys
+
+        assert importlib.util.find_spec('fla.layers') is not None
+        assert importlib.util.find_spec('fla.models') is not None
+
+        import fla
+
+        assert fla.__version__ == {version!r}
+        assert fla.__all__ == []
+        assert not hasattr(fla, 'layers')
+        assert not hasattr(fla, 'models')
+        assert 'fla.layers' not in sys.modules
+        assert 'fla.models' not in sys.modules
 
         try:
-            import fla
-        except ModuleNotFoundError as exc:
-            assert exc.name not in {"fla.layers", "fla.models"}
-            assert exc.name in {"torch", "triton", "transformers", "einops"}
+            from fla import GLAModel
+        except ImportError:
+            pass
         else:
-            assert "GLAModel" in fla.__all__
-            assert "GatedLinearAttention" in fla.__all__
-            assert "GLAConfig" not in fla.__all__
+            raise AssertionError('core-only install must not expose model classes')
         """
     )
-    _run([str(python), "-c", extension_check], cwd=tmp_path)
+    _run([str(python), '-c', core_check], cwd=ROOT, env={'PYTHONPATH': str(ROOT)})
 
 
 def test_split_namespace_across_sys_path_entries_without_runtime_deps(tmp_path: Path) -> None:
@@ -200,17 +265,8 @@ def test_split_namespace_across_sys_path_entries_without_runtime_deps(tmp_path: 
             import sys
 
             sys.path[:0] = [{str(first)!r}, {str(second)!r}]
-            try:
-                import fla
-            except ModuleNotFoundError as exc:
-                assert exc.name not in {{"fla.layers", "fla.models"}}
-                assert exc.name in {{"torch", "triton", "transformers", "einops"}}
-            else:
-                assert "GLAModel" in fla.__all__
-                assert "GatedLinearAttention" in fla.__all__
-                assert "GLAConfig" not in fla.__all__
             """
-        )
+        ) + "\n" + _public_api_contract()
         _run([str(python), "-c", check], cwd=tmp_path)
 
 

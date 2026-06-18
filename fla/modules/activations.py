@@ -955,6 +955,247 @@ sigmoidglu = SigmoidGLUFunction.apply
 sigmoidglu_linear = SigmoidGLULinearFunction.apply
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def powglu_fwd_kernel(
+    x, y, z,
+    stride_x_row,
+    stride_y_row,
+    stride_z_row,
+    m,
+    T,
+    D: tl.constexpr,
+    B: tl.constexpr,
+):
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.load(y + row * stride_y_row + col, mask=mask, other=0.).to(tl.float32)
+    b_s = tl.sigmoid(b_x)
+    b_pos = b_x > 0
+    # feed only positive lanes to log/sqrt; masked lanes give x**p = 1 and are dropped by the where
+    b_xp = tl.where(b_pos, b_x, 1.0)
+    b_sqrt = tl.sqrt(b_xp)
+    b_p = m / (b_sqrt + 1.0)
+    b_pow = exp(b_p * log(b_xp))
+    b_g = tl.where(b_pos, b_pow * b_s, b_x * b_s)
+    b_z = b_g * b_y
+    tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
+
+
+@triton.heuristics({
+    'HAS_WEIGHT': lambda args: args['z'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({'B': bs}, num_warps=num_warps)
+        for bs in [512, 1024, 2048, 4096, 8192]
+        for num_warps in NUM_WARPS_AUTOTUNE
+    ],
+    key=['D'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def powglu_fwdbwd_kernel(
+    x, y, g, dx, dy, z,
+    stride_x_row,
+    stride_y_row,
+    stride_g_row,
+    stride_dx_row,
+    stride_dy_row,
+    stride_z_row,
+    m,
+    T,
+    D: tl.constexpr,
+    B: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
+):
+    i_n = tl.program_id(0).to(tl.int64)
+    offs = i_n * B + tl.arange(0, B)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    b_x = tl.load(x + row * stride_x_row + col, mask=mask, other=0.).to(tl.float32)
+    b_y = tl.load(y + row * stride_y_row + col, mask=mask, other=0.).to(tl.float32)
+    b_g = tl.load(g + row * stride_g_row + col, mask=mask, other=0.).to(tl.float32)
+
+    b_s = tl.sigmoid(b_x)
+    b_pos = b_x > 0
+    b_xp = tl.where(b_pos, b_x, 1.0)
+    b_sqrt = tl.sqrt(b_xp)
+    b_ln = log(b_xp)
+    b_p = m / (b_sqrt + 1.0)
+    b_pow = exp(b_p * b_ln)
+
+    b_gate_pos = b_pow * b_s
+    # d/dx of the exponent term: p' = -m / (2*sqrt(x)*(sqrt(x)+1)**2)
+    b_pprime = -m / (2.0 * b_sqrt * (b_sqrt + 1.0) * (b_sqrt + 1.0))
+    b_dgate_pos = b_gate_pos * (b_pprime * b_ln + b_p / b_xp + 1.0 - b_s)
+    b_gate_neg = b_x * b_s
+    b_dgate_neg = b_s * (1.0 + b_x * (1.0 - b_s))
+
+    b_gate = tl.where(b_pos, b_gate_pos, b_gate_neg)
+    b_dgate = tl.where(b_pos, b_dgate_pos, b_dgate_neg)
+
+    b_dx = b_g * b_y * b_dgate
+    b_dy = b_g * b_gate
+
+    tl.store(dx + row * stride_dx_row + col, b_dx.to(dx.dtype.element_ty), mask=mask)
+    tl.store(dy + row * stride_dy_row + col, b_dy.to(dy.dtype.element_ty), mask=mask)
+    if HAS_WEIGHT:
+        b_z = b_gate * b_y
+        tl.store(z + row * stride_z_row + col, b_z.to(z.dtype.element_ty), mask=mask)
+
+
+@torch.compiler.disable
+def powglu_fwd(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_contiguous: bool = False) -> torch.Tensor:
+    assert x.shape == y.shape, f"powglu_fwd: shape mismatch x={x.shape} y={y.shape}"
+    x = _ensure_inner_contiguous(x)
+    y = _ensure_inner_contiguous(y)
+    T, D = x.numel(), x.shape[-1]
+    z = _alloc_output(x, output_contiguous)
+    powglu_fwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+        x=x,
+        y=y,
+        z=z,
+        stride_x_row=_get_stride(x),
+        stride_y_row=_get_stride(y),
+        stride_z_row=_get_stride(z),
+        m=power,
+        T=T,
+        D=D,
+    )
+    return z
+
+
+@torch.compiler.disable
+def powglu_fwdbwd(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    g: torch.Tensor,
+    power: float = 3.0,
+    use_weight: bool = False,
+    output_contiguous: bool = False,
+):
+    assert x.shape == y.shape == g.shape, f"powglu_fwdbwd: shape mismatch x={x.shape} y={y.shape} g={g.shape}"
+    x = _ensure_inner_contiguous(x)
+    y = _ensure_inner_contiguous(y)
+    g = _ensure_inner_contiguous(g)
+    T, D = x.numel(), x.shape[-1]
+    dx = _alloc_output(x, output_contiguous)
+    dy = _alloc_output(y, output_contiguous)
+    if use_weight:
+        z = _alloc_output(x, output_contiguous)
+    else:
+        z = None
+    powglu_fwdbwd_kernel[lambda meta: (triton.cdiv(T, meta['B']),)](
+        x=x,
+        y=y,
+        g=g,
+        dx=dx,
+        dy=dy,
+        z=z,
+        stride_x_row=_get_stride(x),
+        stride_y_row=_get_stride(y),
+        stride_g_row=_get_stride(g),
+        stride_dx_row=_get_stride(dx),
+        stride_dy_row=_get_stride(dy),
+        stride_z_row=_get_stride(z) if z is not None else 0,
+        m=power,
+        T=T,
+        D=D,
+    )
+    if use_weight:
+        return dx, dy, z
+    return dx, dy
+
+
+class PowGLUFunction(torch.autograd.Function):
+    r"""
+    Power-Gated Linear Unit (PowGLU) function.
+
+    .. math::
+        \text{PowGLU}(x, y) = g(x) * y,\quad
+        g(x) = \begin{cases} x^{power/(\sqrt{x}+1)}\,\sigma(x) & x > 0 \\ x\,\sigma(x) & x \le 0 \end{cases}
+
+    For ``x <= 0`` the gate reduces to swish, matching SwiGLU; for large ``x > 0`` it saturates instead of
+    growing, replacing SwiGLU's quadratic amplification with bounded growth (Power Linear Unit, arXiv:2605.25704).
+    """
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    def forward(ctx, x, y, power):
+        ctx.save_for_backward(x, y)
+        ctx.power = power
+        return powglu_fwd(x, y, power)
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    def backward(ctx, dout):
+        x, y = ctx.saved_tensors
+        dx, dy = powglu_fwdbwd(x, y, dout, ctx.power)
+        return dx, dy, None
+
+
+class PowGLULinearFunction(torch.autograd.Function):
+    r"""
+    Power-Gated Linear Unit (PowGLU) function followed by a linear transformation.
+
+    .. math::
+        \text{PowGLULinear}(x, y, W, b) = (g(x) * y) W + b
+
+    This simple wrap discards the intermediate results of PowGLU(x, y) to save memory.
+    """
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    @autocast_custom_fwd
+    def forward(ctx, x, y, weight, bias, power):
+        z = powglu_fwd(x, y, power, output_contiguous=True)
+        out = F.linear(z, weight, bias)
+        ctx.save_for_backward(x, y, weight)
+        ctx.linear_bias_is_none = bias is None
+        ctx.power = power
+        return out
+
+    @staticmethod
+    @input_guard(no_guard_contiguous=True)
+    @autocast_custom_bwd
+    def backward(ctx, dout, *args):
+        x, y, weight = ctx.saved_tensors
+        dout = dout.reshape(-1, dout.shape[-1])
+        dz = F.linear(dout, weight.t()).view_as(x)
+        dx, dy, z = powglu_fwdbwd(x, y, dz, ctx.power, use_weight=True, output_contiguous=True)
+        dlinear_weight = torch.einsum("bo,bi->oi", dout, z.reshape(-1, z.shape[-1]))
+        dlinear_bias = None if ctx.linear_bias_is_none else dout.sum(0)
+        return dx, dy, dlinear_weight, dlinear_bias, None
+
+
+def powglu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0) -> torch.Tensor:
+    return PowGLUFunction.apply(x, y, power)
+
+
+def powglu_linear(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    power: float = 3.0,
+) -> torch.Tensor:
+    return PowGLULinearFunction.apply(x, y, weight, bias, power)
+
+
 ACT2FN = {
     'relu': F.relu,
     'sigmoid': sigmoid,
