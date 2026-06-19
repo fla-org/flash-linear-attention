@@ -796,12 +796,19 @@ class ParallelNSAFunction(torch.autograd.Function):
         ctx.token_indices = token_indices_q
         ctx.block_size = block_size
         ctx.scale = scale
+        # q/k cu_seqlens differ only in cached inference (Tq != Tk), where backward is not supported
+        ctx.tq_ne_tk = isinstance(cu_seqlens, tuple)
         return o.to(q.dtype)
 
     @staticmethod
     @contiguous
     @autocast_custom_bwd
     def backward(ctx, do):
+        if ctx.tq_ne_tk:
+            raise NotImplementedError(
+                "Backward is not supported when `cu_seqlens` differs for queries and keys (cached inference). "
+                "Run the forward under `torch.no_grad()`."
+            )
         q, k, v, o, lse = ctx.saved_tensors
         dq, dk, dv = parallel_nsa_bwd(
             q=q,
@@ -884,11 +891,6 @@ def parallel_nsa(
             f"Please flatten variable-length inputs before processing.",
         )
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
-    if isinstance(cu_seqlens, tuple) and (q.requires_grad or k.requires_grad or v.requires_grad):
-        raise NotImplementedError(
-            "Backward is not supported when `cu_seqlens` differs for queries and keys (cached inference). "
-            "Run under `torch.no_grad()`."
-        )
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):

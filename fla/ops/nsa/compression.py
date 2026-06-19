@@ -521,12 +521,19 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
         ctx.token_indices = token_indices_q
         ctx.block_size = block_size
         ctx.scale = scale
+        # q/k cu_seqlens differ only in cached inference (Tq != Tk), where backward is not supported
+        ctx.tq_ne_tk = isinstance(cu_seqlens, tuple)
         return o.to(q.dtype), lse
 
     @staticmethod
     @contiguous
     @autocast_custom_bwd
     def backward(ctx, do, *args):
+        if ctx.tq_ne_tk:
+            raise NotImplementedError(
+                "Backward is not supported when `cu_seqlens` differs for queries and keys (cached inference). "
+                "Run the forward under `torch.no_grad()`."
+            )
         q, k, v, o, lse = ctx.saved_tensors
         dq, dk, dv = parallel_nsa_compression_bwd(
             q=q,
