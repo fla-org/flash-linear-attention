@@ -50,19 +50,35 @@ if IS_NVIDIA_BLACKWELL:
     Track upstream issue at: https://github.com/triton-lang/triton/issues/8695
     """
     @triton.jit
-    def safe_dot(a, b, allow_tf32: tl.constexpr = None):
+    def safe_dot(
+        a,
+        b,
+        allow_tf32: tl.constexpr = None,
+        input_precision: tl.constexpr = None,
+    ):
+        if input_precision is None:
+            out = tl.dot(a, b, allow_tf32=allow_tf32)
+        else:
+            out = tl.dot(a, b, input_precision=input_precision)
         return tl.inline_asm_elementwise(
             asm="mov.f32 $0, $1;",
             constraints="=r,r",
-            args=[tl.dot(a, b, allow_tf32=allow_tf32)],
+            args=[out],
             dtype=tl.float32,
             is_pure=True,
             pack=1,
         )
 else:
     @triton.jit
-    def safe_dot(a, b, allow_tf32: tl.constexpr = None):
-        return tl.dot(a, b, allow_tf32=allow_tf32)
+    def safe_dot(
+        a,
+        b,
+        allow_tf32: tl.constexpr = None,
+        input_precision: tl.constexpr = None,
+    ):
+        if input_precision is None:
+            return tl.dot(a, b, allow_tf32=allow_tf32)
+        return tl.dot(a, b, input_precision=input_precision)
 
 
 if not IS_GATHER_SUPPORTED:
