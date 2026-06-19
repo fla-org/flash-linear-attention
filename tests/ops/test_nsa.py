@@ -16,7 +16,7 @@ import torch  # noqa: E402
 import triton  # noqa: E402
 
 from fla.ops.nsa.compression import parallel_nsa_compression  # noqa: E402
-from fla.ops.nsa.naive import naive_nsa, naive_nsa_cmp, naive_nsa_sel, naive_nsa_topk  # noqa: E402
+from fla.ops.nsa.naive import naive_nsa, naive_nsa_compression, naive_nsa_selection, naive_nsa_topk  # noqa: E402
 from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd, parallel_nsa_topk  # noqa: E402
 from fla.ops.utils import prepare_chunk_offsets, prepare_token_indices  # noqa: E402
 from fla.ops.utils.pooling import mean_pooling  # noqa: E402
@@ -45,10 +45,6 @@ def build_partial_varlen(x, cu_seqlens, q_lens):
 
 # Tests on individual ops are skipped as tests on the whole NSA function are added;
 # see `test_parallel_decode` and `test_parallel_decode_varlen`.
-@pytest.mark.skipif(
-    True,
-    reason='Skipping redundant individual tests'
-)
 @pytest.mark.parametrize(
     ('B', 'T', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype'),
     [
@@ -82,7 +78,7 @@ def test_parallel(
 
     block_indices = build_block_indices(B, T, H, S, block_size)
 
-    ref = naive_nsa_sel(q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
+    ref = naive_nsa_selection(q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
     ref_dk, k.grad = k.grad.clone(), None
@@ -100,10 +96,6 @@ def test_parallel(
     assert_close("dv", ref_dv, tri_dv, 0.005)
 
 
-@pytest.mark.skipif(
-    True,
-    reason='Skipping redundant individual tests'
-)
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'S', 'block_size', 'cu_seqlens', 'dtype'),
     [
@@ -143,7 +135,7 @@ def test_parallel_varlen(
     seq_indices = prepare_token_indices(cu_seqlens)
     block_indices = build_block_indices(1, T, H, S, block_size, seq_indices.tolist())
 
-    ref = naive_nsa_sel(
+    ref = naive_nsa_selection(
         q=q,
         k=k,
         v=v,
@@ -176,10 +168,6 @@ def test_parallel_varlen(
     assert_close('dv', ref_dv, tri_dv, 0.005)
 
 
-@pytest.mark.skipif(
-    True,
-    reason='Skipping redundant individual tests'
-)
 @pytest.mark.parametrize(
     ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype'),
     [
@@ -228,7 +216,7 @@ def test_parallel_selective_decode(
         scale,
     )
 
-    o_naive_fla = naive_nsa_sel(
+    o_naive_fla = naive_nsa_selection(
         q, k, v, block_indices, block_size, scale
     )
 
@@ -246,10 +234,6 @@ def test_parallel_selective_decode(
     )
 
 
-@pytest.mark.skipif(
-    True,
-    reason='Skipping redundant individual tests'
-)
 @pytest.mark.parametrize(
     ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'block_size', 'scale', 'dtype'),
     [
@@ -296,7 +280,7 @@ def test_parallel_compressive(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    o_naive, lse_naive = naive_nsa_cmp(
+    o_naive, lse_naive = naive_nsa_compression(
         q=q,
         k_cmp=k_cmp,
         v_cmp=v_cmp,
@@ -337,10 +321,6 @@ def test_parallel_compressive(
     )
 
 
-@pytest.mark.skipif(
-    True,
-    reason='Skipping redundant individual tests'
-)
 @pytest.mark.parametrize(
     ('B', 'T', 'Tq', 'H', 'HQ', 'D', 'S', 'block_size', 'scale', 'dtype', 'reuse_lse'),
     [
@@ -378,7 +358,7 @@ def test_parallel_topk_decode(
     if reuse_lse:
         # For positions not attending to any token, the log-sum-exp should be -inf; the kernel returns 0 instead, it is
         # OK as those positions will not be used in the compressive attention anyway.
-        _, lse_full = naive_nsa_cmp(
+        _, lse_full = naive_nsa_compression(
             q=q,
             k_cmp=k_cmp,
             v_cmp=v_cmp,
@@ -533,10 +513,6 @@ def test_parallel_decode(
     assert_close('short vs full', o_short, o_full[:, -Tq:], 0.005)
 
 
-@pytest.mark.skipif(
-    True,
-    reason='Skipping redundant individual tests'
-)
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'S', 'block_size', 'cu_seqlens', 'q_lens', 'dtype'),
     [
@@ -588,7 +564,7 @@ def test_parallel_selective_varlen_decode(
         token_indices_q=seq_indices,
     )
 
-    ref = naive_nsa_sel(
+    ref = naive_nsa_selection(
         q=q,
         k=k,
         v=v,
@@ -621,10 +597,6 @@ def test_parallel_selective_varlen_decode(
     assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
 
 
-@pytest.mark.skipif(
-    True,
-    reason='Skipping redundant individual tests'
-)
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'block_size', 'cu_seqlens', 'q_lens', 'dtype'),
     [
@@ -678,7 +650,7 @@ def test_parallel_compressive_varlen(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    o_naive, lse_naive = naive_nsa_cmp(
+    o_naive, lse_naive = naive_nsa_compression(
         q=q,
         k_cmp=k_cmp,
         v_cmp=v_cmp,
@@ -716,10 +688,6 @@ def test_parallel_compressive_varlen(
     assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
 
 
-@pytest.mark.skipif(
-    True,
-    reason='Skipping redundant individual tests'
-)
 @pytest.mark.parametrize(
     ('H', 'HQ', 'D', 'S', 'block_size', 'scale', 'cu_seqlens', 'q_lens', 'dtype', 'reuse_lse'),
     [
@@ -763,7 +731,7 @@ def test_parallel_topk_varlen(
     if reuse_lse:
         # For positions not attending to any token, the log-sum-exp should be -inf; the kernel returns 0 instead, it is
         # OK as those positions will not be used in the compressive attention anyway.
-        _, lse_full = naive_nsa_cmp(
+        _, lse_full = naive_nsa_compression(
             q=q,
             k_cmp=k_cmp,
             v_cmp=v_cmp,

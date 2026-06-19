@@ -9,9 +9,8 @@ import warnings
 
 import torch
 from einops import repeat
-from torch.nn.attention.flex_attention import and_masks, create_block_mask, flex_attention
 
-from fla.ops.utils import prepare_chunk_offsets, prepare_token_indices
+from fla.ops.utils import prepare_chunk_offsets
 from fla.ops.utils.pooling import mean_pooling
 
 try:
@@ -24,7 +23,7 @@ except ImportError:
     flash_attn_func = None
 
 
-def naive_nsa_sel(
+def naive_nsa_selection(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -99,7 +98,7 @@ def naive_nsa_sel(
             Tk = cu_k[i+1] - cu_k[i]
             q_b, k_b, v_b, i_b = (q[0][cu_q[i]:cu_q[i+1]], k[0][cu_k[i]:cu_k[i+1]],
                                   v[0][cu_k[i]:cu_k[i+1]], block_indices[0][cu_q[i]:cu_q[i+1]])
-        assert Tq == Tk, "TQ != TK case is not supported in naive_nsa_sel"
+        assert Tq == Tk, "TQ != TK case is not supported in naive_nsa_selection"
         i_b = i_b.unsqueeze(-1) * BS + i_b.new_tensor(range(BS))
         # [T, S*BS, HQ]
         i_b = i_b.view(Tq, block_indices.shape[2], -1).transpose(1, 2)
@@ -122,67 +121,120 @@ def naive_nsa_sel(
     return o.to(dtype)
 
 
-def naive_nsa_cmp(q, k_cmp, v_cmp, block_size, scale, cu_seqlens=None):
-    if cu_seqlens is not None:
-        seq_indices = prepare_token_indices(cu_seqlens)
-        kv_cu_seqlens = prepare_chunk_offsets(cu_seqlens, block_size)
-        kv_indices = prepare_token_indices(kv_cu_seqlens)
-        q_b, q_i = seq_indices[:, 0], seq_indices[:, 1]
-        kv_b, kv_i = kv_indices[:, 0], kv_indices[:, 1]
+def naive_nsa_compression(
+    q: torch.Tensor,
+    k_cmp: torch.Tensor,
+    v_cmp: torch.Tensor,
+    block_size: int,
+    scale: float,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""
+    Naive reference for the compressed-attention branch of NSA.
 
-        @torch.compile
-        def varlen_mask(b, h, q_idx, kv_idx):
-            return q_b[q_idx] == kv_b[kv_idx]
+    A query at position `t` attends to compressed block `c` only if the block is fully in the past,
+    i.e. `(c + 1) * block_size - 1 <= t`.
 
-        @torch.compile
-        def shifted_varlen_mask(b, h, q_idx, kv_idx):
-            return q_i[q_idx] >= (kv_i[kv_idx] + 1) * block_size - 1
+    Args:
+        q (torch.Tensor):
+            Queries of shape `[B, TQ, HQ, K]`.
+        k_cmp (torch.Tensor):
+            Compressed keys of shape `[B, TC, H, K]`, where `TC` is the number of compressed blocks.
+        v_cmp (torch.Tensor):
+            Compressed values of shape `[B, TC, H, V]`.
+        block_size (int):
+            Compression block size.
+        scale (float):
+            Scale factor for attention scores.
+        cu_seqlens (torch.LongTensor, Optional):
+            Cumulative sequence lengths of shape `[N+1]` for variable-length inputs. Default: `None`.
 
-        cmp_mask = and_masks(varlen_mask, shifted_varlen_mask)
+    Returns:
+        o (torch.Tensor):
+            Compressed-attention outputs of shape `[B, TQ, HQ, V]`.
+        lse (torch.Tensor):
+            Log-sum-exp of attention scores of shape `[B, TQ, HQ]`, `-inf` where no block is visible yet.
+    """
+    dtype = q.dtype
+    H = k_cmp.shape[2]
+    G = q.shape[2] // H
+    q, k_cmp, v_cmp = (x.float() for x in (q, k_cmp, v_cmp))
+    k_cmp, v_cmp = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k_cmp, v_cmp))
+
+    def attend(q_b, k_b, v_b):
+        # q_b: [TQ, HQ, K], k_b/v_b: [TC, HQ, *]
+        TQ, TC = q_b.shape[0], k_b.shape[0]
+        attn = torch.einsum('t h d, c h d -> t h c', q_b, k_b) * scale
+        i_t = torch.arange(TQ, device=q_b.device)[:, None]
+        i_c = torch.arange(TC, device=q_b.device)[None, :]
+        allow = ((i_c + 1) * block_size - 1) <= i_t
+        attn = attn.masked_fill(~allow[:, None, :], float('-inf'))
+        lse_b = torch.logsumexp(attn, dim=-1)
+        # queries with no visible block softmax to nan -> 0
+        attn = torch.nan_to_num(torch.softmax(attn, dim=-1), nan=0.0)
+        o_b = torch.einsum('t h c, c h v -> t h v', attn, v_b)
+        return o_b, lse_b
+
+    if cu_seqlens is None:
+        o, lse = zip(*(attend(q[i], k_cmp[i], v_cmp[i]) for i in range(q.shape[0])))
+        o, lse = torch.stack(o, 0), torch.stack(lse, 0)
     else:
-        @torch.compile
-        def cmp_mask(b, h, q_idx, kv_idx):
-            return q_idx >= (kv_idx + 1) * block_size - 1
-    B, H, TQ, TKV = q.shape[0], k_cmp.shape[1], q.shape[1], k_cmp.shape[1]
-    block_mask = create_block_mask(cmp_mask, B, H, TQ, TKV)
-
-    o_cmp, lse_cmp = flex_attention(
-        q.transpose(1, 2),
-        k_cmp.transpose(1, 2),
-        v_cmp.transpose(1, 2),
-        block_mask=block_mask,
-        enable_gqa=True,
-        return_lse=True,
-        scale=scale,
-    )
-    return o_cmp.transpose(1, 2), lse_cmp.transpose(1, 2)
+        cu_q, cu_k = cu_seqlens, prepare_chunk_offsets(cu_seqlens, block_size)
+        o, lse = zip(*(
+            attend(q[0, cu_q[i]:cu_q[i + 1]], k_cmp[0, cu_k[i]:cu_k[i + 1]], v_cmp[0, cu_k[i]:cu_k[i + 1]])
+            for i in range(len(cu_q) - 1)
+        ))
+        o, lse = torch.cat(o, 0).unsqueeze(0), torch.cat(lse, 0).unsqueeze(0)
+    return o.to(dtype), lse
 
 
 def naive_nsa_topk(
-    q: torch.Tensor,               # [B, T_q, Hq, D]
-    k_cmp: torch.Tensor,           # [B, T_C, Hkv, D]  (T_C = #compressed blocks)
-    block_counts: int | torch.Tensor,  # int or [B, T_q, Hkv]
+    q: torch.Tensor,
+    k_cmp: torch.Tensor,
+    block_counts: int | torch.Tensor,
     block_size: int,
     scale: float,
     cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None,
-) -> torch.Tensor:
-    B, Tq, Hq, _ = q.shape
-    Hkv = k_cmp.shape[2]
-    G = Hq // Hkv
+) -> torch.LongTensor:
+    r"""
+    Naive reference for NSA top-k block selection.
+
+    For each query, blocks are ranked by their attention probability averaged over the query group,
+    and the top `block_counts` blocks are kept. The first block and the current/previous blocks are
+    always selected; causally-invisible or surplus slots are padded with `-1`.
+
+    Args:
+        q (torch.Tensor):
+            Queries of shape `[B, TQ, HQ, K]`.
+        k_cmp (torch.Tensor):
+            Compressed keys of shape `[B, TC, H, K]`, where `TC` is the number of compressed blocks.
+        block_counts (int or torch.Tensor):
+            Number of blocks to select per query. Either an int, or a tensor of shape `[B, TQ, H]`.
+        block_size (int):
+            Compression block size.
+        scale (float):
+            Scale factor for attention scores.
+        cu_seqlens (torch.LongTensor, tuple or None, Optional):
+            Cumulative sequence lengths of shape `[N+1]` for variable-length inputs.
+            A tuple holds `(cu_seqlens_q, cu_seqlens_k)`. Default: `None`.
+
+    Returns:
+        block_indices (torch.LongTensor):
+            Selected block indices of shape `[B, TQ, H, S]`, padded with `-1`.
+    """
+    B, TQ, HQ, _ = q.shape
+    H = k_cmp.shape[2]
+    G = HQ // H
     k_cmp = repeat(k_cmp, 'b t h d -> b t (h g) d', g=G)
 
     device = q.device
     varlen = True
     if cu_seqlens is None:
         varlen = False
-        Tq = q.shape[1]
-        Tc = k_cmp.shape[1]
-        cu_q = torch.cat([
-            torch.arange(0, B * Tq, Tq), torch.tensor([B * Tq])
-        ])
-        cu_k = torch.cat([
-            torch.arange(0, B * Tc, Tc), torch.tensor([B * Tc])
-        ])
+        TQ = q.shape[1]
+        TC = k_cmp.shape[1]
+        cu_q = torch.cat([torch.arange(0, B * TQ, TQ), torch.tensor([B * TQ])])
+        cu_k = torch.cat([torch.arange(0, B * TC, TC), torch.tensor([B * TC])])
     else:
         assert B == 1
         if isinstance(cu_seqlens, tuple):
@@ -196,66 +248,59 @@ def naive_nsa_topk(
         assert S >= 0, "block_counts (int) must be >= 0"
     elif torch.is_tensor(block_counts):
         S = int(block_counts.max().item())
-    result = torch.full((B, Tq, Hkv, S), -1, device=device, dtype=torch.long)
+    block_indices = torch.full((B, TQ, H, S), -1, device=device, dtype=torch.long)
 
     for i in range(len(cu_q) - 1):
         if not varlen:
             q_b, k_b = q[i], k_cmp[i]
         else:
-            Tq = (cu_q[i+1] - cu_q[i]).item()
-            Tc = (cu_k[i+1] - cu_k[i]).item()
+            TQ = (cu_q[i+1] - cu_q[i]).item()
+            TC = (cu_k[i+1] - cu_k[i]).item()
             q_b, k_b = q[0][cu_q[i]:cu_q[i+1]], k_cmp[0][cu_k[i]:cu_k[i+1]]
 
-        logits = torch.einsum('t h d, s h d -> t h s', q_b, k_b) * scale  # [Tq, Hq, Tc]
-        logits = logits.reshape(Tq, Hkv, G, Tc)
-        t = torch.arange(Tq, device=device).unsqueeze(1)
-        s = torch.arange(Tc, device=device).unsqueeze(0)
-        block_last_pos = (s + 1) * block_size - 1
-        base_allow = (block_last_pos <= t)  # [Tq,Tc]
+        # [TQ, H, G, TC]
+        attn = torch.einsum('t h d, c h d -> t h c', q_b, k_b).reshape(TQ, H, G, TC) * scale
+        i_t = torch.arange(TQ, device=device).unsqueeze(1)
+        i_c = torch.arange(TC, device=device).unsqueeze(0)
+        # block c is causally visible once its last token (c + 1) * block_size - 1 is in the past
+        allow_causal = ((i_c + 1) * block_size - 1) <= i_t  # [TQ, TC]
+        # the first block and the query's own/previous block are always selected
+        i_blk = i_t // block_size
+        forced = (i_c == i_blk) | (i_c == 0) | (i_c == i_blk - 1)  # [TQ, TC]
+        attn = attn.masked_fill(~allow_causal[:, None, None, :], float('-inf'))
+        allow = allow_causal | forced
 
-        i_qb = (t // block_size)                                                 # [Tq,1]
-        is_current_block = (s == i_qb) | (s == 0) | (s == i_qb - 1)              # [Tq,Tc]
-        logits = logits.masked_fill(~base_allow[:, None, None, :], float("-inf"))
-        allow = base_allow | is_current_block  # [Tq,Tc]
-
-        probs_q = torch.softmax(logits, dim=-1)  # [Tq, Hkv, G, Tc]
-        probs_q = torch.nan_to_num(probs_q, nan=0.0)  # rows with no valid blocks -> 0
-        scores = probs_q.mean(dim=2)  # [Tq, Hkv, Tc]
-        scores = torch.where(is_current_block[:, None, :], 1.0, scores)
+        probs = torch.nan_to_num(torch.softmax(attn, dim=-1), nan=0.0)  # [TQ, H, G, TC]
+        scores = probs.mean(dim=2)  # [TQ, H, TC]
+        scores = torch.where(forced[:, None, :], 1.0, scores)
 
         if isinstance(block_counts, int):
-            desired_k = torch.full((Tq, Hkv), S, dtype=torch.long, device=device)
+            n_sel = torch.full((TQ, H), S, dtype=torch.long, device=device)
         elif torch.is_tensor(block_counts):
             if varlen:
-                assert block_counts.shape == (1, Tq, Hkv)
-                desired_k = block_counts[0].to(device=device, dtype=torch.long)
+                assert block_counts.shape == (1, TQ, H)
+                n_sel = block_counts[0].to(device=device, dtype=torch.long)
             else:
-                assert block_counts.shape == (B, Tq, Hkv)
-                desired_k = block_counts[i].to(device=device, dtype=torch.long)
+                assert block_counts.shape == (B, TQ, H)
+                n_sel = block_counts[i].to(device=device, dtype=torch.long)
         else:
             raise TypeError("block_counts must be int or torch.Tensor")
 
-        _, topi = torch.topk(scores, k=min(S, Tc), dim=-1)                             # [Tq,Hkv,S]
+        _, i_top = torch.topk(scores, k=min(S, TC), dim=-1)  # [TQ, H, min(S, TC)]
 
-        # Validate selections against allow mask; pad with -1 where invalid or beyond quota
-        allow_kv = allow[:, None, :].expand(Tq, Hkv, Tc)                      # [Tq,Hkv,Tc]
-        sel_allowed = torch.gather(allow_kv.long(), dim=-1, index=topi).bool()    # [Tq,Hkv,S]
+        # keep a selected block only if it is allowed and within the per-query quota, else pad with -1
+        top_allowed = torch.gather(allow[:, None, :].expand(TQ, H, TC).long(), dim=-1, index=i_top).bool()
+        i_s = torch.arange(S, device=device).view(1, 1, S)
+        in_quota = (i_s < n_sel.unsqueeze(-1))[:, :, :TC]
+        sel = torch.where(top_allowed & in_quota, i_top, torch.full_like(i_top, -1))
 
-        idx = torch.arange(S, device=device).view(1, 1, S)
-        within_quota = (idx < desired_k.unsqueeze(-1))[:, :, :Tc]                              # [Tq,Hkv,S]
-
-        keep = sel_allowed & within_quota
-        out = torch.full_like(topi, fill_value=-1)                                # pad with -1
-        out = torch.where(keep, topi, out)
-
-        if S > Tc:
-            out = torch.cat((out, torch.full((Tq, Hkv, S - Tc), -1,
-                                             device=device, dtype=topi.dtype)), dim=-1)
+        if S > TC:
+            sel = torch.cat((sel, torch.full((TQ, H, S - TC), -1, device=device, dtype=i_top.dtype)), dim=-1)
         if varlen:
-            result[0, cu_q[i]:cu_q[i+1]] = out
+            block_indices[0, cu_q[i]:cu_q[i+1]] = sel
         else:
-            result[i] = out
-    return result
+            block_indices[i] = sel
+    return block_indices
 
 
 def naive_nsa(
@@ -274,44 +319,43 @@ def naive_nsa(
     return_block_indices: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.LongTensor]:
     r"""
+    Naive reference for NSA, combining the compressed, selected, and sliding-window branches.
+
     Args:
         q (torch.Tensor):
-            queries of shape `[B, TQ, HQ, K]`.
+            Queries of shape `[B, TQ, HQ, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]`.
+            Keys of shape `[B, T, H, K]`.
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]`.
-        g_cmp (torch.Tensor):
-            Gate score for compressed attention of shape `[B, TQ, HQ]`.
-        g_slc (torch.Tensor):
-            Gate score for selected attention of shape `[B, TQ, HQ]`.
-        g_swa (torch.Tensor):
-            Gate score for sliding attentionof shape `[B, TQ, HQ]`.
-        block_indices (torch.LongTensor):
-            Block indices of shape `[B, TQ, H, S]`.
-            `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
-            If `g_cmp` is provided, the passed `block_indices` will be ignored.
-        block_counts (Optional[Union[torch.LongTensor, int]]):
-            Number of selected blocks for each query.
-            If a tensor is provided, with shape `[B, TQ, H]`,
-            each query can select the same number of blocks.
-            If not provided, it will default to 16.
-        block_size (int):
+            Values of shape `[B, T, H, V]`.
+        g_cmp (torch.Tensor, Optional):
+            Gate score for compressed attention of shape `[B, TQ, HQ]`. Default: `None`.
+        g_slc (torch.Tensor, Optional):
+            Gate score for selected attention of shape `[B, TQ, HQ]`. Default: `None`.
+        g_swa (torch.Tensor, Optional):
+            Gate score for sliding-window attention of shape `[B, TQ, HQ]`. Default: `None`.
+        block_indices (torch.LongTensor, Optional):
+            Block indices of shape `[B, TQ, H, S]`, where `S` is the number of selected blocks per query.
+            Ignored and recomputed from compression when `g_cmp` is provided. Default: `None`.
+        block_counts (torch.LongTensor or int, Optional):
+            Number of selected blocks per query. A tensor of shape `[B, TQ, H]`, or an int. Default: 16.
+        block_size (int, Optional):
             Selected block size. Default: 64.
-        window_size (int):
+        window_size (int, Optional):
             Sliding window size. Default: 0.
-        scale (Optional[float]):
-            Scale factor for attention scores.
-            If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
-        cu_seqlens (torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor] or None):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
-            When a tuple is provided, it should contain two tensors: `(cu_seqlens_q, cu_seqlens_k)`.
+        scale (float, Optional):
+            Scale factor for attention scores. If `None`, defaults to `1 / sqrt(K)`. Default: `None`.
+        cu_seqlens (torch.LongTensor, tuple or None, Optional):
+            Cumulative sequence lengths of shape `[N+1]` for variable-length inputs, consistent with the
+            FlashAttention API. A tuple holds `(cu_seqlens_q, cu_seqlens_k)`. Default: `None`.
+        return_block_indices (bool, Optional):
+            Whether to also return the selected block indices. Default: `False`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, HQ, V]`.
+            Outputs of shape `[B, TQ, HQ, V]`. When `return_block_indices=True`, also returns the
+            selected block indices of shape `[B, TQ, H, S]`.
     """
     assert block_counts is not None, "block counts must be provided for selection"
     if scale is None:
@@ -329,9 +373,9 @@ def naive_nsa(
         cu_seqlens_q = cu_seqlens_k = None
 
     k_cmp, v_cmp = mean_pooling(k, block_size, cu_seqlens), mean_pooling(v, block_size, cu_seqlens)
-    o_cmp, lse_cmp = None, None
+    o_cmp = None
     if g_cmp is not None:
-        o_cmp, lse_cmp = naive_nsa_cmp(
+        o_cmp, _ = naive_nsa_compression(
             q=q,
             k_cmp=k_cmp,
             v_cmp=v_cmp,
@@ -349,7 +393,7 @@ def naive_nsa(
             scale=scale,
             cu_seqlens=cu_seqlens
         )
-    o = o_slc = naive_nsa_sel(q, k, v, block_indices, block_size, scale, cu_seqlens)
+    o = o_slc = naive_nsa_selection(q, k, v, block_indices, block_size, scale, cu_seqlens)
     if g_slc is not None:
         o = o_slc * g_slc.unsqueeze(-1)
     if o_cmp is not None:
