@@ -13,8 +13,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          pattern='^[[][A-Za-z][A-Za-z0-9]*[]][[:space:]]+.+'
-          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+          if ! grep -qE '^\[[A-Za-z][A-Za-z0-9]*\][[:space:]].+' <<<"$PR_TITLE"; then
             echo "PR title must start with a bracketed tag, for example:"
             echo "  [Fix] Guard checkpoint weight re-initialization"
             echo "  [Docs] Add agent workflow skills"
@@ -22,10 +21,6 @@ jobs:
             echo
             echo "Common tags (any [Tag] is accepted):"
             echo "  [Fix], [Misc], [Docs], [CI], [Test], [Perf], [Refactor], [Ops], [Model], [Layer], [Attn], [GDN], [KDA], [CP], [Conv], [CE], [chore]"
-            echo
-            echo "Actual title: $PR_TITLE"
-            exit 1
-          fi
             echo
             echo "Actual title: $PR_TITLE"
             exit 1
