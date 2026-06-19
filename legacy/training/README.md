@@ -7,14 +7,14 @@
 > [!IMPORTANT]
 > The `flame` project has been migrated to a new project built on torchtitan.  
 > Please visit the [new repository](https://github.com/fla-org/flame) for details and updates.
-> 
+>
 > The code here is now **archived as legacy**, and no future updates will be synchronized here.
 
 A minimal framework for training FLA models, whether from scratch or through finetuning.
 
 Built on the robust infrastructure of 🤗, `flame` enables you to train large language models with just a few lines of code:
 we use `datasets` for data processing, `transformers` for model definitions, and `accelerate`[^1] for seamless distributed training.
- 
+
 In this README, we will guide you through the process of using `flame` to train GLA models.
 
 ## Setup
@@ -25,7 +25,7 @@ Clone the `fla` repository and install the necessary packages as follows:
 
 ```bash
 git clone https://github.com/sustcsonglin/flash-linear-attention.git
-pip install . 
+pip install .
 pip install accelerate
 ```
 
@@ -35,8 +35,8 @@ pip install accelerate
 
 ## Preprocessing
 
-Before training, you need to download and pre-tokenize your dataset. 
-We provide a straightforward script for this. 
+Before training, you need to download and pre-tokenize your dataset.
+We provide a straightforward script for this.
 For instance, to tokenize a 10B sample of the `fineweb-edu` dataset, run:
 
 ```bash
@@ -103,15 +103,15 @@ Other scheduler types like WSD (`warmup_stable_decay`)[^2] are also supported.
 
 The total number of tokens processed per batch, referred to as `global_batch_size`, is calculated as
 `batch_size × gradient_accumulation_steps × context_length × num_gpus_per_node × num_nodes`.
-For instance, in the 340M model example, the `global_batch_size` calculates to $32 \times 1 \times 2048 \times 8 \times 1 = 524,288$ (0.5M tokens). 
+For instance, in the 340M model example, the `global_batch_size` calculates to $32 \times 1 \times 2048 \times 8 \times 1 = 524,288$ (0.5M tokens).
 
 The `warmup_steps` parameter indicates the number of steps for the learning rate warmup phase, while `max_steps` represents the maximum number of training steps.
-Each step processes `global_batch_size` tokens. 
+Each step processes `global_batch_size` tokens.
 Consequently, `512` and `20480` correspond to processing 0.5B and 10B tokens, respectively.
 
 :warning: Monitor the value of `global_batch_size`, `warmup_steps`, and `max_steps` carefully when modifying any of the hyperparameters!!
 
-`flame` also supports resuming interrupted training by specifying the checkpoint path. 
+`flame` also supports resuming interrupted training by specifying the checkpoint path.
 Simply use the following command:
 
 ```bash
@@ -141,7 +141,7 @@ You can also use `wandb` to monitor your training process effectively.
 ## Continual Pretraining
 
 `flame` supports continual training from a pretrained checkpoint.
-Below, we provide an example of how to finetune Mistral-7B to GLA. 
+Below, we provide an example of how to finetune Mistral-7B to GLA.
 You can follow similar steps to reproduce the results in the [GSA paper](https://arxiv.org/abs/2409.07146):
 
 1. Initialize a brand-new GLA-7B model from the config and copy the mathced pretrained weights from Mistral-7B:
@@ -171,7 +171,7 @@ bash train.sh \
   cache=data/SlimPajama-627B/train
 ```
 
-Please be aware that finetuning on a single node may not be the most efficient approach. 
+Please be aware that finetuning on a single node may not be the most efficient approach.
 If available, consider leveraging multi-node GPUs for optimal performance.
 You can find guidance on how to launch a multi-node job in the [accelerate tutorial](https://github.com/huggingface/accelerate/blob/main/examples/slurm/submit_multinode.sh).
 

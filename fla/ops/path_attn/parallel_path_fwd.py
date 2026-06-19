@@ -1,26 +1,49 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils import prepare_chunk_indices
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None,
     'USE_GATE': lambda args: args['g_cumsum'] is not None,
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def parallel_path_fwd_kernel(
-    q, k, v, o, o_new, g_cumsum, w1, w2, scale, L, L_new, M,
-    offsets, indices, chunk_offsets,
+    q,
+    k,
+    v,
+    o,
+    o_new,
+    g_cumsum,
+    w1,
+    w2,
+    scale,
+    L,
+    L_new,
+    M,
+    cu_seqlens,
+    indices,
     T,
-    G: tl.constexpr, HQ: tl.constexpr, H: tl.constexpr,
-    K: tl.constexpr, V: tl.constexpr,
-    BT: tl.constexpr, BS: tl.constexpr,
+    G: tl.constexpr,
+    HQ: tl.constexpr,
+    H: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BT: tl.constexpr,
+    BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    USE_GATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_GATE: tl.constexpr
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -28,7 +51,7 @@ def parallel_path_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(indices + i_t * 2).to(tl.int32), tl.load(indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(offsets + i_n).to(tl.int32), tl.load(offsets + i_n + 1).to(tl.int32)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
     else:
         i_n = i_b
@@ -76,7 +99,7 @@ def parallel_path_fwd_kernel(
             b_s = b_s + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
         b_s = tl.where(m_s[:, None], b_s * sm_scale, float("-inf"))
         b_m_new = tl.maximum(b_m, tl.max(b_s, 1))
-        alpha = tl.math.exp2((b_m - b_m_new))
+        alpha = tl.math.exp2(b_m - b_m_new)
         b_s = tl.math.exp2(b_s - b_m_new[:, None])
         b_o *= alpha[:, None]
         b_l = b_l * alpha + tl.sum(b_s, 1)
@@ -107,7 +130,7 @@ def parallel_path_fwd_kernel(
             b_s = b_s + b_g_cumsum_q[:, None] - b_g_cumsum_k[None, :]
         b_s = b_s * sm_scale
         b_m_new = tl.maximum(b_m, tl.max(b_s, 1))
-        alpha = tl.math.exp2((b_m - b_m_new))
+        alpha = tl.math.exp2(b_m - b_m_new)
         b_s = tl.math.exp2(b_s - b_m_new[:, None])
         b_o *= alpha[:, None]
         b_l = b_l * alpha + tl.sum(b_s, 1)
@@ -125,16 +148,29 @@ def parallel_path_fwd_kernel(
 
 
 def parallel_path_fwd_fn(
-    q, k, v, o, g_cumsum, w1, w2, scale, L, M,
-    cu_seqlens, BT, BS,
+    q,
+    k,
+    v,
+    o,
+    g_cumsum,
+    w1,
+    w2,
+    scale,
+    L,
+    M,
+    cu_seqlens,
+    BT,
+    BS,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K = q.shape
     V = v.shape[-1]
     H = k.shape[-2]
     G = HQ // H
-    indices_BT = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS) if cu_seqlens is not None else None
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices_BT)
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
     grid = (NT, B * HQ)
     o_new = torch.empty_like(o, dtype=v.dtype)
     L_new = torch.empty_like(L)
@@ -149,9 +185,8 @@ def parallel_path_fwd_fn(
         w2=w2,
         g_cumsum=g_cumsum,
         scale=scale,
-        chunk_offsets=chunk_offsets,
-        offsets=cu_seqlens,
-        indices=indices_BT,
+        cu_seqlens=cu_seqlens,
+        indices=indices,
         L=L,
         L_new=L_new,
         M=M,
@@ -165,6 +200,6 @@ def parallel_path_fwd_fn(
         H=H,
         BS=BS,
         BT=BT,
-        num_warps=8 if (BT == 128 and K == 128) else 4
+        num_warps=8 if (BT == 128 and K == 128) else 4,
     )
     return o_new, L_new

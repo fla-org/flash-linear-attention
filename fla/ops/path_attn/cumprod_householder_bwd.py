@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -78,7 +85,6 @@ def chunk_cumprod_householder_bwd_kernel(
         b_hc = tl.load(p_hc, boundary_check=(0, 1))
 
         b_dk_new = b_dk - tl.dot(b_dk.to(b_hc.dtype), b_hc)
-        p_dk_new = tl.make_block_ptr(dk_new, (T, K), (HQ*K, 1), (i_s*S + i_t_small*BT, 0), (BT, BK), (1, 0))
         tl.store(p_dk_new, b_dk_new.to(dk_new.dtype.element_ty), boundary_check=(0, 1))
 
         b_dh = b_dhc - tl.dot(tl.trans(b_hc), b_dhc.to(b_hc.dtype))
@@ -105,12 +111,15 @@ def chunk_cumprod_householder_bwd_fn(
     S: int,  # split size, aka large chunk size
     BT: int,  # small chunk size
     cu_seqlens: torch.Tensor = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K = dk.shape
     H = k.shape[2]
     G = HQ // H
 
-    split_indices = prepare_chunk_indices(cu_seqlens, S) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, S)
+    split_indices = chunk_indices
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
 
@@ -135,6 +144,6 @@ def chunk_cumprod_householder_bwd_fn(
         T=T, S=S,
         # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
         num_warps=8 if K == 128 else 4,
-        num_stages=2 if check_shared_mem('ampere') else 1
+        num_stages=2 if check_shared_mem('ampere') else 1,
     )
     return dw1, dw2, dk_new

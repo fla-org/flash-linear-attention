@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # scripts for converting pretrained hf model weights to fla style
 
@@ -16,7 +21,7 @@ from fla.models.rwkv7 import RWKV7Config
 def convert(
     rwkv7: str,
     output: str,
-    precision: str = 'float32'
+    precision: str = 'float32',
 ):
     weights = torch.load(rwkv7, weights_only=True, map_location='cpu')
     config = RWKV7Config()
@@ -59,7 +64,7 @@ def convert(
     unused_names = ['blocks.0.att.v0', 'blocks.0.att.v1', 'blocks.0.att.v2']
     # these parameters may or may not be present in pth file:
     possible_absent_weights = [
-        'model.layers.0.pre_norm.weight', 'model.layers.0.pre_norm.bias'
+        'model.layers.0.pre_norm.weight', 'model.layers.0.pre_norm.bias',
     ]
     # other parameters may raise a KeyError
 
@@ -69,7 +74,7 @@ def convert(
             'emb.weight': 'model.embeddings.weight',
             'ln_out.weight': 'model.norm.weight',
             'ln_out.bias': 'model.norm.bias',
-            'head.weight': 'lm_head.weight'
+            'head.weight': 'lm_head.weight',
         }
         proj = {
             'receptance': 'r_proj',
@@ -91,7 +96,7 @@ def convert(
             'ffn': 'ffn',
             'ln0': 'pre_norm',
             'ln1': 'attn_norm',
-            'ln2': 'ffn_norm'
+            'ln2': 'ffn_norm',
         }[name_compo[2]]
         if re.match("[wvag][012]", name_compo[3]):
             typ, num = name_compo[3]

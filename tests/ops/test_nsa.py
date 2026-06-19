@@ -1,8 +1,12 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
 import warnings
-from typing import List
 
 import pytest
 
@@ -54,9 +58,9 @@ def build_partial_varlen(x, cu_seqlens, q_lens):
             (3, 111, 1, 32, 100, 16, 32, 1.0, torch.float16),
             (3, 1024, 2, 32, 60, 16, 32, 0.1, torch.float16),
             (3, 1024, 2, 32, 128, 16, 32, 0.1, torch.float16),
-            (4, 2048, 2, 32, 64, 16, 32, 0.1, torch.float16)
+            (4, 2048, 2, 32, 64, 16, 32, 0.1, torch.float16),
         ]
-    ]
+    ],
 )
 def test_parallel(
         B: int,
@@ -110,20 +114,20 @@ def test_parallel(
             (2, 32, 64, 16, 32, [0, 256, 500, 1000], torch.float16),
             (2, 32, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_parallel_varlen(
-        H: int,
-        HQ: int,
-        D: int,
-        S: int,
-        block_size: int,
-        cu_seqlens: List[int],
-        dtype: torch.dtype,
+    H: int,
+    HQ: int,
+    D: int,
+    S: int,
+    block_size: int,
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -145,7 +149,7 @@ def test_parallel_varlen(
         v=v,
         block_indices=block_indices,
         block_size=block_size,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -159,7 +163,7 @@ def test_parallel_varlen(
         block_indices=block_indices,
         block_counts=S,
         block_size=block_size,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None

@@ -1,20 +1,22 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use_cuda_graph
+from fla.utils import USE_CUDA_GRAPH, autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -24,7 +26,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard, use
         for num_stages in [2, 3, 4]
     ],
     key=['BK'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_dplr_delta_rule_fwd_kernel(
@@ -112,11 +115,11 @@ def fused_recurrent_dplr_delta_rule_fwd(
     a: torch.Tensor,
     b: torch.Tensor,
     gk: torch.Tensor,
-    scale: Optional[float] = 1.0,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float | None = 1.0,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -163,11 +166,11 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
         a: torch.Tensor,
         b: torch.Tensor,
         gk: torch.Tensor,
-        scale: Optional[float] = None,
-        initial_state: Optional[torch.Tensor] = None,
+        scale: float | None = None,
+        initial_state: torch.Tensor | None = None,
         output_final_state: bool = False,
         reverse: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         o, ht = fused_recurrent_dplr_delta_rule_fwd(
             q=q,
@@ -191,7 +194,7 @@ class FusedRecurrentDPLRDeltaRuleFunction(torch.autograd.Function):
         raise NotImplementedError(
             "Backward pass for fused_recurrent_dplr_delta_rule is not implemented and will not be supported. "
             "This kernel is only for inference. "
-            "For training, please use `chunk_dplr_delta_rule`."
+            "For training, please use `chunk_dplr_delta_rule`.",
         )
 
 
@@ -202,12 +205,12 @@ def fused_recurrent_dplr_delta_rule(
     a: torch.Tensor,
     b: torch.Tensor,
     gk: torch.Tensor,
-    scale: Optional[float] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     reverse: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     This function computes the recurrence S_t = S_t @ (Diag(g_t) + a_t b_t^T) + v_t k_t^T in a recurrent manner.
 
@@ -243,12 +246,12 @@ def fused_recurrent_dplr_delta_rule(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = q.shape[-1] ** -0.5

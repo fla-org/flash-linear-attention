@@ -1,8 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang, Yuqi Pan
-
-import warnings
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import torch.nn.functional as F
@@ -11,7 +12,7 @@ import triton.language as tl
 
 from fla.modules.layernorm import group_norm
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 @triton.heuristics({
@@ -25,7 +26,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8]
     ],
-    key=['BT', 'BK', 'BV']
+    key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_fwd_kernel_h(
@@ -130,6 +132,7 @@ def chunk_ttt_linear_fwd_kernel_h(
         for num_stages in [2, 3]
     ],
     key=['BT'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_fwd_kernel_o(
@@ -222,6 +225,7 @@ def chunk_ttt_linear_fwd_kernel_o(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_h(
@@ -323,6 +327,7 @@ def chunk_ttt_linear_bwd_kernel_h(
         for num_warps in [4]
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_dv_local(
@@ -397,6 +402,7 @@ def chunk_ttt_linear_bwd_kernel_dv_local(
         for num_warps in [2, 4, 8, 16]
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_ttt_linear_bwd_kernel_norm(
@@ -467,8 +473,8 @@ def chunk_ttt_linear_bwd_kernel_norm(
     offs_t = tl.arange(0, BT)
     b_w = tl.load(w + i_h * V + offs_v, mask=offs_v < V, other=0.)
     b_b = tl.load(b + i_h * V + offs_v, mask=offs_v < V, other=0.)
-    b_dw = tl.zeros([BV,], dtype=b_w.dtype)
-    b_db = tl.zeros([BV,], dtype=b_b.dtype)
+    b_dw = tl.zeros([BV], dtype=b_w.dtype)
+    b_db = tl.zeros([BV], dtype=b_b.dtype)
     p_dw = tl.make_block_ptr(dw + i_nh * V, (V,), (1,), (i_v * BV,), (BV,), (0,))
     p_db = tl.make_block_ptr(db + i_nh * V, (V,), (1,), (i_v * BV,), (BV,), (0,))
 
@@ -554,6 +560,7 @@ def chunk_ttt_linear_bwd_kernel_norm(
         for num_stages in [2, 3]
     ],
     key=['BT', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dqke(
@@ -613,7 +620,7 @@ def chunk_bwd_kernel_dqke(
     b_dq = tl.zeros([BT, BK], dtype=tl.float32)
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_ds = tl.zeros([BT, BT], dtype=tl.float32)
-    b_de = tl.zeros([BT,], dtype=tl.float32)
+    b_de = tl.zeros([BT], dtype=tl.float32)
 
     p_k = tl.make_block_ptr(k, (T, K), (stride_qk, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
     b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -674,16 +681,18 @@ def chunk_ttt_linear_fwd_h(
     b: torch.Tensor,
     eta: torch.Tensor,
     eps: float,
-    initial_state: Optional[torch.Tensor] = None,
-    initial_state_bias: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
+    initial_state_bias: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 16,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
@@ -739,16 +748,18 @@ def chunk_ttt_linear_fwd_o(
     eta: torch.Tensor,
     h: torch.Tensor,
     hb: torch.Tensor,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
     if scale is None:
         scale = k.shape[-1] ** -0.5
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = max(triton.next_power_of_2(K), 16)
     BV = max(triton.next_power_of_2(V), 16)
@@ -789,15 +800,17 @@ def chunk_ttt_linear_bwd_h(
     b: torch.Tensor,
     eta: torch.Tensor,
     eps: float,
-    initial_state: Optional[torch.Tensor] = None,
-    initial_state_bias: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    initial_state: torch.Tensor | None = None,
+    initial_state_bias: torch.Tensor | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 16,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
@@ -853,13 +866,15 @@ def chunk_ttt_linear_bwd_dv_local(
     eta: torch.Tensor,
     do: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 16
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V = *k.shape, do.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(max(triton.next_power_of_2(K), 16), 128)
     BV = min(max(triton.next_power_of_2(V), 16), 128)
@@ -900,20 +915,22 @@ def chunk_ttt_linear_bwd_norm(
     h0: torch.Tensor,  # [B, H, D, D]
     hb0: torch.Tensor,  # [B, H, 1, D]
     h: torch.Tensor,  # [B, H, NT, D, D]
-    dht: Optional[torch.Tensor],  # [B, H, D, D]
-    dhbt: Optional[torch.Tensor],  # [B, H, 1, D]
-    dv_new: Optional[torch.Tensor],  # [B, H, L, D]
+    dht: torch.Tensor | None,  # [B, H, D, D]
+    dhbt: torch.Tensor | None,  # [B, H, 1, D]
+    dv_new: torch.Tensor | None,  # [B, H, L, D]
     do: torch.Tensor,  # [B, H, L, D]
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 16
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # torch implementation of `dkh, dw, db, dk, dv` for LN^2
     assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *q.shape, do.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
@@ -988,14 +1005,15 @@ def chunk_ttt_linear_bwd_norm_ref(
     eta: torch.Tensor,  # [B, H, L, 1]
     h0: torch.Tensor,  # [B, H, D, D]
     h: torch.Tensor,  # [B, H, NT, D, D]
-    dht: Optional[torch.Tensor],  # [B, H, D, D]
-    dv_new: Optional[torch.Tensor],  # [B, H, L, D]
+    dht: torch.Tensor | None,  # [B, H, D, D]
+    dv_new: torch.Tensor | None,  # [B, H, L, D]
     do: torch.Tensor,  # [B, H, L, D]
     scale: float,
     eps: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 16
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     # torch implementation of `dkh, dw, db, dk, dv` for LN^2
     assert cu_seqlens is None, "bwd of varlen is not implemented yet."
     B, T, H, K, V = *q.shape, do.shape[-1]
@@ -1006,7 +1024,8 @@ def chunk_ttt_linear_bwd_norm_ref(
     ]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     pad_len = (BT - (T % BT)) % BT
     if pad_len > 0:
@@ -1089,13 +1108,15 @@ def chunk_ttt_linear_bwd_dqke(
     dh: torch.Tensor,
     dhb: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 16,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BK = max(triton.next_power_of_2(K), 16)
@@ -1147,8 +1168,9 @@ def chunk_ttt_linear_fwd(
     initial_state: torch.Tensor,
     initial_state_bias: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 16
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 16,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     BT = chunk_size
     h, hb, v_new, final_state, final_state_bias = chunk_ttt_linear_fwd_h(
@@ -1162,7 +1184,8 @@ def chunk_ttt_linear_fwd(
         initial_state_bias=initial_state_bias,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
+        chunk_indices=chunk_indices,
     )
     o = chunk_ttt_linear_fwd_o(
         q=q,
@@ -1173,7 +1196,8 @@ def chunk_ttt_linear_fwd(
         hb=hb,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
+        chunk_indices=chunk_indices,
     )
     return o, final_state, final_state_bias
 
@@ -1193,7 +1217,8 @@ def chunk_ttt_linear_bwd(
     chunk_size: int = 16,
     initial_state: torch.Tensor = None,
     initial_state_bias: torch.Tensor = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     BT = chunk_size
     h, v_new, x, y, rstd = chunk_ttt_linear_bwd_h(
@@ -1206,7 +1231,8 @@ def chunk_ttt_linear_bwd(
         initial_state=initial_state,
         initial_state_bias=initial_state_bias,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
+        chunk_indices=chunk_indices,
     )
     dv_new = chunk_ttt_linear_bwd_dv_local(
         q=q,
@@ -1215,7 +1241,8 @@ def chunk_ttt_linear_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
+        chunk_indices=chunk_indices,
     )
     dh, dhb, dh0, dhb0, dv, dk, dw, db = chunk_ttt_linear_bwd_norm(
         q=q,
@@ -1237,7 +1264,8 @@ def chunk_ttt_linear_bwd(
         do=do,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
+        chunk_indices=chunk_indices,
     )
     dq, dk2, de = chunk_ttt_linear_bwd_dqke(
         q=q,
@@ -1250,7 +1278,8 @@ def chunk_ttt_linear_bwd(
         dhb=dhb,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
+        chunk_indices=chunk_indices,
     )
     dk.add_(dk2)
     return dq, dk, dv, de, dw, db, dh0, dhb0
@@ -1275,8 +1304,11 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
         initial_state,
         initial_state_bias,
         output_final_state,
-        cu_seqlens
+        cu_seqlens,
+        cu_seqlens_cpu,
     ):
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
         o, final_state, final_state_bias = chunk_ttt_linear_fwd(
             q=q,
             k=k,
@@ -1291,8 +1323,9 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
             initial_state_bias=initial_state_bias,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
-        ctx.save_for_backward(q, k, v, eta, w, b, initial_state, initial_state_bias)
+        ctx.save_for_backward(q, k, v, eta, w, b, initial_state, initial_state_bias, chunk_indices)
         ctx.chunk_size = chunk_size
         ctx.scale = scale
         ctx.eps = eps
@@ -1303,7 +1336,7 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dht, dhbt):
-        q, k, v, eta, w, b, initial_state, initial_state_bias = ctx.saved_tensors
+        q, k, v, eta, w, b, initial_state, initial_state_bias, chunk_indices = ctx.saved_tensors
         dq, dk, dv, de, dw, db, dh0, dhb0 = chunk_ttt_linear_bwd(
             q=q,
             k=k,
@@ -1320,8 +1353,12 @@ class ChunkTTTLinearFunction(torch.autograd.Function):
             initial_state=initial_state,
             initial_state_bias=initial_state_bias,
             cu_seqlens=ctx.cu_seqlens,
+            chunk_indices=chunk_indices,
         )
-        return dq.to(q), dk.to(k), dv.to(v), dw.to(w), db.to(b), None, de.to(eta), None, None, dh0, dhb0, None, None, None
+        return (
+            dq.to(q), dk.to(k), dv.to(v), dw.to(w), db.to(b),
+            None, de.to(eta), None, None, dh0, dhb0, None, None, None,
+        )
 
 
 def norm_residual(x, weight, bias, eps):
@@ -1344,79 +1381,73 @@ def chunk_ttt_linear(
     w: torch.Tensor,
     b: torch.Tensor,
     eta: torch.Tensor,
-    scale: float = None,
+    scale: float | None = None,
     eps: float = 1e-6,
     chunk_size: int = 16,
-    initial_state: torch.Tensor = None,
-    initial_state_bias: torch.Tensor = None,
+    initial_state: torch.Tensor | None = None,
+    initial_state_bias: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    **kwargs,
 ):
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `(B, H, T, K)`
+            queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `(B, H, T, K)`
+            keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `(B, H, T, V)`
+            values of shape `[B, T, H, V]`.
         w (torch.Tensor):
-            layer norm weight of shape `(H, V)`
+            layer norm weight of shape `[H, V]`.
         b (torch.Tensor):
-            layer norm bias of shape `(H, V)`
+            layer norm bias of shape `[H, V]`.
         eta (torch.Tensor):
-            Learning rate for hidden state, of shape `(B, H, T, 1)`.
+            Learning rate for hidden state, of shape `[B, T, H, 1]`.
         scale (Optional[float]):
-            Scale factor for the RetNet attention scores.
+            Scale factor for the attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
         chunk_size (int):
-            chunk size. Default: `16`.
+            Chunk size. Default: `16`.
         initial_state (Optional[torch.Tensor]):
-            Initial state of shape `(B, H, K, V)`. Default: `None`.
+            Initial state of shape `[N, H, K, V]`. Default: `None`.
         initial_state_bias (Optional[torch.Tensor]):
-            Initial state bias of shape `(B, H, 1, V)`. Default: `None`.
+            Initial state bias of shape `[N, H, 1, V]`. Default: `None`.
         output_final_state (Optional[bool]):
-            Whether to output the final state of shape `(B, H, K, V)`. Default: `False`.
+            Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
+        cu_seqlens_cpu (torch.LongTensor):
+            CPU copy of `cu_seqlens` to avoid unnecessary device synchronization. Default: `None`.
 
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, H, T, V]`
+            Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[B, H, K, V]` if `output_final_state=True` else `None`
+            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+        final_state_bias (torch.Tensor):
+            Final state bias of shape `[N, H, 1, V]` if `output_final_state=True` else `None`.
     """
     assert q.dtype == k.dtype == v.dtype
     assert k.shape[-1] == v.shape[-1], "DK must equal to DV."
     if isinstance(eta, float):
         eta = torch.full_like(q[:, :, :, :1], eta)
-    if head_first:
+    if 'head_first' in kwargs:
         raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
-                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -1436,6 +1467,7 @@ def chunk_ttt_linear(
         initial_state_bias,
         output_final_state,
         cu_seqlens,
+        cu_seqlens_cpu,
     )
     o = norm_residual(o, w, b, eps)
     return o, final_state, final_state_bias

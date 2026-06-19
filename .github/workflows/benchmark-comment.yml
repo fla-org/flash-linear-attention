@@ -1,0 +1,183 @@
+name: Post benchmark comment
+
+# Runs in the base repo context after a benchmark workflow completes.
+# Needed because pull_request runs from forks have a read-only GITHUB_TOKEN
+# and cannot post comments directly. workflow_run runs with a write token
+# and does NOT execute PR code, so it is safe to grant pull-requests: write.
+
+on:
+  workflow_run:
+    workflows:
+      - nvidia-h100-ci
+      - nvidia-a100-ci
+      - nvidia-4090-ci
+    types:
+      - completed
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download benchmark artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pattern: benchmark-results-*
+          path: artifacts
+
+      - name: Post / update PR comments
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const artifactsDir = 'artifacts';
+            if (!fs.existsSync(artifactsDir)) {
+              console.log('No artifacts downloaded, nothing to comment on.');
+              return;
+            }
+
+            const subdirs = fs.readdirSync(artifactsDir, { withFileTypes: true })
+              .filter(d => d.isDirectory())
+              .map(d => d.name);
+
+            if (subdirs.length === 0) {
+              console.log('No artifact directories found.');
+              return;
+            }
+
+            for (const subdir of subdirs) {
+              const dir = path.join(artifactsDir, subdir);
+              const resultsPath = path.join(dir, 'benchmark_results.json');
+              const metaPath = path.join(dir, 'benchmark_meta.json');
+
+              if (!fs.existsSync(metaPath)) {
+                console.log(`Skipping ${subdir}: no benchmark_meta.json`);
+                continue;
+              }
+
+              const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+              const prNumber = meta.pr_number;
+              const runnerName = meta.runner;
+              const threshold = meta.threshold;
+
+              if (!prNumber) {
+                console.log(`Skipping ${subdir}: missing pr_number in metadata`);
+                continue;
+              }
+
+              if (!fs.existsSync(resultsPath)) {
+                console.log(`Skipping ${subdir}: no benchmark_results.json (benchmark may have failed)`);
+                continue;
+              }
+
+              const data = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+              const {
+                base_sha,
+                head_sha,
+                machine_info,
+                base_results,
+                head_results,
+                regressions,
+                has_regression,
+              } = data;
+
+              const gpuName = machine_info?.gpu_name || 'Unknown';
+              const cudaVersion = machine_info?.cuda_version || 'Unknown';
+              const pytorchVersion = machine_info?.pytorch_version || 'Unknown';
+
+              const makeKey = (r) => `${r.op}|${r.mode}|${r.B}|${r.T}|${r.H}|${r.D}`;
+              const baseMap = {};
+              for (const r of (base_results || [])) baseMap[makeKey(r)] = r;
+              const headMap = {};
+              for (const r of (head_results || [])) headMap[makeKey(r)] = r;
+
+              const allKeys = [...new Set([...Object.keys(baseMap), ...Object.keys(headMap)])];
+              allKeys.sort((a, b) => {
+                const [, aMode] = a.split('|');
+                const [, bMode] = b.split('|');
+                if (aMode !== bMode) return aMode === 'fwd' ? -1 : 1;
+                return a.localeCompare(b);
+              });
+
+              let table = '| Op | Mode | B | T | H | D | Base (ms) | Head (ms) | Speedup | Change |\n';
+              table += '|:---|:---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
+
+              for (const key of allKeys) {
+                const b = baseMap[key];
+                const h = headMap[key];
+                const [op, mode, B, T, H, D] = key.split('|');
+
+                if (b && h) {
+                  const changePct = (h.median_ms - b.median_ms) / b.median_ms * 100;
+                  const speedup = b.median_ms / h.median_ms;
+                  const sign = changePct > 0 ? '+' : '';
+                  let marker = '';
+                  if (changePct > threshold) marker = ' 🔴';
+                  else if (changePct < -threshold) marker = ' 🟢';
+                  table += `| ${op} | ${mode} | ${B} | ${T} | ${H} | ${D} | ${b.median_ms.toFixed(3)} | ${h.median_ms.toFixed(3)} | ${speedup.toFixed(2)}x | ${sign}${changePct.toFixed(1)}%${marker} |\n`;
+                } else if (h) {
+                  table += `| ${op} | ${mode} | ${B} | ${T} | ${H} | ${D} | - | ${h.median_ms.toFixed(3)} | - | new |\n`;
+                } else if (b) {
+                  table += `| ${op} | ${mode} | ${B} | ${T} | ${H} | ${D} | ${b.median_ms.toFixed(3)} | - | - | removed |\n`;
+                }
+              }
+
+              const statusEmoji = has_regression ? '⚠️' : '✅';
+              const nReg = (regressions || []).length;
+              const statusText = has_regression
+                ? `${nReg} regression(s) detected`
+                : 'No significant performance regressions detected';
+
+              let body = `## ${statusEmoji} Benchmark Results (${runnerName.toUpperCase()})\n\n`;
+              body += `**Status:** ${statusText}\n\n`;
+              body += `| | |\n`;
+              body += `|:---|:---|\n`;
+              body += `| **GPU** | ${gpuName} |\n`;
+              body += `| **CUDA** | ${cudaVersion} |\n`;
+              body += `| **PyTorch** | ${pytorchVersion} |\n`;
+              body += `| **Base** | \`${base_sha}\` |\n`;
+              body += `| **Head** | \`${head_sha}\` |\n`;
+              body += `| **Threshold** | ${threshold}% |\n\n`;
+              body += table;
+              body += '\n---\n';
+              body += '*This comment is automatically updated with the latest benchmark results.*';
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                per_page: 100,
+              });
+
+              const botComment = comments.find(c =>
+                c.user.type === 'Bot' &&
+                c.body.includes(`Benchmark Results (${runnerName.toUpperCase()})`)
+              );
+
+              if (botComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body,
+                });
+                console.log(`Updated benchmark comment on PR #${prNumber} for ${runnerName}`);
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body,
+                });
+                console.log(`Created benchmark comment on PR #${prNumber} for ${runnerName}`);
+              }
+            }

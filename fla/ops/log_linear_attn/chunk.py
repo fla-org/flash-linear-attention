@@ -1,7 +1,13 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -10,8 +16,8 @@ import triton.language as tl
 from einops import reduce
 
 from fla.ops.utils import chunk_local_cumsum
-from fla.ops.utils.op import safe_exp
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.utils.op import exp
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 BLOCK_K = 64
 
@@ -21,7 +27,7 @@ BLOCK_K = 64
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
-    }
+    },
 )
 @triton.autotune(
     configs=[
@@ -30,6 +36,7 @@ BLOCK_K = 64
         for num_stages in [2, 3, 4]
     ],
     key=["H", "K", "V"],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_fwd_kernel(
@@ -247,10 +254,10 @@ def chunkwise_fwd_kernel(
 
         p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         p_q = tl.make_block_ptr(
-            q + bos * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0)
+            q + bos * K, (T, K), (K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0),
         )
         p_k = tl.make_block_ptr(
-            k + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
+            k + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1),
         )
         p_v = tl.make_block_ptr(
             v + (bos * H + i_h) * V,
@@ -273,8 +280,9 @@ def chunkwise_fwd_kernel(
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_k = tl.load(p_k, boundary_check=(0, 1))
 
-        b_s = (tl.dot(b_q, b_k) * safe_exp(b_g[:, None] - b_g[None, :])).to(
-            b_q.dtype
+        m_t = i_t * BT + o_i < T
+        b_s = (tl.dot(b_q, b_k) * tl.where((i_idx >= j_idx) & m_t[:, None] & m_t[None, :], tl.exp(b_g[:, None] - b_g[None, :]), 0)).to(
+            b_q.dtype,
         ) * b_h
 
         b_v = tl.load(p_v, boundary_check=(0, 1))
@@ -713,13 +721,13 @@ def copy_input_kernel(
 
     for i_t in range(NT):
         p_g = tl.make_block_ptr(
-            g + bos * H + i_h, (T,), (H,), (i_t * BT + input_offset,), (BT,), (0,)
+            g + bos * H + i_h, (T,), (H,), (i_t * BT + input_offset,), (BT,), (0,),
         )
         p_q = tl.make_block_ptr(
-            q + bos * K, (T, K), (K, 1), (i_t * BT + input_offset, 0), (BT, K), (1, 0)
+            q + bos * K, (T, K), (K, 1), (i_t * BT + input_offset, 0), (BT, K), (1, 0),
         )
         p_k = tl.make_block_ptr(
-            k + bos * K, (T, K), (K, 1), (i_t * BT + input_offset, 0), (BT, K), (1, 0)
+            k + bos * K, (T, K), (K, 1), (i_t * BT + input_offset, 0), (BT, K), (1, 0),
         )
         p_v = tl.make_block_ptr(
             v + (bos * H + i_h) * V,
@@ -730,13 +738,13 @@ def copy_input_kernel(
             (1, 0),
         )
         p_g_new = tl.make_block_ptr(
-            g_new + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+            g_new + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,),
         )
         p_q_new = tl.make_block_ptr(
-            q_new + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+            q_new + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0),
         )
         p_k_new = tl.make_block_ptr(
-            k_new + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+            k_new + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0),
         )
         p_v_new = tl.make_block_ptr(
             v_new + (bos * H + i_h) * V,
@@ -754,13 +762,13 @@ def copy_input_kernel(
 
         if i_t == 0:
             p_g_prev = tl.make_block_ptr(
-                g_prev + i_n * BT * H + i_h, (BT,), (H,), (0,), (BT,), (0,)
+                g_prev + i_n * BT * H + i_h, (BT,), (H,), (0,), (BT,), (0,),
             )
             p_q_prev = tl.make_block_ptr(
-                q_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0)
+                q_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0),
             )
             p_k_prev = tl.make_block_ptr(
-                k_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0)
+                k_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0),
             )
             p_v_prev = tl.make_block_ptr(
                 v_prev + (i_n * BT * H + i_h) * V,
@@ -815,7 +823,7 @@ def copy_input_kernel(
 @triton.heuristics(
     {
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-    }
+    },
 )
 @triton.jit(do_not_specialize=["T"])
 def copy_last_chunk_kernel(
@@ -856,10 +864,10 @@ def copy_last_chunk_kernel(
 
     p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (seq_offset,), (BT,), (0,))
     p_q = tl.make_block_ptr(
-        q + bos * K, (T, K), (K, 1), (seq_offset, 0), (BT, K), (1, 0)
+        q + bos * K, (T, K), (K, 1), (seq_offset, 0), (BT, K), (1, 0),
     )
     p_k = tl.make_block_ptr(
-        k + bos * K, (T, K), (K, 1), (seq_offset, 0), (BT, K), (1, 0)
+        k + bos * K, (T, K), (K, 1), (seq_offset, 0), (BT, K), (1, 0),
     )
     p_v = tl.make_block_ptr(
         v + (bos * H + i_h) * V,
@@ -870,16 +878,16 @@ def copy_last_chunk_kernel(
         (1, 0),
     )
     p_g_prev = tl.make_block_ptr(
-        g_prev + i_n * BT * H + i_h, (BT,), (H,), (0,), (BT,), (0,)
+        g_prev + i_n * BT * H + i_h, (BT,), (H,), (0,), (BT,), (0,),
     )
     p_q_prev = tl.make_block_ptr(
-        q_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0)
+        q_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0),
     )
     p_k_prev = tl.make_block_ptr(
-        k_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0)
+        k_prev + i_n * BT * K, (BT, K), (K, 1), (0, 0), (BT, K), (1, 0),
     )
     p_v_prev = tl.make_block_ptr(
-        v_prev + (i_n * BT * H + i_h) * V, (BT, V), (H * V, 1), (0, 0), (BT, V), (1, 0)
+        v_prev + (i_n * BT * H + i_h) * V, (BT, V), (H * V, 1), (0, 0), (BT, V), (1, 0),
     )
 
     tl.store(p_g_prev, tl.load(p_g, boundary_check=(0,)), boundary_check=(0,))
@@ -917,6 +925,7 @@ def copy_last_chunk_kernel(
     ],
     key=["H", "K", "V"],
     restore_value=["dh", "dg_last"],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dhg(
@@ -970,7 +979,7 @@ def chunkwise_bwd_kernel_dhg(
 
         if (i_t & (1 << ell)) == 0:  # store the chunk
             tl.store(
-                p_dh, b_dh.to(p_dh.dtype.element_ty) + b_dh_old, boundary_check=(0, 1)
+                p_dh, b_dh.to(p_dh.dtype.element_ty) + b_dh_old, boundary_check=(0, 1),
             )
             # if you are about the transition to compute, reset to zeros
             if i_t > 0 and ((i_t - 1) & (1 << ell)) > 0:
@@ -993,10 +1002,10 @@ def chunkwise_bwd_kernel_dhg(
         b_dh *= b_g_last
         if i_t & (1 << ell):  # compute this chunk
             p_g = tl.make_block_ptr(
-                g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+                g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,),
             )
             p_q = tl.make_block_ptr(
-                q + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
+                q + bos * K, (K, T), (1, K), (i_k * BK, i_t * BT), (BK, BT), (0, 1),
             )
             p_do = tl.make_block_ptr(
                 do + (bos * H + i_h) * V,
@@ -1033,6 +1042,7 @@ def chunkwise_bwd_kernel_dhg(
     ],
     key=["H", "K", "V"],
     restore_value=["dq", "dg"],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_hdqgl(
@@ -1086,7 +1096,7 @@ def chunkwise_bwd_kernel_hdqgl(
                 (1, 0),
             )
             p_q = tl.make_block_ptr(
-                q + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+                q + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0),
             )
             p_l = tl.make_block_ptr(
                 l + (bos * H + i_h) * L + num_intra_levels + ell,
@@ -1105,7 +1115,7 @@ def chunkwise_bwd_kernel_hdqgl(
                 (1, 0),
             )
             p_dg = tl.make_block_ptr(
-                dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+                dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,),
             )
             p_dl = tl.make_block_ptr(
                 dl + (bos * H + i_h) * L + num_intra_levels + ell,
@@ -1144,7 +1154,7 @@ def chunkwise_bwd_kernel_hdqgl(
             tl.store(p_dl, b_dl.to(p_dl.dtype.element_ty), boundary_check=(0,))
             b_dg_old = tl.load(p_dg, boundary_check=(0,))
             tl.store(
-                p_dg, b_dg.to(p_dg.dtype.element_ty) + b_dg_old, boundary_check=(0,)
+                p_dg, b_dg.to(p_dg.dtype.element_ty) + b_dg_old, boundary_check=(0,),
             )
             if ((i_t + 1) & (1 << ell)) == 0:
                 b_h = tl.zeros([V, K], dtype=tl.float32)
@@ -1154,7 +1164,7 @@ def chunkwise_bwd_kernel_hdqgl(
         b_h *= tl.exp(b_g_last)
         if (i_t & (1 << ell)) == 0:  # update the state
             p_k = tl.make_block_ptr(
-                k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+                k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0),
             )
             p_v = tl.make_block_ptr(
                 v + (bos * H + i_h) * V,
@@ -1180,6 +1190,7 @@ def chunkwise_bwd_kernel_hdqgl(
     ],
     key=["H", "K", "V"],
     restore_value=["dk", "dg", "dg_last"],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dkg(
@@ -1213,6 +1224,8 @@ def chunkwise_bwd_kernel_dkg(
         bos, eos = i_n * T, i_n * T + T
 
     o_i = tl.arange(0, BT)
+    o_t = i_t * BT + o_i
+    m_t = o_t < T
 
     p_dh = tl.make_block_ptr(
         dh + ((i_n * NT + i_t) * H + i_h) * K * V,
@@ -1233,7 +1246,7 @@ def chunkwise_bwd_kernel_dkg(
         (1, 0),
     )
     p_dk = tl.make_block_ptr(
-        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0),
     )
     p_dg = tl.make_block_ptr(dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
 
@@ -1247,7 +1260,7 @@ def chunkwise_bwd_kernel_dkg(
     b_dg_last = tl.load(p_dg_last)
 
     b_dg_last *= tl.exp(b_g_last)
-    b_dk = safe_exp(b_g_last - b_g)[:, None] * tl.dot(b_v, b_dh).to(b_v.dtype)
+    b_dk = tl.where(m_t, exp(b_g_last - b_g), 0)[:, None] * tl.dot(b_v, b_dh).to(b_v.dtype)
     b_dg = tl.load(p_dg, boundary_check=(0,))
     b_dg -= tl.sum(b_k * b_dk, axis=1)
     b_dg_last += tl.sum(b_dk * b_k)
@@ -1267,6 +1280,7 @@ def chunkwise_bwd_kernel_dkg(
     ],
     key=["H", "K", "V"],
     restore_value=["dv"],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_dv(
@@ -1296,6 +1310,9 @@ def chunkwise_bwd_kernel_dv(
     else:
         bos, eos = i_n * T, i_n * T + T
 
+    o_t = i_t * BT + tl.arange(0, BT)
+    m_t = o_t < T
+
     p_dh = tl.make_block_ptr(
         dh + ((i_n * NT + i_t) * H + i_h) * K * V,
         (K, V),
@@ -1307,7 +1324,7 @@ def chunkwise_bwd_kernel_dv(
     p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     p_k = tl.make_block_ptr(k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0))
     p_dv = tl.make_block_ptr(
-        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0),
     )
 
     last_idx = min((i_t + 1) * BT, T) - 1
@@ -1316,7 +1333,7 @@ def chunkwise_bwd_kernel_dv(
     b_dh = tl.load(p_dh, boundary_check=(0, 1))
     b_g = tl.load(p_g, boundary_check=(0,))
     b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_dv = safe_exp(-b_g + b_g_last)[:, None] * tl.dot(b_k, b_dh).to(b_k.dtype)
+    b_dv = tl.where(m_t, exp(-b_g + b_g_last), 0)[:, None] * tl.dot(b_k, b_dh).to(b_k.dtype)
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
@@ -1329,6 +1346,7 @@ def chunkwise_bwd_kernel_dv(
     ],
     key=["H", "K", "V"],
     restore_value=["dl", "dq", "dk", "dv", "dg"],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunkwise_bwd_kernel_diag(
@@ -1379,20 +1397,20 @@ def chunkwise_bwd_kernel_diag(
     p_q = tl.make_block_ptr(q + bos * K, (K, T), (1, K), (0, i_t * BT), (K, BT), (0, 1))
     p_k = tl.make_block_ptr(k + bos * K, (T, K), (K, 1), (i_t * BT, 0), (BT, K), (1, 0))
     p_v = tl.make_block_ptr(
-        v + (bos * H + i_h) * V, (V, T), (1, H * V), (0, i_t * BT), (V, BT), (0, 1)
+        v + (bos * H + i_h) * V, (V, T), (1, H * V), (0, i_t * BT), (V, BT), (0, 1),
     )
     p_do = tl.make_block_ptr(
-        do + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+        do + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0),
     )
     p_dg = tl.make_block_ptr(dg + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
     p_dq = tl.make_block_ptr(
-        dq + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+        dq + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0),
     )
     p_dk = tl.make_block_ptr(
-        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0)
+        dk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, 0), (BT, K), (1, 0),
     )
     p_dv = tl.make_block_ptr(
-        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0)
+        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, 0), (BT, V), (1, 0),
     )
 
     b_g = tl.load(p_g, boundary_check=(0,))
@@ -1406,7 +1424,9 @@ def chunkwise_bwd_kernel_diag(
     b_dg = tl.load(p_dg, boundary_check=(0,))
 
     b_s = (tl.dot(b_k, b_q)).to(b_q.dtype)
-    b_a = safe_exp(b_g[:, None] - b_g[None, :])
+    # Apply causal and padding masks
+    m_t = i_t * BT + o_i < T
+    b_a = tl.where((i_idx >= j_idx) & m_t[:, None] & m_t[None, :], tl.exp(b_g[:, None] - b_g[None, :]), 0)
     b_dv += tl.dot((b_s * tl.trans(b_a * b_h)).to(b_do.dtype), b_do)
     b_ds = tl.dot(b_do, b_v) * b_a
     b_dl = b_ds * tl.trans(b_s)
@@ -1513,7 +1533,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         if not math.log2(V).is_integer():
             raise ValueError(
-                "Head dimension must be a power of two. Please pad the head dimension to the next power of two."
+                "Head dimension must be a power of two. Please pad the head dimension to the next power of two.",
             )
 
         if K % BLOCK_K != 0:
@@ -1541,7 +1561,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                         BT,
                     )
                     for i in range(len(cu_seqlens) - 1)
-                ]
+                ],
             )
             MAX_LEVEL = ceil_log(NT, 2) - 1
             B = len(cu_seqlens) - 1
@@ -1701,7 +1721,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
 
         if initial_state is not None:
             raise NotImplementedError(
-                "Backward pass is not implemented for log-linear attention with a prefilled kernel."
+                "Backward pass is not implemented for log-linear attention with a prefilled kernel.",
             )
 
         B, T, G, K = k.shape
@@ -1714,7 +1734,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
                 [
                     ceil_div(cu_seqlens[i + 1] - cu_seqlens[i], BT)
                     for i in range(len(cu_seqlens) - 1)
-                ]
+                ],
             )
         else:
             NT = ceil_div(T, BT)
@@ -1730,6 +1750,7 @@ class ChunkLogLinearAttentionFunction(torch.autograd.Function):
         dl = torch.zeros(level_scales.shape, dtype=torch.float, device=v.device)
         h_l = torch.zeros((B, NT, H, K, V), dtype=torch.float, device=v.device)
         dg_last = torch.zeros((B, NT, H), dtype=torch.float, device=v.device)
+        do = do.to(v.dtype)
 
         grid = (B * H,)
 
@@ -1850,10 +1871,10 @@ def chunk_log_linear_attn(
     v: torch.Tensor,
     g: torch.Tensor,
     level_scales: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: LogLinearAttentionState | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -1866,7 +1887,7 @@ def chunk_log_linear_attn(
             Forget gates of shape `[B, T, H]`.
         level_scales (torch.Tensor):
             Scales for each level of shape `[B, T, H, L]`.
-        initial_state (Optional[torch.Tensor]):
+        initial_state (Optional[LogLinearAttentionState]):
             Initial state of shape `[N, H, K, V]` for `N` input sequences.
             For equal-length input sequences, `N` equals the batch size `B`.
             Default: `None`.
@@ -1887,7 +1908,7 @@ def chunk_log_linear_attn(
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
 
     o, final_state = ChunkLogLinearAttentionFunction.apply(

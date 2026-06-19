@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -85,11 +92,14 @@ def chunk_cumprod_householder_fwd_fn(
     w2: torch.Tensor,
     S: int,  # split size, aka large chunk size
     BT: int,  # small chunk size
-    cu_seqlens: torch.Tensor = None
+    cu_seqlens: torch.Tensor = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K = k.shape
 
-    split_indices = prepare_chunk_indices(cu_seqlens, S) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, S)
+    split_indices = chunk_indices
     chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT) if cu_seqlens is not None else None
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
 
@@ -105,7 +115,7 @@ def chunk_cumprod_householder_fwd_fn(
     grid = (NS, H)
     hc_whole = torch.empty((NS, H, K, K), device=k.device, dtype=w1.dtype)
     k_new = torch.empty_like(k, dtype=k.dtype)
-    hc_suffix = torch.empty((NT, H, K, K), device=k.device, dtype=w2.dtype)
+    hc_suffix = torch.empty((NT, H, K, K), device=k.device, dtype=w1.dtype)
     chunk_cumprod_householder_fwd_kernel[grid](
         k=k, k_new=k_new, w1=w1, w2=w2, hc_whole=hc_whole, hc_suffix=hc_suffix,
         cu_seqlens=cu_seqlens,
@@ -114,6 +124,6 @@ def chunk_cumprod_householder_fwd_fn(
         T=T, S=S,
         # SY (2025/07/08): I don't know why when K == 128 if I set num_warps=4 the result would be completely wrong
         num_warps=8 if K == 128 else 4,
-        num_stages=3 if check_shared_mem('ampere') else 1
+        num_stages=3 if check_shared_mem('ampere') else 1,
     )
     return k_new, hc_suffix, hc_whole

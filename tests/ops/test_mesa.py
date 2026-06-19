@@ -1,14 +1,18 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
-from typing import List, Tuple
 
 import pytest
 import torch
 import torch.nn.functional as F
 
 from fla.ops.mesa_net import chunk_mesa_net, mesa_net_decoding_one_step, naive_mesa_net_decoding_one_step, naive_mesa_net_exact
-from fla.utils import assert_close, device, device_platform, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device, device_platform
 
 
 @pytest.mark.parametrize(
@@ -21,20 +25,20 @@ from fla.utils import assert_close, device, device_platform, is_intel_alchemist
             (2, 1024, 8, 128, [0.8, 0.99], torch.float16),
             (2, 1024, 8, 128, [0.01, 0.1], torch.float16),
             (2, 1024, 8, 128, [1, 1], torch.float16),
-            (4, 2048, 8, 64, [0.8, 0.99], torch.float16)
+            (4, 2048, 8, 64, [0.8, 0.99], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk(
     B: int,
     T: int,
     H: int,
     D: int,
-    gate_range: Tuple[float, float],
+    gate_range: tuple[float, float],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -112,20 +116,20 @@ def test_chunk(
             (4, 64, [0.01, 0.1], [0, 256, 500, 1000], torch.float16),
             (4, 100, [1, 1], [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
-    gate_range: Tuple[float, float],
-    cu_seqlens: List[int],
+    gate_range: tuple[float, float],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -183,7 +187,7 @@ def test_chunk_varlen(
             g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
             lamb=lamb,
             h_kk_init=h_kk_init[i],
-            h_kv_init=h_kv_init[i]
+            h_kv_init=h_kv_init[i],
         )
         ref.append(ref_i)
         ref_h_kk_t.append(ref_h_kk_i)
@@ -221,17 +225,17 @@ def test_chunk_varlen(
             (2, 8, 128, [0.95, 0.99], 5, torch.float16),
             (2, 8, 128, [0.95, 0.99], 30, torch.float16),
         ]
-    ]
+    ],
 )
 def test_decoding_one_step(
     B: int,
     H: int,
     D: int,
-    gate_range: Tuple[float, float],
+    gate_range: tuple[float, float],
     max_CG_step: int,
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     torch.set_default_device(device)

@@ -1,15 +1,19 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 # Code is adapted from flash-attn.bert_padding.py
-
-from typing import Tuple, Union
 
 import torch
 from einops import rearrange, repeat
 
 from fla.ops.utils.index import prepare_cu_seqlens_from_mask, prepare_lens_from_mask
 from fla.utils import tensor_cache
+
+_LAYER_IDX_REQUIRED_MSG = "{cls} requires `layer_idx` when `past_key_values` is provided."
 
 
 class IndexFirstAxis(torch.autograd.Function):
@@ -23,7 +27,7 @@ class IndexFirstAxis(torch.autograd.Function):
         # TD [2022-03-04] For some reason torch.gather is a bit faster than indexing.
         # return x[indices]
         return torch.gather(
-            rearrange(x, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim)
+            rearrange(x, "b ... -> b (...)"), 0, repeat(indices, "z -> z d", d=second_dim),
         ).reshape(-1, *other_shape)
 
     @staticmethod
@@ -73,7 +77,7 @@ index_put_first_axis = IndexPutFirstAxis.apply
 
 @tensor_cache
 def get_unpad_data(
-    attention_mask: torch.Tensor
+    attention_mask: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """
     Retrieves indexing data required to repad unpadded (ragged) tensors.
@@ -99,8 +103,8 @@ def get_unpad_data(
 
 
 def unpad_input(
-    q: Union[torch.Tensor, Tuple[torch.Tensor, ...]],
-    states: Tuple[torch.Tensor],
+    q: torch.Tensor | tuple[torch.Tensor, ...],
+    states: tuple[torch.Tensor],
     attention_mask: torch.Tensor,
     q_len: int,
     keepdim: bool = False,
@@ -204,3 +208,24 @@ def pad_input(
     """
     output = index_put_first_axis(hidden_states, indices, batch_size * seq_len)
     return rearrange(output, "(b s) ... -> b s ...", b=batch_size)
+
+
+def require_cache_layer_idx(module, past_key_values):
+    layer_idx = getattr(module, "layer_idx", None)
+    if past_key_values is not None and layer_idx is None:
+        raise ValueError(_LAYER_IDX_REQUIRED_MSG.format(cls=module.__class__.__name__))
+    return layer_idx
+
+
+def get_layer_cache(module, past_key_values):
+    layer_idx = require_cache_layer_idx(module, past_key_values)
+    if past_key_values is not None and len(past_key_values) > layer_idx:
+        return past_key_values[layer_idx]
+    return None
+
+
+def update_layer_cache(module, past_key_values, **kwargs):
+    layer_idx = require_cache_layer_idx(module, past_key_values)
+    if past_key_values is not None:
+        return past_key_values.update(layer_idx=layer_idx, **kwargs)
+    return None

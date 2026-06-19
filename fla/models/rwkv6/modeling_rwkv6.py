@@ -1,14 +1,18 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import math
 import warnings
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn as nn
-from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -17,7 +21,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 from fla.layers.attn import Attention
 from fla.layers.rwkv6 import LerpLinear, RWKV6Attention
 from fla.models.rwkv6.configuration_rwkv6 import RWKV6Config
-from fla.models.utils import Cache
+from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, LayerNorm
 from fla.modules.activations import ACT2FN
 from fla.modules.l2warp import l2_warp
@@ -40,10 +44,10 @@ class RWKV6FeedForward(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        hidden_ratio: Optional[int] = None,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = None,
+        intermediate_size: int | None = None,
         hidden_act: str = 'sqrelu',
-        layer_idx: int = None
+        layer_idx: int = None,
     ) -> RWKV6FeedForward:
         super().__init__()
 
@@ -68,13 +72,13 @@ class RWKV6FeedForward(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        state: Optional[Cache] = None,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-        **kwargs
+        attention_mask: torch.Tensor | None = None,
+        state: Cache | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         if attention_mask is not None:
-            x = x.mul_(attention_mask[:, -x.shape[-2]:, None])
+            x = x.mul(attention_mask[:, -x.shape[-2]:, None])
         if x.shape[1] == 1 and state is not None and state[self.layer_idx]['ffn_state'] is not None:
             shifted = state[self.layer_idx]['ffn_state'].unsqueeze(1)
             delta = shifted - x
@@ -107,12 +111,12 @@ class RWKV6Block(GradientCheckpointingLayer):
             self.pre_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
                 config.hidden_size,
                 bias=config.norm_bias,
-                eps=config.norm_eps
+                eps=config.norm_eps,
             )
         self.attn_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
             config.hidden_size,
             bias=config.norm_bias,
-            eps=config.norm_eps
+            eps=config.norm_eps,
         )
         if config.attn is not None and layer_idx in config.attn['layers']:
             self.attn = Attention(
@@ -123,7 +127,7 @@ class RWKV6Block(GradientCheckpointingLayer):
                 window_size=config.attn['window_size'],
                 rope_theta=config.attn['rope_theta'],
                 max_position_embeddings=config.max_position_embeddings,
-                layer_idx=layer_idx
+                layer_idx=layer_idx,
             )
         else:
             self.attn = RWKV6Attention(
@@ -136,31 +140,31 @@ class RWKV6Block(GradientCheckpointingLayer):
                 gate_low_rank_dim=config.gate_low_rank_dim,
                 norm_eps=config.norm_eps,
                 fuse_norm=config.fuse_norm,
-                layer_idx=layer_idx
+                layer_idx=layer_idx,
             )
         self.ffn_norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
             config.hidden_size,
             bias=config.norm_bias,
-            eps=config.norm_eps
+            eps=config.norm_eps,
         )
         self.ffn = RWKV6FeedForward(
             hidden_size=config.hidden_size,
             hidden_ratio=config.hidden_ratio,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            layer_idx=layer_idx
+            layer_idx=layer_idx,
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        output_attentions: bool | None = False,
+        cu_seqlens: torch.LongTensor | None = None,
         **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         residual = self.pre_norm(hidden_states) if hasattr(self, 'pre_norm') else hidden_states
         hidden_states = self.attn_norm(residual)
         hidden_states, attentions, past_key_values = self.attn(
@@ -170,7 +174,7 @@ class RWKV6Block(GradientCheckpointingLayer):
             use_cache=use_cache,
             output_attentions=output_attentions,
             cu_seqlens=cu_seqlens,
-            **kwargs
+            **kwargs,
         )
         if self.config.fuse_norm:
             hidden_states, residual = self.ffn_norm(hidden_states, residual, True)
@@ -179,7 +183,7 @@ class RWKV6Block(GradientCheckpointingLayer):
             residual = hidden_states
             hidden_states = self.ffn_norm(hidden_states)
         hidden_states, past_key_values = self.ffn(
-            hidden_states, attention_mask, past_key_values, cu_seqlens, **kwargs
+            hidden_states, attention_mask, past_key_values, cu_seqlens, **kwargs,
         )
         hidden_states = residual + hidden_states
 
@@ -252,7 +256,7 @@ class RWKV6Model(RWKV6PreTrainedModel):
         self.norm = (LayerNorm if config.fuse_norm else nn.LayerNorm)(
             config.hidden_size,
             bias=config.norm_bias,
-            eps=config.norm_eps
+            eps=config.norm_eps,
         )
 
         self.gradient_checkpointing = False
@@ -267,17 +271,17 @@ class RWKV6Model(RWKV6PreTrainedModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
         attention_mask: Optional[torch.Tensor] = None,  # noqa
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cu_seqlens: Optional[torch.LongTensor] = None,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        inputs_embeds: torch.FloatTensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        **kwargs: Unpack[dict],
+    ) -> tuple | BaseModelOutputWithPast:
         if output_attentions:
             warnings.warn("`RWKV6Model` does not `output_attentions` now, setting it to `False`.")
             output_attentions = False
@@ -312,7 +316,7 @@ class RWKV6Model(RWKV6PreTrainedModel):
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 cu_seqlens=cu_seqlens,
-                **kwargs
+                **kwargs,
             )
 
             if output_attentions:
@@ -330,11 +334,11 @@ class RWKV6Model(RWKV6PreTrainedModel):
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,
-            attentions=all_attns
+            attentions=all_attns,
         )
 
 
-class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
+class RWKV6ForCausalLM(RWKV6PreTrainedModel, FLAGenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -376,60 +380,26 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
                     f"which is not supported for {self.__class__.__name__}. "
                     f"Try another generation strategy instead. "
                     f"For the available generation strategies, check this doc: "
-                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies"
+                    f"https://huggingface.co/docs/transformers/en/generation_strategies#decoding-strategies",
                 )
             else:
                 raise exception
 
     @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor = None,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        use_cache: bool = True,
-        logits_to_keep: Optional[int] = None,
-        **kwargs
-    ):
-        # only last token for `inputs_ids` if the `past_key_values` is not empty.
-        if past_key_values is not None and len(past_key_values) > 0:
-            input_ids = input_ids[:, -1:]
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and len(past_key_values) == 0:
-            model_inputs = {'inputs_embeds': inputs_embeds}
-        else:
-            # The `contiguous()` here is necessary to have a static stride during decoding. torchdynamo otherwise
-            # recompiles graphs as the stride of the inputs is a guard.
-            # Ref: https://github.com/huggingface/transformers/pull/29114
-            # TODO: use `next_tokens` directly instead.
-            model_inputs = {'input_ids': input_ids.contiguous()}
-
-        if logits_to_keep is not None:
-            model_inputs['logits_to_keep'] = logits_to_keep
-
-        model_inputs.update({
-            'past_key_values': past_key_values,
-            'use_cache': use_cache,
-            'attention_mask': attention_mask,
-        })
-        return model_inputs
-
-    @deprecate_kwarg("num_logits_to_keep", version="4.50", new_name="logits_to_keep")
     def forward(
         self,
         input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        logits_to_keep: Optional[int] = 0,
-        **kwargs: Unpack[Dict]
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        logits_to_keep: int | None = 0,
+        **kwargs: Unpack[dict],
+    ) -> tuple | CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -445,7 +415,7 @@ class RWKV6ForCausalLM(RWKV6PreTrainedModel, GenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            **kwargs
+            **kwargs,
         )
 
         hidden_states = outputs[0]

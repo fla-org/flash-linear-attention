@@ -1,6 +1,9 @@
-# -*- coding: utf-8 -*-
-
-from typing import List
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -22,11 +25,11 @@ from fla.utils import assert_close, device, device_platform
             (3, 2000, 4, 128, 0.1, False, torch.float16),
             (4, 2048, 8, 64, 0.1, False, torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk(
     B: int,
@@ -93,16 +96,16 @@ def test_chunk(
             (3, 64, [0, 256, 500, 900, 1000], torch.float16),
             (4, 100, [0, 15, 100, 300, 1200, 1599, 1800, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     device_platform == 'intel',
-    reason='Intel Triton Failure'
+    reason='Intel Triton Failure',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)

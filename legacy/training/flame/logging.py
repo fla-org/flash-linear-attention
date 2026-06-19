@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import json
 import logging
@@ -6,14 +11,13 @@ import os
 import sys
 import time
 
-from transformers.trainer_callback import (ExportableState, TrainerCallback,
-                                           TrainerControl, TrainerState)
+from transformers.trainer_callback import ExportableState, TrainerCallback, TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 
 
 def get_logger(name: str = None) -> logging.Logger:
     formatter = logging.Formatter(
-        fmt="%(asctime)s - %(levelname)s - %(name)s - %(message)s", datefmt="%m/%d/%Y %H:%M:%S"
+        fmt="%(asctime)s - %(levelname)s - %(name)s - %(message)s", datefmt="%m/%d/%Y %H:%M:%S",
     )
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
@@ -43,7 +47,7 @@ class LogCallback(TrainerCallback, ExportableState):
         args: TrainingArguments,
         state: TrainerState,
         control: TrainerControl,
-        **kwargs
+        **kwargs,
     ):
         r"""
         Event called at the beginning of training.
@@ -74,7 +78,7 @@ class LogCallback(TrainerCallback, ExportableState):
         state: TrainerState,
         control: TrainerControl,
         logs,
-        **kwargs
+        **kwargs,
     ):
         if args.save_on_each_node:
             if not state.is_local_process_zero:
@@ -110,7 +114,7 @@ class LogCallback(TrainerCallback, ExportableState):
     def state(self) -> dict:
         return {
             'start_time': self.start_time,
-            'elapsed_time': self.elapsed_time
+            'elapsed_time': self.elapsed_time,
         }
 
     @classmethod

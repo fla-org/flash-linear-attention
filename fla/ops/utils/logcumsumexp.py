@@ -1,10 +1,15 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.autotune(
@@ -13,7 +18,8 @@ from fla.ops.utils.op import exp, log
         for BT in [16, 32, 64]
         for num_warps in [2, 4, 8]
     ],
-    key=['S']
+    key=['S'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def logcumsumexp_fwd_kernel(
@@ -21,14 +27,14 @@ def logcumsumexp_fwd_kernel(
     z,
     T,
     S: tl.constexpr,
-    BT: tl.constexpr
+    BT: tl.constexpr,
 ):
     i_bh = tl.program_id(0)
     o_i = tl.arange(0, BT)
     m_s = tl.where(o_i[:, None] >= o_i[None, :], 1., 0.)
 
-    b_mp = tl.full([S,], float('-inf'), dtype=tl.float32)
-    b_zp = tl.zeros([S,], dtype=tl.float32)
+    b_mp = tl.full([S], float('-inf'), dtype=tl.float32)
+    b_zp = tl.zeros([S], dtype=tl.float32)
     for i_t in range(tl.cdiv(T, BT)):
         p_s = tl.make_block_ptr(s + i_bh * T*S, (T, S), (S, 1), (i_t * BT, 0), (BT, S), (1, 0))
         p_z = tl.make_block_ptr(z + i_bh * T*S, (T, S), (S, 1), (i_t * BT, 0), (BT, S), (1, 0))

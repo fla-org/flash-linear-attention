@@ -27,6 +27,6 @@ jobs:
           pre-commit install-hooks
       - name: Get changed files
         id: changed-files
-        uses: tj-actions/changed-files@v46.0.5
+        uses: tj-actions/changed-files@v47.0.0
       - name: Lint modified files
         run: pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}

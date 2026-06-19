@@ -1,21 +1,23 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import check_shared_mem, is_intel_alchemist, use_cuda_graph
+from fla.utils import IS_INTEL_ALCHEMIST, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
 
 # https://github.com/intel/intel-xpu-backend-for-triton/issues/3449
-triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
+triton_config = {'grf_mode': 'large'} if IS_INTEL_ALCHEMIST else {}
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -24,7 +26,8 @@ triton_config = {'grf_mode': 'large'} if is_intel_alchemist else {}
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'BK', 'BV'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_bwd_kernel(
@@ -122,14 +125,16 @@ def chunk_dplr_bwd_wy(
     dw: torch.Tensor,
     du: torch.Tensor,
     dv0: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
+    cu_seqlens: torch.LongTensor | None,
     chunk_size: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     A_ab_inv, A_ak, v, ag, dw, du = map(lambda x: x.contiguous(), [A_ab_inv, A_ak, v, ag, dw, du])
     B, T, H, K, V = *dw.shape, du.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(max(triton.next_power_of_2(K), 16), 64)
     BV = min(max(triton.next_power_of_2(V), 16), 64) if check_shared_mem() else min(max(triton.next_power_of_2(V), 16), 32)

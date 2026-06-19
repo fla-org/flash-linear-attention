@@ -1,7 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -9,11 +11,11 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.op import gather
-from fla.utils import is_gather_supported, use_cuda_graph
+from fla.utils import IS_GATHER_SUPPORTED, USE_CUDA_GRAPH, autotune_cache_kwargs
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -21,7 +23,8 @@ from fla.utils import is_gather_supported, use_cuda_graph
         for num_warps in [1, 2, 4, 8, 16]
     ],
     key=['BT'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk32(
@@ -57,7 +60,7 @@ def prepare_wy_repr_fwd_kernel_chunk32(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -66,7 +69,8 @@ def prepare_wy_repr_fwd_kernel_chunk32(
         for num_stages in [2, 3, 4]
     ],
     key=['BC'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def prepare_wy_repr_fwd_kernel_chunk64(
@@ -79,7 +83,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
     BT: tl.constexpr,
     BC: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    GATHER_SUPPORTED: tl.constexpr = is_gather_supported
+    GATHER_SUPPORTED: tl.constexpr = IS_GATHER_SUPPORTED,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -136,7 +140,7 @@ def prepare_wy_repr_fwd_kernel_chunk64(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -145,7 +149,8 @@ def prepare_wy_repr_fwd_kernel_chunk64(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV', 'IS_VARLEN'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def wu_fwd_kernel(
@@ -209,13 +214,15 @@ def wu_fwd(
     v: torch.Tensor,
     A_ak: torch.Tensor,
     A_ab_inv: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *ag.shape, v.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BK = min(max(triton.next_power_of_2(K), 16), 64)
     BV = min(max(triton.next_power_of_2(V), 16), 64)
@@ -247,13 +254,15 @@ def prepare_wy_repr_fwd(
     v: torch.Tensor,
     A_ak: torch.Tensor,
     A_ab: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, _ = ag.shape
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     BC = min(BT, 32)
     fwd_fn = prepare_wy_repr_fwd_kernel_chunk64 if BT == 64 else prepare_wy_repr_fwd_kernel_chunk32
@@ -274,7 +283,8 @@ def prepare_wy_repr_fwd(
         A_ak=A_ak,
         A_ab_inv=A_ab_inv,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=BT,
+        chunk_indices=chunk_indices,
     )
     return w, u, A_ab_inv
 

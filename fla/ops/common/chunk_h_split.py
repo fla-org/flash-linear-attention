@@ -1,19 +1,22 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -24,6 +27,7 @@ from fla.ops.utils.op import exp
         for num_stages in [2, 3]
     ],
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_h_split(
@@ -132,7 +136,7 @@ def chunk_fwd_kernel_h_split(
 
 @triton.heuristics({
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -143,6 +147,7 @@ def chunk_fwd_kernel_h_split(
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_fwd_kernel_h_reduction(
@@ -218,7 +223,7 @@ def chunk_fwd_kernel_h_reduction(
 @triton.heuristics({
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -229,6 +234,7 @@ def chunk_fwd_kernel_h_reduction(
         for num_stages in [2, 3]
     ],
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dh_split(
@@ -336,7 +342,7 @@ def chunk_bwd_kernel_dh_split(
 
 @triton.heuristics({
     'STORE_INITIAL_STATE_GRADIENT': lambda args: args['dh0'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -347,6 +353,7 @@ def chunk_bwd_kernel_dh_split(
         for num_stages in [2, 3, 4]
     ],
     key=['BT', 'USE_G', 'USE_GK', 'USE_GV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_bwd_kernel_dh_reduction(
@@ -427,13 +434,13 @@ def chunk_fwd_h(
     gv: torch.Tensor,
     h0: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    split_offsets: Optional[torch.LongTensor] = None,
-    split_indices: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    split_offsets: torch.LongTensor | None = None,
+    split_indices: torch.LongTensor | None = None,
     chunk_size: int = 64,
     split_size: int = 256,
-    states_in_fp32: bool = True
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    states_in_fp32: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     # B: batch size
     # N: the actual number of sequences in the batch
@@ -513,13 +520,13 @@ def chunk_bwd_dh(
     h0: torch.Tensor,
     dht: torch.Tensor,
     scale: float,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    split_offsets: Optional[torch.Tensor] = None,
-    split_indices: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
+    split_offsets: torch.Tensor | None = None,
+    split_indices: torch.Tensor | None = None,
     chunk_size: int = 64,
     split_size: int = 256,
-    states_in_fp32: bool = True
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    states_in_fp32: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     # B: batch size

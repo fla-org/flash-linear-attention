@@ -1,13 +1,18 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import Optional, Tuple
+import warnings
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp
+from fla.ops.utils.softplus import softplus
 from fla.utils import input_guard
 
 
@@ -17,7 +22,9 @@ from fla.utils import input_guard
     'USE_GV': lambda args: args['gv'] is not None,
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'STORE_FINAL_STATE': lambda args: args['ht'] is not None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'USE_GATE_IN_KERNEL': lambda args: args['A_log'] is not None,
+    'HAS_DT_BIAS': lambda args: args['dt_bias'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_gated_delta_rule_fwd_kernel(
@@ -28,13 +35,14 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     gk,
     gv,
     beta,
+    A_log,
+    dt_bias,
     o,
     h0,
     ht,
     cu_seqlens,
     scale,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
     K: tl.constexpr,
@@ -48,11 +56,17 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_BETA_HEADWISE: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GATE_IN_KERNEL: tl.constexpr,
+    HAS_DT_BIAS: tl.constexpr,
+    APPLY_BETA_SIGMOID: tl.constexpr,
+    ALLOW_NEG_EIGVAL: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
+
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
@@ -79,14 +93,23 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
     mask_k = o_k < K
     mask_v = o_v < V
-    mask_h = mask_k[:, None] & mask_v[None, :]
+    if STATE_V_FIRST:
+        mask_h = mask_v[:, None] & mask_k[None, :]
+    else:
+        mask_h = mask_k[:, None] & mask_v[None, :]
 
-    b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    if STATE_V_FIRST:
+        b_h = tl.zeros([BV, BK], dtype=tl.float32)
+    else:
+        b_h = tl.zeros([BK, BV], dtype=tl.float32)
     if USE_INITIAL_STATE:
-        p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        if STATE_V_FIRST:
+            p_h0 = h0 + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
+        else:
+            p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
-    for _ in range(0, T):
+    for _ in tl.range(0, T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
@@ -98,25 +121,42 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_beta = tl.load(p_beta).to(tl.float32)
         else:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
+        if APPLY_BETA_SIGMOID:
+            b_beta = tl.sigmoid(b_beta)
+            if ALLOW_NEG_EIGVAL:
+                b_beta = b_beta * 2
 
-        # [BK, BV]
         if USE_G:
             b_g = tl.load(p_g).to(tl.float32)
+            if USE_GATE_IN_KERNEL:
+                b_A = tl.load(A_log + i_hv).to(tl.float32)
+                if HAS_DT_BIAS:
+                    b_g = b_g + tl.load(dt_bias + i_hv).to(tl.float32)
+                b_g = -exp(b_A) * softplus(b_g)
             b_h *= exp(b_g)
 
         if USE_GK:
             b_gk = tl.load(p_gk).to(tl.float32)
-            b_h *= exp(b_gk[:, None])
+            if STATE_V_FIRST:
+                b_h *= exp(b_gk[None, :])
+            else:
+                b_h *= exp(b_gk[:, None])
 
         if USE_GV:
             b_gv = tl.load(p_gv).to(tl.float32)
-            b_h *= exp(b_gv[None, :])
+            if STATE_V_FIRST:
+                b_h *= exp(b_gv[:, None])
+            else:
+                b_h *= exp(b_gv[None, :])
 
-        b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0))
-        b_h += b_k[:, None] * b_v
-
-        # [BV]
-        b_o = tl.sum(b_h * b_q[:, None], 0)
+        if STATE_V_FIRST:
+            b_v = b_beta * (b_v - tl.sum(b_h * b_k[None, :], 1))
+            b_h += b_v[:, None] * b_k[None, :]
+            b_o = tl.sum(b_h * b_q[None, :], 1)
+        else:
+            b_v = b_beta * (b_v - tl.sum(b_h * b_k[:, None], 0))
+            b_h += b_k[:, None] * b_v
+            b_o = tl.sum(b_h * b_q[:, None], 0)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
         p_q += H*K
@@ -132,7 +172,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_o += HV*V
 
     if STORE_FINAL_STATE:
-        p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
+        if STATE_V_FIRST:
+            p_ht = ht + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
+        else:
+            p_ht = ht + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
 
@@ -140,26 +183,36 @@ def fused_recurrent_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    gk: Optional[torch.Tensor] = None,
-    gv: Optional[torch.Tensor] = None,
-    beta: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    gv: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
+    A_log: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 8)
+    BK = triton.next_power_of_2(K)
+    BV = min(8, triton.next_power_of_2(V)) if gv is None else triton.next_power_of_2(V)
     NV = triton.cdiv(V, BV)
-    num_stages = 3
-    num_warps = 1
 
     o = torch.empty_like(v)
-    final_state = q.new_empty(N, HV, K, V, dtype=torch.float32) if output_final_state else None
+    if output_final_state:
+        if state_v_first:
+            final_state = q.new_empty(N, HV, V, K, dtype=torch.float32)
+        else:
+            final_state = q.new_empty(N, HV, K, V, dtype=torch.float32)
+    else:
+        final_state = None
 
     grid = (NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
@@ -170,13 +223,14 @@ def fused_recurrent_gated_delta_rule_fwd(
         gk=gk,
         gv=gv,
         beta=beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
         o=o,
         h0=initial_state,
         ht=final_state,
         cu_seqlens=cu_seqlens,
         scale=scale,
         T=T,
-        B=B,
         H=H,
         HV=HV,
         K=K,
@@ -185,8 +239,11 @@ def fused_recurrent_gated_delta_rule_fwd(
         BV=BV,
         IS_BETA_HEADWISE=beta.ndim != v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
+        ALLOW_NEG_EIGVAL=allow_neg_eigval,
+        STATE_V_FIRST=state_v_first,
+        num_warps=1,
+        num_stages=3,
     )
     return o, final_state
 
@@ -200,15 +257,20 @@ class FusedRecurrentFunction(torch.autograd.Function):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        g: Optional[torch.Tensor] = None,
-        gk: Optional[torch.Tensor] = None,
-        gv: Optional[torch.Tensor] = None,
-        beta: Optional[torch.Tensor] = None,
+        g: torch.Tensor | None = None,
+        gk: torch.Tensor | None = None,
+        gv: torch.Tensor | None = None,
+        beta: torch.Tensor | None = None,
+        A_log: torch.Tensor | None = None,
+        dt_bias: torch.Tensor | None = None,
         scale: float = None,
         initial_state: torch.Tensor = None,
         output_final_state: bool = False,
         use_qk_l2norm_in_kernel: bool = False,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        use_beta_sigmoid_in_kernel: bool = False,
+        allow_neg_eigval: bool = False,
+        state_v_first: bool = False,
+        cu_seqlens: torch.LongTensor | None = None,
     ):
         o, final_state = fused_recurrent_gated_delta_rule_fwd(
             q=q,
@@ -218,10 +280,15 @@ class FusedRecurrentFunction(torch.autograd.Function):
             gk=gk,
             gv=gv,
             beta=beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
             scale=scale,
             initial_state=initial_state,
             output_final_state=output_final_state,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
+            state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
         )
 
@@ -233,7 +300,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         raise NotImplementedError(
             "Backward pass is not implemented yet and we do not have plans to implement it "
             "because we haven't figured out how to compute dg without materializing the full "
-            "hidden states for all time steps."
+            "hidden states for all time steps.",
         )
 
 
@@ -241,16 +308,23 @@ def fused_recurrent_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    gk: Optional[torch.Tensor] = None,
-    gv: Optional[torch.Tensor] = None,
-    beta: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    gk: torch.Tensor | None = None,
+    gv: torch.Tensor | None = None,
+    beta: torch.Tensor | None = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    use_gate_in_kernel: bool = False,
+    A_log: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
+    state_v_first: bool = False,
+    cu_seqlens: torch.LongTensor | None = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Args:
         q (torch.Tensor):
@@ -259,9 +333,12 @@ def fused_recurrent_gated_delta_rule(
             keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
             values of shape `[B, T, HV, V]`.
-            GVA is applied if `HV > H`.
+            GVA (Grouped Value Attention) is applied if `HV > H`, where `HV` must be divisible by `H`.
         g (torch.Tensor):
             g (decays) of shape `[B, T, HV]`. Default: `None`.
+            When `use_gate_in_kernel=False` (default), `g` must be in log space (pre-computed decay).
+            When `use_gate_in_kernel=True`, `g` is the raw pre-activation input; the kernel fuses
+            `-exp(A_log) * softplus(g + dt_bias)` internally per step.
         gk (torch.Tensor):
             gk (decays) of shape `[B, T, HV, K]`. Default: `None`.
         gv (torch.Tensor):
@@ -279,6 +356,26 @@ def fused_recurrent_gated_delta_rule(
             Whether to output the final state of shape `[N, HV, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (Optional[bool]):
             Whether to use L2 normalization in the kernel. Default: `False`.
+        use_gate_in_kernel (bool):
+            Whether to compute the log-space GDN decay internally.
+            When `True`, `g` is the raw input and `A_log` must be provided; the kernel fuses
+            gate activation into the recurrence. Default: `False`.
+        A_log (Optional[torch.Tensor]):
+            Decay parameter of shape `[HV]`. Required when `use_gate_in_kernel=True`.
+        dt_bias (Optional[torch.Tensor]):
+            Bias added to `g` before activation, of shape `[HV]`.
+            Only used when `use_gate_in_kernel=True`.
+        use_beta_sigmoid_in_kernel (Optional[bool]):
+            Whether to apply `torch.sigmoid(beta)` inside the kernel.
+            - If `True`, the passed `beta` acts as the raw beta logits.
+            - If `False`, `beta` is expected to already be in post-sigmoid space.
+            Default: `False`.
+        allow_neg_eigval (Optional[bool]):
+            Whether to allow negative eigenvalues by scaling `beta` to `[0, 2)`.
+            Only takes effect together with `use_beta_sigmoid_in_kernel=True`, in which case
+            the kernel computes `2 * sigmoid(beta)` instead of `sigmoid(beta)`. Default: `False`.
+        state_v_first (Optional[bool]):
+            Store the recurrent state in V-first ``[V, K]`` layout instead of the default ``[K, V]``. Default: ``False``.
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
@@ -318,21 +415,41 @@ def fused_recurrent_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if 'transpose_state_layout' in kwargs:
+        if state_v_first:
+            raise ValueError("Cannot pass both `state_v_first` and the deprecated `transpose_state_layout`.")
+        warnings.warn(
+            "`transpose_state_layout` is deprecated and renamed to `state_v_first`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        state_v_first = kwargs.pop('transpose_state_layout')
+
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
     if beta is None:
         beta = torch.ones_like(q[..., 0])
+    if use_gate_in_kernel:
+        if A_log is None:
+            raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True`.")
+        if g is None:
+            raise ValueError("`g` (raw pre-activation) must be provided when `use_gate_in_kernel=True`.")
+    else:
+        A_log = None
+        dt_bias = None
+    if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
+        raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
 
     o, final_state = FusedRecurrentFunction.apply(
         q,
@@ -342,10 +459,18 @@ def fused_recurrent_gated_delta_rule(
         gk,
         gv,
         beta,
+        A_log,
+        dt_bias,
         scale,
         initial_state,
         output_final_state,
         use_qk_l2norm_in_kernel,
+        use_beta_sigmoid_in_kernel,
+        allow_neg_eigval,
+        state_v_first,
         cu_seqlens,
     )
     return o, final_state
+
+
+fused_recurrent_gdn = fused_recurrent_gated_delta_rule

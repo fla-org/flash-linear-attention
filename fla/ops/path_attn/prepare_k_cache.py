@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -6,7 +13,7 @@ from fla.ops.utils import prepare_chunk_indices
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['offsets'] is not None
+    'IS_VARLEN': lambda args: args['offsets'] is not None,
 })
 @triton.jit(do_not_specialize=['T'])
 def parallel_path_fwd_kernel_prepare_k_cache(
@@ -16,7 +23,7 @@ def parallel_path_fwd_kernel_prepare_k_cache(
     H: tl.constexpr,
     K: tl.constexpr,
     BT: tl.constexpr, BK: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -49,13 +56,15 @@ def parallel_path_fwd_kernel_prepare_k_cache(
     tl.store(p_k_new, b_k.to(p_k_new.dtype.element_ty), boundary_check=(0, 1))
 
 
-def prepare_k_cache_fn(k, w1, w2, cu_seqlens, BS, use_cache=False):
+def prepare_k_cache_fn(k, w1, w2, cu_seqlens, BS, use_cache=False, chunk_indices: torch.LongTensor | None = None):
     if not use_cache:
         return None
     else:
         B, T, H, K = k.shape
         k_new = torch.empty_like(k)
-        indices = prepare_chunk_indices(cu_seqlens, BS) if cu_seqlens is not None else None
+        if chunk_indices is None and cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BS)
+        indices = chunk_indices
         NT = triton.cdiv(T, BS) if cu_seqlens is None else len(indices)
         grid = (NT, B * H)
         parallel_path_fwd_kernel_prepare_k_cache[grid](
@@ -69,6 +78,6 @@ def prepare_k_cache_fn(k, w1, w2, cu_seqlens, BS, use_cache=False):
             T=T,
             K=K,
             BT=BS,
-            BK=triton.next_power_of_2(K)
+            BK=triton.next_power_of_2(K),
         )
         return k_new

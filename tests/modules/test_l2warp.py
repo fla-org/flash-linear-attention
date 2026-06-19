@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -7,7 +12,7 @@ import torch.nn.functional as F
 
 from fla.modules import FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp as standalone_l2_warp
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -17,8 +22,8 @@ from fla.utils import assert_close, device, is_intel_alchemist
 @pytest.mark.parametrize("V", [2000])
 @pytest.mark.parametrize("l2_penalty_factor", [1e-4, 1])
 @pytest.mark.skipif(
-    is_intel_alchemist is True,
-    reason="Intel Triton Failure"
+    IS_INTEL_ALCHEMIST is True,
+    reason="Intel Triton Failure",
 )
 def test_fused_linear_cross_entropy_l2_warp(
     B: int,
@@ -26,7 +31,7 @@ def test_fused_linear_cross_entropy_l2_warp(
     H: int,
     V: int,
     l2_penalty_factor: float,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
 
@@ -36,6 +41,7 @@ def test_fused_linear_cross_entropy_l2_warp(
 
     ignore_index = -100
     shift_labels = torch.cat((labels[..., 1:], torch.full_like(labels[:, :1], ignore_index)), 1)
+    shift_labels[:, ::2] = ignore_index
 
     ref_criterion = nn.CrossEntropyLoss()
 
@@ -53,7 +59,7 @@ def test_fused_linear_cross_entropy_l2_warp(
 
     fused_criterion = FusedLinearCrossEntropyLoss(
         l2_penalty_factor=l2_penalty_factor,
-        use_l2warp=True  # Make sure to enable it
+        use_l2warp=True,  # Make sure to enable it
     )
 
     fused_loss = fused_criterion(x, shift_labels, lm_head.weight, lm_head.bias)

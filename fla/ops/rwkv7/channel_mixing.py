@@ -1,10 +1,24 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import logging
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_pytorch_version, input_guard, use_cuda_graph
+from fla.utils import (
+    USE_CUDA_GRAPH,
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    check_pytorch_version,
+    input_guard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +32,8 @@ if not check_pytorch_version('2.4'):
         for block_size in [128, 256, 512, 1024, 2048, 4096, 8192]
     ],
     key=['hidden_dim'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def rwkv_seq_mix_kernel(
@@ -29,7 +44,7 @@ def rwkv_seq_mix_kernel(
     batch_size: tl.constexpr,
     token_length,
     hidden_dim: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     block_start = tl.program_id(0) * BLOCK_SIZE
     block_idx = block_start + tl.arange(0, BLOCK_SIZE)[:]
@@ -69,7 +84,7 @@ def rwkv_seq_mix_kernel(
 def rwkv_channel_mixing_pow_and_relu(
     in_ptr,
     out_ptr,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     """Fused ReLU and Power operation: x = ReLU(x)^2"""
     xoffset = tl.program_id(0) * BLOCK_SIZE
@@ -113,7 +128,7 @@ def rwkv_mix_fwd(x, x_prev, x_k):
     def grid(meta): return (
         (total_elements + meta['BLOCK_SIZE'] - 1) // meta['BLOCK_SIZE'],  # grid_0
         1,  # grid_1
-        1   # grid_2
+        1,   # grid_2
     )
 
     rwkv_seq_mix_kernel[grid](
@@ -144,7 +159,7 @@ def rwkv_relu_and_square_fwd(x: torch.Tensor, inplace: bool = True):
     def grid(meta): return (
         (output.numel() + meta['BLOCK_SIZE'] - 1) // meta['BLOCK_SIZE'],  # grid_0
         1,  # grid_1
-        1   # grid_2
+        1,   # grid_2
     )
     rwkv_channel_mixing_pow_and_relu[grid](
         x,
@@ -159,7 +174,7 @@ def rwkv_relu_and_square_fwd(x: torch.Tensor, inplace: bool = True):
 def relu_square_bwd_kernel(
     out_ptr,
     forward_input_ptr,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     """ReLU(x)^2 backward kernel
     grad_input = grad_output * 2 * x if x > 0 else 0
@@ -184,7 +199,8 @@ def relu_square_bwd_kernel(
         for block_size in [128, 256, 512, 1024, 2048, 4096, 8192]
     ],
     key=['hidden_dim'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def rwkv_mix_bwd_kenel(
@@ -195,7 +211,7 @@ def rwkv_mix_bwd_kenel(
     batch_size,
     token_length,
     hidden_dim: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -225,7 +241,7 @@ def rwkv_mix_bwd_kenel(
     tl.store(
         dx_prev_ptr + dx_prev_offset,
         tl.cast(prod, dtype=dx_prev_ptr.dtype.element_ty),
-        mask=is_first_step
+        mask=is_first_step,
     )
 
 
@@ -259,7 +275,7 @@ def rwkv_channel_mixing_bwd(grad_output, x, x_prev, x_k, key_weight, value_weigh
     relu_square_bwd_kernel[grid](
         dk,
         k1_K,
-        BLOCK_SIZE=BLOCK_SIZE
+        BLOCK_SIZE=BLOCK_SIZE,
     )
 
     dK = k1.transpose(-2, -1) @ dk

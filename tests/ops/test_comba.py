@@ -1,16 +1,20 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
-from typing import List
 
 import pytest
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 
 from fla.ops.comba import chunk_comba, fused_recurrent_comba
+from fla.ops.comba.naive import naive_chunk_comba
 from fla.ops.comba.utils import chunk_comba_cumsum_scalar_fwd
-from fla.utils import assert_close, device, is_intel_alchemist
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
 def cumsum_comba_local_fwd_reference(s, reverse=False, chunk_size=128):
@@ -35,7 +39,7 @@ def cumsum_comba_local_fwd_reference(s, reverse=False, chunk_size=128):
             (32, 1000, 4, 64, torch.float),
             (32, 2048, 8, 128, torch.float),
         ]
-    ]
+    ],
 )
 def test_cumsum_local_scalar_fwd(
     B: int,
@@ -49,85 +53,6 @@ def test_cumsum_local_scalar_fwd(
     tri_0, tri_1 = chunk_comba_cumsum_scalar_fwd(s, chunk_size=chunk_size)
     assert_close("local cumsum scalar", ref_0, tri_0, 0.001 if dtype == torch.float else 0.003)
     assert_close("local cumsum scalar", ref_1, tri_1, 0.001 if dtype == torch.float else 0.003)
-
-
-def chunk_comba_ref(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    p: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-    chunk_size: int = 64,
-    scale: float = None,
-    initial_state: torch.Tensor = None,
-    output_final_state: bool = False,
-):
-    BT = chunk_size
-    if scale is None:
-        scale = 1 / (q.shape[-1] ** 0.5)
-    # Calculate padding needed to make T a multiple of BT
-    q, k, v, p, beta, g = map(lambda x: x.transpose(1, 2).contiguous().to(torch.float32), [q, k, v, p, beta, g])
-
-    T = q.shape[-2]
-    pad_len = (BT - (T % BT)) % BT
-    if pad_len > 0:
-        # Pad all tensors
-        q = F.pad(q, (0, 0, 0, pad_len))
-        k = F.pad(k, (0, 0, 0, pad_len))
-        v = F.pad(v, (0, 0, 0, pad_len))
-        p = F.pad(p, (0, 0, 0, pad_len))
-        beta = F.pad(beta, (0, pad_len))
-        g = F.pad(g, (0, pad_len))
-    decay = g
-    chunk_size = BT
-    b, h, l, d_k = q.shape
-    d_v = v.shape[-1]
-    q = q * scale
-    v = v * beta[..., None]
-    p_beta = p * beta[..., None]
-    assert l % chunk_size == 0
-    # note that diagonal is masked.
-    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=0)
-    q, k, v, p_beta, decay, g = map(
-        lambda x: rearrange(x, 'b h (n c) d -> b h n c d', c=chunk_size),
-        [q, k, v, p_beta, decay.unsqueeze(-1), g.unsqueeze(-1)]
-    )
-    decay = decay.squeeze(-1).cumsum(-1)  # [B, H, n, c]
-    decay_0 = decay - g.squeeze(-1)  # [B, H, n, c]
-    L_mask = ((decay.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
-    L_mask_0 = ((decay_0.unsqueeze(-1) - decay.unsqueeze(-2)).tril().exp().float()).tril()
-    # [B, H, n, c, d] @ [B, H, n, d, c] -> [B, H, n, c, c]
-    attn = -((p_beta @ k.transpose(-1, -2)) * L_mask_0).masked_fill(mask, 0)
-    for i in range(1, chunk_size):
-        attn[..., i, :i] = attn[..., i, :i].clone() + (attn[..., i, :i, None].clone() * attn[..., :i, :i].clone()).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=torch.float, device=q.device)
-    # for U
-    k_cumsum = attn @ v
-    # for W
-    k_cumdecay = attn @ (p_beta * decay_0[..., None].exp())
-    v = k_cumsum
-    S = k.new_zeros(b, h, d_k, d_v)
-    if initial_state is not None:
-        S += initial_state
-    o = torch.zeros_like(v)
-    mask = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=q.device), diagonal=1)
-    for i in range(0, l // chunk_size):
-        q_i, k_i, v_i = q[:, :, i], k[:, :, i], v[:, :, i]
-        attn = (q_i @ k_i.transpose(-1, -2) * L_mask[:, :, i]).masked_fill_(mask, 0)
-        v_prime = k_cumdecay[:, :, i] @ S
-        v_new = v_i - v_prime
-        o_inter = (q_i * decay[:, :, i, :, None].exp()) @ S
-        o[:, :, i] = o_inter + attn @ v_new
-        S = S * decay[:, :, i, -1, None, None].exp() + (k_i * (decay[:, :, i, -1, None] - decay[:, :, i]).exp()
-                                                        [..., None]).transpose(-1, -2) @ v_new
-    if not output_final_state:
-        S = None
-    # unpad
-    o = rearrange(o, 'b h n c d -> b h (n c) d')
-    o = o[:, :, :T]
-    o = o.transpose(1, 2)
-    return o, S
 
 
 @pytest.mark.parametrize(
@@ -144,7 +69,7 @@ def chunk_comba_ref(
             (2, 1024, 8, 128, 1, 0.1, torch.float16),
             (2, 1024, 8, 128, 1, 10, torch.float16),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
@@ -165,7 +90,7 @@ def test_fused_recurrent(
     g = g / gate_logit_normalizer
     h0 = torch.randn(B, H, D, D, dtype=torch.float32)
     q, k, v, p, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, p, beta, g, h0))
-    ref, ref_ht = chunk_comba_ref(
+    ref, ref_ht = naive_chunk_comba(
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -196,7 +121,7 @@ def test_fused_recurrent(
     [
         pytest.param(
             *test,
-            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test)
+            id="B{}-T{}-H{}-D{}-scale{}-gate_logit_normalizer{}-mask_p{}-use_qk_l2norm_in_kernel{}-{}".format(*test),
         )
         for test in [
             (1, 63, 1, 64, 1, 1, 0, False, torch.float16),
@@ -206,9 +131,9 @@ def test_fused_recurrent(
             (2, 1024, 4, 128, 0.1, 1, 0, True, torch.float16),
             (2, 1024, 4, 128, 0.1, 1, 0.5, False, torch.float16),
             (2, 1024, 4, 128, 0.1, 10, 0, False, torch.float16),
-            (4, 2048, 8, 64, 0.1, 1, 0, True, torch.float16)
+            (4, 2048, 8, 64, 0.1, 1, 0, True, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
@@ -221,7 +146,7 @@ def test_chunk(
     use_qk_l2norm_in_kernel: bool,
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
 
     q = torch.randn(B, T, H, D, dtype=dtype)
@@ -253,7 +178,7 @@ def test_chunk(
     tri_dq, tri_dk, tri_dv, tri_dp, tri_dbeta, tri_dg, tri_dh0 = q.grad, k.grad, v.grad, p.grad, beta.grad, g.grad, h0.grad
     q.grad = k.grad = v.grad = p.grad = beta.grad = g.grad = h0.grad = None
 
-    ref, ref_ht = chunk_comba_ref(
+    ref, ref_ht = naive_chunk_comba(
         q=F.normalize(q.clone(), p=2, dim=-1),
         k=F.normalize(k.clone(), p=2, dim=-1),
         p=F.normalize(p.clone(), p=2, dim=-1),
@@ -289,20 +214,20 @@ def test_chunk(
             (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
             (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set'
+    reason='Skipping test_chunk_varlen because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_chunk_varlen(
     H: int,
     D: int,
     mask_p: float,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
-    if is_intel_alchemist and D > 128:
+    if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
@@ -342,7 +267,7 @@ def test_chunk_varlen(
     ref = []
     ref_ht = []
     for i in range(N):
-        ref_i, ref_ht_i = chunk_comba_ref(
+        ref_i, ref_ht_i = naive_chunk_comba(
             q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
             k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
             v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],

@@ -1,5 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -49,7 +53,7 @@ def transform_q_fwd_kernel(
 
     if BS == BT:
         if (i_t * BT) % S == 0:
-            p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (i_t * BT // S)) * HQ + i_hq) * K,
+            p_q_new = tl.make_block_ptr(q_new + ((bos.to(tl.int64) * NUM_BLOCKS + (i_t * BT // S)) * HQ + i_hq) * K,
                                         (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
             tl.store(p_q_new, b_q.to(q_new.dtype.element_ty), boundary_check=(0, 1))
 
@@ -64,7 +68,7 @@ def transform_q_fwd_kernel(
         b_q -= tl.dot(b_s2.to(b_w2.dtype), b_w2)
 
         if offset % S == 0:
-            p_q_new = tl.make_block_ptr(q_new + ((bos * NUM_BLOCKS + (offset // S)) * HQ + i_hq) * K,
+            p_q_new = tl.make_block_ptr(q_new + ((bos.to(tl.int64) * NUM_BLOCKS + (offset // S)) * HQ + i_hq) * K,
                                         (T, K), (HQ*K*NUM_BLOCKS, 1), (i_t * BT, 0), (BT, BK), (1, 0))
             tl.store(p_q_new, b_q.to(q_new.dtype.element_ty), boundary_check=(0, 1))
 
@@ -76,23 +80,26 @@ def transform_q_fwd_fn(
     cu_seqlens,
     BT,
     BS,
-    S
+    S,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K = q.shape
     H = w1.shape[-2]
     G = HQ // H
-    indices_BT = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices_BT)
-    grid = (NT, B * HQ)
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
+
     num_blocks = triton.cdiv(T, S) if cu_seqlens is None else get_max_num_splits(cu_seqlens, S)
-    q_new = torch.empty(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
-    transform_q_fwd_kernel[grid](
+    q_new = torch.zeros(B, T, num_blocks, HQ, K, dtype=q.dtype, device=q.device)
+    transform_q_fwd_kernel[(NT, B * HQ)](
         q=q,
         q_new=q_new,
         w1=w1,
         w2=w2,
         cu_seqlens=cu_seqlens,
-        indices=indices_BT,
+        indices=indices,
         T=T,
         K=K,
         BK=triton.next_power_of_2(K),
@@ -103,6 +110,6 @@ def transform_q_fwd_fn(
         BT=BT,
         S=S,
         NUM_BLOCKS=num_blocks,
-        num_warps=8 if (BT == 128 and K == 128) else 4
+        num_warps=8 if (BT == 128 and K == 128) else 4,
     )
     return q_new

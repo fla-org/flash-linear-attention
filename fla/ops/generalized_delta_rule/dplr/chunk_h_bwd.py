@@ -1,17 +1,19 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, is_amd, use_cuda_graph
+from fla.ops.utils.op import exp2
+from fla.utils import IS_AMD, USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
 
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
 @triton.heuristics({
@@ -25,8 +27,9 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'BK', 'BV', "V"],
-    use_cuda_graph=use_cuda_graph,
+    key=['BT', 'BK', 'BV', 'V'],
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_dplr_bwd_kernel_dhu(
@@ -99,7 +102,7 @@ def chunk_dplr_bwd_kernel_dhu(
             b_dh_tmp += tl.dot(b_w, b_dv2.to(b_qg.dtype))
         last_idx = min((i_t + 1) * BT, T) - 1
         bg_last = tl.load(gk + ((bos + last_idx) * H + i_h) * K + tl.arange(0, BK), mask=mask_k)
-        b_dh *= exp(bg_last)[:, None]
+        b_dh *= exp2(bg_last)[:, None]
         b_dh += b_dh_tmp
 
     if USE_INITIAL_STATE:
@@ -113,14 +116,15 @@ def chunk_dplr_bwd_dhu(
     w: torch.Tensor,
     gk: torch.Tensor,
     h0: torch.Tensor,
-    dht: Optional[torch.Tensor],
+    dht: torch.Tensor | None,
     do: torch.Tensor,
     dv: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *qg.shape, do.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
     BK = max(triton.next_power_of_2(K), 16)
     assert BK <= 256, "current kernel does not support head dimension being larger than 256."
     # H100
@@ -134,7 +138,8 @@ def chunk_dplr_bwd_dhu(
         BV = 16
         BC = 16
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None

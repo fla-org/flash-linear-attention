@@ -1,15 +1,19 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
-from fla.utils import is_nvidia_hopper
+from fla.ops.utils.op import exp2
+from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs
 
-NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
 @triton.heuristics({
@@ -22,6 +26,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
@@ -80,8 +85,8 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_ds = tl.zeros([BT, BT], dtype=tl.float32)
     b_dv = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dg_last = tl.zeros([1,], dtype=tl.float32)
-    b_dg = tl.zeros([BT,], dtype=tl.float32)
+    b_dg_last = tl.zeros([1], dtype=tl.float32)
+    b_dg = tl.zeros([BT], dtype=tl.float32)
 
     p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
@@ -104,9 +109,9 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
 
     # calculation
     b_dg_last += tl.sum(b_h * b_dh)
-    b_dg_last *= exp(b_g_last)
+    b_dg_last *= exp2(b_g_last)
 
-    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp(b_g[:, None] - b_g[None, :]), 0)
+    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp2(b_g[:, None] - b_g[None, :]), 0)
     b_k = (b_k * b_beta[:, None]).to(b_k.dtype)
     b_s = tl.dot(b_q, tl.trans(b_k)) * b_m
     b_ds = tl.dot(b_do, tl.trans(b_v))
@@ -114,7 +119,7 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
     b_dm = tl.where(tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :], b_dm, 0)
     b_dg += tl.sum(b_dm, axis=1)
     b_dg -= tl.sum(b_dm, axis=0)
-    b_g_exp_k = tl.where(m_t, exp(-b_g + b_g_last), 0)
+    b_g_exp_k = tl.where(m_t, exp2(-b_g + b_g_last), 0)
     b_ds = b_ds * b_m
     b_dk += tl.dot(b_v, b_dh.to(b_v.dtype)) * b_g_exp_k[:, None]
     b_dg_last += tl.sum(b_dk * b_k)
@@ -140,6 +145,7 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dkv(
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_mesa_net_h_kv_bwd_intra_kernel_dq(
@@ -214,11 +220,11 @@ def chunk_mesa_net_h_kv_bwd_intra_kernel_dq(
     b_do = tl.load(p_do, boundary_check=(0, 1))
     b_h = tl.load(p_h, boundary_check=(0, 1))
 
-    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp(b_g[:, None] - b_g[None, :]), 0)
+    b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), exp2(b_g[:, None] - b_g[None, :]), 0)
     b_k = (b_k * b_beta[:, None]).to(b_k.dtype)
 
     b_ds = tl.dot(b_do, tl.trans(b_v)) * b_m
-    b_g_exp_q = exp(b_g)
+    b_g_exp_q = exp2(b_g)
     b_dq = tl.dot(b_do, b_h.to(b_do.dtype)) * b_g_exp_q[:, None]
     b_dg = tl.sum(b_dq * b_q, axis=1) + tl.load(p_dg_prev, boundary_check=(0,))
     b_dq += tl.dot(b_ds.to(b_k.dtype), b_k)
@@ -237,11 +243,13 @@ def chunk_mesa_net_h_kv_bwd_intra_separate_fn(
     g,
     do,
     cu_seqlens,
-    chunk_size=64
+    chunk_size=64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, H, K, V = *k.shape, v.shape[-1]
     BT = chunk_size
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     BK = max(triton.next_power_of_2(K), 16)
@@ -272,7 +280,7 @@ def chunk_mesa_net_h_kv_bwd_intra_separate_fn(
         V=V,
         BT=BT,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     dg_final = torch.empty_like(dg)
     chunk_mesa_net_h_kv_bwd_intra_kernel_dq[grid](
@@ -295,6 +303,6 @@ def chunk_mesa_net_h_kv_bwd_intra_separate_fn(
         V=V,
         BT=BT,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     return dq, dk, dv, dg_final

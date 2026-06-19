@@ -1,9 +1,13 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -44,7 +48,7 @@ class HedgehogFeatureMap(nn.Module):
 
     def __init__(
         self,
-        head_dim: int
+        head_dim: int,
     ) -> HedgehogFeatureMap:
         super().__init__()
         # Trainable map
@@ -74,7 +78,7 @@ class T2RFeatureMap(nn.Module):
         self,
         head_dim: int,
         dot_dim: int = None,
-        bias: Optional[bool] = False
+        bias: bool | None = False,
     ) -> T2RFeatureMap:
         super().__init__()
         # Trainable map
@@ -104,7 +108,7 @@ class DPFPFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        nu: int = 4
+        nu: int = 4,
     ) -> DPFPFeatureMap:
         super().__init__()
         self.nu = nu
@@ -119,7 +123,7 @@ class DPFPFeatureMap(nn.Module):
 class HadamardFeatureMap(nn.Module):
     def __init__(
         self,
-        head_dim: int
+        head_dim: int,
     ) -> HadamardFeatureMap:
         super().__init__()
         # Trainable map
@@ -134,7 +138,7 @@ class LearnableOuterProductFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        feature_dim: int
+        feature_dim: int,
     ) -> LearnableOuterProductFeatureMap:
         super().__init__()
         # Trainable map
@@ -151,8 +155,8 @@ class LearnablePolySketchNonNegativeFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        sketch_size: Optional[int] = None,
-        degree: Optional[int] = 2
+        sketch_size: int | None = None,
+        degree: int | None = 2,
     ) -> LearnablePolySketchNonNegativeFeatureMap:
         super().__init__()
 
@@ -168,11 +172,11 @@ class LearnablePolySketchNonNegativeFeatureMap(nn.Module):
         # currently we simply use linear layers without any non-linear activations
         self.sketches1 = nn.ModuleList([
             nn.Linear(head_dim, sketch_size, bias=False),
-            *[nn.Linear(sketch_size, sketch_size, bias=False) for _ in range(int(math.log2(self.degree)) - 2)]
+            *[nn.Linear(sketch_size, sketch_size, bias=False) for _ in range(int(math.log2(self.degree)) - 2)],
         ])
         self.sketches2 = nn.ModuleList([
             nn.Linear(head_dim, sketch_size, bias=False),
-            *[nn.Linear(sketch_size, sketch_size, bias=False) for _ in range(int(math.log2(self.degree)) - 2)]
+            *[nn.Linear(sketch_size, sketch_size, bias=False) for _ in range(int(math.log2(self.degree)) - 2)],
         ])
 
     def forward(self, x: torch.Tensor):
@@ -190,7 +194,7 @@ class LearnablePolySketchNonNegativeFeatureMap(nn.Module):
 class TaylorFeatureMap(nn.Module):
     def __init__(
         self,
-        head_dim: int
+        head_dim: int,
     ) -> TaylorFeatureMap:
         super().__init__()
         self.head_dim = head_dim
@@ -208,9 +212,9 @@ class RebasedFeatureMap(nn.Module):
     def __init__(
         self,
         head_dim: int,
-        use_gamma: Optional[bool] = True,
-        use_beta: Optional[bool] = True,
-        normalize: Optional[bool] = True
+        use_gamma: bool | None = True,
+        use_beta: bool | None = True,
+        normalize: bool | None = True,
     ) -> RebasedFeatureMap:
         super().__init__()
 
@@ -226,7 +230,7 @@ class RebasedFeatureMap(nn.Module):
         if use_beta:
             self.beta = nn.Parameter(torch.zeros(head_dim))
 
-    def forward(self, x: torch.Tensor, flatten: Optional[bool] = True):
+    def forward(self, x: torch.Tensor, flatten: bool | None = True):
         if self.use_beta and self.use_gamma and self.normalize:
             x = layer_norm(x, self.gamma, self.beta)
         elif self.normalize:

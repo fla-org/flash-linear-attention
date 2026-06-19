@@ -1,6 +1,9 @@
-# -*- coding: utf-8 -*-
-
-from typing import Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 from einops import rearrange
@@ -10,8 +13,8 @@ def naive_parallel_based(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = None,
-    use_norm: bool = True
+    scale: float | None = None,
+    use_norm: bool = True,
 ):
     if scale is None:
         scale = q.shape[-1] ** -0.5

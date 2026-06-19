@@ -1,24 +1,28 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2024, Songlin Yang, Yu Zhang
-
-from typing import Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
+from fla.utils import autotune_cache_kwargs
 
 
 @triton.heuristics({
-    'HAS_SCALE': lambda args: args['scale'] is not None
+    'HAS_SCALE': lambda args: args['scale'] is not None,
 })
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps)
         for num_warps in [1, 2, 4, 8, 16, 32]
     ],
-    key=['D']
+    key=['D'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def logsumexp_fwd_kernel(
@@ -27,7 +31,7 @@ def logsumexp_fwd_kernel(
     scale,
     D: tl.constexpr,
     B: tl.constexpr,
-    HAS_SCALE: tl.constexpr
+    HAS_SCALE: tl.constexpr,
 ):
     i_n, i_d = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     o_d = i_d * B + tl.arange(0, B)
@@ -43,8 +47,8 @@ def logsumexp_fwd_kernel(
 
 def logsumexp_fwd(
     x,
-    scale: Optional[float] = None,
-    dtype: Optional[torch.dtype] = None
+    scale: float | None = None,
+    dtype: torch.dtype | None = None,
 ):
     r"""
     Compute the logsumexp of the input tensor over the last dimension.
@@ -72,7 +76,7 @@ def logsumexp_fwd(
         z=z,
         scale=scale,
         D=D,
-        B=B
+        B=B,
     )
     z = z.logsumexp(-1).view(*shape[:-1])
     if dtype is not None and dtype != torch.float:

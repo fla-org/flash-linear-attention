@@ -1,15 +1,16 @@
-
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.ops.utils.op import exp
+from fla.ops.utils.op import exp2
 
 
 @triton.jit()
@@ -20,7 +21,7 @@ def chunk_update_once(
     b_m,
     b_g_exp_q,
     b_h,
-    b_lamb
+    b_lamb,
 ):
     b_o = tl.dot((tl.dot(b_p.to(b_k.dtype), tl.trans(b_k)) * b_m).to(b_v.dtype), b_v)
     b_o += tl.dot((b_p * b_g_exp_q).to(b_h.dtype), b_h)
@@ -49,7 +50,7 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     K: tl.constexpr,
     BT: tl.constexpr,
     BK: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
@@ -93,9 +94,9 @@ def chunk_fwd_mesa_cg_dim64_kernel(
     p_lamb = tl.make_block_ptr(lamb, (K,), (1,), (0,), (BK,), (0,))
     b_lamb = tl.load(p_lamb, boundary_check=(0,)).to(tl.float32)
 
-    b_m = exp(b_g[:, None] - b_g[None, :]) * b_beta[None, :]
+    b_m = exp2(b_g[:, None] - b_g[None, :]) * b_beta[None, :]
     b_m = tl.where((o_t[:, None] >= o_t[None, :]) & (m_t[:, None] & m_t[None, :]), b_m, 0)
-    b_g_exp_q = tl.exp(b_g)[:, None]
+    b_g_exp_q = exp2(b_g)[:, None]
 
     b_x = tl.zeros([BT, BK], dtype=tl.float32)
     b_p = tl.zeros([BT, BK], dtype=tl.float32)
@@ -125,17 +126,19 @@ def chunk_mesa_cg_bwd(
     g_local_cumsum: torch.Tensor,
     beta: torch.Tensor,
     lamb: torch.Tensor,  # lambda
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     max_CG_iteration: int = 30,
-    output_dtype: Optional[torch.dtype] = None
+    output_dtype: torch.dtype | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K = dq.shape
     assert K <= 128, "head dimension must be less than 128"
     assert chunk_size <= 64 or K <= 64, "either chunk size or head dimension must be no greater than 64"
     dq_final = torch.empty_like(dq, dtype=dq.dtype if output_dtype is None else output_dtype)
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, chunk_size) if cu_seqlens is None else len(chunk_indices)
     BK = max(triton.next_power_of_2(K), 16)
     grid = (NT, H*B)
@@ -157,6 +160,6 @@ def chunk_mesa_cg_bwd(
         BT=chunk_size,
         BK=BK,
         num_warps=4,
-        num_stages=1
+        num_stages=1,
     )
     return dq_final

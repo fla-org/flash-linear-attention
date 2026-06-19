@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
-from typing import Dict, Optional
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -16,26 +20,26 @@ class GLAConfig(PretrainedConfig):
         hidden_size: int = 2048,
         expand_k: float = 0.5,
         expand_v: float = 1.,
-        hidden_ratio: Optional[int] = 4,
-        intermediate_size: Optional[int] = None,
+        hidden_ratio: int | None = 4,
+        intermediate_size: int | None = None,
         num_hidden_layers: int = 24,
         num_heads: int = 4,
-        num_kv_heads: Optional[int] = None,
-        feature_map: Optional[str] = None,
+        num_kv_heads: int | None = None,
+        feature_map: str | None = None,
         attn_mode: str = "chunk",
         use_short_conv: bool = False,
         conv_size: int = 4,
         use_output_gate: bool = True,
-        clamp_min: Optional[float] = None,
+        clamp_min: float | None = None,
         hidden_act: str = "swish",
         max_position_embeddings: int = 2048,
-        elementwise_affine: Optional[bool] = True,
+        elementwise_affine: bool | None = True,
         norm_eps: float = 1e-6,
         use_gk: bool = True,
         use_gv: bool = False,
-        attn: Optional[Dict] = None,
+        attn: dict | None = None,
         use_cache: bool = True,
-        pad_token_id: Optional[int] = None,
+        pad_token_id: int | None = None,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
         tie_word_embeddings: bool = False,
@@ -46,7 +50,8 @@ class GLAConfig(PretrainedConfig):
         fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
-        **kwargs
+        attnres_block_size: int | None = None,
+        **kwargs,
     ):
         self.hidden_size = hidden_size
         self.expand_k = expand_k
@@ -78,20 +83,21 @@ class GLAConfig(PretrainedConfig):
         self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.attnres_block_size = attnres_block_size
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(
-                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time."
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
             )
         if fuse_linear_cross_entropy:
             warnings.warn(
                 "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
                 "at the potential cost of reduced precision. "
-                "If you observe issues like loss divergence, consider disabling this setting."
+                "If you observe issues like loss divergence, consider disabling this setting.",
             )
 
         if attn is not None:
-            if not isinstance(attn, Dict):
+            if not isinstance(attn, dict):
                 raise ValueError("attn must be a dictionary")
             if 'layers' not in attn:
                 raise ValueError("Layer indices must be provided to initialize hybrid attention layers")
@@ -101,6 +107,13 @@ class GLAConfig(PretrainedConfig):
             attn['qkv_bias'] = attn.get('qkv_bias', False)
             attn['window_size'] = attn.get('window_size', None)
             attn['rope_theta'] = attn.get('rope_theta', 10000.)
+
+        if attnres_block_size is not None and attnres_block_size != 1:
+            if attnres_block_size < 2 or attnres_block_size % 2 != 0:
+                raise ValueError(
+                    "`attnres_block_size` must be `None`, `1` (full mode), or an even integer (one block "
+                    f"contains `attnres_block_size // 2` transformer layers); got {attnres_block_size}."
+                )
 
         super().__init__(
             pad_token_id=pad_token_id,

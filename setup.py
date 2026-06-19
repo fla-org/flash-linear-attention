@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import ast
 import os
@@ -23,30 +28,7 @@ def get_package_version():
 setup(
     name='flash-linear-attention',
     version=get_package_version(),
-    description='Fast Triton-based implementations of causal linear attention',
+    packages=find_packages(),
     long_description=long_description,
     long_description_content_type='text/markdown',
-    author='Songlin Yang, Yu Zhang',
-    author_email='yangsl66@mit.edu, yzhang.cs@outlook.com',
-    url='https://github.com/fla-org/flash-linear-attention',
-    packages=find_packages(),
-    license='MIT',
-    classifiers=[
-        'Programming Language :: Python :: 3',
-        'License :: OSI Approved :: MIT License',
-        'Operating System :: OS Independent',
-        'Topic :: Scientific/Engineering :: Artificial Intelligence'
-    ],
-    python_requires='>=3.10',
-    install_requires=[
-        'torch>=2.5',
-        'transformers>=4.53.0',
-        'datasets>=3.3.0',
-        'einops',
-        'pytest'
-    ],
-    extras_require={
-        'conv1d': ['causal-conv1d>=1.4.0'],
-        'benchmark': ['matplotlib'],
-    }
 )

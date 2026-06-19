@@ -15,27 +15,36 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 requires-python = ">=3.10"
+# torch and triton are NOT in base deps. Pick a backend extra
+# ([cuda] / [rocm] / [xpu] / [cpu]) plus the matching --extra-index-url.
 dependencies = [
-    "torch>=2.5",
-    "transformers>=4.53.0",
-    "datasets>=3.3.0",
+    "transformers>=4.45.0",
     "einops",
-    "pytest",
 ]
 
 [project.optional-dependencies]
+cuda = ["torch>=2.7.0", "triton>=3.3"]
+# rocm / xpu intentionally don't pin a triton flavor: torch sourced from the
+# matching PyTorch wheel index pulls the right one transitively (pytorch-triton-rocm
+# on stable, triton-rocm on nightly, etc.).
+rocm = ["torch>=2.7.0"]
+xpu  = ["torch>=2.7.0"]
+npu  = ["torch==2.6.0", "torch_npu==2.6.0", "triton-ascend==3.2.0"]
+cpu  = ["torch>=2.7.0", "triton>=3.3"]
+tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]
-benchmark = ["matplotlib"]
+benchmark = ["matplotlib", "datasets>=3.3.0"]
+test = ["pytest"]
 
 [project.urls]
 Homepage = "https://github.com/fla-org/flash-linear-attention"
+Repository = "https://github.com/fla-org/flash-linear-attention"
 
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=64", "wheel"]
 
-[tool.isort]
-line_length = 127
-multi_line_output = 3
+[tool.setuptools.dynamic]
+version = {attr = "fla.__version__"}
 
 [tool.pytest.ini_options]
 log_cli = true
@@ -43,3 +52,81 @@ log_cli_level = "INFO"
 pythonpath = [
   "."
 ]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 127
+
+
+[tool.autopep8]
+max-line-length = 127
+
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # Pyflakes
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "I",    # isort
+    "C4",   # flake8-comprehensions
+    "TCH",  # flake8-type-checking
+    "T",    # flake8-debugger
+]
+ignore = [
+    # pycodestyle (E)
+    "E501",   # line-too-long: Triton kernels and benchmark tables often have long calls/shape lists.
+    "E741",   # ambiguous-variable-name: math code commonly uses short symbols like l/I/O.
+
+    # flake8-bugbear (B)
+    "B023",   # function-uses-loop-variable: closures in generated/autotuned code may intentionally capture loop vars.
+    "B006",   # mutable-argument-default: some APIs use defaults like []/{} for compatibility with existing call sites.
+    "B007",   # unused-loop-control-variable: loops may keep named indices for shape/layout readability.
+    "B008",   # function-call-in-default-argument: defaults sometimes depend on module-level factories/constants.
+    "B028",   # no-explicit-stacklevel: warning locations are usually less important in tests/scripts.
+    "B904",   # raise-without-from-inside-except: concise re-raise patterns are used in compatibility paths.
+    "B905",   # zip-without-explicit-strict: many zips intentionally allow the pre-Python-3.10 default strict=False behavior.
+
+    # flake8-comprehensions (C4)
+    "C408",   # unnecessary-collection-call: dict()/list()/tuple() can be clearer when constructing dynamic values.
+    "C416",   # unnecessary-comprehension: comprehensions may preserve structure for later filtering/debugging.
+    "C417",   # unnecessary-map: map(...) is allowed when it mirrors functional or data-pipeline code.
+
+    # flake8-debugger / print checks (T)
+    "T201",   # print-found: benchmark, release, and CI helper scripts intentionally print progress and summaries.
+
+    # flake8-type-checking (TC)
+    "TC002",  # typing-only-third-party-import: moving imports behind TYPE_CHECKING can hide optional dependency failures.
+    "TC003",  # typing-only-standard-library-import: runtime stdlib imports are cheap and often improve readability.
+
+    # flake8-simplify (SIM)
+    "SIM102", # collapsible-if: nested guards often document staged shape/device checks.
+    "SIM108", # if-else-block-instead-of-if-exp: explicit branches are easier to debug around tensor setup.
+    "SIM118", # in-dict-keys: explicit .keys() can be clearer when the object is mapping-like, not always a plain dict.
+    "SIM211", # if-expr-with-false-true: keep explicit boolean expressions when they mirror config/env logic.
+
+    # flake8-commas (COM)
+    "COM812", # missing-trailing-comma: formatter/autofix tools should own trailing comma style.
+]
+extend-select = ["RUF022"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["fla"]
+force-sort-within-sections = false
+
+[tool.isort]
+profile = "black"
+line_length = 127
+known_first_party = ["fla"]
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"fla/utils.py" = ["TCH004"]
+"evals/harness.py" = ["I", "TCH"]
+"tests/*/*.py" = ["UP030"]
+"scripts/*.py" = ["C414"]
+"legacy/training/flame/*.py" = ["C408"]

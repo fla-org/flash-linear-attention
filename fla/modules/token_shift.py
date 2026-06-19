@@ -1,20 +1,23 @@
-# -*- coding: utf-8 -*-
-
-from typing import Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices
-from fla.utils import get_multiprocessor_count, input_guard, is_amd, tensor_cache
+from fla.utils import IS_AMD, autotune_cache_kwargs, get_multiprocessor_count, input_guard, tensor_cache
 
-NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [2, 4, 8, 16, 32]
+NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [2, 4, 8, 16, 32]
 
 
 def token_shift_ref(
     x: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
         # Variable length mode with cu_seqlens
@@ -59,6 +62,7 @@ def token_shift_ref(
         for num_stages in [1, 2, 3]
     ],
     key=['BD'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def token_shift_fwd_kernel_short(
@@ -106,7 +110,7 @@ def token_shift_fwd_kernel_short(
     else:
         cache_offset = i_b * D + o_d  # i_b is batch index
 
-    if IS_DECODE:
+    if IS_DECODE and USE_INITIAL_STATE:
         b_cache = tl.load(cache + cache_offset, mask=m_d)
         delta = b_cache - b_x
         tl.store(y + base_offset, delta, mask=m_d)
@@ -149,7 +153,8 @@ def token_shift_fwd_kernel_short(
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [1, 2, 3]
     ],
-    key=['BD', 'NB']
+    key=['BD', 'NB'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def token_shift_fwd_kernel_long(
@@ -164,11 +169,13 @@ def token_shift_fwd_kernel_long(
     BD: tl.constexpr,
     BT: tl.constexpr,
     NB: tl.constexpr,
+    ND: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_dt, i_b = tl.program_id(0), tl.program_id(1)
+    i_d, i_t = i_dt % ND, i_dt // ND
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), \
@@ -214,7 +221,7 @@ def token_shift_fwd_kernel_long(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_INITIAL_STATE': lambda args: args['grad_cache_out'] is not None,
-    'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None
+    'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -223,6 +230,7 @@ def token_shift_fwd_kernel_long(
         for num_stages in [1, 2, 3]
     ],
     key=['BD'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def token_shift_bwd_kernel_short(
@@ -291,7 +299,7 @@ def token_shift_bwd_kernel_short(
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_INITIAL_STATE': lambda args: args['grad_cache_out'] is not None,
-    'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None
+    'HAS_DCACHE': lambda args: args['grad_cache_in'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -299,7 +307,8 @@ def token_shift_bwd_kernel_short(
         for num_warps in NUM_WARPS_AUTOTUNE
         for num_stages in [1, 2, 3]
     ],
-    key=['BD', 'NB']
+    key=['BD', 'NB'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def token_shift_bwd_kernel_long(
@@ -314,11 +323,13 @@ def token_shift_bwd_kernel_long(
     BD: tl.constexpr,
     BT: tl.constexpr,
     NB: tl.constexpr,
+    ND: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     HAS_DCACHE: tl.constexpr,
 ):
-    i_d, i_t_blk, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_dt, i_b = tl.program_id(0), tl.program_id(1)
+    i_d, i_t_blk = i_dt % ND, i_dt // ND
 
     if IS_VARLEN:
         i_n, i_t_blk = tl.load(chunk_indices + i_t_blk * 2).to(tl.int32), \
@@ -327,6 +338,7 @@ def token_shift_bwd_kernel_long(
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, eos - bos)
     else:
+        i_n = i_b
         bos, eos = i_b * T, (i_b + 1) * T
         t_start = i_t_blk * BT
         t_end = tl.minimum(t_start + BT, T)
@@ -359,24 +371,26 @@ def token_shift_bwd_kernel_long(
 
 @tensor_cache
 def prepare_maxlens(cu_seqlens: torch.LongTensor) -> int:
-    return torch.max(cu_seqlens[1:] - cu_seqlens[:-1]).item()
+    return torch.max(cu_seqlens.diff()).item()
 
 
 def token_shift_fwd(
     x: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    cache: Optional[torch.Tensor] = None,
-    output_cache: bool = False
+    cu_seqlens: torch.Tensor | None = None,
+    cache: torch.Tensor | None = None,
+    output_cache: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, D = x.shape
     y = torch.empty_like(x)
-    use_short_kernel = T <= 4096
 
     if cu_seqlens is not None:
         T = prepare_maxlens(cu_seqlens)
         N = len(cu_seqlens) - 1
     else:
         N = B
+
+    use_short_kernel = T <= 4096
 
     if output_cache:
         cache_out = torch.empty((N, D), device=x.device, dtype=x.dtype)
@@ -401,17 +415,19 @@ def token_shift_fwd(
             D=D,
             BD=BD,
             STORE_FINAL_STATE=output_cache,
-            IS_DECODE=IS_DECODE
+            IS_DECODE=IS_DECODE,
         )
     else:
         BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, B*T), get_multiprocessor_count(x.device.index))))
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        if chunk_indices is None and cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
         NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
         BD = triton.next_power_of_2(D)
+        ND = triton.cdiv(D, BD)
         NB = triton.cdiv(B*T, 1024)
 
-        def grid(meta): return (triton.cdiv(D, meta['BD']), NT, N)
+        def grid(meta): return (ND * NT, 1 if cu_seqlens is not None else N)
         token_shift_fwd_kernel_long[grid](
             x,
             y,
@@ -424,6 +440,7 @@ def token_shift_fwd(
             BD=BD,
             BT=BT,
             NB=NB,
+            ND=ND,
             STORE_FINAL_STATE=output_cache,
         )
 
@@ -434,10 +451,11 @@ def token_shift_bwd(
     dy: torch.Tensor,
     N: int,
     T: int,
-    dcache: Optional[torch.Tensor] = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    dcache: torch.Tensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     use_short_kernel: bool = True,
-    has_init_cache: bool = False
+    has_init_cache: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     D = dy.shape[2]
     BD = triton.next_power_of_2(D)
@@ -461,12 +479,14 @@ def token_shift_bwd(
     else:
         BT = min(64, triton.next_power_of_2(triton.cdiv(max(16, dy.numel() // D),
                                                         get_multiprocessor_count(dy.device.index))))
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        if chunk_indices is None and cu_seqlens is not None:
+            chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
         NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
         NB = triton.cdiv(N * dy.shape[1], 1024)
         BD = triton.next_power_of_2(D)
+        ND = triton.cdiv(D, BD)
 
-        def grid(meta): return (triton.cdiv(D, meta['BD']), NT, N)
+        def grid(meta): return (ND * NT, 1 if cu_seqlens is not None else N)
         token_shift_bwd_kernel_long[grid](
             dx,
             dy,
@@ -479,6 +499,7 @@ def token_shift_bwd(
             BD=BD,
             BT=BT,
             NB=NB,
+            ND=ND,
         )
     return dx, grad_cache_out
 
@@ -487,10 +508,12 @@ class TokenShift(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def forward(ctx, x: torch.Tensor, cu_seqlens: Optional[torch.Tensor] = None,
-                cache: Optional[torch.Tensor] = None, output_cache: bool = False):
-        output, N, T, use_short_kernel, cache_out = token_shift_fwd(x, cu_seqlens, cache, output_cache)
+    def forward(ctx, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None,
+                cache: torch.Tensor | None = None, output_cache: bool = False,
+                chunk_indices: torch.LongTensor | None = None):
+        output, N, T, use_short_kernel, cache_out = token_shift_fwd(x, cu_seqlens, cache, output_cache, chunk_indices)
         ctx.cu_seqlens = cu_seqlens
+        ctx.chunk_indices = chunk_indices
         ctx.N = N
         ctx.T = T
         ctx.use_short_kernel = use_short_kernel
@@ -499,17 +522,19 @@ class TokenShift(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def backward(ctx, dy: torch.Tensor, dcache: Optional[torch.Tensor] = None):
+    def backward(ctx, dy: torch.Tensor, dcache: torch.Tensor | None = None):
         dx, grad_cache = token_shift_bwd(dy, ctx.N, ctx.T, dcache, ctx.cu_seqlens,
-                                         ctx.use_short_kernel, ctx.has_cache)
-        return dx, None, grad_cache, None
+                                         ctx.use_short_kernel, ctx.has_cache, ctx.chunk_indices)
+        return dx, None, grad_cache, None, None
 
 
+@torch.compiler.disable
 def token_shift(
     x: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    cache: Optional[torch.Tensor] = None,
-    output_cache: bool = False
+    cu_seqlens: torch.LongTensor | None = None,
+    cache: torch.Tensor | None = None,
+    output_cache: bool = False,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     """
     Token-shift operation implemented with Triton kernels.
@@ -536,7 +561,7 @@ def token_shift(
         assert x.dim() == 3, "Input must be [B, T, D]"
         assert x.shape[0] == 1, "Batch size must be 1 when using cu_seqlens"
 
-    output, cache_out = TokenShift.apply(x, cu_seqlens, cache, output_cache)
+    output, cache_out = TokenShift.apply(x, cu_seqlens, cache, output_cache, chunk_indices)
     if output_cache:
         return output, cache_out
     else:

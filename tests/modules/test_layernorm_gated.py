@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -6,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fla.modules import FusedLayerNormGated, FusedRMSNormGated
-from fla.utils import assert_close, device
+from fla.utils import IS_NVIDIA_BLACKWELL, assert_close, device
 
 
 @pytest.mark.parametrize(
@@ -19,7 +24,7 @@ from fla.utils import assert_close, device
             (2, 2, 2048, 1200, True,  "sigmoid", False),
             (2, 2, 50,   50,  False, "sigmoid", False),
         ]
-    ]
+    ],
 )
 def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: bool, activation: str, bias: bool):
     torch.manual_seed(42)
@@ -67,7 +72,7 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
             (2, 2, 2048, 1200, "silu"),
             (2, 2, 50,   50,  "sigmoid"),
         ]
-    ]
+    ],
 )
 def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     torch.manual_seed(42)
@@ -91,3 +96,51 @@ def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     assert_close('dx', ref_dx, tri_dx, 1e-3)
     assert_close('dg', ref_dg, tri_dg, 1e-3)
     assert_close('dw', ref_dw, tri_dw, 1e-3)
+
+
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_rmsnorm_gated_large_batch_offsets():
+    torch.manual_seed(42)
+    B, H, T, D = 256, 12, 6144, 128
+    x = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16).requires_grad_(True)
+    g = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16).requires_grad_(True)
+    weight = torch.ones(D, device=device, dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        ref = x.float() * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+        ref = (ref * weight.float() * F.silu(g.float())).to(torch.bfloat16)
+    tri = FusedRMSNormGated(D, eps=1e-6, activation="silu").to(device, dtype=torch.bfloat16)
+    tri.weight.data.copy_(weight)
+    y = tri(x, g)
+
+    assert_close(' y', ref, y, 6.3e-2)
+    del ref
+
+    y.float().sum().backward()
+    assert x.grad is not None
+    assert g.grad is not None
+    assert tri.weight.grad is not None
+
+
+@pytest.mark.skipif(not IS_NVIDIA_BLACKWELL, reason="large-offset repro requires a Blackwell/B200-class CUDA GPU")
+def test_rmsnorm_gated_large_batch_offsets_large_d():
+    torch.manual_seed(42)
+    B, H, T, D = 256, 1, 8200, 1024
+    x = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16).requires_grad_(True)
+    g = torch.randn(B, H, T, D, device=device, dtype=torch.bfloat16).requires_grad_(True)
+    tri = FusedRMSNormGated(D, eps=1e-6, activation="silu").to(device, dtype=torch.bfloat16)
+    tri.weight.data.fill_(1)
+
+    y = tri(x, g)
+    with torch.no_grad():
+        ref = torch.cat(
+            [tri(x[start:start + 128], g[start:start + 128]) for start in range(0, B, 128)],
+            dim=0,
+        )
+    assert_close(' y', ref, y, 6.3e-2)
+    del ref
+
+    y.float().sum().backward()
+    assert x.grad is not None
+    assert g.grad is not None
+    assert tri.weight.grad is not None

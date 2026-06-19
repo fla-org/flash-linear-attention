@@ -1,8 +1,11 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
-from typing import Optional, Tuple, Union
 
 import torch
 from einops import repeat
@@ -27,24 +30,24 @@ def naive_nsa_sel(
     v: torch.Tensor,
     block_indices: torch.LongTensor,
     block_size: int = 64,
-    scale: Optional[float] = None,
-    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None,
-    head_first: bool = False
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None,
+    **kwargs,
 ) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, TQ, HQ, K]`..
+            queries of shape `[B, TQ, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
             GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         block_indices (torch.LongTensor):
-            Block indices of shape `[B, TQ, H, S]` if `head_first=False` else `[B, H, TQ, S]`.
+            Block indices of shape `[B, TQ, H, S]`.
             `S` is the number of selected blocks for each query token, which is set to 16 in the paper.
         block_size (int):
-            Selected block size. Default: 64.
+            Selected block size. Default: `64`.
         scale (Optional[float]):
             Scale factor for attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -52,28 +55,17 @@ def naive_nsa_sel(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
             When a tuple is provided, it should contain two tensors: `(cu_seqlens_q, cu_seqlens_k)`.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format. Default: `False`.
-            This argument has been deprecated.
 
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, TQ, HQ, V]`.
     """
+    if 'head_first' in kwargs:
+        raise DeprecationWarning(
+            "head_first has been removed. Inputs must be in `[B, T, H, ...]` format.",
+        )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
-        warnings.warn(
-            f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
-            "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
-        )
 
     dtype = q.dtype
     G = q.shape[2] // k.shape[2]
@@ -169,10 +161,10 @@ def naive_nsa_cmp(q, k_cmp, v_cmp, block_size, scale, cu_seqlens=None):
 def naive_nsa_topk(
     q: torch.Tensor,               # [B, T_q, Hq, D]
     k_cmp: torch.Tensor,           # [B, T_C, Hkv, D]  (T_C = #compressed blocks)
-    block_counts: Union[int, torch.Tensor],  # int or [B, T_q, Hkv]
+    block_counts: int | torch.Tensor,  # int or [B, T_q, Hkv]
     block_size: int,
     scale: float,
-    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None,
+    cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None,
 ) -> torch.Tensor:
     B, Tq, Hq, _ = q.shape
     Hkv = k_cmp.shape[2]
@@ -270,17 +262,17 @@ def naive_nsa(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    g_cmp: Optional[torch.Tensor] = None,
-    g_slc: Optional[torch.Tensor] = None,
-    g_swa: Optional[torch.Tensor] = None,
-    block_indices: Optional[torch.LongTensor] = None,
-    block_counts: Union[torch.LongTensor, int] = 16,
+    g_cmp: torch.Tensor | None = None,
+    g_slc: torch.Tensor | None = None,
+    g_swa: torch.Tensor | None = None,
+    block_indices: torch.LongTensor | None = None,
+    block_counts: torch.LongTensor | int = 16,
     block_size: int = 64,
     window_size: int = 0,
-    scale: Optional[float] = None,
-    cu_seqlens: Union[None, torch.LongTensor, Tuple[torch.LongTensor, torch.LongTensor]] = None,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None,
     return_block_indices: bool = False,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.LongTensor]]:
+) -> torch.Tensor | tuple[torch.Tensor, torch.LongTensor]:
     r"""
     Args:
         q (torch.Tensor):

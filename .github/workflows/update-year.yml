@@ -1,0 +1,56 @@
+name: update-year
+
+on:
+  schedule:
+    # Run at 00:30 UTC on January 1st every year
+    - cron: '30 0 1 1 *'
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Target year (default: current year)'
+        required: false
+
+jobs:
+  update-year:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Determine year
+        id: year
+        run: |
+          if [ -n "${{ github.event.inputs.year }}" ]; then
+            echo "value=${{ github.event.inputs.year }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$(date +%Y)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update copyright headers
+        run: python scripts/check_header.py --fix --year ${{ steps.year.outputs.value }}
+
+      - name: Update LICENSE file
+        run: |
+          sed -i "s/Copyright (c) ${{ env.START_YEAR }}-[0-9]*/Copyright (c) ${{ env.START_YEAR }}-${{ steps.year.outputs.value }}/" LICENSE
+        env:
+          START_YEAR: 2023
+
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "chore: bump copyright year to ${{ steps.year.outputs.value }}"
+          title: "chore: bump copyright year to ${{ steps.year.outputs.value }}"
+          body: |
+            Automated copyright year bump to ${{ steps.year.outputs.value }}.
+
+            Triggered by the annual `update-year` workflow.
+          branch: chore/copyright-year-${{ steps.year.outputs.value }}
+          delete-branch: true

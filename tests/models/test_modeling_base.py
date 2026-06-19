@@ -1,19 +1,24 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-from typing import Optional
+import os
 
 import pytest
 import torch
 from transformers.configuration_utils import PretrainedConfig
 
-from fla.utils import assert_close, device, is_intel_alchemist, is_nvidia_hopper
+from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA_HOPPER, assert_close, device
 
 from .test_modeling_utils import (
     GENERATION_UNSUPPORTED,
     HOPPER_EXCLUSIVE,
     MODELING_UNSUPPORTED_VARLEN,
     NOT_READY_FOR_TESTING,
-    create_model_and_config
+    create_model_and_config,
 )
 
 
@@ -21,8 +26,8 @@ from .test_modeling_utils import (
 # BASE TEST FOR MODELING (FORWARD/BACKWARD PASS)
 # ===================================================================================
 @pytest.mark.skipif(
-    is_intel_alchemist,
-    reason="Skipping test on Intel Alchemist due to known issues with SRAM."
+    IS_INTEL_ALCHEMIST,
+    reason="Skipping test on Intel Alchemist due to known issues with SRAM.",
 )
 def run_test_model_forward_backward(
     L: int,
@@ -33,18 +38,19 @@ def run_test_model_forward_backward(
     config_class: type,
     use_l2warp: bool,
     dtype: torch.dtype,
+    **kwargs,
 ):
     """
     A foundational test for the forward and backward passes of a model.
     """
-    if not is_nvidia_hopper and D == 128:
+    if not IS_NVIDIA_HOPPER and D == 128:
         pytest.skip("D=128 is only tested on Hopper GPUs to save CI time.")
-    if not is_nvidia_hopper and config_class.__name__ in HOPPER_EXCLUSIVE:
+    if not IS_NVIDIA_HOPPER and config_class.__name__ in HOPPER_EXCLUSIVE:
         pytest.skip(f"{config_class.__name__} requires Hopper-specific features.")
     if config_class.__name__ in NOT_READY_FOR_TESTING:
         pytest.skip(f"{config_class.__name__} is not yet ready for testing.")
 
-    model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype)
+    model, config = create_model_and_config(config_class, L, H, D, use_l2warp=use_l2warp, dtype=dtype, **kwargs)
     input_ids = torch.randint(low=0, high=config.vocab_size, size=(B, T), device=device)
     output_fixed = model(input_ids, output_hidden_states=True).hidden_states[-1]
     assert output_fixed.shape == (B, T, config.hidden_size)
@@ -54,7 +60,7 @@ def run_test_model_forward_backward(
 
     cu_seqlens = torch.arange(0, B * T + 1, T, dtype=torch.int32, device=device)
     output_var = model(
-        input_ids.view(1, B * T), output_hidden_states=True, cu_seqlens=cu_seqlens
+        input_ids.view(1, B * T), output_hidden_states=True, cu_seqlens=cu_seqlens,
     ).hidden_states[-1]
     assert output_var.shape == (1, B * T, config.hidden_size)
     assert_close("output", output_fixed.view(1, B * T, -1), output_var, 1e-3)
@@ -73,14 +79,15 @@ def run_test_generation(
     config_class: type,
     dtype: torch.dtype,
     use_l2warp: bool = False,
-    model: Optional[torch.nn.Module] = None,
-    config: Optional[PretrainedConfig] = None,
+    model: torch.nn.Module | None = None,
+    config: PretrainedConfig | None = None,
     tol: float = 2e-3,
 ):
     """
     A foundational test for K/V cache-based generation.
     """
     torch.manual_seed(42)
+    os.environ['FLA_CONV_BACKEND'] = 'triton'
     if config_class.__name__ in GENERATION_UNSUPPORTED:
         pytest.skip(f"Generation test not supported for {config_class.__name__}.")
     if config_class.__name__ in NOT_READY_FOR_TESTING:

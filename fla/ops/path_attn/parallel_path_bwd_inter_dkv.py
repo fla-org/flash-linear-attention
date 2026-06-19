@@ -1,3 +1,10 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import torch
 import triton
 import triton.language as tl
@@ -39,7 +46,7 @@ def parallel_path_bwd_dkv_kernel(
     S: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     USE_GATE: tl.constexpr,
-    NUM_BLOCKS: tl.constexpr
+    NUM_BLOCKS: tl.constexpr,
 ):
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_hq = i_bh // HQ, i_bh % HQ
@@ -77,20 +84,20 @@ def parallel_path_bwd_dkv_kernel(
     # load query
     p_k = tl.make_block_ptr(k, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
     b_k = tl.load(p_k, boundary_check=(0, 1))
-    p_v = tl.make_block_ptr(v, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
+    p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, 0), (BT, BV), (1, 0))
     b_v = tl.load(p_v, boundary_check=(0, 1))
 
     if USE_GATE:
-        b_g_cumsum_k = tl.zeros([BT,], dtype=tl.float32)
+        b_g_cumsum_k = tl.zeros([BT], dtype=tl.float32)
         p_g_cumsum_k = tl.make_block_ptr(g_cumsum, (T, ), (HQ, ), (i_t * BT, ), (BT, ), (0, ))
         b_g_cumsum_k += tl.load(p_g_cumsum_k, boundary_check=(0, ))
-        b_dg_cumsum_k = tl.zeros([BT,], dtype=tl.float32)
+        b_dg_cumsum_k = tl.zeros([BT], dtype=tl.float32)
     else:
         b_g_cumsum_k = None
         b_dg_cumsum_k = None
 
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dv = tl.zeros([BT, BK], dtype=tl.float32)
+    b_dv = tl.zeros([BT, BV], dtype=tl.float32)
 
     last_chunk_start = tl.floor(i_t*BT / S).to(tl.int32) * S
     idx_j = (tl.floor(i_t * BT / S).to(tl.int32) + 1).to(tl.int32)
@@ -103,7 +110,7 @@ def parallel_path_bwd_dkv_kernel(
         b_delta = tl.load(p_delta, boundary_check=(0, ))
         b_l = tl.load(p_l, boundary_check=(0, ))
 
-        p_q = tl.make_block_ptr(q + ((bos * NUM_BLOCKS + idx_j) * HQ + i_hq) * K, (T, K),
+        p_q = tl.make_block_ptr(q + ((bos.to(tl.int64) * NUM_BLOCKS + idx_j) * HQ + i_hq) * K, (T, K),
                                 (HQ*K*NUM_BLOCKS, 1), (offset, 0), (BS, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         b_A = tl.dot(b_k, tl.trans(b_q).to(b_k.dtype))
@@ -127,10 +134,10 @@ def parallel_path_bwd_dkv_kernel(
     tl.store(p_dk, b_dk.to(dk.dtype.element_ty), boundary_check=(0, 1))
     mask = i_t * BT + tl.arange(0, BT) < T
     tl.atomic_add(
-        dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ * K + tl.arange(0, BK)[None, :],
+        dv + (i_t * BT + tl.arange(0, BT))[:, None] * HQ * V + tl.arange(0, BV)[None, :],
         b_dv,
         mask=mask[:, None],
-        sem='relaxed'
+        sem='relaxed',
     )
     if USE_GATE:
         tl.atomic_add(dg_cumsum + (i_t * BT + tl.arange(0, BT)) * HQ, b_dg_cumsum_k, mask=mask, sem='relaxed')
@@ -140,14 +147,17 @@ def parallel_path_bwd_dkv_fn(
     q, k, v, g_cumsum, do, dv, dg_cumsum,
     hc_whole, scale, L, D,
     cu_seqlens,
-    S, BT, BS
+    S, BT, BS,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, num_blocks, HQ, K = q.shape
     V = v.shape[-1]
     H = k.shape[-2]
     G = HQ // H
 
-    indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
+    indices = chunk_indices
     split_offsets = prepare_chunk_offsets(cu_seqlens, S) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(indices)
 
@@ -184,6 +194,6 @@ def parallel_path_bwd_dkv_fn(
         BK=triton.next_power_of_2(K),
         BV=triton.next_power_of_2(V),
         num_warps=8 if (BT == 128 and K == 128) else 4,
-        NUM_BLOCKS=num_blocks
+        NUM_BLOCKS=num_blocks,
     )
     return dk, dv, dg_cumsum

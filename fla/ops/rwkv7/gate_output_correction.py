@@ -1,10 +1,15 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 def gate_output_correction_ref(
@@ -63,6 +68,7 @@ def gate_output_correction_backward_ref(grad_output, o, r, k, r_k, v, g):
         for BT in [2, 4, 8]
     ],
     key=['num_heads', 'head_dim', 'BLOCK_SIZE_D'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def gate_output_correction_fwd_kernel(
@@ -80,9 +86,9 @@ def gate_output_correction_fwd_kernel(
 ):
     pid_b, pid_t_block = tl.program_id(0), tl.program_id(1)
     pid_h = tl.program_id(2)
-    t_start = pid_t_block * BT + T_OFFSET
-    t_idx = t_start + tl.arange(0, BT)[:, None]
-    mask_t = t_idx < T
+    t_local = pid_t_block * BT + tl.arange(0, BT)[:, None]
+    t_idx = T_OFFSET + t_local
+    mask_t = t_local < T
 
     d_idx = tl.arange(0, BLOCK_SIZE_D)[None, :]
     mask_d = d_idx < head_dim
@@ -114,6 +120,7 @@ def gate_output_correction_fwd_kernel(
         for BT in [2, 4, 8]
     ],
     key=['num_heads', 'head_dim', 'BLOCK_SIZE_D'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def gate_output_correction_bwd_kernel(
@@ -130,8 +137,9 @@ def gate_output_correction_bwd_kernel(
     pid_b, pid_t_block = tl.program_id(0), tl.program_id(1)
     pid_h = tl.program_id(2)
 
-    t_idx = pid_t_block * BT + T_OFFSET + tl.arange(0, BT)[:, None]
-    mask_t = t_idx < T
+    t_local = pid_t_block * BT + tl.arange(0, BT)[:, None]
+    t_idx = T_OFFSET + t_local
+    mask_t = t_local < T
 
     d_idx = tl.arange(0, BLOCK_SIZE_D)[None, :]
     mask_d = d_idx < head_dim
@@ -229,7 +237,7 @@ class GateOutputCorrection(torch.autograd.Function):
                 v.stride(0), v.stride(1), v.stride(2),
                 r_k.stride(0),
                 T_SIZE, T_OFFSET,
-                num_heads, head_dim, BLOCK_SIZE_D=triton.next_power_of_2(head_dim)
+                num_heads, head_dim, BLOCK_SIZE_D=triton.next_power_of_2(head_dim),
             )
         return output
 
@@ -241,4 +249,30 @@ class GateOutputCorrection(torch.autograd.Function):
         return gate_output_correction_backward_triton(grad_output, o, r, k, r_k, v, g)
 
 
-gate_output_correction = GateOutputCorrection.apply
+@torch.compiler.disable
+def gate_output_correction(
+    o: torch.Tensor,
+    r: torch.Tensor,
+    k: torch.Tensor,
+    r_k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply the RWKV7 output correction and output gate.
+
+    Computes ``(o + correction) * g``, where
+    ``correction = ((r * k * r_k).sum(-1, keepdim=True) * v).view_as(o)``.
+
+    Args:
+        o: Output tensor before correction, shape `[B, T, H * D]`.
+        r: Receptance tensor, shape `[B, T, H, D]`.
+        k: Key tensor, shape `[B, T, H, D]`.
+        r_k: Per-head correction weight, shape `[H, D]`.
+        v: Value tensor, shape `[B, T, H, D]`.
+        g: Output gate tensor, shape `[B, T, H * D]`.
+
+    Returns:
+        Corrected and gated output tensor with the same shape as `o`.
+    """
+    return GateOutputCorrection.apply(o, r, k, r_k, v, g)
