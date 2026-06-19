@@ -13,7 +13,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          pattern='^\[[A-Za-z][A-Za-z0-9]*\][[:space:]]+.+'
+          pattern='^[[][A-Za-z][A-Za-z0-9]*[]][[:space:]]+.+'
           if [[ ! "$PR_TITLE" =~ $pattern ]]; then
             echo "PR title must start with a bracketed tag, for example:"
             echo "  [Fix] Guard checkpoint weight re-initialization"
