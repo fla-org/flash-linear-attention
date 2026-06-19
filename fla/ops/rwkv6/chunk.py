@@ -15,7 +15,6 @@ from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
 from fla.utils import (
-    USE_CUDA_GRAPH,
     autocast_custom_bwd,
     autocast_custom_fwd,
     autotune_cache_kwargs,
@@ -39,7 +38,6 @@ BV_LIST = [32, 64] if check_shared_mem() else [16, 32]
         for num_stages in [2, 3, 4]
     ],
     key=['S', 'BT', 'HAS_SCALE'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -128,7 +126,6 @@ def chunk_rwkv6_fwd_cumsum(
         for num_stages in [2, 3, 4]
     ],
     key=['BC'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -204,7 +201,6 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_inter(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BK', 'BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -279,7 +275,6 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra(
         triton.Config({}, num_warps=8),
     ],
     key=['BC', 'BK'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -360,7 +355,6 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_split(
         triton.Config({}, num_warps=8),
     ],
     key=['BC'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -413,7 +407,6 @@ def chunk_rwkv6_fwd_A_kernel_intra_sub_intra_merge(
         for num_stages in [2, 3, 4]
     ],
     key=['BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -494,7 +487,6 @@ def chunk_rwkv6_bwd_kernel_dh(
         for num_warps in [1, 2, 4, 8]
     ],
     key=['BK', 'NC', 'BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -635,7 +627,6 @@ def chunk_rwkv6_bwd_kernel_intra(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
