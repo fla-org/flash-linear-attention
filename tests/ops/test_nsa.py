@@ -220,18 +220,9 @@ def test_parallel_selective_decode(
         q, k, v, block_indices, block_size, scale
     )
 
-    assert_close(
-        'outputs: full-vs-naive',
-        o_naive_fla, o_full, 0.005
-    )
-    assert_close(
-        'outputs: full-vs-cached',
-        o_short, o_full[:, -Tq:], 0.005
-    )
-    assert_close(
-        'log-sum-exp: full-vs-cached',
-        lse_short, lse_full[:, -Tq:], 0.005
-    )
+    assert_close('o vs naive', o_naive_fla, o_full, 0.005)
+    assert_close('o vs cached', o_short, o_full[:, -Tq:], 0.005)
+    assert_close('lse vs cached', lse_short, lse_full[:, -Tq:], 0.005)
 
 
 @pytest.mark.parametrize(
@@ -292,16 +283,10 @@ def test_parallel_compressive(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    assert_close(
-        'outputs: full-vs-naive',
-        o_full, o_naive, 0.005
-    )
+    assert_close('  o vs naive', o_full, o_naive, 0.005)
     # For positions not attending to any token, the log-sum-exp should be -inf; the kernel returns 0 instead, it is
     # OK as those positions will not be used in the compressive attention anyway.
-    assert_close(
-        'log-sum-exp: full-vs-naive',
-        lse_full, torch.where(lse_naive == float('-inf'), 0, lse_naive), 0.005
-    )
+    assert_close('lse vs naive', lse_full, torch.where(lse_naive == float('-inf'), 0, lse_naive), 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
@@ -310,15 +295,9 @@ def test_parallel_compressive(
         q[:, -Tq:], k_cmp, v_cmp, T, block_size, scale,
     )
 
-    assert_close(
-        'outputs: full-vs-cached',
-        o_short, o_full[:, -Tq:], 0.005
-    )
+    assert_close('o vs cached', o_short, o_full[:, -Tq:], 0.005)
 
-    assert_close(
-        'log-sum-exp: full-vs-cached',
-        lse_short, lse_full[:, -Tq:], 0.005
-    )
+    assert_close('lse vs cached', lse_short, lse_full[:, -Tq:], 0.005)
 
 
 @pytest.mark.parametrize(
@@ -499,7 +478,7 @@ def test_parallel_decode(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    assert_close('full vs naive', o_full, o_naive, 0.005)
+    assert_close('o vs naive', o_full, o_naive, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
@@ -513,7 +492,7 @@ def test_parallel_decode(
         window_size=window_size
     )
 
-    assert_close('short vs full', o_short, o_full[:, -Tq:], 0.005)
+    assert_close('o vs short', o_short, o_full[:, -Tq:], 0.005)
 
 
 @pytest.mark.parametrize(
@@ -595,9 +574,9 @@ def test_parallel_selective_varlen_decode(
         token_indices_q=token_indices_q
     )
 
-    assert_close('outputs: full vs naive', ref, o_full, 0.005)
-    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
-    assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
+    assert_close('o vs naive', ref, o_full, 0.005)
+    assert_close('o vs short', o_short, o_short_ref, 0.005)
+    assert_close('lse vs short', lse_short, lse_short_ref, 0.005)
 
 
 @pytest.mark.parametrize(
@@ -666,8 +645,8 @@ def test_parallel_compressive_varlen(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    assert_close('outputs: full vs naive', o_naive, o_full, 0.005)
-    assert_close('lse: full vs naive', torch.where(lse_naive == float('-inf'), 0, lse_naive), lse_full, 0.005)
+    assert_close('o vs naive', o_naive, o_full, 0.005)
+    assert_close('lse vs naive', torch.where(lse_naive == float('-inf'), 0, lse_naive), lse_full, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
@@ -687,8 +666,8 @@ def test_parallel_compressive_varlen(
         cu_seqlens=(cu_seqlens_q, cu_seqlens),
     )
 
-    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
-    assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
+    assert_close('o vs short', o_short, o_short_ref, 0.005)
+    assert_close('lse vs short', lse_short, lse_short_ref, 0.005)
 
 
 @pytest.mark.parametrize(
@@ -892,7 +871,7 @@ def test_parallel_varlen_decode(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    assert_close('full vs naive', o_full, o_naive, 0.005)
+    assert_close('o vs naive', o_full, o_naive, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
@@ -910,4 +889,4 @@ def test_parallel_varlen_decode(
         q_short, k, v, g_cmp, g_slc, g_swa, block_indices=block_indices, block_counts=S, block_size=block_size,
         scale=scale, window_size=window_size, cu_seqlens=(cu_seqlens_q, cu_seqlens), )
 
-    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
+    assert_close('o vs short', o_short, o_short_ref, 0.005)
