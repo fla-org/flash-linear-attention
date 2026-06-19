@@ -833,9 +833,7 @@ def test_parallel_topk_varlen(
     [
         pytest.param(
             *test,
-            id=(
-                "H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-cu_seqlens{}-q_lens{}-{}".format(*test)
-            ),
+            id="H{}-HQ{}-D{}-S{}-block_size{}-scale{}-W{}-cu_seqlens{}-q_lens{}-{}".format(*test),
         )
         for test in [
             # the kernel reuses the naive block indices; see the note in `test_parallel_decode` — independent top-k
