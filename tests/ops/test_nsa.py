@@ -162,7 +162,7 @@ def test_parallel_varlen(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    assert_close('o', ref, tri, 0.004)
+    assert_close(' o', ref, tri, 0.004)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
@@ -209,7 +209,7 @@ def test_parallel_selective_decode(
         scale,
     )
 
-    o_short, lse_short = parallel_nsa_fwd(
+    o_dec, lse_dec = parallel_nsa_fwd(
         q[:, -Tq:], k, v, block_indices[:, -Tq:],
         S,
         block_size,
@@ -220,18 +220,9 @@ def test_parallel_selective_decode(
         q, k, v, block_indices, block_size, scale
     )
 
-    assert_close(
-        'outputs: full-vs-naive',
-        o_naive_fla, o_full, 0.005
-    )
-    assert_close(
-        'outputs: full-vs-cached',
-        o_short, o_full[:, -Tq:], 0.005
-    )
-    assert_close(
-        'log-sum-exp: full-vs-cached',
-        lse_short, lse_full[:, -Tq:], 0.005
-    )
+    assert_close('  o', o_naive_fla, o_full, 0.005)
+    assert_close('  o', o_dec, o_full[:, -Tq:], 0.005)
+    assert_close('lse', lse_dec, lse_full[:, -Tq:], 0.005)
 
 
 @pytest.mark.parametrize(
@@ -292,33 +283,21 @@ def test_parallel_compressive(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    assert_close(
-        'outputs: full-vs-naive',
-        o_full, o_naive, 0.005
-    )
+    assert_close('  o', o_full, o_naive, 0.005)
     # For positions not attending to any token, the log-sum-exp should be -inf; the kernel returns 0 instead, it is
     # OK as those positions will not be used in the compressive attention anyway.
-    assert_close(
-        'log-sum-exp: full-vs-naive',
-        lse_full, torch.where(lse_naive == float('-inf'), 0, lse_naive), 0.005
-    )
-    assert_close('dq', ref_dq, tri_dq, 0.005)
-    assert_close('dk', ref_dk, tri_dk, 0.005)
-    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('lse', lse_full, torch.where(lse_naive == float('-inf'), 0, lse_naive), 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
 
-    o_short, lse_short = parallel_nsa_compression(
+    o_dec, lse_dec = parallel_nsa_compression(
         q[:, -Tq:], k_cmp, v_cmp, T, block_size, scale,
     )
 
-    assert_close(
-        'outputs: full-vs-cached',
-        o_short, o_full[:, -Tq:], 0.005
-    )
+    assert_close('  o', o_dec, o_full[:, -Tq:], 0.005)
 
-    assert_close(
-        'log-sum-exp: full-vs-cached',
-        lse_short, lse_full[:, -Tq:], 0.005
-    )
+    assert_close('lse', lse_dec, lse_full[:, -Tq:], 0.005)
 
 
 @pytest.mark.parametrize(
@@ -412,7 +391,7 @@ def test_parallel_topk_decode(
                 m = a_s.max(dim=0, keepdim=True).values
                 a_lse = torch.log(torch.exp(a_s - m).sum(0)) + m.squeeze(0)
                 k_lse = lse_full[b_i, t_i, h_i * (HQ // H): (h_i + 1) * (HQ // H)]
-                assert_close('block lse', a_lse, k_lse, ratio=0.005)
+                assert_close('   block lse', a_lse, k_lse, ratio=0.005)
             fk = free_block_indices[b_i, t_i, h_i]
             fn = free_block_indices_naive[b_i, t_i, h_i]
             sk = a_snm[fk[fk >= 0]].sort(descending=True).values
@@ -421,7 +400,7 @@ def test_parallel_topk_decode(
         warnings.warn(f"Block selection differs at {pos.shape[0]} positions, "
                       f"all with matching scores (near-tied blocks).")
 
-    block_indices_short = parallel_nsa_topk(
+    block_indices_dec = parallel_nsa_topk(
         q=q[:, -Tq:],
         k=k_cmp,
         lse=lse_full[:, -Tq:] if lse_full is not None else None,
@@ -431,12 +410,12 @@ def test_parallel_topk_decode(
         scale=scale,
     )
 
-    fixed_block_indices_short, free_block_indices_short = (
-        block_indices_short[:, :, :, :3], block_indices_short[:, :, :, 3:])
-    fixed_block_indices_short, _ = torch.sort(fixed_block_indices_short, dim=-1)
-    assert (fixed_block_indices_short == fixed_block_indices[:, -Tq:]).all(), \
+    fixed_block_indices_dec, free_block_indices_dec = (
+        block_indices_dec[:, :, :, :3], block_indices_dec[:, :, :, 3:])
+    fixed_block_indices_dec, _ = torch.sort(fixed_block_indices_dec, dim=-1)
+    assert (fixed_block_indices_dec == fixed_block_indices[:, -Tq:]).all(), \
         "Different in forcefully selected block indices compared to full"
-    assert (free_block_indices_short == free_block_indices[:, -Tq:]).all(), \
+    assert (free_block_indices_dec == free_block_indices[:, -Tq:]).all(), \
         "Different in free block indices compared to full"
 
 
@@ -499,12 +478,12 @@ def test_parallel_decode(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    assert_close('full vs naive', o_full, o_naive, 0.005)
+    assert_close(' o', o_full, o_naive, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
 
-    o_short = parallel_nsa(
+    o_dec = parallel_nsa(
         q[:, -Tq:], k, v, g_cmp[:, -Tq:], g_slc[:, -Tq:], g_swa[:, -Tq:],
         block_indices=block_indices[:, -Tq:],
         block_counts=S,
@@ -513,7 +492,7 @@ def test_parallel_decode(
         window_size=window_size
     )
 
-    assert_close('short vs full', o_short, o_full[:, -Tq:], 0.005)
+    assert_close(' o', o_dec, o_full[:, -Tq:], 0.005)
 
 
 @pytest.mark.parametrize(
@@ -576,17 +555,17 @@ def test_parallel_selective_varlen_decode(
         cu_seqlens=cu_seqlens
     )
 
-    q_short = build_partial_varlen(q, cu_seqlens, q_lens)
-    block_indices_short = build_partial_varlen(block_indices, cu_seqlens, q_lens)
+    q_dec = build_partial_varlen(q, cu_seqlens, q_lens)
+    block_indices_dec = build_partial_varlen(block_indices, cu_seqlens, q_lens)
     cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).to(device)
     token_indices_q = prepare_token_indices(cu_seqlens_q)
 
-    o_short_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
-    lse_short_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens)
+    o_dec_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
+    lse_dec_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens)
 
-    o_short, lse_short = parallel_nsa_fwd(
-        q_short, k, v,
-        block_indices_short,
+    o_dec, lse_dec = parallel_nsa_fwd(
+        q_dec, k, v,
+        block_indices_dec,
         S,
         block_size,
         cu_seqlens_q=cu_seqlens_q,
@@ -595,9 +574,9 @@ def test_parallel_selective_varlen_decode(
         token_indices_q=token_indices_q
     )
 
-    assert_close('outputs: full vs naive', ref, o_full, 0.005)
-    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
-    assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
+    assert_close('  o', ref, o_full, 0.005)
+    assert_close('  o', o_dec, o_dec_ref, 0.005)
+    assert_close('lse', lse_dec, lse_dec_ref, 0.005)
 
 
 @pytest.mark.parametrize(
@@ -666,20 +645,20 @@ def test_parallel_compressive_varlen(
     ref_dk, k.grad = k.grad.clone(), None
     ref_dv, v.grad = v.grad.clone(), None
 
-    assert_close('outputs: full vs naive', o_naive, o_full, 0.005)
-    assert_close('lse: full vs naive', torch.where(lse_naive == float('-inf'), 0, lse_naive), lse_full, 0.005)
-    assert_close('dq', ref_dq, tri_dq, 0.005)
-    assert_close('dk', ref_dk, tri_dk, 0.005)
-    assert_close('dv', ref_dv, tri_dv, 0.005)
+    assert_close('  o', o_naive, o_full, 0.005)
+    assert_close('lse', torch.where(lse_naive == float('-inf'), 0, lse_naive), lse_full, 0.005)
+    assert_close(' dq', ref_dq, tri_dq, 0.005)
+    assert_close(' dk', ref_dk, tri_dk, 0.005)
+    assert_close(' dv', ref_dv, tri_dv, 0.005)
 
-    q_short = build_partial_varlen(q, cu_seqlens, q_lens)
+    q_dec = build_partial_varlen(q, cu_seqlens, q_lens)
     cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).to(device)
 
-    o_short_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
-    lse_short_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens)
+    o_dec_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
+    lse_dec_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens)
 
-    o_short, lse_short = parallel_nsa_compression(
-        q_short,
+    o_dec, lse_dec = parallel_nsa_compression(
+        q_dec,
         k_cmp, v_cmp,
         T,
         block_size,
@@ -687,8 +666,8 @@ def test_parallel_compressive_varlen(
         cu_seqlens=(cu_seqlens_q, cu_seqlens),
     )
 
-    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
-    assert_close('lse: full vs short', lse_short, lse_short_ref, 0.005)
+    assert_close('  o', o_dec, o_dec_ref, 0.005)
+    assert_close('lse', lse_dec, lse_dec_ref, 0.005)
 
 
 @pytest.mark.parametrize(
@@ -792,7 +771,7 @@ def test_parallel_topk_varlen(
                 m = a_s.max(dim=0, keepdim=True).values
                 a_lse = torch.log(torch.exp(a_s - m).sum(0)) + m.squeeze(0)
                 k_lse = lse_full[0, t_i, h_i * (HQ // H): (h_i + 1) * (HQ // H)]
-                assert_close('block lse', a_lse, k_lse, ratio=0.005)
+                assert_close('   block lse', a_lse, k_lse, ratio=0.005)
             fk = free_block_indices[0, t_i, h_i]
             fn = free_block_indices_naive[0, t_i, h_i]
             sk = a_snm[fk[fk >= 0]].sort(descending=True).values
@@ -801,17 +780,17 @@ def test_parallel_topk_varlen(
         warnings.warn(f"Block selection differs at {pos.shape[0]} positions, "
                       f"all with matching scores (near-tied blocks).")
 
-    q_short = build_partial_varlen(q, cu_seqlens, q_lens)
+    q_dec = build_partial_varlen(q, cu_seqlens, q_lens)
     cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).to(device)
 
-    fixed_block_indices_short_ref = build_partial_varlen(fixed_block_indices, cu_seqlens, q_lens)
-    free_block_indices_short_ref = build_partial_varlen(free_block_indices, cu_seqlens, q_lens)
-    lse_short_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens) if lse_full is not None else None
+    fixed_block_indices_dec_ref = build_partial_varlen(fixed_block_indices, cu_seqlens, q_lens)
+    free_block_indices_dec_ref = build_partial_varlen(free_block_indices, cu_seqlens, q_lens)
+    lse_dec_ref = build_partial_varlen(lse_full, cu_seqlens, q_lens) if lse_full is not None else None
 
-    block_indices_short = parallel_nsa_topk(
-        q=q_short,
+    block_indices_dec = parallel_nsa_topk(
+        q=q_dec,
         k=k_cmp,
-        lse=lse_short_ref,
+        lse=lse_dec_ref,
         TK=T,
         block_counts=S,
         block_size=block_size,
@@ -819,12 +798,12 @@ def test_parallel_topk_varlen(
         cu_seqlens=(cu_seqlens_q, cu_seqlens),
     )
 
-    fixed_block_indices_short, free_block_indices_short = (
-        block_indices_short[:, :, :, :3], block_indices_short[:, :, :, 3:])
-    fixed_block_indices_short, _ = torch.sort(fixed_block_indices_short, dim=-1)
-    assert (fixed_block_indices_short == fixed_block_indices_short_ref).all(), \
+    fixed_block_indices_dec, free_block_indices_dec = (
+        block_indices_dec[:, :, :, :3], block_indices_dec[:, :, :, 3:])
+    fixed_block_indices_dec, _ = torch.sort(fixed_block_indices_dec, dim=-1)
+    assert (fixed_block_indices_dec == fixed_block_indices_dec_ref).all(), \
         "Different in forcefully selected block indices compared to full"
-    assert (free_block_indices_short == free_block_indices_short_ref).all(), \
+    assert (free_block_indices_dec == free_block_indices_dec_ref).all(), \
         "Different in free block indices compared to full"
 
 
@@ -892,22 +871,22 @@ def test_parallel_varlen_decode(
     tri_dk, k.grad = k.grad.clone(), None
     tri_dv, v.grad = v.grad.clone(), None
 
-    assert_close('full vs naive', o_full, o_naive, 0.005)
+    assert_close(' o', o_full, o_naive, 0.005)
     assert_close('dq', ref_dq, tri_dq, 0.005)
     assert_close('dk', ref_dk, tri_dk, 0.005)
     assert_close('dv', ref_dv, tri_dv, 0.005)
 
-    q_short = build_partial_varlen(q, cu_seqlens, q_lens)
-    g_short = build_partial_varlen(g, cu_seqlens, q_lens)
-    g_cmp, g_slc, g_swa = g_short.sigmoid().unbind(-1)
+    q_dec = build_partial_varlen(q, cu_seqlens, q_lens)
+    g_dec = build_partial_varlen(g, cu_seqlens, q_lens)
+    g_cmp, g_slc, g_swa = g_dec.sigmoid().unbind(-1)
     cu_seqlens_q = torch.cumsum(torch.tensor([0] + q_lens), dim=0).int().to(device)
 
     block_indices = build_partial_varlen(block_indices, cu_seqlens, q_lens)
 
-    o_short_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
+    o_dec_ref = build_partial_varlen(o_full, cu_seqlens, q_lens)
 
-    o_short = parallel_nsa(
-        q_short, k, v, g_cmp, g_slc, g_swa, block_indices=block_indices, block_counts=S, block_size=block_size,
+    o_dec = parallel_nsa(
+        q_dec, k, v, g_cmp, g_slc, g_swa, block_indices=block_indices, block_counts=S, block_size=block_size,
         scale=scale, window_size=window_size, cu_seqlens=(cu_seqlens_q, cu_seqlens), )
 
-    assert_close('outputs: full vs short', o_short, o_short_ref, 0.005)
+    assert_close(' o', o_dec, o_dec_ref, 0.005)
