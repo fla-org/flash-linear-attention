@@ -412,12 +412,12 @@ def test_parallel_topk_decode(
                 m = a_s.max(dim=0, keepdim=True).values
                 a_lse = torch.log(torch.exp(a_s - m).sum(0)) + m.squeeze(0)
                 k_lse = lse_full[b_i, t_i, h_i * (HQ // H): (h_i + 1) * (HQ // H)]
-                assert_close(f'lse vs naive {(b_i, t_i, h_i)}', a_lse, k_lse, ratio=0.005)
+                assert_close('block lse', a_lse, k_lse, ratio=0.005)
             fk = free_block_indices[b_i, t_i, h_i]
             fn = free_block_indices_naive[b_i, t_i, h_i]
             sk = a_snm[fk[fk >= 0]].sort(descending=True).values
             sn = a_snm[fn[fn >= 0]].sort(descending=True).values
-            assert_close(f'free-block scores {(b_i, t_i, h_i)}', sk, sn, ratio=0.005)
+            assert_close('block scores', sk, sn, ratio=0.005)
         warnings.warn(f"Block selection differs at {pos.shape[0]} positions, "
                       f"all with matching scores (near-tied blocks).")
 
@@ -792,12 +792,12 @@ def test_parallel_topk_varlen(
                 m = a_s.max(dim=0, keepdim=True).values
                 a_lse = torch.log(torch.exp(a_s - m).sum(0)) + m.squeeze(0)
                 k_lse = lse_full[0, t_i, h_i * (HQ // H): (h_i + 1) * (HQ // H)]
-                assert_close(f'lse vs naive {(t_i, h_i)}', a_lse, k_lse, ratio=0.005)
+                assert_close('block lse', a_lse, k_lse, ratio=0.005)
             fk = free_block_indices[0, t_i, h_i]
             fn = free_block_indices_naive[0, t_i, h_i]
             sk = a_snm[fk[fk >= 0]].sort(descending=True).values
             sn = a_snm[fn[fn >= 0]].sort(descending=True).values
-            assert_close(f'free-block scores {(t_i, h_i)}', sk, sn, ratio=0.005)
+            assert_close('block scores', sk, sn, ratio=0.005)
         warnings.warn(f"Block selection differs at {pos.shape[0]} positions, "
                       f"all with matching scores (near-tied blocks).")
 
