@@ -48,6 +48,12 @@ def causal_conv1d_fwd(
     BT: int = 64,
     layout_fallback: bool = False,
 ) -> torch.Tensor:
+    if cu_seqlens is not None and x.shape[0] != 1:
+        raise ValueError(
+            f"causal_conv1d_fwd with cu_seqlens requires x.shape[0]==1; "
+            f"got {tuple(x.shape)}. Flatten the batch dimension into the "
+            f"sequence dimension and update cu_seqlens before calling."
+        )
     shape = x.shape
     if x.shape[-1] != weight.shape[0]:
         x = rearrange(x, 'b t ... -> b t (...)')
@@ -161,12 +167,6 @@ def causal_conv1d_bwd(
     if cu_seqlens is not None and x.shape[0] != 1:
         raise ValueError(
             f"causal_conv1d_bwd with cu_seqlens requires x.shape[0]==1; "
-            f"got {tuple(x.shape)}. Flatten the batch dimension into the "
-            f"sequence dimension and update cu_seqlens before calling."
-        )
-    if cu_seqlens is not None and x.shape[0] != 1:
-        raise ValueError(
-            f"causal_conv1d_fwd with cu_seqlens requires x.shape[0]==1; "
             f"got {tuple(x.shape)}. Flatten the batch dimension into the "
             f"sequence dimension and update cu_seqlens before calling."
         )
