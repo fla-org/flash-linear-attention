@@ -83,8 +83,7 @@ def causal_conv1d_fwd(
         stride_x_n=stride_x_n,
         stride_x_t=stride_x_t,
         stride_x_d=stride_x_d,
-        stride_dy_n=dy.stride(0),
-        stride_y_n=y.stride(0) if y is not None else 0,
+        stride_y_n=y.stride(0),
         ACTIVATION=activation,
     )
     final_state = None
@@ -236,6 +235,7 @@ def causal_conv1d_bwd(
         stride_dy_n=stride_dy_n,
         stride_dy_t=stride_dy_t,
         stride_dy_d=stride_dy_d,
+        stride_y_n=(y.stride(0) if y is not None else 0),
         ACTIVATION=activation,
     )
     if weight is not None:

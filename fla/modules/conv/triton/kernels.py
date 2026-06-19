@@ -48,6 +48,7 @@ def causal_conv1d_fwd_kernel(
     stride_x_n,
     stride_x_t,
     stride_x_d,
+    stride_y_n,
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -174,6 +175,7 @@ def causal_conv1d_bwd_kernel(
     stride_dy_n,  # dy batch stride
     stride_dy_t,  # dy time stride
     stride_dy_d,  # dy dim stride
+    stride_y_n,   # y batch stride (only used when ACTIVATION is set)
     D: tl.constexpr,
     W: tl.constexpr,
     BT: tl.constexpr,
@@ -193,7 +195,7 @@ def causal_conv1d_bwd_kernel(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         T = eos - bos
-        p_x = x + bos * stride_x_t
+        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n + bos * stride_x_t
     else:
         i_tg = i_b * tl.num_programs(1) + i_t
         i_n = i_b
@@ -201,7 +203,7 @@ def causal_conv1d_bwd_kernel(
         p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
 
     if IS_VARLEN:
-        p_dy = dy + bos * stride_dy_t
+        p_dy = dy + tl.cast(i_b, tl.int64) * stride_dy_n + bos * stride_dy_t
     else:
         p_dy = dy + tl.cast(i_b, tl.int64) * stride_dy_n
 
