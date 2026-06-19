@@ -8,6 +8,7 @@
 import warnings
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -438,6 +439,7 @@ def parallel_nsa_bwd_kernel_dkv(
     dk,
     dv,
     block_mask,
+    skip_mask,
     cu_seqlens,
     chunk_indices,
     scale,
@@ -452,6 +454,7 @@ def parallel_nsa_bwd_kernel_dkv(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
+    BQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_s, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -477,34 +480,38 @@ def parallel_nsa_bwd_kernel_dkv(
     b_v = tl.load(p_v, boundary_check=(0, 1))
     b_dv = tl.zeros([BS, BV], dtype=tl.float32)
 
-    for i in range(i_s * BS, T):
-        b_m = tl.load(block_mask + (bos + i) * H*M + i_h * M + i_s)
-        if b_m:
-            p_q = tl.make_block_ptr(q + (bos + i) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
-            # [G, BK]
-            b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_q = (b_q * scale).to(b_q.dtype)
+    # skip query tiles where no query selected this KV block: skip_mask ORs block_mask
+    # over BQ-query tiles, absolute-aligned (bos may not be BQ-aligned under varlen)
+    q_min = bos + i_s * BS
+    for i_t in range(q_min // BQ * BQ, eos, BQ):
+        if tl.load(skip_mask + (i_t // BQ) * H*M + i_h * M + i_s):
+            for i in range(tl.maximum(i_t, q_min), tl.minimum(i_t + BQ, eos)):
+                if tl.load(block_mask + i * H*M + i_h * M + i_s):
+                    p_q = tl.make_block_ptr(q + i * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
+                    # [G, BK]
+                    b_q = tl.load(p_q, boundary_check=(0, 1))
+                    b_q = (b_q * scale).to(b_q.dtype)
 
-            p_do = tl.make_block_ptr(do + (bos + i) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-            p_lse = lse + (bos + i) * HQ + i_h * G + tl.arange(0, G)
-            p_delta = delta + (bos + i) * HQ + i_h * G + tl.arange(0, G)
-            # [G, BV]
-            b_do = tl.load(p_do, boundary_check=(0, 1))
-            # [G]
-            b_lse = tl.load(p_lse)
-            b_delta = tl.load(p_delta)
-            # [BS, G]
-            b_s = tl.dot(b_k, tl.trans(b_q))
-            b_p = exp(b_s - b_lse[None, :])
-            b_p = tl.where((i >= (i_s * BS + tl.arange(0, BS)))[:, None], b_p, 0)
-            # [BS, G] @ [G, BV] -> [BS, BV]
-            b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
-            # [BS, BV] @ [BV, G] -> [BS, G]
-            b_dp = tl.dot(b_v, tl.trans(b_do))
-            # [BS, G]
-            b_ds = b_p * (b_dp - b_delta[None, :])
-            # [BS, G] @ [G, BK] -> [BS, BK]
-            b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+                    p_do = tl.make_block_ptr(do + i * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+                    p_lse = lse + i * HQ + i_h * G + tl.arange(0, G)
+                    p_delta = delta + i * HQ + i_h * G + tl.arange(0, G)
+                    # [G, BV]
+                    b_do = tl.load(p_do, boundary_check=(0, 1))
+                    # [G]
+                    b_lse = tl.load(p_lse)
+                    b_delta = tl.load(p_delta)
+                    # [BS, G]
+                    b_s = tl.dot(b_k, tl.trans(b_q))
+                    b_p = exp(b_s - b_lse[None, :])
+                    b_p = tl.where((i >= q_min + tl.arange(0, BS))[:, None], b_p, 0)
+                    # [BS, G] @ [G, BV] -> [BS, BV]
+                    b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
+                    # [BS, BV] @ [BV, G] -> [BS, G]
+                    b_dp = tl.dot(b_v, tl.trans(b_do))
+                    # [BS, G]
+                    b_ds = b_p * (b_dp - b_delta[None, :])
+                    # [BS, G] @ [G, BK] -> [BS, BK]
+                    b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
 
     tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
@@ -679,6 +686,7 @@ def parallel_nsa_bwd(
     BS = block_size
     BK = max(triton.next_power_of_2(K), 16)
     BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
+    BQ = 16
     NV = triton.cdiv(V, BV)
 
     delta = parallel_attn_bwd_preprocess(o, do)
@@ -721,6 +729,11 @@ def parallel_nsa_bwd(
 
     # [B, T, H, M]
     block_mask = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
+    M = block_mask.shape[-1]
+    # skip_mask[t] = OR of block_mask over a BQ-query tile, so dkv can skip whole tiles
+    # of queries that selected nothing in a KV block
+    mask = F.pad(block_mask.reshape(B * T, H, M), (0, 0, 0, 0, 0, (-(B * T)) % BQ))
+    skip_mask = mask.view(-1, BQ, H, M).any(dim=1).contiguous()
     dk = torch.empty(NV, *k.shape, dtype=k.dtype if NV == 1 else torch.float, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
 
@@ -735,6 +748,7 @@ def parallel_nsa_bwd(
         dk=dk,
         dv=dv,
         block_mask=block_mask,
+        skip_mask=skip_mask,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
@@ -745,10 +759,11 @@ def parallel_nsa_bwd(
         G=G,
         K=K,
         V=V,
-        M=block_mask.shape[-1],
+        M=M,
         BS=BS,
         BK=BK,
         BV=BV,
+        BQ=BQ,
     )
     dk = dk.sum(0)
     return dq, dk, dv
