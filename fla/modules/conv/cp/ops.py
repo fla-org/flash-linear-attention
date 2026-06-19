@@ -129,6 +129,11 @@ class CausalConv1dFunctionCP(torch.autograd.Function):
         chunk_size: int | None,
         backend: str = 'triton',
     ):
+        if x.shape[0] != 1:
+            raise ValueError(
+                f"CausalConv1dFunctionCP requires x.shape[0]==1; "
+                f"got {tuple(x.shape)}. Pack the batch into the sequence dim."
+            )
         # Import here to avoid circular dependency
         from fla.modules.conv.triton.ops import causal_conv1d_fwd
 
