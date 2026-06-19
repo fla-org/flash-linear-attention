@@ -363,11 +363,6 @@ def naive_nsa(
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
-    if isinstance(cu_seqlens, tuple) and (q.requires_grad or k.requires_grad or v.requires_grad):
-        raise NotImplementedError(
-            "Backward is not supported when `cu_seqlens` differs for queries and keys (cached inference). "
-            "Run under `torch.no_grad()`."
-        )
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):
