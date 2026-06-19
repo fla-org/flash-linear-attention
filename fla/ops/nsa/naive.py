@@ -20,7 +20,7 @@ except ImportError:
         "Flash Attention is not installed. Please install it via `pip install flash-attn --no-build-isolation`",
         category=ImportWarning
     )
-    flash_attn_func = None
+    flash_attn_func = flash_attn_varlen_func = None
 
 
 def naive_nsa_selection(
@@ -337,7 +337,7 @@ def naive_nsa(
             Gate score for sliding-window attention of shape `[B, TQ, HQ]`. Default: `None`.
         block_indices (torch.LongTensor, Optional):
             Block indices of shape `[B, TQ, H, S]`, where `S` is the number of selected blocks per query.
-            Ignored and recomputed from compression when `g_cmp` is provided. Default: `None`.
+            If provided, overrides the selection computed from compression when `g_cmp` is given. Default: `None`.
         block_counts (torch.LongTensor or int, Optional):
             Number of selected blocks per query. A tensor of shape `[B, TQ, H]`, or an int. Default: 16.
         block_size (int, Optional):
@@ -363,6 +363,11 @@ def naive_nsa(
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
+    if isinstance(cu_seqlens, tuple) and (q.requires_grad or k.requires_grad or v.requires_grad):
+        raise NotImplementedError(
+            "Backward is not supported when `cu_seqlens` differs for queries and keys (cached inference). "
+            "Run under `torch.no_grad()`."
+        )
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):
@@ -383,16 +388,17 @@ def naive_nsa(
             scale=scale,
             cu_seqlens=cu_seqlens
         )
-        if block_indices is not None:
-            warnings.warn("`block_indices` will be ignored when `g_cmp` is provided")
-        block_indices = naive_nsa_topk(
-            q=q,
-            k_cmp=k_cmp,
-            block_counts=block_counts,
-            block_size=block_size,
-            scale=scale,
-            cu_seqlens=cu_seqlens
-        )
+        if block_indices is None:
+            block_indices = naive_nsa_topk(
+                q=q,
+                k_cmp=k_cmp,
+                block_counts=block_counts,
+                block_size=block_size,
+                scale=scale,
+                cu_seqlens=cu_seqlens
+            )
+        else:
+            warnings.warn("`block_indices` is provided, overriding the selection computed from compression")
     o = o_slc = naive_nsa_selection(q, k, v, block_indices, block_size, scale, cu_seqlens)
     if g_slc is not None:
         o = o_slc * g_slc.unsqueeze(-1)

@@ -74,9 +74,7 @@ def parallel_nsa_compression_fwd_kernel(
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    # the number of compression representations required to iterate over
-    # incomplete compression blocks are not included
-    # Here we assume that q tokens are last TQ tokens
+    # number of complete compression blocks visible to the query (q tokens are the last TQ of the sequence)
     NC = (i_t + Q_OFFSET + 1) // BS
 
     p_o = tl.make_block_ptr(o + (bos_q + i_t) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
@@ -88,7 +86,7 @@ def parallel_nsa_compression_fwd_kernel(
     b_acc = tl.zeros([G], dtype=tl.float32)
 
     for i_c in range(0, NC, BC):
-        o_c = i_c + tl.arange(0, BC)  # block idx
+        o_c = i_c + tl.arange(0, BC)
 
         p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (K, TC), (1, H*K), (0, i_c), (BK, BC), (0, 1))
         p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c, i_v * BV), (BC, BV), (1, 0))
@@ -98,8 +96,7 @@ def parallel_nsa_compression_fwd_kernel(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         # [G, BC]
         b_s = tl.dot(b_q, b_k)
-        # Causal mask; note that NC is the compressed-block idx of q_idx + 1,
-        # i.e. number of blocks that need to be attended to
+        # causal mask: only the NC complete blocks are visible
         b_s = tl.where((o_c < NC)[None, :], b_s, float('-inf'))
 
         # [G]
@@ -111,8 +108,6 @@ def parallel_nsa_compression_fwd_kernel(
         b_acc = b_acc * b_r + tl.sum(b_p, 1)
         # [G, BV]
         b_o = b_o * b_r[:, None] + tl.dot(b_p.to(b_q.dtype), b_v)
-
-        # b_mp = b_m
     if NC == 0:
         b_lse = tl.zeros([G], dtype=tl.float32)
     else:
