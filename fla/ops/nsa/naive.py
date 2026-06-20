@@ -39,7 +39,8 @@ def naive_nsa_selection(
             queries of shape `[B, TQ, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
-            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16 (it is a kernel tile dimension; Triton requires power-of-2 block shapes).
+            GQA is enforced here: the ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >= 16.
+            This is a kernel tile dimension, which Triton requires to be a power-of-2 block shape.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         block_indices (torch.LongTensor):
@@ -326,7 +327,8 @@ def naive_nsa(
             Queries of shape `[B, TQ, HQ, K]`.
         k (torch.Tensor):
             Keys of shape `[B, T, H, K]`.
-            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16 (it is a kernel tile dimension; Triton requires power-of-2 block shapes).
+            GQA is enforced here: the ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >= 16.
+            This is a kernel tile dimension, which Triton requires to be a power-of-2 block shape.
         v (torch.Tensor):
             Values of shape `[B, T, H, V]`.
         g_cmp (torch.Tensor, Optional):
@@ -362,7 +364,8 @@ def naive_nsa(
         scale = k.shape[-1] ** -0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
-    assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
+    G = q.shape[2] // k.shape[2]
+    assert G >= 16 and (G & (G - 1)) == 0, "Group size (HQ/H) must be a power of 2 and >= 16 in NSA"
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):

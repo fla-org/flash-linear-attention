@@ -82,8 +82,7 @@ Paper: [arXiv:2502.11089](https://arxiv.org/abs/2502.11089) — *block · pooled
 **Hardware-aligned core — why GQA is mandatory.** Selection is *per KV head, not per query head*, so
 all `G = H_Q/H_KV` query heads in a group share one block list. The kernel makes this a GEMM: load the
 group's queries once as `[G, d]`, then for each selected block load its KV tile `[d, B_S]` from HBM
-**once** and matmul against all `G` rows. Group sharing amortizes each KV read over `G` heads (so the
-group must be a multiple of 16, the MMA tile height), and block-level reads stay contiguous — together
+**once** and matmul against all `G` rows. Group sharing amortizes each KV read over `G` heads, and block-level reads stay contiguous — together
 they restore the arithmetic intensity that scattered, memory-bound sparse attention throws away.
 
 ### MoBA — Mixture of Block Attention

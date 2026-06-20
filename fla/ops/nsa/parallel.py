@@ -14,7 +14,7 @@ import triton.language as tl
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.nsa.compression import parallel_nsa_compression
 from fla.ops.nsa.utils import _bitonic_merge
-from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_lens, prepare_token_indices
+from fla.ops.utils import prepare_block_csr, prepare_chunk_indices, prepare_chunk_offsets, prepare_lens, prepare_token_indices
 from fla.ops.utils.op import exp, log
 from fla.ops.utils.pooling import mean_pooling
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
@@ -279,34 +279,6 @@ def parallel_nsa_fwd_kernel(
 
 
 @triton.heuristics({
-    'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor),
-})
-@triton.jit(do_not_specialize=['T'])
-def parallel_nsa_kernel_mask(
-    block_indices,
-    block_counts,
-    block_mask,
-    T,
-    H: tl.constexpr,
-    S: tl.constexpr,
-    BS: tl.constexpr,
-    NS: tl.constexpr,
-    USE_BLOCK_COUNTS: tl.constexpr,
-):
-    i_t, i_b, i_hs = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_h, i_s = i_hs // S, i_hs % S
-
-    b_i = tl.load(block_indices + i_b * T * H * S + i_t * H * S + i_h * S + i_s)
-    if USE_BLOCK_COUNTS:
-        b_m = b_i * BS <= i_t and i_s < tl.load(block_counts + i_b * T * H + i_t * H + i_h)
-    else:
-        b_m = b_i * BS <= i_t
-
-    if b_i < NS and b_i >= 0:
-        tl.store(block_mask + i_b * T * H * NS + i_t * H * NS + i_h * NS + b_i, b_m.to(block_mask.dtype.element_ty))
-
-
-@triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
     'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor),
 })
@@ -416,124 +388,126 @@ def parallel_nsa_bwd_kernel_dq(
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
 
-def prepare_dkv_csr(block_mask, cu_seqlens, chunk_indices, block_size):
-    # Inverse index for gather-based dkv: per KV block (keyed by the same id the
-    # kernel decodes) the sorted list of *absolute* query positions selecting it,
-    # as CSR (q_idx values + q_ptr offsets). Lets bwd_dkv gather selecting queries
-    # and batch them into one MMA instead of scanning every query tile per block.
-    # Handles both dense (key = (b*H+h)*NS + block) and varlen (key = global-chunk
-    # * H + h, via cu_seqlens/chunk_offsets).
-    B, T, H, NS = block_mask.shape
-    nz = block_mask.nonzero(as_tuple=False)            # [P, 4] = (b, t, h, ns)
-    b_, t_, h_, ns_ = nz[:, 0], nz[:, 1], nz[:, 2], nz[:, 3]
-    if cu_seqlens is None:
-        q_abs = (b_ * T + t_).to(torch.int32)
-        gkey = (b_ * H + h_) * NS + ns_
-        n_keys = B * H * NS
-    else:
-        n_ = torch.searchsorted(cu_seqlens[1:].contiguous(), t_, right=True)   # sequence index
-        chunk_off = prepare_chunk_offsets(cu_seqlens, block_size)
-        gkey = (chunk_off[n_] + ns_) * H + h_
-        q_abs = t_.to(torch.int32)
-        n_keys = chunk_indices.shape[0] * H
-    order = (gkey.to(torch.int64) * (B * T) + q_abs).argsort()
-    q_idx = q_abs[order].contiguous()
-    counts = torch.bincount(gkey, minlength=n_keys)
-    q_ptr = torch.zeros(n_keys + 1, dtype=torch.int32, device=block_mask.device)
-    q_ptr[1:] = counts.cumsum(0)
-    return q_idx, q_ptr.contiguous()
-
-
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BG': BG}, num_warps=nw, num_stages=ns)
+        triton.Config({'BG': BG}, num_warps=num_warps, num_stages=num_stages)
         for BG in [1, 2, 4, 8]
-        for nw in [4, 8]
-        for ns in [1, 2]
+        for num_warps in [4, 8]
+        for num_stages in [1, 2]
     ],
     key=['BS', 'BK', 'BV', 'G'],
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
-def parallel_nsa_bwd_kernel_dkv_gather(
-    q, k, v, lse, delta, do, dk, dv,
-    q_idx, q_ptr, cu_seqlens, chunk_indices,
+def parallel_nsa_bwd_kernel_dkv(
+    q,
+    k,
+    v,
+    lse,
+    delta,
+    do,
+    dk,
+    dv,
     scale,
-    T, NTOK,
-    B: tl.constexpr, H: tl.constexpr, HQ: tl.constexpr, G: tl.constexpr,
-    K: tl.constexpr, V: tl.constexpr, NS: tl.constexpr,
-    BS: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, BG: tl.constexpr,
+    csr_indices,
+    csr_offsets,
+    cu_seqlens,
+    chunk_indices,
+    T,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    HQ: tl.constexpr,
+    G: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    TC: tl.constexpr,
+    BS: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    BG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_blk = tl.program_id(0), tl.program_id(1)
-    # decode the program into this KV block's head and absolute key start; all
-    # address arithmetic in int64 (NTOK*HQ*K overflows int32 at long seq / big heads).
+    i_q0, i_q1 = tl.load(csr_offsets + i_blk).to(tl.int64), tl.load(csr_offsets + i_blk + 1).to(tl.int64)
+    all = B * T
     if IS_VARLEN:
         i_c, i_h = i_blk // H, i_blk % H
         i_n = tl.load(chunk_indices + i_c * 2).to(tl.int32)
-        i_sl = tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
-        kbos = tl.load(cu_seqlens + i_n).to(tl.int64)
-        keos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        key_abs = kbos + i_sl * BS + tl.arange(0, BS)
+        i_s = tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
+        bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
     else:
-        i_s = i_blk % NS
-        bh = i_blk // NS
-        i_b, i_h = bh // H, bh % H
-        key_abs = (i_b * T).to(tl.int64) + i_s * BS + tl.arange(0, BS)
-        keos = (i_b + 1) * T
-
-    start = tl.load(q_ptr + i_blk).to(tl.int32)
-    end = tl.load(q_ptr + i_blk + 1).to(tl.int32)
-    cnt = end - start
-
+        i_s = i_blk % TC
+        i_b, i_h = (i_blk // TC) // H, (i_blk // TC) % H
+        bos = (i_b * T).to(tl.int64)
+        eos = bos + T
+    o_t = bos + i_s * BS + tl.arange(0, BS)
     o_k = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    o_g = i_h * G + tl.arange(0, G)
-    r_m, k_m, v_m = key_abs < keos, o_k < K, o_v < V
+    o_g = tl.arange(0, G)
+    m_t, m_k, m_v = o_t < eos, o_k < K, o_v < V
 
-    # K/V tile for this block: k/v[key_abs, i_h, :]
-    b_k = tl.load(k + key_abs[:, None] * (H * K) + i_h * K + o_k[None, :], mask=r_m[:, None] & k_m[None, :], other=0.)
-    b_v = tl.load(v + key_abs[:, None] * (H * V) + i_h * V + o_v[None, :], mask=r_m[:, None] & v_m[None, :], other=0.)
+    NQ = i_q1 - i_q0
+
+    q += i_h * G*K
+    do += i_h * G*V
+    lse += i_h * G
+    delta += i_h * G
+    k += i_h * K
+    v += i_h * V
+    dk += i_h * K
+    dv += i_h * V
+
+    # [BS, BK] / [BS, BV] k/v tile for this kv block
+    b_k = tl.load(k + o_t[:, None] * H*K + o_k[None, :], mask=m_t[:, None] & m_k[None, :], other=0.)
+    b_v = tl.load(v + o_t[:, None] * H*V + o_v[None, :], mask=m_t[:, None] & m_v[None, :], other=0.)
     b_dk = tl.zeros([BS, BK], dtype=tl.float32)
     b_dv = tl.zeros([BS, BV], dtype=tl.float32)
 
-    for it in range(0, tl.cdiv(cnt, BG)):
-        offs = it * BG + tl.arange(0, BG)
-        m_j = offs < cnt
-        q_pos = tl.load(q_idx + start + offs, mask=m_j, other=0).to(tl.int64)         # [BG] absolute
+    for i in range(tl.cdiv(NQ, BG)):
+        o_j = i * BG + tl.arange(0, BG)
+        m_j = o_j < NQ
+        # [BG] absolute positions of the queries selecting this block
+        i_q = tl.load(csr_indices + i_q0 + o_j, mask=m_j, other=0).to(tl.int64)
 
-        base = q_pos[:, None, None] * (HQ * K) + o_g[None, :, None] * K + o_k[None, None, :]
-        b_q = tl.load(q + base, mask=m_j[:, None, None] & k_m[None, None, :], other=0.).to(tl.float32)
+        # gather q/do/lse/delta for the BG queries over their G group heads -> [BG*G, *]
+        o_q = i_q[:, None, None] * HQ*K + o_g[None, :, None] * K + o_k[None, None, :]
+        b_q = tl.load(q + o_q, mask=m_j[:, None, None] & m_k[None, None, :], other=0.).to(tl.float32)
         b_q = tl.reshape(b_q * scale, [BG * G, BK]).to(b_k.dtype)
 
-        based = q_pos[:, None, None] * (HQ * V) + o_g[None, :, None] * V + o_v[None, None, :]
-        b_do = tl.load(do + based, mask=m_j[:, None, None] & v_m[None, None, :], other=0.)
+        o_do = i_q[:, None, None] * HQ*V + o_g[None, :, None] * V + o_v[None, None, :]
+        b_do = tl.load(do + o_do, mask=m_j[:, None, None] & m_v[None, None, :], other=0.)
         b_do = tl.reshape(b_do, [BG * G, BV])
 
-        ld = q_pos[:, None] * HQ + o_g[None, :]
-        b_lse = tl.reshape(tl.load(lse + ld, mask=m_j[:, None], other=0.), [BG * G])
-        b_del = tl.reshape(tl.load(delta + ld, mask=m_j[:, None], other=0.), [BG * G])
+        o_ld = i_q[:, None] * HQ + o_g[None, :]
+        b_lse = tl.reshape(tl.load(lse + o_ld, mask=m_j[:, None], other=0.), [BG * G])
+        b_delta = tl.reshape(tl.load(delta + o_ld, mask=m_j[:, None], other=0.), [BG * G])
 
-        col_valid = tl.reshape(tl.broadcast_to(m_j[:, None], [BG, G]), [BG * G])
-        qpos_rep = tl.reshape(tl.broadcast_to(q_pos[:, None], [BG, G]), [BG * G])
+        # broadcast per-query validity and position over the G group heads
+        m_col = tl.reshape(tl.broadcast_to(m_j[:, None], [BG, G]), [BG * G])
+        o_pos = tl.reshape(tl.broadcast_to(i_q[:, None], [BG, G]), [BG * G])
 
-        b_s = tl.dot(b_k, tl.trans(b_q))                                              # [BS, BG*G]
+        # [BS, BK] @ [BK, BG*G] -> [BS, BG*G]
+        b_s = tl.dot(b_k, tl.trans(b_q))
         b_p = exp(b_s - b_lse[None, :])
-        keep = (qpos_rep[None, :] >= key_abs[:, None]) & col_valid[None, :]
-        b_p = tl.where(keep, b_p, 0.)
+        # causal: a key contributes only to queries at or after its position
+        b_p = tl.where((o_pos[None, :] >= o_t[:, None]) & m_col[None, :], b_p, 0.)
 
+        # [BS, BG*G] @ [BG*G, BV] -> [BS, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
+        # [BS, BV] @ [BV, BG*G] -> [BS, BG*G]
         b_dp = tl.dot(b_v, tl.trans(b_do))
-        b_ds = b_p * (b_dp.to(tl.float32) - b_del[None, :])
+        b_ds = b_p * (b_dp.to(tl.float32) - b_delta[None, :])
+        # [BS, BG*G] @ [BG*G, BK] -> [BS, BK]
         b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
 
-    dk_off = (i_v * NTOK + key_abs)[:, None] * (H * K) + i_h * K + o_k[None, :]
-    dv_off = key_abs[:, None] * (H * V) + i_h * V + o_v[None, :]
-    tl.store(dk + dk_off, b_dk.to(dk.dtype.element_ty), mask=r_m[:, None] & k_m[None, :])
-    tl.store(dv + dv_off, b_dv.to(dv.dtype.element_ty), mask=r_m[:, None] & v_m[None, :])
+    o_dk = (i_v * all + o_t)[:, None] * H*K + o_k[None, :]
+    o_dv = o_t[:, None] * H*V + o_v[None, :]
+    tl.store(dk + o_dk, b_dk.to(dk.dtype.element_ty), mask=m_t[:, None] & m_k[None, :])
+    tl.store(dv + o_dv, b_dv.to(dv.dtype.element_ty), mask=m_t[:, None] & m_v[None, :])
 
 
 @contiguous
@@ -611,8 +585,8 @@ def parallel_nsa_fwd(
     cu_seqlens_k: torch.LongTensor | None = None,
     token_indices_q: torch.LongTensor | None = None,
 ):
-    B, T_kv, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
-    _, T_q, HQ, _ = q.shape
+    B, TK, H, K, V, S = *k.shape, v.shape[-1], block_indices.shape[-1]
+    _, TQ, HQ, _ = q.shape
     G = HQ // H
     BS = block_size
     if check_shared_mem('hopper', q.device.index):
@@ -625,9 +599,9 @@ def parallel_nsa_fwd(
     NV = triton.cdiv(V, BV)
     assert NK == 1, "The key dimension can not be larger than 256"
 
-    grid = (T_q, NV, B * H)
-    o = torch.empty(B, T_q, HQ, V, dtype=v.dtype, device=q.device)
-    lse = torch.empty(B, T_q, HQ, dtype=torch.float, device=q.device)
+    grid = (TQ, NV, B * H)
+    o = torch.empty(B, TQ, HQ, V, dtype=v.dtype, device=q.device)
+    lse = torch.empty(B, TQ, HQ, dtype=torch.float, device=q.device)
 
     parallel_nsa_fwd_kernel[grid](
         q=q,
@@ -641,8 +615,8 @@ def parallel_nsa_fwd(
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
         token_indices_q=token_indices_q,
-        TQ=T_q,
-        TK=T_kv,
+        TQ=TQ,
+        TK=TK,
         H=H,
         HQ=HQ,
         G=G,
@@ -654,33 +628,6 @@ def parallel_nsa_fwd(
         BV=BV,
     )
     return o, lse
-
-
-def parallel_nsa_block_mask(
-    block_indices: torch.LongTensor,
-    block_counts: torch.LongTensor | int,
-    cu_seqlens: torch.LongTensor,
-    block_size: int,
-):
-    B, T, H, S = block_indices.shape
-    BS = block_size
-    if cu_seqlens is not None:
-        NS = triton.cdiv(prepare_lens(cu_seqlens).max().item(), BS)
-    else:
-        NS = triton.cdiv(T, BS)
-    block_mask = torch.zeros(B, T, H, NS, dtype=torch.bool, device=block_indices.device)
-
-    parallel_nsa_kernel_mask[(T, B, H*S)](
-        block_indices=block_indices,
-        block_counts=block_counts,
-        block_mask=block_mask,
-        T=T,
-        H=H,
-        S=S,
-        BS=BS,
-        NS=NS,
-    )
-    return block_mask
 
 
 def parallel_nsa_bwd(
@@ -740,23 +687,47 @@ def parallel_nsa_bwd(
     if cu_seqlens is not None and chunk_indices is None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BS)
 
-    # [B, T, H, M] block_mask: which KV blocks each query selects (causal + count
-    # valid); prepare_dkv_csr inverts it into the per-block list of selecting queries.
-    block_mask = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
-    M = block_mask.shape[-1]
+    M = triton.cdiv(T, BS) if cu_seqlens is None else triton.cdiv(prepare_lens(cu_seqlens).max().item(), BS)
     dk = torch.empty(NV, *k.shape, dtype=k.dtype if NV == 1 else torch.float, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
 
-    # gather the queries selecting each KV block (CSR inverse index) and batch them
-    # into one MMA — far fewer, far larger matmuls than scanning every query tile.
-    # Works for dense and varlen (the kernel decodes the block via chunk_indices).
-    q_idx, q_ptr = prepare_dkv_csr(block_mask, cu_seqlens, chunk_indices, block_size)
-    n_blk = chunk_indices.shape[0] * H if cu_seqlens is not None else B * H * M
-    grid = (NV, n_blk)
-    parallel_nsa_bwd_kernel_dkv_gather[grid](
-        q, k, v, lse, delta, do, dk, dv, q_idx, q_ptr, cu_seqlens, chunk_indices,
-        scale, T, B * T,
-        B=B, H=H, HQ=HQ, G=G, K=K, V=V, NS=M, BS=BS, BK=BK, BV=BV,
+    # invert the selection into the per-block list of selecting queries (CSR), so the kernel
+    # gathers and batches them into one MMA instead of scanning every query tile.
+    csr_indices, csr_offsets = prepare_block_csr(
+        block_indices=block_indices,
+        block_counts=block_counts,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        num_blocks=M,
+        block_size=block_size,
+    )
+    NB = chunk_indices.shape[0] * H if cu_seqlens is not None else B * H * M
+    grid = (NV, NB)
+    parallel_nsa_bwd_kernel_dkv[grid](
+        q=q,
+        k=k,
+        v=v,
+        lse=lse,
+        delta=delta,
+        do=do,
+        dk=dk,
+        dv=dv,
+        scale=scale,
+        csr_indices=csr_indices,
+        csr_offsets=csr_offsets,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        T=T,
+        B=B,
+        H=H,
+        HQ=HQ,
+        G=G,
+        K=K,
+        V=V,
+        TC=M,
+        BS=BS,
+        BK=BK,
+        BV=BV,
     )
     dk = dk.sum(0)
     return dq, dk, dv
@@ -856,7 +827,8 @@ def parallel_nsa(
             queries of shape `[B, TQ, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
-            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16 (it is a kernel tile dimension; Triton requires power-of-2 block shapes).
+            GQA is enforced here: the ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >= 16.
+            This is a kernel tile dimension, which Triton requires to be a power-of-2 block shape.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g_cmp (torch.Tensor):
@@ -898,7 +870,8 @@ def parallel_nsa(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`. "
             f"Please flatten variable-length inputs before processing.",
         )
-    assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
+    G = q.shape[2] // k.shape[2]
+    assert G >= 16 and (G & (G - 1)) == 0, "Group size (HQ/H) must be a power of 2 and >= 16 in NSA"
 
     if cu_seqlens is not None:
         if isinstance(cu_seqlens, tuple):
