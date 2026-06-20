@@ -142,6 +142,12 @@ class OpConfig:
             This is useful when the op's shape semantics differ from `B/T/H/D`,
             for example when AttnRes uses an extra `L` residual-source axis.
             Default: None.
+        test_file (str, Optional):
+            Path (relative to repo root) to the op's pytest file, used as the
+            frozen correctness gate by `benchmarks/ops/verify.py`. When None,
+            the gate is derived from `import_path`'s last segment, e.g.
+            `fla.ops.gla` -> `tests/ops/test_gla.py`. Set this only when the
+            derived path is wrong. Default: None.
     """
     name: str
     import_path: str
@@ -154,6 +160,7 @@ class OpConfig:
     category: str = ''
     dim_constraints: dict | None = None
     default_shapes: dict[str, dict[str, int]] | None = None
+    test_file: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +307,7 @@ register_op(OpConfig(
         'beta': TensorSpec(shape_BTH, transform=sigmoid_transform),
     },
     category='beta',
+    test_file='tests/ops/test_delta.py',
 ))
 
 # --- D: +gate + beta ---
@@ -315,6 +323,7 @@ register_op(OpConfig(
     func_name='chunk_gated_delta_rule',
     extra_kwargs={'use_qk_l2norm_in_kernel': True},
     category='gate_beta',
+    test_file='tests/ops/test_gdn.py',
 ))
 
 register_op(OpConfig(
@@ -419,6 +428,7 @@ register_op(OpConfig(
         'gk': TensorSpec(shape_BTHD, transform=logsigmoid),
     },
     category='gen_delta',
+    test_file='tests/ops/test_dplr_delta.py',
 ))
 
 # --- K: Lightning attention (needs layer_idx, num_layers) ---
