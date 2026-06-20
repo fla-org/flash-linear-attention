@@ -14,11 +14,11 @@ Do not add a `README.md` inside individual skill directories; the canonical entr
 
 ## Current skills
 
-| Skill | Purpose |
-|-------|---------|
-| `fla-optimization-loop` | Disciplined, reproducible kernel optimization loop (task contract, three phases, iteration protocol, trap catalog) anchored on the frozen pytest correctness gate |
-| `fla-nvidia-performance` | NVIDIA GPU kernel performance workflow for Triton, Gluon, TileLang, CUDA backends, hardware baselines, and MR-ready profiling evidence |
-| `fla-kda` | KDA-specific gate, intra/inter, backend, and test workflow |
-| `fla-dispatch-backends` | `@dispatch` decorator and backend registry workflow |
-| `fla-correctness-coverage` | Coverage matrix and test guidance for `fla/ops/**` kernels |
-| `fla-mr-readiness` | MR/PR preparation checklist, test plan, and PR body structure |
+| Skill                      | Purpose                                                                                                                                                           |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fla-optimization-loop`    | Disciplined, reproducible kernel optimization loop (task contract, three phases, iteration protocol, trap catalog) anchored on the frozen pytest correctness gate |
+| `fla-nvidia-performance`   | NVIDIA GPU kernel performance workflow for Triton, Gluon, TileLang, CUDA backends, hardware baselines, and MR-ready profiling evidence                            |
+| `fla-kda`                  | KDA-specific gate, intra/inter, backend, and test workflow                                                                                                        |
+| `fla-dispatch-backends`    | `@dispatch` decorator and backend registry workflow                                                                                                               |
+| `fla-correctness-coverage` | Coverage matrix and test guidance for `fla/ops/**` kernels                                                                                                        |
+| `fla-mr-readiness`         | MR/PR preparation checklist, test plan, and PR body structure                                                                                                     |

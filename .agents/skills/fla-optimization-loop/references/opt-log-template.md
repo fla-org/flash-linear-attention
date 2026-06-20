@@ -21,7 +21,7 @@ Target: <e.g. 1.2x on B4_T4096_H64_D128, full gate green>
 ## Summary
 
 | Iter | Direction (one line) | Gate | Bench (median ms) | vs best | Status |
-|------|----------------------|------|-------------------|---------|--------|
+| ---- | -------------------- | ---- | ----------------- | ------- | ------ |
 | 0    | baseline             | pass | 1.934             | —       | base   |
 | 1    | fuse gate mult       | pass | 1.701             | +12%    | keep   |
 | 2    | larger BT block      | pass | 1.770             | -4%     | revert |
