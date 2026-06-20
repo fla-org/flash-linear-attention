@@ -125,29 +125,25 @@ class OpConfig:
         extra_kwargs (dict[str, Any], Optional):
             Constant keyword arguments passed to the op. Default: `{}`.
         output_is_tuple (bool):
-            Whether the op returns a tuple whose first item is the tensor used
-            for `.backward()`. Default: `True`.
+            Whether the op returns a tuple whose first item is the tensor used for `.backward()`. Default: `True`.
         skip_backward (bool):
             Whether to skip forward-backward benchmark mode. Default: `False`.
         post_init (Callable, Optional):
-            Callback invoked as `post_init(inputs, B=B, T=T, H=H, D=D, **kw)`
-            for custom input mutation. Default: None.
+            Callback invoked as `post_init(inputs, B=B, T=T, H=H, D=D, **kw)` for custom input mutation. Default: None.
         category (str):
             Grouping label used in reports. Default: `''`.
         dim_constraints (dict, Optional):
-            Shape constraints, such as `{'D': [64, 128]}`. Shapes that do not
-            match are skipped. Default: None.
+            Shape constraints, such as `{'D': [64, 128]}`. Shapes that do not match are skipped. Default: None.
         default_shapes (dict[str, dict[str, int]], Optional):
             Per-op shape configs used instead of the global `SHAPE_CONFIGS`.
             This is useful when the op's shape semantics differ from `B/T/H/D`,
             for example when AttnRes uses an extra `L` residual-source axis.
             Default: None.
         test_file (str, Optional):
-            Path (relative to repo root) to the op's pytest file, used as the
-            frozen correctness gate by `benchmarks/ops/verify.py`. When None,
-            the gate is derived from `import_path`'s last segment, e.g.
-            `fla.ops.gla` -> `tests/ops/test_gla.py`. Set this only when the
-            derived path is wrong. Default: None.
+            Path (relative to repo root) to the op's pytest file,
+            used as the frozen correctness gate by `benchmarks/ops/verify.py`.
+            When None, the gate is derived from `import_path`'s last segment (e.g. `fla.ops.gla` -> `tests/ops/test_gla.py`).
+            Set this only when the derived path is wrong. Default: None.
     """
     name: str
     import_path: str

@@ -8,20 +8,20 @@
 """
 Correctness-gated benchmark driver for the kernel optimization loop.
 
-This ties the two halves of an optimization iteration into one reproducible
-command: it runs the op's **frozen pytest** as a correctness gate, and only if
-the gate is green does it measure performance. A speedup is never reported on a
-red gate. See ``.agents/skills/fla-optimization-loop/SKILL.md`` for the
-discipline this driver supports.
+This ties the two halves of an optimization iteration into one reproducible command:
+it runs the op's **frozen pytest** as a correctness gate, and only if the gate is green does it measure performance.
+A speedup is never reported on a red gate.
+See ``.agents/skills/fla-optimization-loop/SKILL.md`` for the discipline this driver supports.
 
-Why a separate driver and not just ``run.py``? ``run.py`` measures latency but
-does not check correctness; the pytest suite checks correctness (forward AND
-backward, under NaN memory poisoning) but does not measure latency. During an
-optimization loop you need both, every iteration, and you must never let a fast
-kernel that silently broke gradients look like a win. This driver enforces that
-ordering. It reuses ``registry.py`` (inputs) and ``run.py`` (timing); the only
-correctness logic is "run the unmodified test file via pytest" — the test is a
-black box this tool may select from but never edit.
+Why a separate driver and not just ``run.py``?
+``run.py`` measures latency but does not check correctness;
+the pytest suite checks correctness (forward AND backward, under NaN memory poisoning) but does not measure latency.
+During an optimization loop you need both, every iteration,
+and you must never let a fast kernel that silently broke gradients look like a win.
+This driver enforces that ordering.
+It reuses ``registry.py`` (inputs) and ``run.py`` (timing);
+the only correctness logic is "run the unmodified test file via pytest" —
+the test is a black box this tool may select from but never edit.
 
 Usage::
 
@@ -43,10 +43,10 @@ Usage::
     # List registered ops
     python -m benchmarks.ops.verify --list
 
-``--gate-k`` is a pytest ``-k`` *selection* for fast iteration — it narrows
-which parametrized cases run, it does not modify the test. The full file is the
-promotion gate; a subset is only a signal. Promote a candidate only on a full
-green gate.
+``--gate-k`` is a pytest ``-k`` *selection* for fast iteration — it narrows which parametrized cases run,
+it does not modify the test.
+The full file is the promotion gate; a subset is only a signal.
+Promote a candidate only on a full green gate.
 """
 
 from __future__ import annotations
@@ -74,11 +74,10 @@ from run import (  # noqa: E402
 def derive_test_file(op_name: str) -> str:
     """Derive the gate test path from the registered op.
 
-    Priority: the op's explicit ``test_file`` field, else
-    ``tests/ops/test_<last-segment-of-import_path>.py``. The returned path is
-    repo-root-relative; the caller checks existence (some ops need an explicit
-    override because the op directory name and test name differ, e.g.
-    ``fla.ops.gated_delta_rule`` is tested by ``test_gdn.py``).
+    Priority: the op's explicit ``test_file`` field, else ``tests/ops/test_<last-segment-of-import_path>.py``.
+    The returned path is repo-root-relative; the caller checks existence
+    (some ops need an explicit override because the op directory name and test name differ,
+    e.g. ``fla.ops.gated_delta_rule`` is tested by ``test_gdn.py``).
     """
     config = get_op(op_name)
     if config.test_file:
@@ -90,9 +89,9 @@ def derive_test_file(op_name: str) -> str:
 def run_gate(op_name: str, test_file: str | None, gate_k: str | None) -> bool:
     """Run the frozen pytest correctness gate for *op_name*.
 
-    Returns True iff pytest exits 0. The test file is run unmodified; ``gate_k``
-    only narrows selection via pytest ``-k``. Raises FileNotFoundError if the
-    resolved test file does not exist (caller should surface the override hint).
+    Returns True iff pytest exits 0.
+    The test file is run unmodified; ``gate_k`` only narrows selection via pytest ``-k``.
+    Raises FileNotFoundError if the resolved test file does not exist (caller should surface the override hint).
     """
     root = _find_project_root()
     rel = test_file or derive_test_file(op_name)
@@ -112,9 +111,9 @@ def run_gate(op_name: str, test_file: str | None, gate_k: str | None) -> bool:
 def profile_op(op_name: str, modes: list[str]) -> None:
     """Dump a torch.profiler trace for one fwd(+bwd) call into profile/<op>-opt/.
 
-    A general (no-ncu) profiling entry point — the torch profiler the user
-    already reaches for, wired to the same registry inputs. Detailed Nsight
-    Compute collection lives in the fla-nvidia-performance skill.
+    A general (no-ncu) profiling entry point — the torch profiler the user already reaches for,
+    wired to the same registry inputs.
+    Detailed Nsight Compute collection lives in the fla-nvidia-performance skill.
     """
     import importlib
 
