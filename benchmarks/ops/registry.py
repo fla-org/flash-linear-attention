@@ -59,6 +59,13 @@ def shape_LBTD(B, T, H, D, L=None, **kw):
     return (L, B, T, D)
 
 
+def shape_q_hq(B, T, H, D, HQ=None, **kw):
+    """q with HQ query heads (GQA); k/v keep H heads. Used by NSA."""
+    if HQ is None:
+        raise ValueError("shape_q_hq requires the 'HQ' (query-head) shape config key")
+    return (B, T, HQ, D)
+
+
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------
@@ -259,7 +266,7 @@ def generate_inputs(
 # Op registrations
 # ===========================================================================
 
-# --- A: Simple qkv (no extra inputs) ---
+# --- Simple qkv (no extra inputs) ---
 
 _simple_qkv = {
     'q': TensorSpec(shape_BTHD),
@@ -281,7 +288,7 @@ register_op(OpConfig(
     category='simple_qkv',
 ))
 
-# --- B: +elem gate (g=[B,T,H,D] with logsigmoid_clamp) ---
+# --- +elem gate (g=[B,T,H,D] with logsigmoid_clamp) ---
 
 register_op(OpConfig(
     name='chunk_gla',
@@ -293,7 +300,7 @@ register_op(OpConfig(
     category='elem_gate',
 ))
 
-# --- C: +beta (beta=[B,T,H] with sigmoid) ---
+# --- +beta (beta=[B,T,H] with sigmoid) ---
 
 register_op(OpConfig(
     name='chunk_delta_rule',
@@ -306,7 +313,7 @@ register_op(OpConfig(
     test_file='tests/ops/test_delta.py',
 ))
 
-# --- D: +gate + beta ---
+# --- +gate + beta ---
 
 register_op(OpConfig(
     name='chunk_gdn',
@@ -334,7 +341,7 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
-# --- E: +head gate (g=[B,T,H] with logsigmoid) ---
+# --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(
     name='chunk_simple_gla',
@@ -346,7 +353,7 @@ register_op(OpConfig(
     category='head_gate',
 ))
 
-# --- F: RWKV ---
+# --- RWKV ---
 
 
 def _rwkv7_post_init(inputs, B, T, H, D, **kw):
@@ -385,7 +392,7 @@ register_op(OpConfig(
     category='rwkv',
 ))
 
-# --- H: Comba ---
+# --- Comba ---
 
 register_op(OpConfig(
     name='chunk_comba',
@@ -400,7 +407,7 @@ register_op(OpConfig(
     category='comba',
 ))
 
-# --- I: HGRN (x, g only, no qkv) ---
+# --- HGRN (x, g only, no qkv) ---
 
 register_op(OpConfig(
     name='fused_recurrent_hgrn',
@@ -412,7 +419,7 @@ register_op(OpConfig(
     category='hgrn',
 ))
 
-# --- J: Generalized delta rule (DPLR) ---
+# --- Generalized delta rule (DPLR) ---
 
 register_op(OpConfig(
     name='chunk_dplr_delta_rule',
@@ -427,7 +434,7 @@ register_op(OpConfig(
     test_file='tests/ops/test_dplr_delta.py',
 ))
 
-# --- K: Lightning attention (needs layer_idx, num_layers) ---
+# --- Lightning attention (needs layer_idx, num_layers) ---
 
 register_op(OpConfig(
     name='chunk_lightning_attn',
@@ -437,7 +444,7 @@ register_op(OpConfig(
     category='lightning',
 ))
 
-# --- L: Attention baselines ---
+# --- Attention baselines ---
 
 register_op(OpConfig(
     name='parallel_attn',
@@ -458,7 +465,7 @@ register_op(OpConfig(
     category='flash_attn',
 ))
 
-# --- M: layer-axis residual aggregation (AttnRes, mHC, ...) ---
+# --- layer-axis residual aggregation (AttnRes, mHC, ...) ---
 # These ops attend / aggregate over an `L` axis of stacked residual sources.
 # Inputs and shape sweeps are shared so future ops (mHC etc.) can reuse them.
 
@@ -495,16 +502,10 @@ register_op(OpConfig(
     category='naive_attnres',
 ))
 
-# --- N: NSA (native sparse attention) — GQA + structured block selection ---
+# --- NSA (native sparse attention) — GQA + structured block selection ---
 # q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
 # and >= 16). block_indices is a causal random selection that must be built
 # explicitly — the generic randn/randint input factory cannot produce a valid one.
-
-
-def shape_q_hq(B, T, H, D, HQ=None, **kw):
-    if HQ is None:
-        raise ValueError("nsa shapes require an 'HQ' (query-head) key")
-    return (B, T, HQ, D)
 
 
 def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):
