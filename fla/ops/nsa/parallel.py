@@ -737,12 +737,8 @@ def parallel_nsa_bwd(
     )
     dq = dq.sum(0)
 
-    if cu_seqlens is not None:
-        if chunk_indices is None:
-            chunk_indices = prepare_chunk_indices(cu_seqlens, BS)
-        NS = len(chunk_indices)
-    else:
-        NS = triton.cdiv(T, BS)
+    if cu_seqlens is not None and chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BS)
 
     # [B, T, H, M] block_mask: which KV blocks each query selects (causal + count
     # valid); prepare_dkv_csr inverts it into the per-block list of selecting queries.
