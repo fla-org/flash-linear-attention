@@ -37,7 +37,7 @@ class L2Wrap(torch.autograd.Function):
         glogits = torch.zeros(ctx.logits_shape, device=grad_output.device,
                               dtype=grad_output.dtype)
         glogits.scatter_(-1, ids, maxx)
-        return grad_output, glogits, None
+        return grad_output, glogits * grad_output, None
 
 
 l2_warp = L2Wrap.apply
