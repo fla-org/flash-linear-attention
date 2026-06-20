@@ -388,6 +388,14 @@ def parallel_nsa_bwd_kernel_dq(
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
 
+def _prune_dkv_bq(configs, nargs, **kwargs):
+    # the gather stacks BQ queries x G group heads into a [BQ*G]-wide tile; past ~1024 columns the
+    # Triton compiler fails outright (which autotune cannot catch), so cap BQ*G here. Shared-memory
+    # fit is left to autotune, which prunes configs that don't fit the device. Always keep BQ=1.
+    G = {**(nargs or {}), **kwargs}.get('G', 1)
+    return [c for c in configs if c.kwargs['BQ'] == 1 or c.kwargs['BQ'] * G <= 256]
+
+
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
@@ -399,6 +407,7 @@ def parallel_nsa_bwd_kernel_dq(
         for num_stages in [1, 2]
     ],
     key=['BS', 'BK', 'BV', 'G'],
+    prune_configs_by={'early_config_prune': _prune_dkv_bq},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
