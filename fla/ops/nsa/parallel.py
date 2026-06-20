@@ -881,7 +881,7 @@ def parallel_nsa(
             queries of shape `[B, TQ, HQ, K]`.
         k (torch.Tensor):
             keys of shape `[B, T, H, K]`.
-            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a power of 2 and >=16.
+            GQA is enforced here. The ratio of query heads (HQ) to key/value heads (H) must be a multiple of 16.
         v (torch.Tensor):
             values of shape `[B, T, H, V]`.
         g_cmp (torch.Tensor):
