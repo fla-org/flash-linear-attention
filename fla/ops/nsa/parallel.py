@@ -8,7 +8,6 @@
 import warnings
 
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -531,6 +530,126 @@ def parallel_nsa_bwd_kernel_dkv(
     tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
 
 
+def prepare_dkv_csr(block_mask, cu_seqlens, chunk_indices, block_size):
+    # Inverse index for gather-based dkv: per KV block (keyed by the same id the
+    # kernel decodes) the sorted list of *absolute* query positions selecting it,
+    # as CSR (q_idx values + q_ptr offsets). Lets bwd_dkv gather selecting queries
+    # and batch them into one MMA instead of scanning every query tile per block.
+    # Handles both dense (key = (b*H+h)*NS + block) and varlen (key = global-chunk
+    # * H + h, via cu_seqlens/chunk_offsets).
+    B, T, H, NS = block_mask.shape
+    nz = block_mask.nonzero(as_tuple=False)            # [P, 4] = (b, t, h, ns)
+    b_, t_, h_, ns_ = nz[:, 0], nz[:, 1], nz[:, 2], nz[:, 3]
+    if cu_seqlens is None:
+        q_abs = (b_ * T + t_).to(torch.int32)
+        gkey = (b_ * H + h_) * NS + ns_
+        n_keys = B * H * NS
+    else:
+        n_ = torch.searchsorted(cu_seqlens[1:].contiguous(), t_, right=True)   # sequence index
+        chunk_off = prepare_chunk_offsets(cu_seqlens, block_size)
+        gkey = (chunk_off[n_] + ns_) * H + h_
+        q_abs = t_.to(torch.int32)
+        n_keys = chunk_indices.shape[0] * H
+    order = (gkey.to(torch.int64) * (B * T) + q_abs).argsort()
+    q_idx = q_abs[order].contiguous()
+    counts = torch.bincount(gkey, minlength=n_keys)
+    q_ptr = torch.zeros(n_keys + 1, dtype=torch.int32, device=block_mask.device)
+    q_ptr[1:] = counts.cumsum(0)
+    return q_idx, q_ptr.contiguous()
+
+
+@triton.heuristics({
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+})
+@triton.autotune(
+    configs=[
+        triton.Config({'BG': BG}, num_warps=nw, num_stages=ns)
+        for BG in [1, 2, 4, 8]
+        for nw in [2, 4, 8]
+        for ns in [1, 2]
+    ],
+    key=['BS', 'BK', 'BV', 'G'],
+    **autotune_cache_kwargs,
+)
+@triton.jit(do_not_specialize=['T'])
+def parallel_nsa_bwd_kernel_dkv_gather(
+    q, k, v, lse, delta, do, dk, dv,
+    q_idx, q_ptr, cu_seqlens, chunk_indices,
+    scale,
+    T, NTOK,
+    B: tl.constexpr, H: tl.constexpr, HQ: tl.constexpr, G: tl.constexpr,
+    K: tl.constexpr, V: tl.constexpr, NS: tl.constexpr,
+    BS: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, BG: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+):
+    i_v, i_blk = tl.program_id(0), tl.program_id(1)
+    # decode the program into this KV block's head and absolute key start; all
+    # address arithmetic in int64 (NTOK*HQ*K overflows int32 at long seq / big heads).
+    if IS_VARLEN:
+        i_c, i_h = i_blk // H, i_blk % H
+        i_n = tl.load(chunk_indices + i_c * 2).to(tl.int32)
+        i_sl = tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
+        kbos = tl.load(cu_seqlens + i_n).to(tl.int64)
+        keos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        key_abs = kbos + i_sl * BS + tl.arange(0, BS)
+    else:
+        i_s = i_blk % NS
+        bh = i_blk // NS
+        i_b, i_h = bh // H, bh % H
+        key_abs = (i_b * T).to(tl.int64) + i_s * BS + tl.arange(0, BS)
+        keos = (i_b + 1) * T
+
+    start = tl.load(q_ptr + i_blk).to(tl.int32)
+    end = tl.load(q_ptr + i_blk + 1).to(tl.int32)
+    cnt = end - start
+
+    o_k = tl.arange(0, BK)
+    o_v = i_v * BV + tl.arange(0, BV)
+    o_g = i_h * G + tl.arange(0, G)
+    r_m, k_m, v_m = key_abs < keos, o_k < K, o_v < V
+
+    # K/V tile for this block: k/v[key_abs, i_h, :]
+    b_k = tl.load(k + key_abs[:, None] * (H * K) + i_h * K + o_k[None, :], mask=r_m[:, None] & k_m[None, :], other=0.)
+    b_v = tl.load(v + key_abs[:, None] * (H * V) + i_h * V + o_v[None, :], mask=r_m[:, None] & v_m[None, :], other=0.)
+    b_dk = tl.zeros([BS, BK], dtype=tl.float32)
+    b_dv = tl.zeros([BS, BV], dtype=tl.float32)
+
+    for it in range(0, tl.cdiv(cnt, BG)):
+        offs = it * BG + tl.arange(0, BG)
+        m_j = offs < cnt
+        q_pos = tl.load(q_idx + start + offs, mask=m_j, other=0).to(tl.int64)         # [BG] absolute
+
+        base = q_pos[:, None, None] * (HQ * K) + o_g[None, :, None] * K + o_k[None, None, :]
+        b_q = tl.load(q + base, mask=m_j[:, None, None] & k_m[None, None, :], other=0.).to(tl.float32)
+        b_q = tl.reshape(b_q * scale, [BG * G, BK]).to(b_k.dtype)
+
+        based = q_pos[:, None, None] * (HQ * V) + o_g[None, :, None] * V + o_v[None, None, :]
+        b_do = tl.load(do + based, mask=m_j[:, None, None] & v_m[None, None, :], other=0.)
+        b_do = tl.reshape(b_do, [BG * G, BV])
+
+        ld = q_pos[:, None] * HQ + o_g[None, :]
+        b_lse = tl.reshape(tl.load(lse + ld, mask=m_j[:, None], other=0.), [BG * G])
+        b_del = tl.reshape(tl.load(delta + ld, mask=m_j[:, None], other=0.), [BG * G])
+
+        col_valid = tl.reshape(tl.broadcast_to(m_j[:, None], [BG, G]), [BG * G])
+        qpos_rep = tl.reshape(tl.broadcast_to(q_pos[:, None], [BG, G]), [BG * G])
+
+        b_s = tl.dot(b_k, tl.trans(b_q))                                              # [BS, BG*G]
+        b_p = exp(b_s - b_lse[None, :])
+        keep = (qpos_rep[None, :] >= key_abs[:, None]) & col_valid[None, :]
+        b_p = tl.where(keep, b_p, 0.)
+
+        b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
+        b_dp = tl.dot(b_v, tl.trans(b_do))
+        b_ds = b_p * (b_dp.to(tl.float32) - b_del[None, :])
+        b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
+
+    dk_off = (i_v * NTOK + key_abs)[:, None] * (H * K) + i_h * K + o_k[None, :]
+    dv_off = key_abs[:, None] * (H * V) + i_h * V + o_v[None, :]
+    tl.store(dk + dk_off, b_dk.to(dk.dtype.element_ty), mask=r_m[:, None] & k_m[None, :])
+    tl.store(dv + dv_off, b_dv.to(dv.dtype.element_ty), mask=r_m[:, None] & v_m[None, :])
+
+
 @contiguous
 def parallel_nsa_topk(
     q: torch.Tensor,
@@ -745,43 +864,21 @@ def parallel_nsa_bwd(
     # [B, T, H, M] block_mask, plus q_last[b, h, s] = furthest query that selected
     # KV block s (fused into the mask kernel), so dkv stops its scan there instead
     # of at eos. Used on the dense path only (varlen falls back via HAS_Q_LAST off).
-    block_mask, q_last = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
+    block_mask, _ = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
     M = block_mask.shape[-1]
-    # skip_mask[t] = OR of block_mask over a BQ-query tile, so dkv can skip whole tiles
-    # of queries that selected nothing in a KV block
-    mask = F.pad(block_mask.reshape(B * T, H, M), (0, 0, 0, 0, 0, (-(B * T)) % BQ))
-    skip_mask = mask.view(-1, BQ, H, M).any(dim=1).contiguous()
     dk = torch.empty(NV, *k.shape, dtype=k.dtype if NV == 1 else torch.float, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
 
-    grid = (NV, NS, B * H)
-    parallel_nsa_bwd_kernel_dkv[grid](
-        q=q,
-        k=k,
-        v=v,
-        lse=lse,
-        delta=delta,
-        do=do,
-        dk=dk,
-        dv=dv,
-        block_mask=block_mask,
-        skip_mask=skip_mask,
-        q_last=q_last,
-        cu_seqlens=cu_seqlens,
-        chunk_indices=chunk_indices,
-        scale=scale,
-        T=T,
-        B=B,
-        H=H,
-        HQ=HQ,
-        G=G,
-        K=K,
-        V=V,
-        M=M,
-        BS=BS,
-        BK=BK,
-        BV=BV,
-        BQ=BQ,
+    # gather the queries selecting each KV block (CSR inverse index) and batch them
+    # into one MMA — far fewer, far larger matmuls than scanning every query tile.
+    # Works for dense and varlen (the kernel decodes the block via chunk_indices).
+    q_idx, q_ptr = prepare_dkv_csr(block_mask, cu_seqlens, chunk_indices, block_size)
+    n_blk = chunk_indices.shape[0] * H if cu_seqlens is not None else B * H * M
+    grid = (NV, n_blk)
+    parallel_nsa_bwd_kernel_dkv_gather[grid](
+        q, k, v, lse, delta, do, dk, dv, q_idx, q_ptr, cu_seqlens, chunk_indices,
+        scale, T, B * T,
+        B=B, H=H, HQ=HQ, G=G, K=K, V=V, NS=M, BS=BS, BK=BK, BV=BV,
     )
     dk = dk.sum(0)
     return dq, dk, dv
