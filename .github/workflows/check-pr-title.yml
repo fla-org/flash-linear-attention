@@ -13,14 +13,13 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          pattern='^\[(Fix|Misc|Docs|CI|Test|Perf|Refactor|Ops|Model|Layer|Attn|GDN|KDA|CP|Conv|CE|chore)\][[:space:]]+.+'
-          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
-            echo "PR title must start with a semantic prefix, for example:"
+          if ! grep -qE '^\[[A-Za-z][A-Za-z0-9]*\][[:space:]].+' <<<"$PR_TITLE"; then
+            echo "PR title must start with a bracketed tag, for example:"
             echo "  [Fix] Guard checkpoint weight re-initialization"
             echo "  [Docs] Add agent workflow skills"
-            echo "  [CI] Add PR title validation"
+            echo "  [NSA] Support cached inference"
             echo
-            echo "Allowed prefixes:"
+            echo "Common tags (any [Tag] is accepted):"
             echo "  [Fix], [Misc], [Docs], [CI], [Test], [Perf], [Refactor], [Ops], [Model], [Layer], [Attn], [GDN], [KDA], [CP], [Conv], [CE], [chore]"
             echo
             echo "Actual title: $PR_TITLE"
