@@ -393,8 +393,8 @@ def parallel_nsa_bwd_kernel_dq(
 })
 @triton.autotune(
     configs=[
-        triton.Config({'BG': BG}, num_warps=num_warps, num_stages=num_stages)
-        for BG in [1, 2, 4, 8]
+        triton.Config({'BQ': BQ}, num_warps=num_warps, num_stages=num_stages)
+        for BQ in [1, 2, 4, 8]
         for num_warps in [4, 8]
         for num_stages in [1, 2]
     ],
@@ -427,11 +427,10 @@ def parallel_nsa_bwd_kernel_dkv(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    BG: tl.constexpr,
+    BQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
     i_v, i_blk = tl.program_id(0), tl.program_id(1)
-    i_q0, i_q1 = tl.load(csr_offsets + i_blk).to(tl.int64), tl.load(csr_offsets + i_blk + 1).to(tl.int64)
     all = B * T
     if IS_VARLEN:
         i_c, i_h = i_blk // H, i_blk % H
@@ -445,68 +444,63 @@ def parallel_nsa_bwd_kernel_dkv(
         bos = (i_b * T).to(tl.int64)
         eos = bos + T
     o_t = bos + i_s * BS + tl.arange(0, BS)
-    o_k = tl.arange(0, BK)
+    o_d = tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
-    o_g = tl.arange(0, G)
-    m_t, m_k, m_v = o_t < eos, o_k < K, o_v < V
+    o_h = tl.arange(0, BQ * G) % G
+    m_t, m_d, m_v = o_t < eos, o_d < K, o_v < V
 
+    # this block's CSR slice: the queries that selected it
+    i_q0, i_q1 = tl.load(csr_offsets + i_blk).to(tl.int64), tl.load(csr_offsets + i_blk + 1).to(tl.int64)
     NQ = i_q1 - i_q0
 
     q += i_h * G*K
-    do += i_h * G*V
-    lse += i_h * G
-    delta += i_h * G
     k += i_h * K
     v += i_h * V
+    lse += i_h * G
+    delta += i_h * G
+    do += i_h * G*V
     dk += i_h * K
     dv += i_h * V
 
     # [BS, BK] / [BS, BV] k/v tile for this kv block
-    b_k = tl.load(k + o_t[:, None] * H*K + o_k[None, :], mask=m_t[:, None] & m_k[None, :], other=0.)
+    b_k = tl.load(k + o_t[:, None] * H*K + o_d[None, :], mask=m_t[:, None] & m_d[None, :], other=0.)
     b_v = tl.load(v + o_t[:, None] * H*V + o_v[None, :], mask=m_t[:, None] & m_v[None, :], other=0.)
     b_dk = tl.zeros([BS, BK], dtype=tl.float32)
     b_dv = tl.zeros([BS, BV], dtype=tl.float32)
 
-    for i in range(tl.cdiv(NQ, BG)):
-        o_j = i * BG + tl.arange(0, BG)
-        m_j = o_j < NQ
-        # [BG] absolute positions of the queries selecting this block
-        i_q = tl.load(csr_indices + i_q0 + o_j, mask=m_j, other=0).to(tl.int64)
+    for i in range(tl.cdiv(NQ, BQ)):
+        # BQ queries x G group heads flattened to [BQ*G] columns; row r -> query slot i*BQ + r//G, head o_h[r]
+        o_q = i * BQ + tl.arange(0, BQ * G) // G
+        m_q = o_q < NQ
+        o_q = tl.load(csr_indices + i_q0 + o_q, mask=m_q, other=0).to(tl.int64)
 
-        # gather q/do/lse/delta for the BG queries over their G group heads -> [BG*G, *]
-        o_q = i_q[:, None, None] * HQ*K + o_g[None, :, None] * K + o_k[None, None, :]
-        b_q = tl.load(q + o_q, mask=m_j[:, None, None] & m_k[None, None, :], other=0.).to(tl.float32)
-        b_q = tl.reshape(b_q * scale, [BG * G, BK]).to(b_k.dtype)
+        # gather q/do/lse/delta for the [BQ*G] (query, group-head) columns
+        # [BQ*G, BK]
+        b_q = tl.load(q + o_q[:, None] * HQ*K + o_h[:, None] * K + o_d[None, :], mask=m_q[:, None] & m_d[None, :], other=0.)
+        b_q = (b_q * scale).to(b_k.dtype)
+        # [BQ*G, BV]
+        b_do = tl.load(do + o_q[:, None] * HQ*V + o_h[:, None] * V + o_v[None, :], mask=m_q[:, None] & m_v[None, :], other=0.)
+        # [BQ*G]
+        b_lse = tl.load(lse + o_q * HQ + o_h, mask=m_q, other=0.)
+        b_delta = tl.load(delta + o_q * HQ + o_h, mask=m_q, other=0.)
 
-        o_do = i_q[:, None, None] * HQ*V + o_g[None, :, None] * V + o_v[None, None, :]
-        b_do = tl.load(do + o_do, mask=m_j[:, None, None] & m_v[None, None, :], other=0.)
-        b_do = tl.reshape(b_do, [BG * G, BV])
-
-        o_ld = i_q[:, None] * HQ + o_g[None, :]
-        b_lse = tl.reshape(tl.load(lse + o_ld, mask=m_j[:, None], other=0.), [BG * G])
-        b_delta = tl.reshape(tl.load(delta + o_ld, mask=m_j[:, None], other=0.), [BG * G])
-
-        # broadcast per-query validity and position over the G group heads
-        m_col = tl.reshape(tl.broadcast_to(m_j[:, None], [BG, G]), [BG * G])
-        o_pos = tl.reshape(tl.broadcast_to(i_q[:, None], [BG, G]), [BG * G])
-
-        # [BS, BK] @ [BK, BG*G] -> [BS, BG*G]
+        # [BS, BK] @ [BK, BQ*G] -> [BS, BQ*G]
         b_s = tl.dot(b_k, tl.trans(b_q))
         b_p = exp(b_s - b_lse[None, :])
         # causal: a key contributes only to queries at or after its position
-        b_p = tl.where((o_pos[None, :] >= o_t[:, None]) & m_col[None, :], b_p, 0.)
+        b_p = tl.where((o_q[None, :] >= o_t[:, None]) & m_q[None, :], b_p, 0.)
 
-        # [BS, BG*G] @ [BG*G, BV] -> [BS, BV]
+        # [BS, BQ*G] @ [BQ*G, BV] -> [BS, BV]
         b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
-        # [BS, BV] @ [BV, BG*G] -> [BS, BG*G]
+        # [BS, BV] @ [BV, BQ*G] -> [BS, BQ*G]
         b_dp = tl.dot(b_v, tl.trans(b_do))
         b_ds = b_p * (b_dp.to(tl.float32) - b_delta[None, :])
-        # [BS, BG*G] @ [BG*G, BK] -> [BS, BK]
+        # [BS, BQ*G] @ [BQ*G, BK] -> [BS, BK]
         b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
 
-    o_dk = (i_v * all + o_t)[:, None] * H*K + o_k[None, :]
+    o_dk = (i_v * all + o_t)[:, None] * H*K + o_d[None, :]
     o_dv = o_t[:, None] * H*V + o_v[None, :]
-    tl.store(dk + o_dk, b_dk.to(dk.dtype.element_ty), mask=m_t[:, None] & m_k[None, :])
+    tl.store(dk + o_dk, b_dk.to(dk.dtype.element_ty), mask=m_t[:, None] & m_d[None, :])
     tl.store(dv + o_dv, b_dv.to(dv.dtype.element_ty), mask=m_t[:, None] & m_v[None, :])
 
 
