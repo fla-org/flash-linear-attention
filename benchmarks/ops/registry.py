@@ -494,3 +494,56 @@ register_op(OpConfig(
     default_shapes=_layer_default_shapes,
     category='naive_attnres',
 ))
+
+# --- N: NSA (native sparse attention) — GQA + structured block selection ---
+# q carries HQ query heads while k/v carry H kv heads (GQA; HQ/H a power of two
+# and >= 16). block_indices is a causal random selection that must be built
+# explicitly — the generic randn/randint input factory cannot produce a valid one.
+
+
+def shape_q_hq(B, T, H, D, HQ=None, **kw):
+    if HQ is None:
+        raise ValueError("nsa shapes require an 'HQ' (query-head) key")
+    return (B, T, HQ, D)
+
+
+def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):
+    # build block_indices [B, T, H, S]: for each query t, pick S of the causal
+    # blocks (block i is selectable iff i <= t // block_size), -1-padded when
+    # fewer than S exist, then sorted — mirroring tests/ops/test_nsa.py.
+    device = inputs['q'].device
+    NS = (T + block_size - 1) // block_size
+    valid = (torch.arange(NS, device=device)[None, None, None, :]
+             <= (torch.arange(T, device=device) // block_size)[None, :, None, None])
+    scores = torch.rand(B, T, H, NS, device=device).masked_fill(~valid, float('-inf'))
+    topv, topi = scores.topk(min(S, NS), dim=-1)
+    block_indices = topi.masked_fill(topv == float('-inf'), -1).sort(-1)[0].to(torch.long)
+    inputs['block_indices'] = block_indices.contiguous()
+    inputs['block_counts'] = S
+    inputs['block_size'] = block_size
+
+
+# Sweep T across the regime where the selective backward's tile-skip matters:
+# at short T every query selects nearly all its causal blocks (dense), the win
+# only appears once T >> S * block_size makes the selection sparse.
+_nsa_shapes = {
+    'B1_T8K_H1_HQ16_D128_S16':  {'B': 1, 'T': 8192,  'H': 1, 'D': 128, 'HQ': 16, 'S': 16, 'block_size': 64},
+    'B1_T16K_H1_HQ16_D128_S16': {'B': 1, 'T': 16384, 'H': 1, 'D': 128, 'HQ': 16, 'S': 16, 'block_size': 64},
+    'B1_T32K_H1_HQ16_D128_S16': {'B': 1, 'T': 32768, 'H': 1, 'D': 128, 'HQ': 16, 'S': 16, 'block_size': 64},
+    'B1_T64K_H1_HQ16_D128_S16': {'B': 1, 'T': 65536, 'H': 1, 'D': 128, 'HQ': 16, 'S': 16, 'block_size': 64},
+}
+
+register_op(OpConfig(
+    name='parallel_nsa',
+    import_path='fla.ops.nsa',
+    inputs={
+        'q': TensorSpec(shape_q_hq),
+        'k': TensorSpec(shape_BTHD),
+        'v': TensorSpec(shape_BTHD),
+    },
+    post_init=_nsa_post_init,
+    output_is_tuple=False,
+    default_shapes=_nsa_shapes,
+    category='nsa',
+    test_file='tests/ops/test_nsa.py',
+))
