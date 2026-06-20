@@ -542,8 +542,7 @@ def parallel_nsa_topk(
     scale: float = None,
     cu_seqlens: torch.LongTensor | tuple[torch.LongTensor, torch.LongTensor] | None = None,
 ) -> torch.LongTensor:
-    B, TQ, HQ, K = q.shape
-    _, TC, H, _ = k.shape
+    B, TQ, HQ, K, H = *q.shape, k.shape[2]
 
     assert k.shape[0] == q.shape[0] and k.shape[-1] == q.shape[-1], "The last dimension of k and q must match"
     assert lse is None or lse.shape == (B, TQ, HQ), "The shape of lse must be (B, TQ, HQ)"
@@ -830,7 +829,7 @@ class ParallelNSAFunction(torch.autograd.Function):
         ctx.token_indices = token_indices_q
         ctx.block_size = block_size
         ctx.scale = scale
-        # q/k cu_seqlens differ only in cached inference (Tq != Tk), where backward is not supported
+        # q/k cu_seqlens differ only in cached inference (TQ != TK), where backward is not supported
         ctx.tq_ne_tk = isinstance(cu_seqlens, tuple)
         return o.to(q.dtype)
 
