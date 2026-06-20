@@ -286,7 +286,6 @@ def parallel_nsa_kernel_mask(
     block_indices,
     block_counts,
     block_mask,
-    q_last,
     T,
     H: tl.constexpr,
     S: tl.constexpr,
@@ -305,10 +304,6 @@ def parallel_nsa_kernel_mask(
 
     if b_i < NS and b_i >= 0:
         tl.store(block_mask + i_b * T * H * NS + i_t * H * NS + i_h * NS + b_i, b_m.to(block_mask.dtype.element_ty))
-        # furthest query that actually selects this block — lets bwd_dkv stop its
-        # scan here instead of at eos. Fused in (one atomic) so it costs ~nothing.
-        if b_m:
-            tl.atomic_max(q_last + i_b * H * NS + i_h * NS + b_i, i_t)
 
 
 @triton.heuristics({
@@ -421,115 +416,6 @@ def parallel_nsa_bwd_kernel_dq(
     tl.store(p_dq, b_dq.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.heuristics({
-    'HAS_Q_LAST': lambda args: args['cu_seqlens'] is None,
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-})
-@triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=nw, num_stages=ns)
-        for nw in [1, 2, 4, 8]
-        for ns in [1, 2, 3]
-    ],
-    key=['BS', 'BK', 'BV'],
-    **autotune_cache_kwargs,
-)
-@triton.jit(do_not_specialize=['T'])
-def parallel_nsa_bwd_kernel_dkv(
-    q,
-    k,
-    v,
-    lse,
-    delta,
-    do,
-    dk,
-    dv,
-    block_mask,
-    skip_mask,
-    q_last,
-    cu_seqlens,
-    chunk_indices,
-    scale,
-    T,
-    B: tl.constexpr,
-    H: tl.constexpr,
-    HQ: tl.constexpr,
-    G: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
-    M: tl.constexpr,
-    BS: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-    BQ: tl.constexpr,
-    HAS_Q_LAST: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-):
-    i_v, i_s, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_b, i_h = i_bh // H, i_bh % H
-
-    all = B * T
-    if IS_VARLEN:
-        i_n, i_s = tl.load(chunk_indices + i_s * 2).to(tl.int32), tl.load(chunk_indices + i_s * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
-    else:
-        bos, eos = i_b * T, i_b * T + T
-
-    p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_s * BS, 0), (BS, BK), (1, 0))
-    p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s * BS, i_v * BV), (BS, BV), (1, 0))
-    p_dk = tl.make_block_ptr(dk + (i_v * all * H + bos * H + i_h) * K, (T, K), (H*K, 1), (i_s * BS, 0), (BS, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv + (bos * H + i_h) * V, (T, V), (H*V, 1), (i_s * BS, i_v * BV), (BS, BV), (1, 0))
-
-    # [BS, BK]
-    b_k = tl.load(p_k, boundary_check=(0, 1))
-    b_dk = tl.zeros([BS, BK], dtype=tl.float32)
-    # [BS, BV]
-    b_v = tl.load(p_v, boundary_check=(0, 1))
-    b_dv = tl.zeros([BS, BV], dtype=tl.float32)
-
-    # skip query tiles where no query selected this KV block: skip_mask ORs block_mask
-    # over BQ-query tiles, absolute-aligned (bos may not be BQ-aligned under varlen)
-    q_min = bos + i_s * BS
-    # stop scanning past the furthest query that selected this block (dense only);
-    # q_last holds that position, so the all-empty tail is never iterated.
-    q_hi = eos
-    if HAS_Q_LAST:
-        q_hi = tl.minimum(eos, bos + tl.load(q_last + (i_b * H + i_h) * M + i_s) + 1)
-    for i_t in range(q_min // BQ * BQ, q_hi, BQ):
-        if tl.load(skip_mask + (i_t // BQ) * H*M + i_h * M + i_s):
-            for i in range(tl.maximum(i_t, q_min), tl.minimum(i_t + BQ, eos)):
-                if tl.load(block_mask + i * H*M + i_h * M + i_s):
-                    p_q = tl.make_block_ptr(q + i * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
-                    # [G, BK]
-                    b_q = tl.load(p_q, boundary_check=(0, 1))
-                    b_q = (b_q * scale).to(b_q.dtype)
-
-                    p_do = tl.make_block_ptr(do + i * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
-                    p_lse = lse + i * HQ + i_h * G + tl.arange(0, G)
-                    p_delta = delta + i * HQ + i_h * G + tl.arange(0, G)
-                    # [G, BV]
-                    b_do = tl.load(p_do, boundary_check=(0, 1))
-                    # [G]
-                    b_lse = tl.load(p_lse)
-                    b_delta = tl.load(p_delta)
-                    # [BS, G]
-                    b_s = tl.dot(b_k, tl.trans(b_q))
-                    b_p = exp(b_s - b_lse[None, :])
-                    b_p = tl.where((i >= q_min + tl.arange(0, BS))[:, None], b_p, 0)
-                    # [BS, G] @ [G, BV] -> [BS, BV]
-                    b_dv += tl.dot(b_p.to(b_do.dtype), b_do)
-                    # [BS, BV] @ [BV, G] -> [BS, G]
-                    b_dp = tl.dot(b_v, tl.trans(b_do))
-                    # [BS, G]
-                    b_ds = b_p * (b_dp - b_delta[None, :])
-                    # [BS, G] @ [G, BK] -> [BS, BK]
-                    b_dk += tl.dot(b_ds.to(b_q.dtype), b_q)
-
-    tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), boundary_check=(0, 1))
-
-
 def prepare_dkv_csr(block_mask, cu_seqlens, chunk_indices, block_size):
     # Inverse index for gather-based dkv: per KV block (keyed by the same id the
     # kernel decodes) the sorted list of *absolute* query positions selecting it,
@@ -565,7 +451,7 @@ def prepare_dkv_csr(block_mask, cu_seqlens, chunk_indices, block_size):
     configs=[
         triton.Config({'BG': BG}, num_warps=nw, num_stages=ns)
         for BG in [1, 2, 4, 8]
-        for nw in [2, 4, 8]
+        for nw in [4, 8]
         for ns in [1, 2]
     ],
     key=['BS', 'BK', 'BV', 'G'],
@@ -783,20 +669,18 @@ def parallel_nsa_block_mask(
     else:
         NS = triton.cdiv(T, BS)
     block_mask = torch.zeros(B, T, H, NS, dtype=torch.bool, device=block_indices.device)
-    q_last = torch.full((B, H, NS), -1, dtype=torch.int32, device=block_indices.device)
 
     parallel_nsa_kernel_mask[(T, B, H*S)](
         block_indices=block_indices,
         block_counts=block_counts,
         block_mask=block_mask,
-        q_last=q_last,
         T=T,
         H=H,
         S=S,
         BS=BS,
         NS=NS,
     )
-    return block_mask, q_last
+    return block_mask
 
 
 def parallel_nsa_bwd(
@@ -820,7 +704,6 @@ def parallel_nsa_bwd(
     BS = block_size
     BK = max(triton.next_power_of_2(K), 16)
     BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
-    BQ = 16
     NV = triton.cdiv(V, BV)
 
     delta = parallel_attn_bwd_preprocess(o, do)
@@ -861,10 +744,9 @@ def parallel_nsa_bwd(
     else:
         NS = triton.cdiv(T, BS)
 
-    # [B, T, H, M] block_mask, plus q_last[b, h, s] = furthest query that selected
-    # KV block s (fused into the mask kernel), so dkv stops its scan there instead
-    # of at eos. Used on the dense path only (varlen falls back via HAS_Q_LAST off).
-    block_mask, _ = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
+    # [B, T, H, M] block_mask: which KV blocks each query selects (causal + count
+    # valid); prepare_dkv_csr inverts it into the per-block list of selecting queries.
+    block_mask = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
     M = block_mask.shape[-1]
     dk = torch.empty(NV, *k.shape, dtype=k.dtype if NV == 1 else torch.float, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
