@@ -6,9 +6,10 @@ Add reusable workflows as:
 .agents/skills/<skill-name>/SKILL.md
 ```
 
-Each skill should be self-contained and task-specific. Include YAML frontmatter with `name` and `description`. If a skill
-needs reference files, place them in a `references/` subdirectory inside the skill folder. Symlinks to public repo docs
-are allowed when the referenced file is already tracked in this repository.
+Each skill should be self-contained and task-specific.
+Include YAML frontmatter with `name` and `description`.
+If a skill needs reference files, place them in a `references/` subdirectory inside the skill folder.
+Symlinks to public repo docs are allowed when the referenced file is already tracked in this repository.
 
 Do not add a `README.md` inside individual skill directories; the canonical entry point is `SKILL.md`.
 
