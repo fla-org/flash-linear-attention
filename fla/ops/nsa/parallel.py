@@ -423,8 +423,8 @@ def parallel_nsa_bwd_kernel_dq(
 
 
 @triton.heuristics({
+    'HAS_Q_LAST': lambda args: args['cu_seqlens'] is None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
-    'USE_QMAX': lambda args: args['cu_seqlens'] is None,
 })
 @triton.autotune(
     configs=[
@@ -463,8 +463,8 @@ def parallel_nsa_bwd_kernel_dkv(
     BK: tl.constexpr,
     BV: tl.constexpr,
     BQ: tl.constexpr,
+    HAS_Q_LAST: tl.constexpr,
     IS_VARLEN: tl.constexpr,
-    USE_QMAX: tl.constexpr,
 ):
     i_v, i_s, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -495,7 +495,7 @@ def parallel_nsa_bwd_kernel_dkv(
     # stop scanning past the furthest query that selected this block (dense only);
     # q_last holds that position, so the all-empty tail is never iterated.
     q_hi = eos
-    if USE_QMAX:
+    if HAS_Q_LAST:
         q_hi = tl.minimum(eos, bos + tl.load(q_last + (i_b * H + i_h) * M + i_s) + 1)
     for i_t in range(q_min // BQ * BQ, q_hi, BQ):
         if tl.load(skip_mask + (i_t // BQ) * H*M + i_h * M + i_s):
@@ -744,7 +744,7 @@ def parallel_nsa_bwd(
 
     # [B, T, H, M] block_mask, plus q_last[b, h, s] = furthest query that selected
     # KV block s (fused into the mask kernel), so dkv stops its scan there instead
-    # of at eos. Used on the dense path only (varlen falls back via USE_QMAX off).
+    # of at eos. Used on the dense path only (varlen falls back via HAS_Q_LAST off).
     block_mask, q_last = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
     M = block_mask.shape[-1]
     # skip_mask[t] = OR of block_mask over a BQ-query tile, so dkv can skip whole tiles
