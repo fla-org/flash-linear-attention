@@ -68,14 +68,14 @@ def parallel_nsa_kernel_topk(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int32)
-        bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int32), tl.load(cu_seqlens_q + i_n + 1).to(tl.int32)
-        bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int32), tl.load(cu_seqlens_k + i_n + 1).to(tl.int32)
-        TQ = eos_q - bos_q
-        TK = eos_k - bos_k
+        bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int64), tl.load(cu_seqlens_q + i_n + 1).to(tl.int64)
+        bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int64), tl.load(cu_seqlens_k + i_n + 1).to(tl.int64)
+        TQ = (eos_q - bos_q).to(tl.int32)
+        TK = (eos_k - bos_k).to(tl.int32)
         TC = tl.cdiv(TK, BS)
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
-        bos_q, eos_q = i_b * TQ, i_b * TQ + TQ
+        bos_q, eos_q = (i_b * TQ).to(tl.int64), (i_b * TQ + TQ).to(tl.int64)
         TC = tl.cdiv(TK, BS)
         boc = i_b * TC
     # boc is the start of the current sequence at [B, TC] dimensions
@@ -213,13 +213,13 @@ def parallel_nsa_fwd_kernel(
     if IS_VARLEN:
         # token_indices_q maps a flattened query to its (sequence index, in-sequence position)
         i_n, i_t = tl.load(token_indices_q + i_t * 2).to(tl.int32), tl.load(token_indices_q + i_t * 2 + 1).to(tl.int32)
-        bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int32), tl.load(cu_seqlens_q + i_n + 1).to(tl.int32)
-        bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int32), tl.load(cu_seqlens_k + i_n + 1).to(tl.int32)
-        TQ = eos_q - bos_q
-        TK = eos_k - bos_k
+        bos_q, eos_q = tl.load(cu_seqlens_q + i_n).to(tl.int64), tl.load(cu_seqlens_q + i_n + 1).to(tl.int64)
+        bos_k, eos_k = tl.load(cu_seqlens_k + i_n).to(tl.int64), tl.load(cu_seqlens_k + i_n + 1).to(tl.int64)
+        TQ = (eos_q - bos_q).to(tl.int32)
+        TK = (eos_k - bos_k).to(tl.int32)
     else:
-        bos_q, eos_q = i_b * TQ, i_b * TQ + TQ
-        bos_k, eos_k = i_b * TK, i_b * TK + TK
+        bos_q, eos_q = (i_b * TQ).to(tl.int64), (i_b * TQ + TQ).to(tl.int64)
+        bos_k, eos_k = (i_b * TK).to(tl.int64), (i_b * TK + TK).to(tl.int64)
 
     # q tokens are assumed to be the last TQ tokens of the sequence (cached decoding)
     Q_OFFSET = TK - TQ
@@ -324,10 +324,10 @@ def parallel_nsa_bwd_kernel_dq(
     all = B * T
     if IS_VARLEN:
         i_n, i_t = tl.load(token_indices + i_t * 2).to(tl.int32), tl.load(token_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
-        bos, eos = i_b * T, i_b * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
     q += (bos + i_t) * HQ*K
     do += (bos + i_t) * HQ*V
