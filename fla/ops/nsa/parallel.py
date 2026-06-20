@@ -287,6 +287,7 @@ def parallel_nsa_kernel_mask(
     block_indices,
     block_counts,
     block_mask,
+    q_last,
     T,
     H: tl.constexpr,
     S: tl.constexpr,
@@ -305,6 +306,10 @@ def parallel_nsa_kernel_mask(
 
     if b_i < NS and b_i >= 0:
         tl.store(block_mask + i_b * T * H * NS + i_t * H * NS + i_h * NS + b_i, b_m.to(block_mask.dtype.element_ty))
+        # furthest query that actually selects this block — lets bwd_dkv stop its
+        # scan here instead of at eos. Fused in (one atomic) so it costs ~nothing.
+        if b_m:
+            tl.atomic_max(q_last + i_b * H * NS + i_h * NS + b_i, i_t)
 
 
 @triton.heuristics({
@@ -419,6 +424,7 @@ def parallel_nsa_bwd_kernel_dq(
 
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
+    'USE_QMAX': lambda args: args['cu_seqlens'] is None,
 })
 @triton.autotune(
     configs=[
@@ -441,6 +447,7 @@ def parallel_nsa_bwd_kernel_dkv(
     dv,
     block_mask,
     skip_mask,
+    q_last,
     cu_seqlens,
     chunk_indices,
     scale,
@@ -457,6 +464,7 @@ def parallel_nsa_bwd_kernel_dkv(
     BV: tl.constexpr,
     BQ: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_QMAX: tl.constexpr,
 ):
     i_v, i_s, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -484,7 +492,12 @@ def parallel_nsa_bwd_kernel_dkv(
     # skip query tiles where no query selected this KV block: skip_mask ORs block_mask
     # over BQ-query tiles, absolute-aligned (bos may not be BQ-aligned under varlen)
     q_min = bos + i_s * BS
-    for i_t in range(q_min // BQ * BQ, eos, BQ):
+    # stop scanning past the furthest query that selected this block (dense only);
+    # q_last holds that position, so the all-empty tail is never iterated.
+    q_hi = eos
+    if USE_QMAX:
+        q_hi = tl.minimum(eos, bos + tl.load(q_last + (i_b * H + i_h) * M + i_s) + 1)
+    for i_t in range(q_min // BQ * BQ, q_hi, BQ):
         if tl.load(skip_mask + (i_t // BQ) * H*M + i_h * M + i_s):
             for i in range(tl.maximum(i_t, q_min), tl.minimum(i_t + BQ, eos)):
                 if tl.load(block_mask + i * H*M + i_h * M + i_s):
@@ -652,18 +665,20 @@ def parallel_nsa_block_mask(
     else:
         NS = triton.cdiv(T, BS)
     block_mask = torch.zeros(B, T, H, NS, dtype=torch.bool, device=block_indices.device)
+    q_last = torch.full((B, H, NS), -1, dtype=torch.int32, device=block_indices.device)
 
     parallel_nsa_kernel_mask[(T, B, H*S)](
         block_indices=block_indices,
         block_counts=block_counts,
         block_mask=block_mask,
+        q_last=q_last,
         T=T,
         H=H,
         S=S,
         BS=BS,
         NS=NS,
     )
-    return block_mask
+    return block_mask, q_last
 
 
 def parallel_nsa_bwd(
@@ -728,8 +743,10 @@ def parallel_nsa_bwd(
     else:
         NS = triton.cdiv(T, BS)
 
-    # [B, T, H, M]
-    block_mask = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
+    # [B, T, H, M] block_mask, plus q_last[b, h, s] = furthest query that selected
+    # KV block s (fused into the mask kernel), so dkv stops its scan there instead
+    # of at eos. Used on the dense path only (varlen falls back via USE_QMAX off).
+    block_mask, q_last = parallel_nsa_block_mask(block_indices, block_counts, cu_seqlens, block_size)
     M = block_mask.shape[-1]
     # skip_mask[t] = OR of block_mask over a BQ-query tile, so dkv can skip whole tiles
     # of queries that selected nothing in a KV block
@@ -750,6 +767,7 @@ def parallel_nsa_bwd(
         dv=dv,
         block_mask=block_mask,
         skip_mask=skip_mask,
+        q_last=q_last,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         scale=scale,
