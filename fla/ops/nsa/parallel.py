@@ -422,8 +422,9 @@ def parallel_nsa_bwd_kernel_dq(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4]
+        triton.Config({}, num_warps=nw, num_stages=ns)
+        for nw in [1, 2, 4, 8]
+        for ns in [1, 2, 3]
     ],
     key=['BS', 'BK', 'BV'],
     **autotune_cache_kwargs,
