@@ -524,14 +524,11 @@ def _nsa_post_init(inputs, B, T, H, D, HQ=None, S=16, block_size=64, **kw):
     inputs['block_size'] = block_size
 
 
-# Sweep T across the regime where the selective backward's tile-skip matters:
-# at short T every query selects nearly all its causal blocks (dense), the win
-# only appears once T >> S * block_size makes the selection sparse.
 _nsa_shapes = {
-    'B1_T8K_H1_HQ16_D128_S16':  {'B': 1, 'T': 8192,  'H': 1, 'D': 128, 'HQ': 16, 'S': 16, 'block_size': 64},
-    'B1_T16K_H1_HQ16_D128_S16': {'B': 1, 'T': 16384, 'H': 1, 'D': 128, 'HQ': 16, 'S': 16, 'block_size': 64},
-    'B1_T32K_H1_HQ16_D128_S16': {'B': 1, 'T': 32768, 'H': 1, 'D': 128, 'HQ': 16, 'S': 16, 'block_size': 64},
-    'B1_T64K_H1_HQ16_D128_S16': {'B': 1, 'T': 65536, 'H': 1, 'D': 128, 'HQ': 16, 'S': 16, 'block_size': 64},
+    'B1_T8K_H1_HQ32_D128_S16':  {'B': 1, 'T': 8192,  'H': 1, 'HQ': 32, 'D': 128, 'S': 16, 'block_size': 64},
+    'B1_T16K_H1_HQ64_D128_S16': {'B': 1, 'T': 16384, 'H': 1, 'HQ': 64, 'D': 128, 'S': 16, 'block_size': 64},
+    'B1_T32K_H1_HQ64_D256_S16': {'B': 1, 'T': 32768, 'H': 1, 'HQ': 64, 'D': 256, 'S': 16, 'block_size': 64},
+    'B1_T64K_H1_HQ128_D256_S16': {'B': 1, 'T': 65536, 'H': 1, 'HQ': 128, 'D': 256, 'S': 16, 'block_size': 64},
 }
 
 register_op(OpConfig(
