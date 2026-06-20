@@ -521,7 +521,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
         ctx.token_indices = token_indices_q
         ctx.block_size = block_size
         ctx.scale = scale
-        # q/k cu_seqlens differ only in cached inference (Tq != Tk), where backward is not supported
+        # q/k cu_seqlens differ only in cached inference (TQ != TK), where backward is not supported
         ctx.tq_ne_tk = isinstance(cu_seqlens, tuple)
         return o.to(q.dtype), lse
 

@@ -77,12 +77,12 @@ def naive_nsa_selection(
     varlen = True
     if cu_seqlens is None:
         varlen = False
-        Tq = Tk = q.shape[1]
+        TQ = TK = q.shape[1]
         cu_q = torch.cat([
-            block_indices.new_tensor(range(0, B * Tq, Tq)), block_indices.new_tensor([B * Tq])
+            block_indices.new_tensor(range(0, B * TQ, TQ)), block_indices.new_tensor([B * TQ])
         ]).to(device=q.device)
         cu_k = torch.cat([
-            block_indices.new_tensor(range(0, B * Tk, Tk)), block_indices.new_tensor([B * Tk])
+            block_indices.new_tensor(range(0, B * TK, TK)), block_indices.new_tensor([B * TK])
         ]).to(device=q.device)
     else:
         if isinstance(cu_seqlens, tuple):
@@ -94,21 +94,21 @@ def naive_nsa_selection(
         if not varlen:
             q_b, k_b, v_b, i_b = q[i], k[i], v[i], block_indices[i]
         else:
-            Tq = cu_q[i+1] - cu_q[i]
-            Tk = cu_k[i+1] - cu_k[i]
+            TQ = cu_q[i+1] - cu_q[i]
+            TK = cu_k[i+1] - cu_k[i]
             q_b, k_b, v_b, i_b = (q[0][cu_q[i]:cu_q[i+1]], k[0][cu_k[i]:cu_k[i+1]],
                                   v[0][cu_k[i]:cu_k[i+1]], block_indices[0][cu_q[i]:cu_q[i+1]])
-        assert Tq == Tk, "TQ != TK case is not supported in naive_nsa_selection"
+        assert TQ == TK, "TQ != TK case is not supported in naive_nsa_selection"
         i_b = i_b.unsqueeze(-1) * BS + i_b.new_tensor(range(BS))
         # [T, S*BS, HQ]
-        i_b = i_b.view(Tq, block_indices.shape[2], -1).transpose(1, 2)
-        for i_q in range(Tq):
+        i_b = i_b.view(TQ, block_indices.shape[2], -1).transpose(1, 2)
+        for i_q in range(TQ):
             # [HQ, D]
             q_i = q_b[i_q] * scale
             # [S*BS, HQ]
             i_i = i_b[i_q]
             # [S*BS, HQ, -1]
-            k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, Tk-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])),
+            k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, TK-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])),
                            (k_b, v_b))
             # [S*BS, HQ]
             attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill(
