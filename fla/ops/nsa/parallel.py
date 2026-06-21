@@ -173,10 +173,11 @@ def parallel_nsa_kernel_topk(
 })
 @triton.autotune(
     configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4]
+        triton.Config({}, num_warps=num_warps, num_stages=num_stages)
+        for num_warps in [1, 2, 4, 8]
+        for num_stages in [1, 2, 3]
     ],
-    key=['BS', 'BK', 'BV'],
+    key=['BS', 'BK', 'BV', 'G'],
     **autotune_cache_kwargs,
 )
 @triton.jit
