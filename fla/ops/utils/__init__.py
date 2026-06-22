@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from .csr import prepare_block_csr
 from .cumsum import (
     chunk_global_cumsum,
     chunk_global_cumsum_scalar,
@@ -46,6 +47,7 @@ __all__ = [
     "matmul",
     "mean_pooling",
     "pack_sequence",
+    "prepare_block_csr",
     "prepare_chunk_indices",
     "prepare_chunk_offsets",
     "prepare_cu_seqlens_from_lens",

@@ -21,21 +21,6 @@ on:
         required: false
         type: string
         default: '5.0'
-      pytorch_version:
-        description: 'The PyTorch version to install (e.g., 2.7.0). Leave empty to use the pre-installed torch.'
-        required: false
-        type: string
-        default: ''
-      pytorch_cuda_version:
-        description: 'The PyTorch CUDA version (e.g., cu128)'
-        required: false
-        type: string
-        default: 'cu128'
-      nvcc_toolkit_version:
-        description: 'The NVCC toolkit version to install (e.g., 12.8.1)'
-        required: false
-        type: string
-        default: '12.8.1'
 
 
 jobs:
@@ -108,14 +93,9 @@ jobs:
         if: steps.check_skip.outputs.skip_bench == 'false'
         shell: bash
         run: |
+          $CONDA_BIN_PATH/pip uninstall -y flash-linear-attention
           $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
-          $CONDA/bin/conda install -n $CONDA_ENV_NAME nvidia/label/cuda-${{ inputs.nvcc_toolkit_version }}::cuda-nvcc -y
-          if [ -n "${{ inputs.pytorch_version }}" ]; then
-            STABLE_URL="https://download.pytorch.org/whl/${{ inputs.pytorch_cuda_version }}"
-            $CONDA_BIN_PATH/pip install -U torch~=${{ inputs.pytorch_version }} triton --index-url $STABLE_URL
-          else
-            echo "Using pre-installed PyTorch in $CONDA_ENV_NAME"
-          fi
+          echo "Using pre-installed PyTorch in $CONDA_ENV_NAME"
           $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops
           $CONDA_BIN_PATH/pip install -e .
 

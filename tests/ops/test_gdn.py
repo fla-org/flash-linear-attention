@@ -16,7 +16,23 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gat
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate, naive_gdn_gate
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
-from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
+from fla.utils import IS_INTEL_ALCHEMIST, IS_NVIDIA_BLACKWELL, assert_close, device
+
+
+def _unwrap_autotuner(fn):
+    while not hasattr(fn, 'configs'):
+        fn = fn.fn
+    return fn
+
+
+def test_chunk_gated_delta_rule_fwd_h_blackwell_triton_guard():
+    if not IS_NVIDIA_BLACKWELL:
+        pytest.skip(reason='Blackwell guard is only active on Blackwell GPUs')
+
+    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+
+    tuner = _unwrap_autotuner(chunk_gated_delta_rule_fwd_kernel_h_blockdim64)
+    assert {config.num_warps for config in tuner.configs} == {2}
 
 
 @pytest.mark.parametrize(

@@ -59,11 +59,11 @@ def parallel_attn_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
 
     p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
@@ -188,7 +188,7 @@ def parallel_attn_bwd_kernel_preprocess(
     B: tl.constexpr,
     V: tl.constexpr,
 ):
-    i_n = tl.program_id(0)
+    i_n = tl.program_id(0).to(tl.int64)
     o_d = tl.arange(0, B)
     m_d = o_d < V
 
@@ -240,11 +240,11 @@ def parallel_attn_bwd_kernel_dq(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
     # NOTE: we must multiply RCP_LN2 after tl.dot for high precision
     RCP_LN2: tl.constexpr = 1.4426950216
 
@@ -386,11 +386,11 @@ def parallel_attn_bwd_kernel_dkv(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_n * T).to(tl.int64), (i_n * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
 
     p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
@@ -610,6 +610,8 @@ def parallel_attn_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     G = HQ // H
+    # dq/dk are reduced over the full value dim in one program (no cross-program accumulation),
+    # so BV must span all of V (NV == 1). Don't cap it here -- the forward can, the backward can't.
     if check_shared_mem('hopper'):
         BT = 128
         BS = 64
@@ -626,7 +628,7 @@ def parallel_attn_bwd(
         BT = 64
         BS = 32
         BK = max(triton.next_power_of_2(K), 16)
-        BV = min(max(triton.next_power_of_2(V), 16), 64)
+        BV = max(triton.next_power_of_2(V), 16)
         num_warps = 2
 
     if chunk_indices is None and cu_seqlens is not None:

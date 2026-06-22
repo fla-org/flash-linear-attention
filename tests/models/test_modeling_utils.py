@@ -28,7 +28,6 @@ HOPPER_EXCLUSIVE = []
 
 GENERATION_UNSUPPORTED = [
     "ABCConfig",
-    "NSAConfig",
     "DeltaFormerConfig",
     "MoBAConfig",
     "WallTransformerConfig",
