@@ -26,11 +26,6 @@ inputs:
     required: false
     type: string
     default: 'cu128'
-  nvcc_toolkit_version:
-    description: 'The NVCC toolkit version (e.g., 12.8.1)'
-    required: false
-    type: string
-    default: '12.8.1'
   install_tilelang:
     description: 'Whether to install tilelang on H100 runners'
     required: false
@@ -121,7 +116,6 @@ runs:
         $CONDA_BIN_PATH/pip install -U pytest setuptools wheel ninja
 
         if [ "${{ inputs.gpu_type }}" = "nvidia" ]; then
-          $CONDA/bin/conda install -n $CONDA_ENV_NAME nvidia/label/cuda-${{ inputs.nvcc_toolkit_version }}::cuda-nvcc -y
           if [ -z "${{ inputs.pytorch_version }}" ]; then
             echo "Using pre-installed PyTorch in $CONDA_ENV_NAME"
             $CONDA_BIN_PATH/pip install -U numpy packaging psutil ninja einops datasets transformers
