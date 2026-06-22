@@ -45,3 +45,10 @@ def test_gated_deltanet_fused_qkv_conv_matches_fallback():
 
     assert_close('y', y_fallback, y_fast, 0.0)
     assert_close('dx', x_fallback.grad, x_fast.grad, 0.0)
+
+    # The fused path concatenates the q/k/v conv weights into a single conv, which
+    # regroups the backward accumulation for those weights. Every parameter grad is
+    # identical except the conv weights, which may differ by accumulation-order noise.
+    for (name, p_fast), (_, p_fallback) in zip(fast.named_parameters(), fallback.named_parameters()):
+        assert p_fast.grad is not None and p_fallback.grad is not None, f"missing grad for {name}"
+        assert_close(f'd{name}', p_fallback.grad, p_fast.grad, 5e-3)
