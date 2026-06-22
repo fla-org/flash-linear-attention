@@ -45,7 +45,18 @@ Widening it to make a candidate pass converts a correctness regression into a si
 **How to apply:** Tolerance is part of the frozen contract.
 If you think it's wrong, that's a separate PR with justification — ask the user.
 
-### Grid-derived indices must be `int64`
+### Numeric flags must be symmetric across baseline and candidate
+
+**Fact:** A "win" can be a one-sided numeric relaxation — the candidate runs at a lower precision
+the baseline never gets — rather than a genuinely faster kernel.
+
+**Why:** `allow_tf32 = True`, a bf16/tf32 accumulator where the reference keeps fp32, or any flag that
+changes code generation makes the candidate compute *something cheaper but less accurate*.
+The gate may still pass within tolerance, so the speedup looks real while the comparison is rigged.
+
+**How to apply:** Keep accumulation precision and numeric flags identical on both sides;
+`verify.py` compares against `main`, so the win has to come from the kernel, not from the flag.
+If a precision change is genuinely the point, it is a separate, justified PR — not bundled into a perf number.
 
 **Fact:** Program IDs and grid-derived offsets multiplied by sizes/strides can silently overflow at large `T`,
 producing wrong results only on big shapes.

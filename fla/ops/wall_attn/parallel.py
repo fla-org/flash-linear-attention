@@ -93,11 +93,11 @@ def parallel_wall_attn_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
 
     p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
@@ -261,11 +261,11 @@ def parallel_wall_attn_bwd_kernel_dq(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
     LN2: tl.constexpr = 0.6931471805599453
 
@@ -436,11 +436,11 @@ def parallel_wall_attn_bwd_kernel_dkv(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
     LN2: tl.constexpr = 0.6931471805599453
 
