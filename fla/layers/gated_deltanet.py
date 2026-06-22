@@ -257,9 +257,9 @@ class GatedDeltaNet(nn.Module):
             )
             qkv_weight = torch.cat(
                 [
-                    rearrange(self.q_conv1d.weight, "d 1 w -> d w"),
-                    rearrange(self.k_conv1d.weight, "d 1 w -> d w"),
-                    rearrange(self.v_conv1d.weight, "d 1 w -> d w"),
+                    self.q_conv1d.weight.squeeze(1),
+                    self.k_conv1d.weight.squeeze(1),
+                    self.v_conv1d.weight.squeeze(1),
                 ],
                 dim=0,
             )
