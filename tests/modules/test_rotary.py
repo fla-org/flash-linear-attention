@@ -181,7 +181,7 @@ def test_rotary_partial(B: int, T: int, H: int, D: int, rotary_dim: int, dtype: 
 @pytest.mark.parametrize("T", [2048])
 @pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("D", [128])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_rotary_left_padding_no_uninit_leak(B: int, T: int, H: int, D: int, dtype: torch.dtype):
     # Regression guard for the uninitialized-output bug. Under left-padding the kernel
     # skips out-of-range rows, so an uninitialized output buffer leaks whatever was in
