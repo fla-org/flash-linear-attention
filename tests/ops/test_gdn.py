@@ -217,6 +217,11 @@ def test_chunk_beta_sigmoid_in_kernel(
     dtype: torch.dtype,
 ):
     """`use_beta_sigmoid_in_kernel=True` (raw beta logits) matches manual sigmoid + autograd."""
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and HV != H:
+        pytest.skip(
+            reason="GQA (HV != H) is not supported by the tilelang backend; "
+            "covered by the Triton baseline run."
+        )
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
@@ -910,6 +915,11 @@ def test_chunk_gate_in_kernel_gqa(
     dtype: torch.dtype,
 ):
     """Test use_gate_in_kernel=True with grouped value attention (HV > H)."""
+    if os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1" and Hq != H:
+        pytest.skip(
+            reason="GQA (Hq != H) is not supported by the tilelang backend; "
+            "covered by the Triton baseline run."
+        )
     torch.manual_seed(42)
     if IS_INTEL_ALCHEMIST and D > 128:
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
