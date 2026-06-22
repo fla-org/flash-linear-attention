@@ -132,7 +132,7 @@ def test_rotary_varlen(N: int, T: int, H: int, G: int, D: int, dtype: torch.dtyp
 @pytest.mark.parametrize("T", [2048, 4096])
 @pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("D", [128, 256])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_rotary_left_padding(B: int, T: int, H: int, D: int, dtype: torch.dtype):
     # Left-padding gives a NEGATIVE per-sequence seqlen_offset (real_len - T), as the
     # attention layer builds it for a padded batch. Existing tests cover only positive
@@ -160,7 +160,7 @@ def test_rotary_left_padding(B: int, T: int, H: int, D: int, dtype: torch.dtype)
 @pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("D", [128, 256])
 @pytest.mark.parametrize("rotary_dim", [64])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_rotary_partial(B: int, T: int, H: int, D: int, rotary_dim: int, dtype: torch.dtype):
     # Partial rotary (rotary_dim < head_dim): only [:rotary_dim] is rotated and the
     # non-rotated tail [rotary_dim:] is carried over from the input. Previously untested.
@@ -181,7 +181,7 @@ def test_rotary_partial(B: int, T: int, H: int, D: int, rotary_dim: int, dtype: 
 @pytest.mark.parametrize("T", [2048])
 @pytest.mark.parametrize("H", [4])
 @pytest.mark.parametrize("D", [128])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_rotary_left_padding_no_uninit_leak(B: int, T: int, H: int, D: int, dtype: torch.dtype):
     # Regression guard for the uninitialized-output bug. Under left-padding the kernel
     # skips out-of-range rows, so an uninitialized output buffer leaks whatever was in
