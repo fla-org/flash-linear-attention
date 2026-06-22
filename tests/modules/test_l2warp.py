@@ -15,12 +15,13 @@ from fla.modules.l2warp import l2_warp as standalone_l2_warp
 from fla.utils import IS_INTEL_ALCHEMIST, assert_close, device
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("B", [4, 8])
 @pytest.mark.parametrize("T", [1024])
 @pytest.mark.parametrize("H", [256])
 @pytest.mark.parametrize("V", [2000])
 @pytest.mark.parametrize("l2_penalty_factor", [1e-4, 1])
+@pytest.mark.parametrize("grad_scale", [1.0, 3.0])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.skipif(
     IS_INTEL_ALCHEMIST is True,
     reason="Intel Triton Failure",
@@ -31,6 +32,7 @@ def test_fused_linear_cross_entropy_l2_warp(
     H: int,
     V: int,
     l2_penalty_factor: float,
+    grad_scale: float,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -49,7 +51,8 @@ def test_fused_linear_cross_entropy_l2_warp(
     ref_loss_ce = ref_criterion(ref_logits.view(B * T, V), shift_labels.view(-1))
     ref_loss = standalone_l2_warp(ref_loss_ce, ref_logits.view(B, T, V), l2_penalty_factor)
 
-    ref_loss.backward()
+    # scale the loss so backward sees a non-unit upstream gradient when grad_scale != 1
+    (grad_scale * ref_loss).backward()
     ref_x_grad = x.grad.clone()
     ref_w_grad = lm_head.weight.grad.clone()
     ref_b_grad = lm_head.bias.grad.clone()
@@ -64,14 +67,44 @@ def test_fused_linear_cross_entropy_l2_warp(
 
     fused_loss = fused_criterion(x, shift_labels, lm_head.weight, lm_head.bias)
 
-    fused_loss.backward()
+    (grad_scale * fused_loss).backward()
     fused_x_grad = x.grad.clone()
     fused_w_grad = lm_head.weight.grad.clone()
     fused_b_grad = lm_head.bias.grad.clone()
 
-    ratio = 4e-3 if dtype == torch.bfloat16 else 1e-3
+    ratio = 4e-3 if dtype == torch.float16 else 1e-3
 
     assert_close("Loss", ref_loss, fused_loss, ratio)
     assert_close("dx", ref_x_grad, fused_x_grad, ratio)
     assert_close("dw", ref_w_grad, fused_w_grad, ratio)
     assert_close("db", ref_b_grad, fused_b_grad, ratio)
+
+
+@pytest.mark.parametrize("grad_scale", [3.0])
+@pytest.mark.skipif(
+    IS_INTEL_ALCHEMIST is True,
+    reason="Intel Triton Failure",
+)
+def test_l2_warp_grad_output_scaling(grad_scale: float):
+    # an autograd.Function must return input gradients that are linear in the upstream gradient;
+    # L2Wrap injects a logits gradient in backward that must be scaled by grad_output too
+    torch.manual_seed(42)
+
+    logits = torch.randn(2, 64, 100, device=device, requires_grad=True)
+    loss = torch.randn((), device=device, requires_grad=True)
+    wrapped = standalone_l2_warp(loss, logits, 1.0)
+
+    g_loss_1, g_logits_1 = torch.autograd.grad(
+        wrapped,
+        (loss, logits),
+        grad_outputs=torch.ones((), device=device),
+        retain_graph=True,
+    )
+    g_loss_k, g_logits_k = torch.autograd.grad(
+        wrapped,
+        (loss, logits),
+        grad_outputs=torch.full((), grad_scale, device=device),
+    )
+
+    assert_close("  dloss", g_loss_k, grad_scale * g_loss_1, 1e-5)
+    assert_close("dlogits", g_logits_k, grad_scale * g_logits_1, 1e-5)
