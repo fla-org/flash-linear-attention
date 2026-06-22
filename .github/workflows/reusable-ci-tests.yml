@@ -25,11 +25,6 @@ on:
         required: false
         type: string
         default: 'cu128'
-      nvcc_toolkit_version:
-        description: 'The NVCC toolkit version to install (e.g., 12.8.1)'
-        required: false
-        type: string
-        default: '12.8.1'
       skip_gpu_check:
         description: 'Whether to skip the GPU check (default: false)'
         required: false
@@ -61,7 +56,6 @@ jobs:
           pytorch_version: ${{ inputs.pytorch_version }}
           gpu_type: ${{ inputs.gpu_type }}
           pytorch_cuda_version: ${{ inputs.pytorch_cuda_version }}
-          nvcc_toolkit_version: ${{ inputs.nvcc_toolkit_version }}
           install_tilelang: "true"
           skip_gpu_check: ${{ inputs.skip_gpu_check }}
 
@@ -139,7 +133,6 @@ jobs:
           pytorch_version: ${{ inputs.pytorch_version }}
           gpu_type: ${{ inputs.gpu_type }}
           pytorch_cuda_version: ${{ inputs.pytorch_cuda_version }}
-          nvcc_toolkit_version: ${{ inputs.nvcc_toolkit_version }}
           install_tilelang: "false"
           skip_gpu_check: ${{ inputs.skip_gpu_check }}
 
