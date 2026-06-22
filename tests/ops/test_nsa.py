@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import importlib.util
 import os
 import warnings
 
@@ -21,6 +22,9 @@ from fla.ops.nsa.parallel import parallel_nsa, parallel_nsa_fwd, parallel_nsa_to
 from fla.ops.utils import prepare_chunk_offsets, prepare_token_indices  # noqa: E402
 from fla.ops.utils.pooling import mean_pooling  # noqa: E402
 from fla.utils import assert_close, device  # noqa: E402
+
+# The sliding-window branch of NSA is backed by Flash Attention, so window_size > 0 cases are skipped when absent.
+_FLASH_ATTN_AVAILABLE = importlib.util.find_spec("flash_attn") is not None
 
 
 def build_block_indices(B, T, H, S, block_size, seq_indices=None):
@@ -452,6 +456,8 @@ def test_parallel_decode(
         window_size: int,
         dtype: torch.dtype,
 ):
+    if window_size > 0 and not _FLASH_ATTN_AVAILABLE:
+        pytest.skip("Flash Attention is required for the sliding-window branch")
     torch.manual_seed(42)
 
     q = (torch.rand((B, T, HQ, D), dtype=dtype, device=device) * 3 - 2).requires_grad_(True)
@@ -841,6 +847,8 @@ def test_parallel_varlen_decode(
         q_lens,
         dtype: torch.dtype,
 ):
+    if window_size > 0 and not _FLASH_ATTN_AVAILABLE:
+        pytest.skip("Flash Attention is required for the sliding-window branch")
     torch.manual_seed(42)
 
     T = cu_seqlens[-1]
