@@ -199,6 +199,23 @@ class GatedDeltaNet(nn.Module):
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
+    def _use_fused_qkv_conv(
+        self,
+        last_state: dict | None,
+        use_cache: bool | None,
+        cu_seqlens: torch.Tensor | None,
+    ) -> bool:
+        # The dense no-cache q/k/v short convolutions can collapse into a single
+        # causal_conv1d only when there is no cache/varlen state and the three convs
+        # share the same backend, activation, and kernel size.
+        if not (self.use_short_conv and last_state is None and not use_cache and cu_seqlens is None):
+            return False
+        return (
+            self.q_conv1d.backend == self.k_conv1d.backend == self.v_conv1d.backend and
+            self.q_conv1d.activation == self.k_conv1d.activation == self.v_conv1d.activation and
+            self.q_conv1d.kernel_size == self.k_conv1d.kernel_size == self.v_conv1d.kernel_size
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -229,16 +246,7 @@ class GatedDeltaNet(nn.Module):
             hidden_states = index_first_axis(rearrange(hidden_states, "b s ... -> (b s) ..."), indices).unsqueeze(0)
 
         conv_state_q, conv_state_k, conv_state_v = None, None, None
-        use_fused_qkv_conv = (
-            self.use_short_conv and
-            last_state is None and
-            not use_cache and
-            cu_seqlens is None and
-            self.q_conv1d.backend == self.k_conv1d.backend == self.v_conv1d.backend and
-            self.q_conv1d.activation == self.k_conv1d.activation == self.v_conv1d.activation and
-            self.q_conv1d.kernel_size == self.k_conv1d.kernel_size == self.v_conv1d.kernel_size
-        )
-        if use_fused_qkv_conv:
+        if self._use_fused_qkv_conv(last_state, use_cache, cu_seqlens):
             qkv = torch.cat(
                 [
                     self.q_proj(hidden_states),
