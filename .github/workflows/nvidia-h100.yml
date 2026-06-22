@@ -30,6 +30,9 @@ jobs:
       runner: 'nvidia-h100-1'
       gpu_type: 'nvidia'
       conda_env_name: 'pytorch_2_12'
+      # PyTorch 2.12 dropped cu128; the pytorch_2_12 env is built on CUDA 13.0,
+      # so the nvcc toolkit must match or conda fails to solve.
+      nvcc_toolkit_version: '13.0.1'
       skip_gpu_check: true
 
   check_h100_pytorch_2_7:
@@ -167,4 +170,5 @@ jobs:
     with:
       runner: 'nvidia-h100-1'
       conda_env_name: 'pytorch_2_12'
+      nvcc_toolkit_version: '13.0.1'
       base_ref: origin/${{ github.event.pull_request.base.ref }}
