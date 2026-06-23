@@ -5,8 +5,6 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
-"""Cumsum kernels for triton-ascend on NPU (fixed launch config, no autotune)."""
-
 from __future__ import annotations
 
 import torch
