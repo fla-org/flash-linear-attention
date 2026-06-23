@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Check out repo (full history for cross-commit comparison)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
 
@@ -137,7 +137,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always() && steps.check_skip.outputs.skip_bench == 'false'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: benchmark-results-${{ inputs.runner }}
           path: |

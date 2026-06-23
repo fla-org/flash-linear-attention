@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Setup CI Environment
         id: setup
@@ -118,11 +118,10 @@ jobs:
     if: (success() || failure()) && inputs.skip_models_tests == false
     env:
       FLA_CI_ENV: 1
-      FLA_DISABLE_BACKEND_DISPATCH: "1"
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Setup CI Environment
         id: setup
@@ -133,7 +132,7 @@ jobs:
           pytorch_version: ${{ inputs.pytorch_version }}
           gpu_type: ${{ inputs.gpu_type }}
           pytorch_cuda_version: ${{ inputs.pytorch_cuda_version }}
-          install_tilelang: "false"
+          install_tilelang: "true"
           skip_gpu_check: ${{ inputs.skip_gpu_check }}
 
       - name: Find dependent Model test files for Models

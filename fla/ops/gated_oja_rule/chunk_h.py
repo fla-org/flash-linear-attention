@@ -11,7 +11,7 @@ import triton.language as tl
 
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
 from fla.ops.utils.op import exp
-from fla.utils import check_shared_mem, is_nvidia_hopper, use_cuda_graph
+from fla.utils import check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
@@ -32,7 +32,6 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
         for BK in [32, 64]
     ],
     key=['H', 'K', 'V', 'BT'],
-    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_fwd_kernel_h_blockdim64(
@@ -259,7 +258,6 @@ def chunk_oja_fwd_h(
         for BK in [64, 32]
     ],
     key=['H', 'K', 'V', 'BT', 'BK', 'USE_GV'],
-    use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_oja_bwd_kernel_dhu_blockdim64(
