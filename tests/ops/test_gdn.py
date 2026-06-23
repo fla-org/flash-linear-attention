@@ -612,14 +612,16 @@ def test_fused_recurrent_gate_in_kernel_varlen(
 
 
 @pytest.mark.parametrize(
-    ('H', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
+    ('H', 'HV', 'D', 'mask_p', 'cu_seqlens', 'dtype'),
     [
-        pytest.param(*test, id="H{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
+        pytest.param(*test, id="H{}-HV{}-D{}-mask_p{}-cu_seqlens{}-{}".format(*test))
         for test in [
-            (4, 60, 0, [0, 15], torch.float16),
-            (4, 64, 0, [0, 256, 500, 1000], torch.float16),
-            (4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
-            (4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (4, 4, 60, 0, [0, 15], torch.float16),
+            (4, 4, 64, 0, [0, 256, 500, 1000], torch.float16),
+            (4, 4, 64, 0.5, [0, 256, 500, 1000], torch.float16),
+            (4, 4, 100, 0, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (2, 4, 64, 0, [0, 256, 500, 1000], torch.float16),
+            (2, 8, 64, 0, [0, 256, 500, 1000], torch.float16),
         ]
     ],
 )
@@ -629,6 +631,7 @@ def test_fused_recurrent_gate_in_kernel_varlen(
 )
 def test_chunk_varlen(
     H: int,
+    HV: int,
     D: int,
     mask_p: float,
     cu_seqlens: list[int],
@@ -638,6 +641,8 @@ def test_chunk_varlen(
         pytest.skip(reason='chunk_gated_delta_rule is not supported on alchemist for D>128')
     torch.manual_seed(42)
     os.environ['TRITON_F32_DEFAULT'] = 'ieee'
+    assert HV % H == 0
+    G = HV // H
     # randomly split the sequence into N segments
     cu_seqlens = torch.LongTensor(cu_seqlens).to(device)
     T = cu_seqlens[-1]
@@ -646,11 +651,11 @@ def test_chunk_varlen(
     # seq-first required for inputs with variable lengths
     q = torch.randn((1, T, H, D), dtype=dtype)
     k = F.normalize(torch.randn(1, T, H, D, dtype=torch.float32), p=2, dim=-1).to(dtype)
-    v = torch.randn((1, T, H, D), dtype=dtype)
-    g = F.logsigmoid(torch.rand(1, T, H, dtype=dtype))
+    v = torch.randn((1, T, HV, D), dtype=dtype)
+    g = F.logsigmoid(torch.rand(1, T, HV, dtype=dtype))
     g = g * (torch.rand_like(g) > mask_p)
-    beta = torch.rand(1, T, H, dtype=torch.float).sigmoid()
-    h0 = torch.randn((N, H, D, D), dtype=dtype)
+    beta = torch.rand(1, T, HV, dtype=torch.float).sigmoid()
+    h0 = torch.randn((N, HV, D, D), dtype=dtype)
 
     q, k, v, beta, g, h0 = map(lambda x: x.to(device).requires_grad_(), (q, k, v, beta, g, h0))
     do = torch.randn_like(v)
@@ -674,8 +679,8 @@ def test_chunk_varlen(
     ref_ht = []
     for i in range(N):
         ref_i, ref_ht_i = naive_recurrent_gated_delta_rule(
-            q=q[:, cu_seqlens[i]:cu_seqlens[i+1]],
-            k=k[:, cu_seqlens[i]:cu_seqlens[i+1]],
+            q=repeat(q[:, cu_seqlens[i]:cu_seqlens[i+1]], 'b t h d -> b t (h g) d', g=G),
+            k=repeat(k[:, cu_seqlens[i]:cu_seqlens[i+1]], 'b t h d -> b t (h g) d', g=G),
             v=v[:, cu_seqlens[i]:cu_seqlens[i+1]],
             beta=beta[:, cu_seqlens[i]:cu_seqlens[i+1]],
             g=g[:, cu_seqlens[i]:cu_seqlens[i+1]],
