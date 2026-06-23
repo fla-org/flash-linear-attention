@@ -79,18 +79,30 @@ class FLALayer(CacheLayerMixin):
                 self.state["attn_state"] = tuple(attn_state)
             else:
                 old = self.state["attn_state"]
-                if window_size is not None and old[0].shape[1] >= window_size:
+                if window_size is not None and input_size == 0:
+                    pass
+                # if the incoming chunk covers the whole window then we can replace the cache with its tail
+                # otherwise we roll the existing window and splice in the new tokens
+                elif window_size is not None and old[0].shape[1] >= window_size:
                     new_tuple = []
                     for old_x, new_x in zip(old, attn_state, strict=False):
-                        rolled = old_x.roll(-input_size, dims=1)
                         tail = new_x[:, -window_size:]
-                        rolled[:, -tail.shape[1]:] = tail
-                        new_tuple.append(rolled)
+                        if tail.shape[1] >= window_size:
+                            new_tuple.append(tail.contiguous())
+                        else:
+                            old_x = old_x[:, -window_size:].contiguous() if old_x.shape[1] > window_size else old_x
+                            rolled = old_x.roll(-input_size, dims=1)
+                            rolled[:, -tail.shape[1]:] = tail
+                            new_tuple.append(rolled)
                     self.state["attn_state"] = tuple(new_tuple)
                 else:
-                    self.state["attn_state"] = tuple(
-                        torch.cat([old_x, new_x], dim=1) for old_x, new_x in zip(old, attn_state, strict=False)
-                    )
+                    new_tuple = []
+                    for old_x, new_x in zip(old, attn_state, strict=False):
+                        updated = torch.cat([old_x, new_x], dim=1)
+                        if window_size is not None and updated.shape[1] > window_size:
+                            updated = updated[:, -window_size:].contiguous()
+                        new_tuple.append(updated)
+                    self.state["attn_state"] = tuple(new_tuple)
 
         if conv_state is not None:
             self.state["conv_state"] = conv_state
@@ -168,7 +180,8 @@ class FLALayer(CacheLayerMixin):
                 self.state[k] = to_dev(v)
 
     def reset(self):
-        pass
+        self.state = None
+        self._seen_tokens = 0
 
 
 class LegacyFLACache(HFCacheBase):
@@ -264,20 +277,41 @@ class LegacyFLACache(HFCacheBase):
             if recurrent_state is not None:
                 state['recurrent_state'] = recurrent_state
             if attn_state is not None:
-                if window_size is not None and state['attn_state'][0].shape[1] == window_size:
-                    for i, (old_state, new_state) in enumerate(zip(state['attn_state'], attn_state, strict=False)):
-                        # DO NOT allocate new memory if the cache is full
-                        # roll the key/value states to the left by `input_size`
-                        old_state = old_state.roll(-input_size, 1)
-                        # replace the last `input_size` tokens with the new key/value states
-                        old_state[:, -input_size:] = new_state
-                        state['attn_state'][i] = old_state
-                else:
-                    attn_state = [
-                        torch.cat([old_state, new_state], 1)
-                        for old_state, new_state in zip(state['attn_state'], attn_state, strict=False)
+                if state['attn_state'] is None:
+                    state['attn_state'] = [
+                        new_state[:, -window_size:].contiguous()
+                        if window_size is not None and new_state.shape[1] > window_size
+                        else new_state
+                        for new_state in attn_state
                     ]
-                    state['attn_state'] = attn_state
+                elif window_size is not None and input_size == 0:
+                    pass
+                # mirror FLALayer's window semantics so legacy caches handle oversized decoding chunks
+                elif window_size is not None and state['attn_state'][0].shape[1] >= window_size:
+                    updated_attn_state = []
+                    for old_state, new_state in zip(state['attn_state'], attn_state, strict=False):
+                        tail = new_state[:, -window_size:]
+                        if tail.shape[1] >= window_size:
+                            updated_attn_state.append(tail.contiguous())
+                        else:
+                            # DO NOT allocate new memory if the cache is full
+                            # roll the key/value states to the left by `input_size`
+                            old_state = (
+                                old_state[:, -window_size:].contiguous() if old_state.shape[1] > window_size else old_state
+                            )
+                            old_state = old_state.roll(-input_size, 1)
+                            # replace the newest slots with the new key/value states
+                            old_state[:, -tail.shape[1]:] = tail
+                            updated_attn_state.append(old_state)
+                    state['attn_state'] = updated_attn_state
+                else:
+                    updated_attn_state = []
+                    for old_state, new_state in zip(state['attn_state'], attn_state, strict=False):
+                        updated = torch.cat([old_state, new_state], 1)
+                        if window_size is not None and updated.shape[1] > window_size:
+                            updated = updated[:, -window_size:].contiguous()
+                        updated_attn_state.append(updated)
+                    state['attn_state'] = updated_attn_state
             if conv_state is not None:
                 state['conv_state'] = conv_state
             if ffn_state is not None:
@@ -294,6 +328,10 @@ class LegacyFLACache(HFCacheBase):
     def get_max_cache_shape(self) -> int | None:
         """Returns the maximum sequence length of the cached states. Cache does not have a maximum length."""
         return None
+
+    def reset(self):
+        self.states.clear()
+        self._seen_tokens = 0
 
     def to_legacy_cache(self) -> tuple:
         return tuple(self.states)
@@ -396,6 +434,13 @@ class FLACache(HFCacheBase):
         kv_length = int(self.get_seq_length(layer_idx)) + query_len
         return kv_length, 0
 
+    def reset(self):
+        # keeps the layer objects allocated for the HF cache compatibility
+        # drops cache state
+        for layer in self.layers:
+            layer.reset()
+        self._seen_tokens = 0
+
     def to_legacy_cache(self) -> tuple[dict[str, Any], ...]:
         return tuple(self[i] for i in range(len(self.layers)))
 
@@ -411,8 +456,13 @@ class FLACache(HFCacheBase):
         if isinstance(past_key_values, (list, tuple)):
             for i, st in enumerate(past_key_values):
                 while len(cache.layers) <= i:
-                    cache.layers.append(cache.layer_class_to_replicate())
+                    if cache.use_layer_class_to_replicate:
+                        cache.layers.append(cache.layer_class_to_replicate())
+                    else:
+                        cache.append_new_layers(i)
                 cache.layers[i].state = dict(st)
+                # legacy cache tracks seen token globally but FLACache stores per layer
+                cache.layers[i]._seen_tokens = int(seen_tokens)
         return cache
 
 

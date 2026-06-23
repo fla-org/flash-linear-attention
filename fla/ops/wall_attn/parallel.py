@@ -16,6 +16,7 @@ import triton
 import triton.language as tl
 from einops import reduce
 
+from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.backends import dispatch
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
@@ -92,11 +93,11 @@ def parallel_wall_attn_fwd_kernel(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
 
     p_q = tl.make_block_ptr(q + (bos * HQ + i_hq) * K, (T, K), (HQ*K, 1), (i_t * BT, 0), (BT, BK), (1, 0))
@@ -213,25 +214,6 @@ def parallel_wall_attn_fwd_kernel(
     tl.store(p_lse, b_m.to(p_lse.dtype.element_ty), boundary_check=(0,))
 
 
-@triton.jit
-def parallel_attn_bwd_kernel_preprocess(
-    o,
-    do,
-    delta,
-    B: tl.constexpr,
-    V: tl.constexpr,
-):
-    i_n = tl.program_id(0)
-    o_d = tl.arange(0, B)
-    m_d = o_d < V
-
-    b_o = tl.load(o + i_n * V + o_d, mask=m_d, other=0)
-    b_do = tl.load(do + i_n * V + o_d, mask=m_d, other=0).to(tl.float32)
-    b_delta = tl.sum(b_o * b_do)
-
-    tl.store(delta + i_n, b_delta.to(delta.dtype.element_ty))
-
-
 @triton.autotune(
     configs=WALL_BWD_AUTOTUNE_CONFIGS,
     key=['T', 'K', 'V', 'HQ', 'H'],
@@ -279,11 +261,11 @@ def parallel_wall_attn_bwd_kernel_dq(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
     LN2: tl.constexpr = 0.6931471805599453
 
@@ -454,11 +436,11 @@ def parallel_wall_attn_bwd_kernel_dkv(
 
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
-        T = eos - bos
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+        T = (eos - bos).to(tl.int32)
     else:
         i_n = i_b
-        bos, eos = i_n * T, i_n * T + T
+        bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
     RCP_LN2: tl.constexpr = 1.4426950216
     LN2: tl.constexpr = 0.6931471805599453
 
@@ -681,22 +663,6 @@ def parallel_wall_attn_fwd(
     return o, lse
 
 
-def parallel_attn_bwd_preprocess(
-    o: torch.Tensor,
-    do: torch.Tensor,
-):
-    V = o.shape[-1]
-    delta = torch.empty_like(o[..., 0], dtype=torch.float)
-    parallel_attn_bwd_kernel_preprocess[(delta.numel(),)](
-        o=o,
-        do=do,
-        delta=delta,
-        B=triton.next_power_of_2(V),
-        V=V,
-    )
-    return delta
-
-
 @dispatch('attn')
 def parallel_wall_attn_bwd(
     q: torch.Tensor,
@@ -720,12 +686,10 @@ def parallel_wall_attn_bwd(
     B, T, H, K, V = *k.shape, v.shape[-1]
     HQ = q.shape[2]
     G = HQ // H
-    if check_shared_mem('hopper') or check_shared_mem('ampere'):
-        BK = max(triton.next_power_of_2(K), 16)
-        BV = max(triton.next_power_of_2(V), 16)
-    else:
-        BK = max(triton.next_power_of_2(K), 16)
-        BV = min(max(triton.next_power_of_2(V), 16), 64)
+    # dq/dk are reduced over the full value dim in one program (no cross-program accumulation),
+    # so BV must span all of V (NV == 1). Don't cap it here -- the forward can, the backward can't.
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
 
     NV = triton.cdiv(V, BV)
 
