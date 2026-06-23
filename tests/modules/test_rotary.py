@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from fla.modules.rotary import RotaryEmbedding, rotary_embedding_ref
-from fla.utils import assert_close, device
+from fla.utils import IS_NPU, assert_close, device
 
 
 @pytest.mark.parametrize("B", [2])
@@ -197,7 +197,10 @@ def test_rotary_left_padding_no_uninit_leak(B: int, T: int, H: int, D: int, dtyp
     rotary = RotaryEmbedding(D).to(device)
 
     rotary(q, k, seqlen_offset=seqlen_offset, max_seqlen=T)   # warm up cos/sin cache + kernel
-    torch.cuda.synchronize()
+    if IS_NPU:
+        torch.npu.synchronize()
+    else:
+        torch.cuda.synchronize()
     junk = [torch.full_like(q, float("nan")) for _ in range(32)]   # poison the free list
     del junk
 

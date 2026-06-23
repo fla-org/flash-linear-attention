@@ -105,9 +105,8 @@ jobs:
           assert IS_NPU, "Expected NPU backend (IS_NPU=True)"
           PY
 
-      # TODO: expand to `tests/modules/` after NPU failures are fixed
-      - name: Run rotary module tests
+      - name: Run module and utils op tests
         shell: bash
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v --exitfirst tests/modules/test_rotary.py
+          pytest -s -v --exitfirst tests/modules tests/ops/utils tests/ops/test_based.py
