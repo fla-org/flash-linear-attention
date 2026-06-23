@@ -17,7 +17,7 @@ from the matching PyTorch wheel index (rocm / xpu).
 | CUDA    | `[cuda]` | `https://download.pytorch.org/whl/cu128`   | `triton` (PyPI)                                  |
 | ROCm    | `[rocm]` | `https://download.pytorch.org/whl/rocm7.2` | pulled by `torch` (`pytorch-triton-rocm` / `triton-rocm`) |
 | XPU     | `[xpu]`  | `https://download.pytorch.org/whl/xpu`     | pulled by `torch` (`pytorch-triton-xpu`)         |
-| NPU     | `[npu]`  | (use your CANN-matched `torch` / `torch_npu`) | `triton-ascend`                               |
+| NPU     | `[npu]`  | `https://triton-ascend.osinfra.cn/pypi/simple` | `triton-ascend`                              |
 | CPU     | `[cpu]`  | `https://download.pytorch.org/whl/cpu`     | `triton` (PyPI, import-only)                     |
 
 ## From PyPI
@@ -57,13 +57,16 @@ old "install fla, then `pip uninstall triton`, then install `triton-ascend`"
 dance is no longer needed.
 
 ```sh
-# 1. install CANN + source set_env.sh
-# 2. install fla with the npu extra (pins torch / torch_npu / triton-ascend)
+# 1. install CANN 9.0.0 + source set_env.sh
+# 2. install torch / torch_npu / triton-ascend, then fla with the npu extra
+pip install torch==2.7.1 torch_npu==2.7.1 torchvision==0.22.1
+pip install triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple
 pip install flash-linear-attention[npu]
 ```
 
-`triton-ascend` 3.2.1 is tagged but not yet on PyPI, so the `[npu]` extra
-currently pins `torch==2.6.0`, `torch_npu==2.6.0`, `triton-ascend==3.2.0`.
+The `[npu]` extra pins `torch==2.7.1`, `torch_npu==2.7.1`, `torchvision==0.22.1`,
+and `triton-ascend==3.2.1` (CANN 9.0.0 stack tested in CI). Install
+`triton-ascend` with `--extra-index-url` as shown above.
 
 ## From source
 
