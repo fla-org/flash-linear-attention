@@ -44,7 +44,7 @@ jobs:
     steps:
       - name: Check eligibility and wait for PyTorch 2.12 H100 jobs
         id: check
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const { owner, repo } = context.repo;

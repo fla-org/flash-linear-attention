@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Setup CI Environment
         id: setup
@@ -121,7 +121,7 @@ jobs:
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.0
 
       - name: Setup CI Environment
         id: setup
