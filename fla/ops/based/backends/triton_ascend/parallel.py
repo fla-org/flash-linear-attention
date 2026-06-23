@@ -382,7 +382,6 @@ def parallel_based_bwd_dkv_kernel_npu(
 def _launch_parallel_kernel(kernel, g0, g1, g2, args, kwargs):
     for nblocks, bstart in _npu_flat_grids(g0, g1, g2):
         kernel[(nblocks,)](*args, BLOCK_START=bstart, **kwargs)
-        torch.npu.synchronize()
 
 
 class ParallelBasedFunctionNPU(torch.autograd.Function):
