@@ -16,7 +16,7 @@ import triton.language as tl
 
 from fla.ops.cp.comm import all_gather_into_tensor
 from fla.ops.utils.op import exp2
-from fla.utils import USE_CUDA_GRAPH, autotune_cache_kwargs, check_shared_mem
+from fla.utils import autotune_cache_kwargs, check_shared_mem
 
 if TYPE_CHECKING:
     from fla.ops.cp.context import FLACPContext
@@ -35,7 +35,6 @@ if TYPE_CHECKING:
         for num_stages in [2, 3, 4]
     ],
     key=['H', 'HV', 'K', 'V', 'BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -314,7 +313,6 @@ def pre_process_fwd_kernel_merged(
         for BV in [32, 64]
     ],
     key=['HV', 'K', 'V', 'BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['pre_or_post_num_ranks', 'rank', 'NUM_SEQ_ENTRIES'])
@@ -469,7 +467,6 @@ def merge_fwd_bwd_kernel(
         for num_stages in ([4, 3, 2] if check_shared_mem('ampere') else [1])
     ],
     key=['H', 'HV', 'K', 'V', 'BT'],
-    use_cuda_graph=USE_CUDA_GRAPH,
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
