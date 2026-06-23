@@ -54,10 +54,10 @@ class TileLangBackend(BaseBackend):
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
             return False, "TileLang backend does not support g_gamma"
-        if v.shape[2] != k.shape[2]:
+        if v.shape[2] % k.shape[2] != 0:
             return False, (
-                "TileLang backend does not support GQA (v has more heads than k); "
-                "use repeat_interleave on k/q to match v's head count, or fall back to Triton"
+                f"TileLang backend requires num_v_heads (HV={v.shape[2]}) to be divisible by "
+                f"num_qk_heads (H={k.shape[2]}); HV % H must be 0 for GVA"
             )
         if h.dtype != q.dtype:
             return False, (
