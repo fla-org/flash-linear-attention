@@ -23,10 +23,8 @@ Every method builds `S_t` the same way — **score all candidates with a cheap p
 attend** — because scoring with full attention would cost the `O(T²)` you are trying to avoid. So the
 proxy is the whole game, and it is fixed by **two choices**:
 
-- **Granularity** — score/select individual **tokens** (precise, scattered reads) or contiguous
-  **blocks** (coarser, but contiguous, tensor-core- and KV-cache-friendly).
-- **Scoring proxy** — rank by **pooled existing keys** (free, no new params, lossy) or by a
-  **separate learned indexer** (expressive, but extra params that must be trained).
+- **Granularity** — score and select individual **tokens**, or contiguous **blocks** of keys.
+- **Scoring proxy** — rank candidates by **pooled existing keys**, or by a **separate learned indexer**.
 
 Those two choices place the four methods in a 2×2:
 
@@ -35,18 +33,27 @@ Those two choices place the four methods in a 2×2:
 | **block** | NSA, MoBA                       | MSA                              |
 | **token** | —                               | DSA                              |
 
-The scoring choice also decides the **hard part — training.** `top-k` is non-differentiable, so the
-score must be learned some other way:
+Each axis has one consequence.
 
-- **Pooled keys** (NSA, MoBA) get gradient *for free*: the same keys feed the attention output, so
-  the language-model loss trains them. No extra machinery.
+**Granularity sets the quality–speed trade-off.**
+Token-level selection is the ideal:
+each query picks its own `top-k` tokens, the closest sparse match to full attention.
+But token reads are scattered and memory-bound.
+Blocks fix that — contiguous, tensor-core- and KV-cache-friendly — at the cost of coarser selection.
+So the axis runs **DSA → NSA/MSA → MoBA**, most precise to fastest.
+
+**Scoring sets the training difficulty.**
+`top-k` is non-differentiable, so the score has to be learned some other way:
+
+- **Pooled keys** (NSA, MoBA) get gradient *for free*:
+  the same keys feed the output, so the LM loss trains them.
 - **A separate indexer** (DSA, MSA) feeds *only* selection, never the output, so it gets no gradient.
-  It must be trained by **distilling it to the full attention** (KL loss: indexer = student, attention
-  = teacher).
+  It must be **distilled to the full attention** (KL loss: indexer = student, attention = teacher).
 
-Two structural patterns are near-universal: a **local + global** split (a cheap local path plus the
-sparse global one), and a **prefill/decode asymmetry** (a method sparse in training may still go dense
-at generation, as MoBA does).
+**Beyond the two axes,** two patterns recur.
+One is a **local + global** split: a cheap local path next to the sparse global one.
+The other is a **prefill/decode asymmetry**:
+a method sparse in training may still go dense at generation, as MoBA does.
 
 ---
 
@@ -79,11 +86,13 @@ Paper: [arXiv:2502.11089](https://arxiv.org/abs/2502.11089) — *block · pooled
 - **No separate scorer** — selection reuses the compression scores `I_t`, so one coarse pass both
   adds context *and* steers selection (the gradient-free proxy).
 
-**Hardware-aligned core — why GQA is mandatory.** Selection is *per KV head, not per query head*, so
-all `G = H_Q/H_KV` query heads in a group share one block list. The kernel makes this a GEMM: load the
-group's queries once as `[G, d]`, then for each selected block load its KV tile `[d, B_S]` from HBM
-**once** and matmul against all `G` rows. Group sharing amortizes each KV read over `G` heads, and block-level reads stay contiguous — together
-they restore the arithmetic intensity that scattered, memory-bound sparse attention throws away.
+**Hardware-aligned core — why GQA is mandatory.**
+Selection is *per KV head, not per query head*,
+so all `G = H_Q/H_KV` query heads in a group share one block list.
+The kernel makes this a GEMM: load the group's queries once as `[G, d]`,
+then for each selected block load its KV tile `[d, B_S]` from HBM **once** and matmul against all `G` rows.
+Group sharing amortizes each KV read over `G` heads, and block-level reads stay contiguous —
+together they restore the arithmetic intensity that scattered, memory-bound sparse attention throws away.
 
 ### MoBA — Mixture of Block Attention
 
