@@ -111,8 +111,12 @@ def naive_dsa(
     r"""
     Naive reference for DeepSeek Sparse Attention (DSA).
 
-    The lightning indexer scores every causal key for each query, the top-k keys are selected, and
-    attention is computed over the selected keys only. The selection is shared across all query heads.
+    DSA scores every causal key with a lightweight indexer, keeps the top-k per query,
+    and attends over those keys only. The selection is shared across all query heads.
+
+    Reference:
+        DeepSeek-V3.2 (https://arxiv.org/abs/2512.02556);
+        TileLang `examples/deepseek_v32` (https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_v32).
 
     Args:
         q (torch.Tensor):
