@@ -115,8 +115,7 @@ def naive_dsa(
     and attends over those keys only. The selection is shared across all query heads.
 
     Reference:
-        DeepSeek-V3.2 (https://arxiv.org/abs/2512.02556);
-        TileLang `examples/deepseek_v32` (https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_v32).
+        DeepSeek-V3.2 (https://arxiv.org/abs/2512.02556).
 
     Args:
         q (torch.Tensor):
