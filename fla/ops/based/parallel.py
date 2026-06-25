@@ -9,7 +9,6 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 # Based: An Educational and Effective Sequence Mixer
@@ -390,7 +389,6 @@ class ParallelBasedFunction(torch.autograd.Function):
 triton_parallel_based = ParallelBasedFunction.apply
 
 
-@dispatch('based')
 def parallel_based(
     q: torch.Tensor,
     k: torch.Tensor,

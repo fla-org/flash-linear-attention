@@ -109,4 +109,4 @@ jobs:
         shell: bash
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v --exitfirst tests/modules tests/ops/utils tests/ops/test_based.py
+          pytest -s -v --exitfirst tests/modules tests/ops/utils
