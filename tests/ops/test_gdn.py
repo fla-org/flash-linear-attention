@@ -191,6 +191,84 @@ def test_chunk(
 
 
 @pytest.mark.parametrize(
+    ('B', 'T', 'H', 'HV', 'D', 'scale', 'gate_logit_normalizer', 'dtype', 'chunk_size'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-HV{}-D{}-scale{}-gate{}-{}-chunk{}".format(*test))
+        for chunk_size in [16, 32, 64]
+        for test in [
+            (1, 64, 2, 4, 32, 0.1, 1.0, torch.float32, chunk_size),
+        ]
+    ],
+)
+def test_chunk_with_chunk_size(
+    B: int,
+    T: int,
+    H: int,
+    HV: int,
+    D: int,
+    scale: float,
+    gate_logit_normalizer: float,
+    dtype: torch.dtype,
+    chunk_size: int,
+):
+    torch.manual_seed(42)
+    assert HV % H == 0
+    G = HV // H
+
+    q = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    k = torch.rand(B, T, H, D, dtype=dtype, device=device)
+    v = torch.rand(B, T, HV, D, dtype=dtype, device=device)
+    beta = torch.rand(B, T, HV, dtype=torch.float32, device=device).sigmoid()
+    g = F.logsigmoid(torch.rand(B, T, HV, dtype=torch.float32, device=device)) / gate_logit_normalizer
+    h0 = torch.zeros(B, HV, D, D, dtype=torch.float32, device=device)
+    do = torch.randn_like(v)
+    dht = torch.randn_like(h0)
+
+    def run_ref():
+        q_, k_, v_, beta_, g_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, g, h0))
+        o, ht = naive_recurrent_gated_delta_rule(
+            q=F.normalize(repeat(q_, 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+            k=F.normalize(repeat(k_, 'b t h d -> b t (h g) d', g=G), p=2, dim=-1),
+            v=v_,
+            beta=beta_,
+            g=g_,
+            scale=scale,
+            initial_state=h0_,
+            output_final_state=True,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, q_.grad, k_.grad, v_.grad, beta_.grad, g_.grad, h0_.grad
+
+    def run_tri(chunk_size: int):
+        q_, k_, v_, beta_, g_, h0_ = (x.detach().clone().requires_grad_(True) for x in (q, k, v, beta, g, h0))
+        o, ht = chunk_gated_delta_rule(
+            q=F.normalize(q_, p=2, dim=-1),
+            k=F.normalize(k_, p=2, dim=-1),
+            v=v_,
+            beta=beta_,
+            g=g_,
+            scale=scale,
+            initial_state=h0_,
+            output_final_state=True,
+            chunk_size=chunk_size,
+        )
+        ((o * do).sum() + (ht * dht).sum()).backward()
+        return o, ht, q_.grad, k_.grad, v_.grad, beta_.grad, g_.grad, h0_.grad
+
+    ref_o, ref_ht, ref_dq, ref_dk, ref_dv, ref_dbeta, ref_dg, ref_dh0 = run_ref()
+    tri_o, tri_ht, tri_dq, tri_dk, tri_dv, tri_dbeta, tri_dg, tri_dh0 = run_tri(chunk_size)
+
+    assert_close(f'o@{chunk_size}', ref_o, tri_o, 0.005)
+    assert_close(f'ht@{chunk_size}', ref_ht, tri_ht, 0.005)
+    assert_close(f'dq@{chunk_size}', ref_dq, tri_dq, 0.005)
+    assert_close(f'dk@{chunk_size}', ref_dk, tri_dk, 0.005)
+    assert_close(f'dv@{chunk_size}', ref_dv, tri_dv, 0.005)
+    assert_close(f'db@{chunk_size}', ref_dbeta, tri_dbeta, 0.01)
+    assert_close(f'dg@{chunk_size}', ref_dg, tri_dg, 0.01)
+    assert_close(f'dh0@{chunk_size}', ref_dh0, tri_dh0, 0.005)
+
+
+@pytest.mark.parametrize(
     ('B', 'T', 'H', 'HV', 'D', 'scale', 'use_qk_l2norm_in_kernel', 'allow_neg_eigval', 'dtype'),
     [
         pytest.param(

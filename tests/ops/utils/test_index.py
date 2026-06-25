@@ -134,7 +134,7 @@ def test_cu_seqlens_cpu_matches_device(name, impl, ref):
 
 @pytest.mark.parametrize("batch_size", [1, 4])
 @pytest.mark.parametrize("max_seq_len", [100, 500])
-@pytest.mark.parametrize("chunk_size", [16, 64, 128])
+@pytest.mark.parametrize("chunk_size", [16, 32, 64, 128])
 def test_chunk_offsets_correctness(batch_size, max_seq_len, chunk_size):
     torch.manual_seed(42)
     cu_seqlens = make_cu_seqlens(torch.randint(1, max_seq_len, (batch_size,)).tolist())

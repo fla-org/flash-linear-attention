@@ -11,7 +11,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from fla.ops.generalized_delta_rule.dplr import chunk_dplr_delta_rule
 from fla.ops.generalized_delta_rule.dplr.fused_recurrent import fused_recurrent_dplr_delta_rule
+from fla.ops.rwkv7 import chunk_rwkv7
 from fla.ops.rwkv7.channel_mixing import channel_mixing_rwkv7, channel_mixing_rwkv7_torch
 from fla.ops.rwkv7.fused_addcmul import fused_addcmul_rwkv7, torch_addcmul_rwkv7
 from fla.ops.rwkv7.fused_k_update import fused_k_rwkv7, k_update_ref
@@ -133,6 +135,43 @@ def test_fused_mul_recurrent_fwd(
         initial_state=h0.clone(),
         output_final_state=True,
     )
+    assert_close('o', ref, tri, 0.002)
+    assert_close('ht', ref_ht, tri_ht, 0.002)
+
+
+@pytest.mark.parametrize('chunk_size', [16, 32, 64])
+def test_chunk_wrapper_chunk_size(chunk_size: int):
+    B, T, H, D = 1, 64, 2, 64
+    r = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    k = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    v = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    w = torch.empty(B, T, H, D).uniform_(-8, -6).to(device)
+    kk = F.normalize(torch.empty(B, T, H, D).uniform_(-1, 1), dim=-1).to(device)
+    a = -kk
+    b = kk * torch.empty(B, T, H, D).uniform_(0, 0.1).to(device)
+
+    ref, ref_ht = chunk_dplr_delta_rule(
+        q=r.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        gk=w.clone(),
+        scale=1.0,
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+    tri, tri_ht = chunk_rwkv7(
+        r=r.clone(),
+        w=w.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        a=a.clone(),
+        b=b.clone(),
+        output_final_state=True,
+        chunk_size=chunk_size,
+    )
+
     assert_close('o', ref, tri, 0.002)
     assert_close('ht', ref_ht, tri_ht, 0.002)
 
