@@ -716,7 +716,6 @@ def parallel_attn_bwd(
     return dq, dk, dv, dg_cumsum, dsink_bias
 
 
-@torch.compile
 class ParallelAttentionFunction(torch.autograd.Function):
 
     @staticmethod
