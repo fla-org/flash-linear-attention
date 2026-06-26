@@ -188,6 +188,20 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.activations import sqrelu_bwd_npu
         return sqrelu_bwd_npu(g, x)
 
+    def powglu_fwd(self, x, y, power=3.0, output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import powglu_fwd_npu
+        return powglu_fwd_npu(x, y, power=power, output_contiguous=output_contiguous)
+
+    def powglu_fwdbwd(self, x, y, g, power=3.0, use_weight=False, output_contiguous=False):
+        from fla.modules.backends.triton_ascend.activations import powglu_fwdbwd_npu
+        return powglu_fwdbwd_npu(
+            x, y, g, power=power, use_weight=use_weight, output_contiguous=output_contiguous,
+        )
+
+    def powglu_linear(self, x, y, weight, bias, power=3.0):
+        from fla.modules.backends.triton_ascend.activations import powglu_linear_npu
+        return powglu_linear_npu(x, y, weight, bias, power)
+
     def fused_kl_div_forward(
         self,
         x,
