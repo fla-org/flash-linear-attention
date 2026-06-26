@@ -13,9 +13,12 @@ hardware-specific regressions (see #640). Can also be forced via FLA_TILELANG=1.
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from fla.ops.backends import BaseBackend
+from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
 
 
 class TileLangBackend(BaseBackend):
@@ -31,6 +34,17 @@ class TileLangBackend(BaseBackend):
             return True
         except ImportError:
             return False
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        # Explicit opt-in / opt-out always wins.
+        val = os.environ.get(cls.env_var)
+        if val is not None:
+            return val != "0"
+        # Default on only where the Triton path is known to be broken:
+        # Hopper (sm90) with Triton >= 3.4.0 (see #640). Everywhere else the
+        # Triton backend stays the default unless the user forces FLA_TILELANG=1.
+        return IS_NVIDIA_HOPPER and TRITON_ABOVE_3_4_0
 
     def chunk_bwd_dqkwg_verifier(
         self,
@@ -54,10 +68,10 @@ class TileLangBackend(BaseBackend):
             return False, "TileLang backend only supports gated case (g != None)"
         if g_gamma is not None:
             return False, "TileLang backend does not support g_gamma"
-        if v.shape[2] != k.shape[2]:
+        if v.shape[2] % k.shape[2] != 0:
             return False, (
-                "TileLang backend does not support GQA (v has more heads than k); "
-                "use repeat_interleave on k/q to match v's head count, or fall back to Triton"
+                f"TileLang backend requires num_v_heads (HV={v.shape[2]}) to be divisible by "
+                f"num_qk_heads (H={k.shape[2]}); HV % H must be 0 for GVA"
             )
         if h.dtype != q.dtype:
             return False, (
