@@ -505,7 +505,7 @@ class FLAGenerationMixin(GenerationMixin):
                     # Fallback: manually slice using cache_position
                     if input_ids is not None and input_ids.shape[1] != cache_position.shape[0]:
                         input_ids = input_ids[:, cache_position]
-                elif hasattr(past_key_values, '__len__') and len(past_key_values) > 0:
+                elif past_key_values.get_seq_length() > 0:
                     # Ultimate fallback to old behavior
                     input_ids = input_ids[:, -1:]
 
@@ -523,7 +523,7 @@ class FLAGenerationMixin(GenerationMixin):
             # For older transformers versions, use the original logic
             model_inputs = {}
             # only last token for `inputs_ids` if the `past_key_values` is not empty.
-            if past_key_values is not None and hasattr(past_key_values, '__len__') and len(past_key_values) > 0:
+            if past_key_values is not None and past_key_values.get_seq_length() > 0:
                 input_ids = input_ids[:, -1:]
             # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
             if inputs_embeds is not None and hasattr(past_key_values, '__len__') and len(past_key_values) == 0:
