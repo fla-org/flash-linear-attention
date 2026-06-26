@@ -5,32 +5,27 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+from __future__ import annotations
+
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.backends import dispatch
-from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.index import prepare_chunk_indices
-from fla.utils import autotune_cache_kwargs, check_shared_mem, input_guard
+from fla.utils import input_guard
 
-BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
+_NUM_WARPS = 4
+_BT_GLOBAL = 32
+_BS_GLOBAL = 16
+_BS_LOCAL = 32
 
 
 @triton.heuristics({
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@fla_cache_autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8]
-    ],
-    key=['B', 'H', 'BT', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
-def chunk_local_cumsum_scalar_kernel(
+def chunk_local_cumsum_scalar_kernel_npu(
     s,
     o,
     scale,
@@ -60,7 +55,6 @@ def chunk_local_cumsum_scalar_kernel(
     else:
         p_s = tl.make_block_ptr(s + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
         p_o = tl.make_block_ptr(o + bos*H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    # [BT]
     b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
     b_o = tl.cumsum(b_s, axis=0)
     if REVERSE:
@@ -75,17 +69,8 @@ def chunk_local_cumsum_scalar_kernel(
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@fla_cache_autotune(
-    configs=[
-        triton.Config({'BS': BS}, num_warps=num_warps)
-        for BS in BS_LIST
-        for num_warps in [2, 4, 8]
-    ],
-    key=['B', 'H', 'S', 'BT', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
-def chunk_local_cumsum_vector_kernel(
+def chunk_local_cumsum_vector_kernel_npu(
     s,
     o,
     scale,
@@ -117,7 +102,6 @@ def chunk_local_cumsum_vector_kernel(
     else:
         p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
         p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-    # [BT, BS]
     b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
     if REVERSE:
         b_o = tl.cumsum(b_s, axis=0, reverse=True)
@@ -132,18 +116,8 @@ def chunk_local_cumsum_vector_kernel(
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
-        for BT in [32, 64, 128, 256]
-        for num_warps in [2, 4, 8]
-        for num_stages in [1, 2, 3, 4]
-    ],
-    key=['B', 'H', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
-def chunk_global_cumsum_scalar_kernel(
+def chunk_global_cumsum_scalar_kernel_npu(
     s,
     o,
     scale,
@@ -192,18 +166,8 @@ def chunk_global_cumsum_scalar_kernel(
     'HAS_SCALE': lambda args: args['scale'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
-@triton.autotune(
-    configs=[
-        triton.Config({'BT': BT}, num_warps=num_warps, num_stages=num_stages)
-        for BT in [16, 32, 64, 128]
-        for num_warps in [2, 4, 8]
-        for num_stages in [1, 2, 3, 4]
-    ],
-    key=['B', 'H', 'S', 'IS_VARLEN', 'REVERSE'],
-    **autotune_cache_kwargs,
-)
 @triton.jit(do_not_specialize=['T'])
-def chunk_global_cumsum_vector_kernel(
+def chunk_global_cumsum_vector_kernel_npu(
     s,
     o,
     scale,
@@ -237,7 +201,6 @@ def chunk_global_cumsum_vector_kernel(
         else:
             p_s = tl.make_block_ptr(s + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
             p_o = tl.make_block_ptr(o + (bos * H + i_h) * S, (T, S), (H*S, 1), (i_t * BT, i_s * BS), (BT, BS), (1, 0))
-        # [BT, BS]
         b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
         if REVERSE:
             b_c = b_z[None, :] + tl.cumsum(b_s, axis=0, reverse=True)
@@ -249,7 +212,7 @@ def chunk_global_cumsum_vector_kernel(
         b_z += tl.sum(b_s, 0)
 
 
-def chunk_local_cumsum_scalar(
+def chunk_local_cumsum_scalar_npu(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
@@ -270,7 +233,7 @@ def chunk_local_cumsum_scalar(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
     grid = (NT, B * H)
-    chunk_local_cumsum_scalar_kernel[grid](
+    chunk_local_cumsum_scalar_kernel_npu[grid](
         s=g_org,
         o=g,
         scale=scale,
@@ -282,11 +245,12 @@ def chunk_local_cumsum_scalar(
         BT=BT,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
+        num_warps=_NUM_WARPS,
     )
     return g
 
 
-def chunk_local_cumsum_vector(
+def chunk_local_cumsum_vector_npu(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
@@ -307,11 +271,8 @@ def chunk_local_cumsum_vector(
     assert chunk_size == 2**(chunk_size.bit_length()-1), "chunk_size must be a power of 2"
 
     g_org, g = g, torch.empty_like(g, dtype=output_dtype or g.dtype)
-    def grid(meta): return (triton.cdiv(meta['S'], meta['BS']), NT, B * H)
-    # keep cummulative normalizer in fp32
-    # this kernel is equivalent to
-    # g = g.view(B, H, NT, BT, -1).cumsum(-2).view(B, H, T, -1)
-    chunk_local_cumsum_vector_kernel[grid](
+    grid = (triton.cdiv(S, _BS_LOCAL), NT, B * H)
+    chunk_local_cumsum_vector_kernel_npu[grid](
         s=g_org,
         o=g,
         scale=scale,
@@ -322,14 +283,16 @@ def chunk_local_cumsum_vector(
         H=H,
         S=S,
         BT=BT,
+        BS=_BS_LOCAL,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
+        num_warps=_NUM_WARPS,
     )
     return g
 
 
 @input_guard
-def chunk_global_cumsum_scalar(
+def chunk_global_cumsum_scalar_npu(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
@@ -345,7 +308,7 @@ def chunk_global_cumsum_scalar(
 
     z = torch.empty_like(s, dtype=output_dtype or s.dtype)
     grid = (N * H,)
-    chunk_global_cumsum_scalar_kernel[grid](
+    chunk_global_cumsum_scalar_kernel_npu[grid](
         s=s,
         o=z,
         scale=scale,
@@ -353,14 +316,16 @@ def chunk_global_cumsum_scalar(
         T=T,
         B=B,
         H=H,
+        BT=_BT_GLOBAL,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
+        num_warps=_NUM_WARPS,
     )
     return z
 
 
 @input_guard
-def chunk_global_cumsum_vector(
+def chunk_global_cumsum_vector_npu(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
@@ -373,11 +338,11 @@ def chunk_global_cumsum_vector(
     else:
         B, T, H, S = s.shape
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
-    BS = min(32, triton.next_power_of_2(S))
+    BS = min(_BS_GLOBAL, triton.next_power_of_2(S))
 
     z = torch.empty_like(s, dtype=output_dtype or s.dtype)
     grid = (triton.cdiv(S, BS), N * H)
-    chunk_global_cumsum_vector_kernel[grid](
+    chunk_global_cumsum_vector_kernel_npu[grid](
         s=s,
         o=z,
         scale=scale,
@@ -386,16 +351,17 @@ def chunk_global_cumsum_vector(
         B=B,
         H=H,
         S=S,
+        BT=_BT_GLOBAL,
         BS=BS,
         HEAD_FIRST=head_first,
         REVERSE=reverse,
+        num_warps=_NUM_WARPS,
     )
     return z
 
 
 @input_guard
-@dispatch('utils')
-def chunk_global_cumsum(
+def chunk_global_cumsum_npu(
     s: torch.Tensor,
     reverse: bool = False,
     cu_seqlens: torch.Tensor | None = None,
@@ -406,7 +372,7 @@ def chunk_global_cumsum(
     if cu_seqlens is not None:
         assert s.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
     if len(s.shape) == 3:
-        return chunk_global_cumsum_scalar(
+        return chunk_global_cumsum_scalar_npu(
             s=s,
             reverse=reverse,
             cu_seqlens=cu_seqlens,
@@ -414,8 +380,8 @@ def chunk_global_cumsum(
             head_first=head_first,
             output_dtype=output_dtype,
         )
-    elif len(s.shape) == 4:
-        return chunk_global_cumsum_vector(
+    if len(s.shape) == 4:
+        return chunk_global_cumsum_vector_npu(
             s=s,
             reverse=reverse,
             cu_seqlens=cu_seqlens,
@@ -423,17 +389,15 @@ def chunk_global_cumsum(
             head_first=head_first,
             output_dtype=output_dtype,
         )
-    else:
-        raise ValueError(
-            f"Unsupported input shape {s.shape}, "
-            f"which should be [B, T, H]/[B, T, H, D] if `head_first=False` "
-            f"or [B, H, T]/[B, H, T, D] otherwise",
-        )
+    raise ValueError(
+        f"Unsupported input shape {s.shape}, "
+        f"which should be [B, T, H]/[B, T, H, D] if `head_first=False` "
+        f"or [B, H, T]/[B, H, T, D] otherwise",
+    )
 
 
 @input_guard
-@dispatch('utils')
-def chunk_local_cumsum(
+def chunk_local_cumsum_npu(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
@@ -447,7 +411,7 @@ def chunk_local_cumsum(
     if cu_seqlens is not None:
         assert g.shape[0] == 1, "Only batch size 1 is supported when cu_seqlens are provided"
     if len(g.shape) == 3:
-        return chunk_local_cumsum_scalar(
+        return chunk_local_cumsum_scalar_npu(
             g=g,
             chunk_size=chunk_size,
             reverse=reverse,
@@ -457,8 +421,8 @@ def chunk_local_cumsum(
             output_dtype=output_dtype,
             chunk_indices=chunk_indices,
         )
-    elif len(g.shape) == 4:
-        return chunk_local_cumsum_vector(
+    if len(g.shape) == 4:
+        return chunk_local_cumsum_vector_npu(
             g=g,
             chunk_size=chunk_size,
             reverse=reverse,
@@ -468,9 +432,8 @@ def chunk_local_cumsum(
             output_dtype=output_dtype,
             chunk_indices=chunk_indices,
         )
-    else:
-        raise ValueError(
-            f"Unsupported input shape {g.shape}, "
-            f"which should be (B, T, H, D) if `head_first=False` "
-            f"or (B, H, T, D) otherwise",
-        )
+    raise ValueError(
+        f"Unsupported input shape {g.shape}, "
+        f"which should be (B, T, H, D) if `head_first=False` "
+        f"or (B, H, T, D) otherwise",
+    )

@@ -491,6 +491,7 @@ bias_gelu_impl = GeLUFunction.apply
 # this function is tanh approximation of gelu
 # actual gelu is:
 # x * 0.5 * (1.0 + torch.erf(x * 0.70710678))
+@dispatch('modules')
 @torch.compile
 def gelu_fwd(x):
     return (x * 0.5 * (1.0 + torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x)))).to(dtype=x.dtype)
@@ -499,6 +500,7 @@ def gelu_fwd(x):
 # gradient of tanh approximation of gelu
 # gradient of actual gelu is:
 # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
+@dispatch('modules')
 @torch.compile
 def gelu_bwd(g, x):
     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
@@ -531,12 +533,14 @@ def relu_bwd(g, x):
     return torch.where(x >= 0, g, 0.0).to(dtype=x.dtype)
 
 
+@dispatch('modules')
 @torch.compile
 def sqrelu_fwd(x):
     r = F.relu(x.float())
     return (r * r).to(dtype=x.dtype)
 
 
+@dispatch('modules')
 @torch.compile
 def sqrelu_bwd(g, x):
     return (2.0 * g * F.relu(x.float())).to(dtype=x.dtype)

@@ -144,7 +144,7 @@ def rotary_embedding_fwdbwd_npu(
     else:
         assert seqlen_offsets + T <= TR
 
-    y = torch.empty_like(x) if not inplace else x
+    y = torch.zeros_like(x) if not inplace else x
     if R2 < D and not inplace:
         y[..., R2:].copy_(x[..., R2:])
 

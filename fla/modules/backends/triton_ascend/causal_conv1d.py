@@ -69,10 +69,10 @@ def _npu_bwd_tile_config(
         BD = min(BD, 8)
         BT = min(BT, 32)
     if D >= 2048:
-        BD = 4
+        BD = 8
         BT = min(BT, 8)
     elif D >= 1024:
-        BD = 4
+        BD = 8
         BT = min(BT, 16)
     elif D >= 512:
         BD = 8

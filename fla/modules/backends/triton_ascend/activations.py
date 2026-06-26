@@ -18,6 +18,8 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_k
 # Ascend vector UB is small; keep warps and tile sizes conservative.
 NUM_WARPS_AUTOTUNE = [2, 4]
 BLOCK_SIZES_AUTOTUNE = [512, 1024, 2048]
+STATIC_WARPS = 2
+STATIC_BLOCK_SIZE = 1024
 
 
 def _get_stride(x: torch.Tensor) -> int:
@@ -347,6 +349,174 @@ def swiglu_fwdbwd_kernel(
         z_off = row * stride_z_row + col
         z_val = x_s * y_val
         tl.store(z + z_off, z_val.to(z.dtype.element_ty), mask=mask)
+
+
+@triton.jit(do_not_specialize=['T'])
+def gelu_fwd_kernel(
+    x, y,
+    T,
+    D: tl.constexpr,
+    stride_x_row,
+    stride_y_row,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    x_off = row * stride_x_row + col
+    y_off = row * stride_y_row + col
+    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
+    t = 0.79788456 * x_val * (1.0 + 0.044715 * x_val * x_val)
+    s = 1.0 / (1.0 + exp(-2.0 * t))
+    tanh_out = 2.0 * s - 1.0
+    y_val = x_val * 0.5 * (1.0 + tanh_out)
+    tl.store(y + y_off, y_val.to(y.dtype.element_ty), mask=mask)
+
+
+@triton.jit(do_not_specialize=['T'])
+def gelu_bwd_kernel(
+    x, dy, dx,
+    T,
+    D: tl.constexpr,
+    stride_x_row,
+    stride_dy_row,
+    stride_dx_row,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    x_off = row * stride_x_row + col
+    dy_off = row * stride_dy_row + col
+    dx_off = row * stride_dx_row + col
+    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
+    g_val = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
+    t = 0.79788456 * x_val * (1.0 + 0.044715 * x_val * x_val)
+    s = 1.0 / (1.0 + exp(-2.0 * t))
+    tanh_out = 2.0 * s - 1.0
+    ff = 0.5 * x_val * (
+        (1.0 - tanh_out * tanh_out) * (0.79788456 + 0.1070322243 * x_val * x_val)
+    ) + 0.5 * (1.0 + tanh_out)
+    dx_val = ff * g_val
+    tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
+
+
+@triton.jit(do_not_specialize=['T'])
+def sqrelu_fwd_kernel(
+    x, y,
+    T,
+    D: tl.constexpr,
+    stride_x_row,
+    stride_y_row,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    x_off = row * stride_x_row + col
+    y_off = row * stride_y_row + col
+    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
+    r = tl.maximum(x_val, 0.0)
+    y_val = r * r
+    tl.store(y + y_off, y_val.to(y.dtype.element_ty), mask=mask)
+
+
+@triton.jit(do_not_specialize=['T'])
+def sqrelu_bwd_kernel(
+    x, dy, dx,
+    T,
+    D: tl.constexpr,
+    stride_x_row,
+    stride_dy_row,
+    stride_dx_row,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < T
+    row = offs // D
+    col = offs % D
+    x_off = row * stride_x_row + col
+    dy_off = row * stride_dy_row + col
+    dx_off = row * stride_dx_row + col
+    x_val = tl.load(x + x_off, mask=mask, other=0.).to(tl.float32)
+    g_val = tl.load(dy + dy_off, mask=mask, other=0.).to(tl.float32)
+    dx_val = 2.0 * g_val * tl.maximum(x_val, 0.0)
+    tl.store(dx + dx_off, dx_val.to(dx.dtype.element_ty), mask=mask)
+
+
+@torch.compiler.disable
+def gelu_fwd_npu(x: torch.Tensor) -> torch.Tensor:
+    x = _ensure_inner_contiguous(x)
+    T, D = x.numel(), x.shape[-1]
+    y = _alloc_output(x)
+    grid = (triton.cdiv(T, STATIC_BLOCK_SIZE),)
+    gelu_fwd_kernel[grid](
+        x, y, T=T, D=D,
+        stride_x_row=_get_stride(x),
+        stride_y_row=_get_stride(y),
+        BLOCK_SIZE=STATIC_BLOCK_SIZE,
+        num_warps=STATIC_WARPS,
+    )
+    return y
+
+
+@torch.compiler.disable
+def gelu_bwd_npu(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    x = _ensure_inner_contiguous(x)
+    g = _ensure_inner_contiguous(g)
+    T, D = x.numel(), x.shape[-1]
+    dx = _alloc_output(x)
+    grid = (triton.cdiv(T, STATIC_BLOCK_SIZE),)
+    gelu_bwd_kernel[grid](
+        x, g, dx, T=T, D=D,
+        stride_x_row=_get_stride(x),
+        stride_dy_row=_get_stride(g),
+        stride_dx_row=_get_stride(dx),
+        BLOCK_SIZE=STATIC_BLOCK_SIZE,
+        num_warps=STATIC_WARPS,
+    )
+    return dx
+
+
+@torch.compiler.disable
+def sqrelu_fwd_npu(x: torch.Tensor) -> torch.Tensor:
+    x = _ensure_inner_contiguous(x)
+    T, D = x.numel(), x.shape[-1]
+    y = _alloc_output(x)
+    grid = (triton.cdiv(T, STATIC_BLOCK_SIZE),)
+    sqrelu_fwd_kernel[grid](
+        x, y, T=T, D=D,
+        stride_x_row=_get_stride(x),
+        stride_y_row=_get_stride(y),
+        BLOCK_SIZE=STATIC_BLOCK_SIZE,
+        num_warps=STATIC_WARPS,
+    )
+    return y
+
+
+@torch.compiler.disable
+def sqrelu_bwd_npu(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    x = _ensure_inner_contiguous(x)
+    g = _ensure_inner_contiguous(g)
+    T, D = x.numel(), x.shape[-1]
+    dx = _alloc_output(x)
+    grid = (triton.cdiv(T, STATIC_BLOCK_SIZE),)
+    sqrelu_bwd_kernel[grid](
+        x, g, dx, T=T, D=D,
+        stride_x_row=_get_stride(x),
+        stride_dy_row=_get_stride(g),
+        stride_dx_row=_get_stride(dx),
+        BLOCK_SIZE=STATIC_BLOCK_SIZE,
+        num_warps=STATIC_WARPS,
+    )
+    return dx
 
 
 @torch.compiler.disable
