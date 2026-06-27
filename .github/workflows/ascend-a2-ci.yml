@@ -42,7 +42,7 @@ jobs:
         python:
           - "3.11"
         os:
-          - "linux-aarch64-a2-1"
+          - "linux-aarch64-a2-8"
 
     runs-on: ${{ matrix.os }}
 
