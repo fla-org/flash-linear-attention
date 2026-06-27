@@ -34,7 +34,7 @@ cpu  = ["torch>=2.7.0", "triton>=3.3"]
 tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]
 benchmark = ["matplotlib", "datasets>=3.3.0"]
-test = ["pytest"]
+test = ["pytest", "pytest-xdist"]
 
 [project.urls]
 Homepage = "https://github.com/fla-org/flash-linear-attention"
@@ -127,6 +127,7 @@ force_grid_wrap = 0
 "__init__.py" = ["F401"]
 "fla/utils.py" = ["TCH004"]
 "evals/harness.py" = ["I", "TCH"]
+"tests/conftest.py" = ["E402", "I001"]
 "tests/*/*.py" = ["UP030"]
 "scripts/*.py" = ["C414"]
 "legacy/training/flame/*.py" = ["C408"]
