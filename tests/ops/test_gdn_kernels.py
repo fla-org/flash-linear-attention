@@ -19,10 +19,11 @@ import torch.nn.functional as F
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
 from fla.ops.gated_delta_rule.gate import gdn_gate_bwd, gdn_gate_chunk_cumsum, gdn_gate_fwd
+from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.wy_fast import prepare_wy_repr_bwd, recompute_w_u_fwd
+from fla.ops.utils.constant import RCP_LN2
 from fla.utils import assert_close, device
 
 
@@ -617,79 +618,94 @@ def chunk_bwd_dqkwg_ref(
     scale: float,
     chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    """Torch baseline for `chunk_bwd_kernel_dqkwg` (gated, state_v_first=False).
+    """Torch baseline for the `chunk_bwd_dqkwg` wrapper (gated, state_v_first=False).
 
-    Per chunk with h/dh the state and its gradient at chunk start, g_last = g[e-1]:
-        ds[t, s] = <do[t], v_new[s]>                          (s <= t)
-        dq[t]    = do[t] @ h
-        dk[t]    = v_new[t] @ dh
-        dw[t]    = -dv[t] @ h                                  (if USE_DW)
-        dq[t]    = dq[t] * exp2(g[t]) * scale + (ds_g @ k)[t]
-        dk[t]    = dk[t] * exp2(g_last - g[t]) + (ds_g^T @ q)[t]
-        dg[t]    = <dq[t], q[t]> - <dk[t], k[t]>
-    where ds_g[t, s] = ds[t, s] * exp2(g[t] - g[s]) * scale for s <= t else 0.
+    Obtained by reverse-mode autodiff of the forward sub-loss that the kernel
+    differentiates:
+
+        o      = chunk_fwd_o(q, k, v_new, h_start, g, scale)   # local output
+        h_end  = state_update(h_start, k, v_new, g)            # state at chunk end
+        L      = <do, o> + <dh, h_end>
+
+    with `v_new`, `h_start` (= the chunk-start states `h`), `do` and `dh` treated
+    as constants. `dh` is the gradient of the total loss w.r.t. the state at the
+    END of each chunk (as produced by `chunk_gated_delta_rule_bwd_dhu`), so it
+    already folds in all downstream propagation; the kernel only has to backprop
+    through the local chunk_fwd_o and the local state update.
+
+    Returns (dq, dk, dw, dg) matching the wrapper's output contract:
+        dq, dk : [B, T, H, K]    (summed over the GVA head group)
+        dw     : [B, T, HV, K]   (= -dv @ h_start, if w is not None)
+        dg     : [B, T, HV]      (gradient w.r.t. the chunk-cumsum gate)
     """
     B, T, H, K = q.shape
     HV = do.shape[2]
+    V = v_new.shape[3]
     BT = chunk_size
     assert T % BT == 0
+    NT = T // BT
+
+    q_r = q.detach().float().requires_grad_()
+    k_r = k.detach().float().requires_grad_()
+    g_r = g.detach().float().requires_grad_() if g is not None else None
 
     if HV != H:
-        q_hv = q.repeat_interleave(HV // H, dim=2)
-        k_hv = k.repeat_interleave(HV // H, dim=2)
+        q_hv = q_r.repeat_interleave(HV // H, dim=2)
+        k_hv = k_r.repeat_interleave(HV // H, dim=2)
     else:
-        q_hv, k_hv = q, k
+        q_hv, k_hv = q_r, k_r
 
-    dq = torch.empty(B, T, HV, K, dtype=q.dtype, device=q.device)
-    dk = torch.empty(B, T, HV, K, dtype=k.dtype, device=k.device)
-    dw = torch.empty(B, T, HV, K, dtype=w.dtype, device=w.device) if w is not None else None
-    dg = torch.empty(B, T, HV, dtype=torch.float32, device=q.device) if g is not None else None
-    m = torch.tril(torch.ones(BT, BT, device=q.device))
+    v_new_c = v_new.detach().float()
+    h_start = h.detach().float()          # [B, NT, HV, K, V]
+    dh_c = dh.detach().float()            # [B, NT, HV, K, V], dL/d(state at chunk end)
+    do_c = do.detach().float()
 
-    for it in range(0, T, BT):
-        s, e = it, it + BT
-        q_c = q_hv[:, s:e].float()
-        k_c = k_hv[:, s:e].float()
-        v_c = v_new[:, s:e].float()
-        do_c = do[:, s:e].float()
-        h_c = h[:, it].float()      # [B, HV, K, V]
-        dh_c = dh[:, it].float()
+    # local output (q_hv/k_hv are HV-shaped, so the ref sees H == HV)
+    o = chunk_fwd_o_ref(q_hv, k_hv, v_new_c, h_start, g_r, scale, BT)
 
-        # ds = do @ v^T
-        ds = torch.matmul(do_c.permute(0, 2, 1, 3), v_c.permute(0, 2, 1, 3).transpose(-1, -2))
-        b_dq = torch.einsum('bthv,bhkv->bthk', do_c, h_c)
-        b_dk = torch.einsum('bthv,bhkv->bthk', v_c, dh_c)
-
-        if dw is not None:
-            dv_c = dv[:, s:e].float()
-            b_dw = -torch.einsum('bthv,bhkv->bthk', dv_c, h_c)
-
-        if g is not None:
-            g_c = g[:, s:e].float()   # [B, BT, HV]
-            g_last = g_c[:, -1]       # [B, HV]
-            b_dq = b_dq * torch.exp2(g_c)[:, :, :, None] * scale
-            b_dk = b_dk * torch.exp2(g_last[:, None, :] - g_c)[:, :, :, None]
-            g_ch = g_c.permute(0, 2, 1)
-            gdiff = g_ch[:, :, :, None] - g_ch[:, :, None, :]  # g[t] - g[s]
-            ds = ds * torch.exp2(gdiff.masked_fill(~m.bool(), 0.0)) * m * scale
+    # per-chunk state update: h_end[it] = exp2(g_last)*h_start[it] + k^T @ (v_new * exp2(g_last - g))
+    h_end = torch.empty(B, NT, HV, K, V, dtype=torch.float32, device=q.device)
+    for it in range(NT):
+        s, e = it * BT, (it + 1) * BT
+        hs = h_start[:, it]               # [B, HV, K, V]
+        kc = k_hv[:, s:e]                 # [B, BT, HV, K]
+        vc = v_new_c[:, s:e]              # [B, BT, HV, V]
+        if g_r is not None:
+            gc = g_r[:, s:e]              # [B, BT, HV]
+            gl = gc[:, -1]                # [B, HV]
+            bv = vc * torch.exp2(gl[:, None, :, None] - gc[:, :, :, None])
+            he = hs * torch.exp2(gl)[:, :, None, None]
         else:
-            ds = ds * m
-            b_dq = b_dq * scale
+            bv = vc
+            he = hs
+        he = he + torch.einsum('bthk,bthv->bhkv', kc, bv)
+        h_end[:, it] = he
 
-        b_dq = b_dq + torch.matmul(ds, k_c.permute(0, 2, 1, 3)).permute(0, 2, 1, 3)
-        if g is not None:
-            b_dk = b_dk + torch.matmul(ds.transpose(-1, -2), q_c.permute(0, 2, 1, 3)).permute(0, 2, 1, 3)
-        else:
-            b_dk = b_dk + torch.matmul(ds.transpose(-1, -2), q_c.permute(0, 2, 1, 3)).permute(0, 2, 1, 3) * scale
+    loss = (do_c * o.float()).sum() + (dh_c * h_end).sum()
+    vars_ = [q_r, k_r] + ([g_r] if g_r is not None else [])
+    grads = torch.autograd.grad(loss, vars_, allow_unused=True)
+    dq = grads[0]
+    dk = grads[1]
+    dg = grads[2] if g_r is not None else None
+    # The kernel computes dg via the identity sum(dq*q) - sum(dk*k), which drops the
+    # ln2 factor that autodiff through exp2(g) produces. The missing RCP_LN2 is
+    # compensated by the orchestration's reverse cumsum (see chunk_gated_delta_rule_bwd),
+    # so the per-kernel dg contract is dL/d(g_cumsum) * RCP_LN2.
+    if dg is not None:
+        dg = dg * RCP_LN2
 
-        dq[:, s:e] = b_dq.to(q.dtype)
-        dk[:, s:e] = b_dk.to(k.dtype)
-        if dw is not None:
-            dw[:, s:e] = b_dw.to(w.dtype)
-        if dg is not None:
-            dg[:, s:e] = (b_dq * q_c).sum(-1) - (b_dk * k_c).sum(-1)
+    # dw = -dv @ h_start (the kernel computes this from the `dv` input; `w` only sets the shape)
+    if w is not None and dv is not None:
+        du_c = dv.detach().float()        # [B, T, HV, V]
+        dw = torch.empty(B, T, HV, K, dtype=torch.float32, device=q.device)
+        for it in range(NT):
+            s, e = it * BT, (it + 1) * BT
+            dw[:, s:e] = -torch.einsum('bthv,bhkv->bthk', du_c[:, s:e], h_start[:, it])
+        dw = dw.to(w.dtype)
+    else:
+        dw = None
 
-    return dq, dk, dw, dg
+    return dq.to(q.dtype), dk.to(k.dtype), dw, dg
 
 
 @pytest.mark.parametrize(
@@ -703,13 +719,6 @@ def chunk_bwd_dqkwg_ref(
         ]
     ],
 )
-@pytest.mark.skip(reason=(
-    "per-kernel backward baseline computes intermediate/partial gradients "
-    "(dq/dk/dw/dg) that do not directly equal torch.autograd's final input "
-    "gradients; the full backward pipeline is validated by test_gdn_full_bwd. "
-    "TODO: derive a baseline that matches the kernel's exact partial-gradient "
-    "contract."
-))
 def test_chunk_bwd_dqkwg(B: int, T: int, H: int, HV: int, D: int, dtype: torch.dtype):
     torch.manual_seed(42)
     BT = 64
@@ -869,84 +878,35 @@ def prepare_wy_repr_bwd_ref(
     g: torch.Tensor | None = None,
     chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Torch baseline for the gated `prepare_wy_repr_bwd_kernel` (state_v_first=False).
+    """Torch baseline for the `prepare_wy_repr_bwd` wrapper (state_v_first=False).
 
-    Mirrors the kernel structure: a V-loop (dv), a first K-loop (direct dk), the
-    `dA = A @ dA @ A` gradient through the (I+L)^{-1} inverse, and a second K-loop
-    that folds dA back into dk. Returns (dk, dv, db).
+    The kernel is the exact backward of `recompute_w_u_fwd`, including the gradient
+    through the WY inverse ``A = (I + L)^{-1}`` (which depends on k, beta, g). We
+    therefore recompute the *true* A from (k, g, beta) and let reverse-mode
+    autodiff flow through it:
+
+        A      = (I + L(k, g, beta))^{-1}
+        w, u   = recompute_w_u_fwd(k, v, beta, A, g)
+        L_loss = <dw, w> + <du, u>
+        dk, dv, dbeta = autograd(L_loss, [k, v, beta])
+
+    The passed `A` is intentionally not used for the gradient (the kernel likewise
+    assumes A is the true inverse of (I + L)); the test feeds the same true A to
+    the kernel so the forward values agree. Returns (dk, dv, dbeta) matching the
+    wrapper's output contract: dk is summed over the GVA head group.
     """
-    B, T, H, K = k.shape
-    HV = v.shape[2]
-    V = v.shape[3]
-    BT = A.shape[-1]
-    assert T % BT == 0
+    k_r = k.detach().float().requires_grad_()
+    v_r = v.detach().float().requires_grad_()
+    beta_r = beta.detach().float().requires_grad_()
+    g_r = g.detach().float().requires_grad_() if g is not None else None
 
-    if HV != H:
-        k_hv = k.repeat_interleave(HV // H, dim=2)
-    else:
-        k_hv = k
+    # true WY inverse, differentiable w.r.t. k, beta, g
+    A_r = chunk_kkt_solve_ref(k_r, g_r, beta_r, chunk_size)
+    w, u = recompute_w_u_fwd_ref(k_r, v_r, beta_r, A_r, g_r)
 
-    dk = torch.zeros(B, T, HV, K, dtype=k.dtype, device=k.device)
-    dv = torch.zeros(B, T, HV, V, dtype=v.dtype, device=v.device)
-    db = torch.zeros(B, T, HV, dtype=torch.float32, device=k.device)
-    m = torch.tril(torch.ones(BT, BT, device=k.device), diagonal=-1)
-
-    for it in range(0, T, BT):
-        s, e = it, it + BT
-        k_c = k_hv[:, s:e].float()                      # [B, BT, HV, K]
-        v_c = v[:, s:e].float()                         # [B, BT, HV, V]
-        beta_c = beta[:, s:e].float()                   # [B, BT, HV]
-        A_c = A[:, s:e].float().permute(0, 2, 1, 3)     # [B, HV, BT, BT]
-        dw_c = dw[:, s:e].float()                       # [B, BT, HV, K]
-        du_c = du[:, s:e].float()                       # [B, BT, HV, V]
-        if g is not None:
-            g_c = g[:, s:e].float()
-            g_exp = torch.exp2(g_c)
-
-        # V-loop
-        v_beta = v_c * beta_c[:, :, :, None]
-        dA = torch.matmul(du_c.permute(0, 2, 1, 3), v_beta.permute(0, 2, 1, 3).transpose(-1, -2))
-        dvb = torch.matmul(A_c, du_c.permute(0, 2, 1, 3))
-        dv_c = (dvb * beta_c.permute(0, 2, 1)[:, :, :, None]).permute(0, 2, 1, 3)
-        dv[:, s:e] = dv_c.to(v.dtype)
-        db_c = (dvb * v_c.permute(0, 2, 1, 3)).sum(-1)  # [B, HV, BT]
-
-        # K-loop 1
-        if g is not None:
-            k_bg = k_c * (beta_c * g_exp)[:, :, :, None]
-        else:
-            k_bg = k_c * beta_c[:, :, :, None]
-        dA = dA + torch.matmul(dw_c.permute(0, 2, 1, 3), k_bg.permute(0, 2, 1, 3).transpose(-1, -2))
-        dkbg = torch.matmul(A_c, dw_c.permute(0, 2, 1, 3))
-        if g is not None:
-            dk_c = dkbg * (g_exp * beta_c).permute(0, 2, 1)[:, :, :, None]
-            db_c = db_c + (dkbg * k_c.permute(0, 2, 1, 3) * g_exp.permute(0, 2, 1)[:, :, :, None]).sum(-1)
-        else:
-            dk_c = dkbg * beta_c.permute(0, 2, 1)[:, :, :, None]
-            db_c = db_c + (dkbg * k_c.permute(0, 2, 1, 3)).sum(-1)
-        dk[:, s:e] = dk_c.permute(0, 2, 1, 3).to(k.dtype)
-
-        # process dA through the inverse
-        dA = dA * m
-        dA = torch.matmul(dA, A_c)
-        dA = torch.matmul(A_c, dA)
-        if g is not None:
-            g_ch = g_c.permute(0, 2, 1)
-            gdiff = g_ch[:, :, :, None] - g_ch[:, :, None, :]
-            dA = dA * torch.exp2(gdiff)
-        dA = -dA * m
-
-        # K-loop 2
-        k_beta = k_c * beta_c[:, :, :, None]
-        dkb = torch.matmul(dA, k_c.permute(0, 2, 1, 3))
-        db_c = db_c + (dkb * k_c.permute(0, 2, 1, 3)).sum(-1)
-        dk2 = dkb * beta_c.permute(0, 2, 1)[:, :, :, None] + \
-            torch.matmul(k_beta.permute(0, 2, 1, 3).transpose(-1, -2), dA).transpose(-1, -2)
-        dk_acc = dk[:, s:e].float().permute(0, 2, 1, 3) + dk2
-        dk[:, s:e] = dk_acc.permute(0, 2, 1, 3).to(k.dtype)
-        db[:, s:e] = db_c.permute(0, 2, 1)
-
-    return dk, dv, db
+    loss = (dw.detach().float() * w.float()).sum() + (du.detach().float() * u.float()).sum()
+    dk, dv, db = torch.autograd.grad(loss, [k_r, v_r, beta_r])
+    return dk.to(k.dtype), dv.to(v.dtype), db
 
 
 @pytest.mark.parametrize(
@@ -962,23 +922,22 @@ def prepare_wy_repr_bwd_ref(
         ]
     ],
 )
-@pytest.mark.skip(reason=(
-    "per-kernel backward baseline computes intermediate/partial gradients "
-    "(dk/dv/dbeta) that do not directly equal torch.autograd's final input "
-    "gradients; the full backward pipeline is validated by test_gdn_full_bwd. "
-    "TODO: derive a baseline that matches the kernel's exact partial-gradient "
-    "contract."
-))
 def test_prepare_wy_repr_bwd(B: int, T: int, H: int, HV: int, D: int, use_g: bool, dtype: torch.dtype):
     torch.manual_seed(42)
     BT = 64
     k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    # normalize k so the (I + L) inverse is well-conditioned (production always
+    # L2-normalizes q/k before the op, as in test_gdn_full_bwd); random k makes
+    # the inverse ill-conditioned and blows up autodiff through it.
+    k = F.normalize(k, p=2, dim=-1)
     v = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     beta = torch.rand(B, T, HV, dtype=dtype, device=device).sigmoid()
-    A = _make_wy_inverse(B, T, HV, BT, dtype)
+    g = torch.randn(B, T, HV, dtype=torch.float32, device=device) * 0.1 if use_g else None
+    # the kernel's backward assumes A is the true (I + L)^{-1}; feed the true A so
+    # the kernel and the autograd baseline see identical forward values.
+    A = chunk_kkt_solve_ref(k, g, beta, BT)
     dw = torch.randn(B, T, HV, D, dtype=dtype, device=device)
     du = torch.randn(B, T, HV, D, dtype=dtype, device=device)
-    g = torch.randn(B, T, HV, dtype=torch.float32, device=device) * 0.1 if use_g else None
 
     dk_ref, dv_ref, db_ref = prepare_wy_repr_bwd_ref(k, v, beta, A, dw, du, g, BT)
     dk_tri, dv_tri, db_tri, _ = prepare_wy_repr_bwd(k=k, v=v, beta=beta, A=A, dw=dw, du=du, g=g)
@@ -1065,39 +1024,80 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
     h0: torch.Tensor | None,
     do: torch.Tensor,
     dht: torch.Tensor | None,
+    dv_local: torch.Tensor,
     scale: float,
     chunk_size: int = 64,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     """Torch baseline for `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64`.
 
-    Obtained by reverse-mode autodiff (torch.autograd) of the forward
-    (fwd_h + fwd_o) torch baselines, with loss = sum(do * o) + sum(dht * final_state).
-    This gives exactly:
-        dv2 = dL/du,  dh0 = dL/dh0,  dh = dL/dh (per-chunk state).
+    The kernel's `dh` is the gradient w.r.t. the chunk-*end* states, produced by a
+    reverse recurrence that autodiff on the forward states cannot reproduce
+    directly (the reverse-pass gradient flows through a running accumulator, not
+    through the stored forward states). We therefore evaluate that same reverse
+    recurrence in plain torch (state_v_first=False, USE_GK=False):
+
+        b_dh = dht
+        for it = NT-1 ... 0:
+            dh[it]  = b_dh
+            b_dv    = (k[it] @ b_dh) * exp2(g_last[it] - g[it]) + dv_local[it]
+            dv2[it] = b_dv
+            b_dh    = b_dh * exp2(g_last[it])
+                      + (q_gated[it]^T @ do[it]) * scale
+                      - w[it]^T @ b_dv
+        dh0   = b_dh
+
+    Returns (dh, dh0, dv2) matching the kernel. `u` is unused (the kernel consumes
+    `dv_local` instead) and kept only for a uniform call signature.
     """
-    q_r = q.detach().float().requires_grad_()
-    k_r = k.detach().float().requires_grad_()
-    w_r = w.detach().float().requires_grad_()
-    u_r = u.detach().float().requires_grad_()
-    h0_r = h0.detach().float().requires_grad_() if h0 is not None else None
+    del u  # unused: the kernel differentiates w.r.t. dv_local, not u
+    B, T, H, K = k.shape
+    HV = do.shape[2]
+    V = do.shape[3]
+    BT = chunk_size
+    assert T % BT == 0
+    NT = T // BT
 
-    h_all, v_new, final_state = chunk_gated_delta_rule_fwd_h_ref(
-        k_r, w_r, u_r, g.float() if g is not None else None, h0_r, chunk_size,
-    )
-    o = chunk_fwd_o_ref(
-        q_r, k_r, v_new, h_all,
-        g.float() if g is not None else None,
-        scale, chunk_size,
-    )
-    loss = (do.float() * o).sum()
+    if HV != H:
+        q_hv = q.float().repeat_interleave(HV // H, dim=2)
+        k_hv = k.float().repeat_interleave(HV // H, dim=2)
+    else:
+        q_hv = q.float()
+        k_hv = k.float()
+    w_f = w.float()
+    do_f = do.float()
+    dv_f = dv_local.float()
+    g_f = g.float() if g is not None else None
+
+    dh = torch.zeros(B, NT, HV, K, V, dtype=torch.float32, device=k.device)
+    dv2 = torch.zeros(B, T, HV, V, dtype=torch.float32, device=k.device)
     if dht is not None:
-        loss = loss + (dht.float() * final_state).sum()
+        b_dh = dht.float().clone()
+    else:
+        b_dh = torch.zeros(B, HV, K, V, dtype=torch.float32, device=k.device)
 
-    targets = [h_all, u_r] + ([h0_r] if h0_r is not None else [])
-    grads = torch.autograd.grad(loss, targets)
-    dh = grads[0]
-    dv2 = grads[1]
-    dh0 = grads[2] if h0_r is not None else None
+    for it in range(NT - 1, -1, -1):
+        s, e = it * BT, (it + 1) * BT
+        dh[:, it] = b_dh
+        q_c = q_hv[:, s:e]            # [B, BT, HV, K]
+        k_c = k_hv[:, s:e]            # [B, BT, HV, K]
+        w_c = w_f[:, s:e]             # [B, BT, HV, K]
+        do_c = do_f[:, s:e]           # [B, BT, HV, V]
+        dv_c = dv_f[:, s:e]           # [B, BT, HV, V]
+        kdh = torch.einsum('bthk,bhkv->bthv', k_c, b_dh)   # [B, BT, HV, V]
+        if g_f is not None:
+            g_c = g_f[:, s:e]         # [B, BT, HV]
+            g_last = g_c[:, -1]       # [B, HV]
+            b_dv = kdh * torch.exp2(g_last[:, None, :, None] - g_c[:, :, :, None]) + dv_c
+            q_gated = q_c * torch.exp2(g_c)[:, :, :, None]
+            b_dh = b_dh * torch.exp2(g_last)[:, :, None, None]
+        else:
+            b_dv = kdh + dv_c
+            q_gated = q_c
+        dv2[:, s:e] = b_dv
+        b_dh = b_dh + torch.einsum('bthk,bthv->bhkv', q_gated, do_c) * scale
+        b_dh = b_dh - torch.einsum('bthk,bthv->bhkv', w_c, b_dv)
+
+    dh0 = b_dh if h0 is not None else None
     return dh, dh0, dv2
 
 
@@ -1113,12 +1113,6 @@ def chunk_gated_delta_rule_bwd_dhu_ref(
         ]
     ],
 )
-@pytest.mark.skip(reason=(
-    "the autograd reference (dL/dh) indexes the per-chunk state gradient "
-    "differently from the kernel's dh output (off-by-one chunk boundary); the "
-    "full backward pipeline is validated by test_gdn_full_bwd. TODO: align the "
-    "baseline's dh indexing with the kernel contract."
-))
 def test_chunk_gated_delta_rule_bwd_dhu(
     B: int,
     T: int,
@@ -1140,11 +1134,11 @@ def test_chunk_gated_delta_rule_bwd_dhu(
     h0 = torch.randn(B, HV, D, D, dtype=torch.float32, device=device) if use_h0 else None
     dht = torch.randn(B, HV, D, D, dtype=torch.float32, device=device)
 
-    dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
-        q, k, w, u, g, h0, do, dht, scale, BT,
-    )
     # the kernel takes dv_local as input; compute it via its own baseline
     dv_local = chunk_bwd_dv_local_ref(q, k, do, g, scale, BT)
+    dh_ref, dh0_ref, dv2_ref = chunk_gated_delta_rule_bwd_dhu_ref(
+        q, k, w, u, g, h0, do, dht, dv_local, scale, BT,
+    )
     dh_tri, dh0_tri, dv2_tri = chunk_gated_delta_rule_bwd_dhu(
         q=q, k=k, w=w, g=g, h0=h0, dht=dht, do=do, dv=dv_local, scale=scale, chunk_size=BT,
     )
