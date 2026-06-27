@@ -1,0 +1,28 @@
+name: check-no-oj
+
+# Merge gate: the `tests/oj/` directory is a throwaway scratch space for
+# OJ-style kernel debugging on self-hosted runners (see oj.yml). It must
+# never reach main. This gate fails any PR that still carries it.
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  no-oj-tests:
+    name: Ensure tests/oj/ is removed before merge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Fail if tests/oj/ is present
+        shell: bash
+        run: |
+          if [ -d tests/oj ] && [ -n "$(ls -A tests/oj 2>/dev/null)" ]; then
+            echo "::error::tests/oj/ is a temporary debug directory and must be deleted before merging. Found files:"
+            ls -la tests/oj
+            exit 1
+          fi
+          echo "OK: no tests/oj/ directory present."
