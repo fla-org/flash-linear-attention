@@ -40,9 +40,6 @@ on:
 jobs:
   test-ops:
     runs-on: ${{ inputs.runner }}
-    permissions:
-      contents: read
-      issues: write
     env:
       FLA_CI_ENV: 1
 
