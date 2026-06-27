@@ -92,32 +92,51 @@ jobs:
 
       - name: Run pytest on ops test files (dispatch DISABLED, Triton baseline)
         if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false'
-        id: triton-baseline
-        continue-on-error: true
         shell: bash
         env:
           FLA_DISABLE_BACKEND_DISPATCH: "1"
         run: |
           $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
 
-      - name: Comment on PR when Triton baseline fails
-        if: steps.triton-baseline.outcome == 'failure' && github.event_name == 'pull_request'
+      - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
+        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
+        id: dispatch-coverage
+        continue-on-error: true
+        shell: bash
+        run: |
+          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }} 2>&1 | tee /tmp/fla-dispatch-coverage.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Comment on PR when dispatch coverage fails
+        if: steps.dispatch-coverage.outcome == 'failure' && github.event_name == 'pull_request'
         continue-on-error: true
         uses: actions/github-script@v9.0.0
         with:
           script: |
+            const fs = require('fs');
+            let tail = '(log unavailable)';
+            try {
+              const lines = fs.readFileSync('/tmp/fla-dispatch-coverage.log', 'utf8').trimEnd().split('\n');
+              tail = lines.slice(-40).join('\n');
+            } catch (e) {}
+            const body = [
+              '⚠️ **Dispatch coverage (backend) failed** while the Triton baseline passed.',
+              '',
+              'The dispatched backend (e.g. TileLang) disagrees with the Triton reference. CI is not blocked, but please review the backend changes.',
+              '',
+              '<details><summary>Last 40 lines of the failure log</summary>',
+              '',
+              '```text',
+              tail,
+              '```',
+              '</details>',
+            ].join('\n');
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '⚠️ **Triton baseline (dispatch disabled) failed** on this runner.\n\nThe Triton backend produced incorrect results for at least one op (see #640). Dispatch coverage (e.g. TileLang) remains the gated path, so this does not block CI — please review the Triton kernel changes.'
+              body,
             });
-
-      - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
-        if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
-        shell: bash
-        run: |
-          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
 
   test-models:
     runs-on: ${{ inputs.runner }}
