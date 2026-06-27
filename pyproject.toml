@@ -29,7 +29,7 @@ cuda = ["torch>=2.7.0", "triton>=3.3"]
 # on stable, triton-rocm on nightly, etc.).
 rocm = ["torch>=2.7.0"]
 xpu  = ["torch>=2.7.0"]
-npu  = ["torch==2.7.1", "torch_npu==2.7.1", "torchvision==0.22.1", "triton-ascend==3.2.1"]
+npu  = ["torch==2.7.1", "torch_npu==2.7.1.post4", "torchvision==0.22.1", "triton-ascend==3.2.1"]
 cpu  = ["torch>=2.7.0", "triton>=3.3"]
 tilelang = ["tilelang>=0.1.9"]
 conv1d = ["causal-conv1d>=1.4.0"]
