@@ -100,6 +100,7 @@ def causal_conv1d_fwd_kernel(
     chunk_indices,
     B,
     T,
+    NT,
     stride_x_n,
     stride_x_t,
     stride_x_d,
@@ -116,61 +117,63 @@ def causal_conv1d_fwd_kernel(
     USE_INITIAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_d, i_c0, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    # Grid-stride loop over the time (chunk) dimension; see bwd kernel.
+    for i_c in tl.range(i_c0, NT, tl.num_programs(1)):
+        if IS_VARLEN:
+            i_n, i_t = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+            T = eos - bos
+            p_x = x + bos * stride_x_t
+            p_y = y + bos * stride_y_t
+        else:
+            i_n = i_b
+            i_t = i_c
+            bos = (i_b * T).to(tl.int64)
+            p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
+            p_y = y + tl.cast(i_b, tl.int64) * stride_y_n
 
-    if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-        p_x = x + bos * stride_x_t
-        p_y = y + bos * stride_y_t
-    else:
-        i_n = i_b
-        bos = (i_b * T).to(tl.int64)
-        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
-        p_y = y + tl.cast(i_b, tl.int64) * stride_y_n
+        o_d = i_d * BD + tl.arange(0, BD)
+        o_w = tl.arange(0, BW) + W - BW
+        m_d = o_d < D
+        m_w = o_w >= 0
 
-    o_d = i_d * BD + tl.arange(0, BD)
-    o_w = tl.arange(0, BW) + W - BW
-    m_d = o_d < D
-    m_w = o_w >= 0
+        if HAS_WEIGHT:
+            b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0).to(tl.float32)
 
-    if HAS_WEIGHT:
-        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0).to(tl.float32)
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = (o_t >= 0) & (o_t < T)
+        b_y = tl.zeros((BT, BD), dtype=tl.float32)
 
-    o_t = i_t * BT + tl.arange(0, BT)
-    m_t = (o_t >= 0) & (o_t < T)
-    b_y = tl.zeros((BT, BD), dtype=tl.float32)
-
-    for i_w in tl.static_range(-W + 1, 1):
-        o_x = o_t + i_w
-        m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :]
-        b_yi = tl.load(
-            p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d,
-            mask=m_x,
-            other=0,
-        ).to(tl.float32)
-
-        if USE_INITIAL_STATE:
-            m_c = ((o_x + W >= 0) & (o_x < 0))[:, None] & m_d[None, :]
-            b_yi += tl.load(
-                initial_state + i_n * D * W + o_d[None, :] * W + (o_x + W)[:, None],
-                mask=m_c,
+        for i_w in tl.static_range(-W + 1, 1):
+            o_x = o_t + i_w
+            m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :]
+            b_yi = tl.load(
+                p_x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d,
+                mask=m_x,
                 other=0,
             ).to(tl.float32)
 
-        if HAS_WEIGHT:
-            b_yi = b_yi * tl.sum(b_w * (o_w == (i_w + W - 1)), 1)[None, :]
-        b_y += b_yi
+            if USE_INITIAL_STATE:
+                m_c = ((o_x + W >= 0) & (o_x < 0))[:, None] & m_d[None, :]
+                b_yi += tl.load(
+                    initial_state + i_n * D * W + o_d[None, :] * W + (o_x + W)[:, None],
+                    mask=m_c,
+                    other=0,
+                ).to(tl.float32)
 
-    if HAS_BIAS:
-        b_y += tl.load(bias + o_d, mask=m_d).to(tl.float32)[None, :]
+            if HAS_WEIGHT:
+                b_yi = b_yi * tl.sum(b_w * (o_w == (i_w + W - 1)), 1)[None, :]
+            b_y += b_yi
 
-    tl.store(
-        p_y + o_t[:, None] * stride_y_t + o_d[None, :] * stride_y_d,
-        tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding='rtne'),
-        mask=m_t[:, None] & m_d[None, :],
-    )
+        if HAS_BIAS:
+            b_y += tl.load(bias + o_d, mask=m_d).to(tl.float32)[None, :]
+
+        tl.store(
+            p_y + o_t[:, None] * stride_y_t + o_d[None, :] * stride_y_d,
+            tl.cast(b_y, dtype=y.dtype.element_ty, fp_downcast_rounding='rtne'),
+            mask=m_t[:, None] & m_d[None, :],
+        )
 
 
 @triton.jit
@@ -406,6 +409,7 @@ def causal_conv1d_bwd_kernel(
     chunk_indices,
     B,
     T,
+    NT,
     stride_x_n,
     stride_x_t,
     stride_x_d,
@@ -426,98 +430,103 @@ def causal_conv1d_bwd_kernel(
     USE_FINAL_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    if IS_VARLEN:
-        i_tg = i_t
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(chunk_indices + i_t * 2 + 1).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
-        T = eos - bos
-        p_x = x + bos * stride_x_t
-        p_dy = dy + bos * stride_dy_t
-        p_dx = dx + bos * stride_dx_t
-    else:
-        i_tg = i_b * tl.num_programs(1) + i_t
-        i_n = i_b
-        p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
-        p_dy = dy + tl.cast(i_b, tl.int64) * stride_dy_n
-        p_dx = dx + tl.cast(i_b, tl.int64) * stride_dx_n
-
-    o_d = i_d * BD + tl.arange(0, BD)
-    o_w = tl.arange(0, BW) + W - BW
-    m_d = o_d < D
-    m_w = o_w >= 0
-
-    o_t = i_t * BT + tl.arange(0, BT)
-    m_t = (o_t >= 0) & (o_t < T)
-
-    b_x = tl.zeros((BT, BD), dtype=tl.float32)
-    if HAS_WEIGHT:
-        b_x = tl.load(
-            p_x + o_t[:, None] * stride_x_t + o_d[None, :] * stride_x_d,
-            mask=m_t[:, None] & m_d[None, :],
-            other=0,
-        ).to(tl.float32)
-        b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0).to(tl.float32)
-
-    b_dx = tl.zeros((BT, BD), dtype=tl.float32)
-    if HAS_BIAS:
-        b_db = tl.zeros((BD,), dtype=tl.float32)
-
-    for i_w in tl.static_range(0, W):
-        o_dy = o_t + i_w
-        m_dy = ((o_dy >= 0) & (o_dy < T))[:, None] & m_d[None, :]
-        b_dy = tl.load(
-            p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d,
-            mask=m_dy,
-            other=0,
-        ).to(tl.float32)
-
-        if HAS_WEIGHT:
-            b_wdy = b_dy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)[None, :]
-            b_dw = tl.sum(b_dy * b_x, 0)
-            if USE_INITIAL_STATE:
-                mask_head_rows = (o_t < i_w) & (o_t < T)
-                b_dy_head = tl.load(
-                    p_dy + o_t[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d,
-                    mask=(mask_head_rows[:, None] & m_d[None, :]),
-                    other=0.0,
-                ).to(tl.float32)
-                o_c = W - i_w + o_t
-                mask_c = (mask_head_rows & (o_c >= 1) & (o_c < W))
-                b_xc = tl.load(
-                    initial_state + i_n * D * W + o_d[None, :] * W + o_c[:, None],
-                    mask=(mask_c[:, None] & m_d[None, :]),
-                    other=0.0,
-                ).to(tl.float32)
-                b_dw += tl.sum(b_dy_head * b_xc, 0)
-            tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+    i_d, i_c0, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    # Grid-stride loop over the time (chunk) dimension. The launch grid's dim-1
+    # is capped at min(NT, nt_tile) so it never exceeds the NPU 65535 coreDim
+    # limit; each program then strides over multiple chunks when NT is large.
+    for i_c in tl.range(i_c0, NT, tl.num_programs(1)):
+        if IS_VARLEN:
+            i_tg = i_c
+            i_n, i_t = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
+            bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+            T = eos - bos
+            p_x = x + bos * stride_x_t
+            p_dy = dy + bos * stride_dy_t
+            p_dx = dx + bos * stride_dx_t
         else:
-            b_wdy = b_dy
+            i_tg = i_b * NT + i_c
+            i_n = i_b
+            i_t = i_c
+            p_x = x + tl.cast(i_b, tl.int64) * stride_x_n
+            p_dy = dy + tl.cast(i_b, tl.int64) * stride_dy_n
+            p_dx = dx + tl.cast(i_b, tl.int64) * stride_dx_n
 
-        if HAS_BIAS and i_w == 0:
-            b_db += tl.sum(b_dy, 0)
-        b_dx += b_wdy
+        o_d = i_d * BD + tl.arange(0, BD)
+        o_w = tl.arange(0, BW) + W - BW
+        m_d = o_d < D
+        m_w = o_w >= 0
 
-    if HAS_BIAS:
-        b_db = tl.cast(b_db, dtype=db.dtype.element_ty, fp_downcast_rounding='rtne')
-        tl.store(db + i_tg * D + o_d, b_db, mask=m_d)
+        o_t = i_t * BT + tl.arange(0, BT)
+        m_t = (o_t >= 0) & (o_t < T)
 
-    if USE_FINAL_STATE:
-        if i_t * BT + BT >= T - W:
-            start_tok = T - (W - 1)
-            offset = i_t * BT + tl.arange(0, BT)
-            tok_idx = offset - start_tok
-            mask = (offset >= start_tok) & (offset < T)
-            w_idx = 1 + tok_idx
-            dht_off = i_n * D * W + o_d[None, :] * W + w_idx[:, None]
-            b_dht = tl.load(dht + dht_off, mask=mask[:, None] & m_d[None, :], other=0.).to(tl.float32)
-            b_dx += b_dht
+        b_x = tl.zeros((BT, BD), dtype=tl.float32)
+        if HAS_WEIGHT:
+            b_x = tl.load(
+                p_x + o_t[:, None] * stride_x_t + o_d[None, :] * stride_x_d,
+                mask=m_t[:, None] & m_d[None, :],
+                other=0,
+            ).to(tl.float32)
+            b_w = tl.load(weight + o_d[:, None] * W + o_w, mask=m_d[:, None] & m_w, other=0).to(tl.float32)
 
-    tl.store(
-        p_dx + o_t[:, None] * stride_dx_t + o_d[None, :] * stride_dx_d,
-        tl.cast(b_dx, dtype=dx.dtype.element_ty, fp_downcast_rounding='rtne'),
-        mask=m_t[:, None] & m_d[None, :],
-    )
+        b_dx = tl.zeros((BT, BD), dtype=tl.float32)
+        if HAS_BIAS:
+            b_db = tl.zeros((BD,), dtype=tl.float32)
+
+        for i_w in tl.static_range(0, W):
+            o_dy = o_t + i_w
+            m_dy = ((o_dy >= 0) & (o_dy < T))[:, None] & m_d[None, :]
+            b_dy = tl.load(
+                p_dy + o_dy[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d,
+                mask=m_dy,
+                other=0,
+            ).to(tl.float32)
+
+            if HAS_WEIGHT:
+                b_wdy = b_dy * tl.sum(b_w * (o_w == (W - i_w - 1)), 1)[None, :]
+                b_dw = tl.sum(b_dy * b_x, 0)
+                if USE_INITIAL_STATE:
+                    mask_head_rows = (o_t < i_w) & (o_t < T)
+                    b_dy_head = tl.load(
+                        p_dy + o_t[:, None] * stride_dy_t + o_d[None, :] * stride_dy_d,
+                        mask=(mask_head_rows[:, None] & m_d[None, :]),
+                        other=0.0,
+                    ).to(tl.float32)
+                    o_c = W - i_w + o_t
+                    mask_c = (mask_head_rows & (o_c >= 1) & (o_c < W))
+                    b_xc = tl.load(
+                        initial_state + i_n * D * W + o_d[None, :] * W + o_c[:, None],
+                        mask=(mask_c[:, None] & m_d[None, :]),
+                        other=0.0,
+                    ).to(tl.float32)
+                    b_dw += tl.sum(b_dy_head * b_xc, 0)
+                tl.store(dw + i_tg * D * W + o_d * W + W - i_w - 1, b_dw.to(dw.dtype.element_ty), mask=m_d)
+            else:
+                b_wdy = b_dy
+
+            if HAS_BIAS and i_w == 0:
+                b_db += tl.sum(b_dy, 0)
+            b_dx += b_wdy
+
+        if HAS_BIAS:
+            b_db = tl.cast(b_db, dtype=db.dtype.element_ty, fp_downcast_rounding='rtne')
+            tl.store(db + i_tg * D + o_d, b_db, mask=m_d)
+
+        if USE_FINAL_STATE:
+            if i_t * BT + BT >= T - W:
+                start_tok = T - (W - 1)
+                offset = i_t * BT + tl.arange(0, BT)
+                tok_idx = offset - start_tok
+                mask = (offset >= start_tok) & (offset < T)
+                w_idx = 1 + tok_idx
+                dht_off = i_n * D * W + o_d[None, :] * W + w_idx[:, None]
+                b_dht = tl.load(dht + dht_off, mask=mask[:, None] & m_d[None, :], other=0.).to(tl.float32)
+                b_dx += b_dht
+
+        tl.store(
+            p_dx + o_t[:, None] * stride_dx_t + o_d[None, :] * stride_dx_d,
+            tl.cast(b_dx, dtype=dx.dtype.element_ty, fp_downcast_rounding='rtne'),
+            mask=m_t[:, None] & m_d[None, :],
+        )
 
 
 @triton.heuristics({
@@ -738,7 +747,11 @@ def _launch_fwd_core(
     y = torch.zeros_like(x, memory_format=torch.contiguous_format)
     stride_y_n, stride_y_t, stride_y_d = y.stride()
 
-    grid = (triton.cdiv(D, BD), NT, B)
+    d_tiles = triton.cdiv(D, BD)
+    # Cap grid dim-1 so the launch volume stays <= 65535 (NPU coreDim limit);
+    # the kernel grid-strides over the remaining chunks.
+    nt_tile = max(1, 65535 // max(d_tiles * B, 1))
+    grid = (d_tiles, min(NT, nt_tile), B)
     causal_conv1d_fwd_kernel[grid](
         x=x,
         y=y,
@@ -749,6 +762,7 @@ def _launch_fwd_core(
         chunk_indices=chunk_indices,
         B=B,
         T=T,
+        NT=NT,
         D=D,
         W=W,
         BT=BT,
@@ -892,7 +906,11 @@ def causal_conv1d_bwd_npu(
         stride_dy_n, stride_dy_t, stride_dy_d = dy_conv.stride()
         dw = weight.new_empty(B * NT, *weight.shape, dtype=torch.float) if weight is not None else None
         db = bias.new_empty(B * NT, *bias.shape, dtype=torch.float) if bias is not None else None
-        grid = (triton.cdiv(D, BD), NT, B)
+        d_tiles = triton.cdiv(D, BD)
+        # Cap grid dim-1 so the launch volume stays <= 65535 (NPU coreDim
+        # limit); the kernel grid-strides over the remaining chunks.
+        nt_tile = max(1, 65535 // max(d_tiles * B, 1))
+        grid = (d_tiles, min(NT, nt_tile), B)
         causal_conv1d_bwd_kernel[grid](
             x=x,
             weight=weight,
@@ -906,6 +924,7 @@ def causal_conv1d_bwd_npu(
             chunk_indices=chunk_indices,
             B=B,
             T=T,
+            NT=NT,
             D=D,
             W=W,
             BT=BT,
