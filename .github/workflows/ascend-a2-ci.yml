@@ -59,7 +59,7 @@ jobs:
 
     env:
       FLA_CI_ENV: 1
-      ASCEND_RT_VISIBLE_DEVICES: "0"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout
@@ -107,6 +107,8 @@ jobs:
 
       - name: Run module and utils op tests
         shell: bash
+        env:
+          FLA_NPU_XDIST: "1"
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
-          pytest -s -v --exitfirst tests/modules tests/ops/utils
+          pytest -s -v --exitfirst -n 8 --dist loadfile tests/modules tests/ops/utils
