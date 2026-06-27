@@ -11,6 +11,7 @@ from ._compat import (  # noqa: F401
     SUPPORTS_AUTOTUNE_CACHE,
     TRITON_ABOVE_3_4_0,
     TRITON_ABOVE_3_5_1,
+    TRITON_ABOVE_3_7_1,
     autotune_cache_kwargs,
 )
 from ._config import (  # noqa: F401
