@@ -5,17 +5,19 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import inspect
 import os
+from unittest.mock import patch
+
+import pytest
+import torch
+
+from fla.utils import device_torch_lib
 
 _worker = os.environ.get("PYTEST_XDIST_WORKER")
 if os.environ.get("FLA_NPU_XDIST") == "1" and _worker and _worker.startswith("gw"):
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = _worker[2:]
 
-import inspect
-from unittest.mock import patch
-
-import pytest
-import torch
 
 try:
     from torch.compiler import is_compiling
@@ -23,7 +25,6 @@ except ImportError:
     def is_compiling():
         return False
 
-from fla.utils import device_torch_lib
 
 # -----------------------------------------------------------------------------
 # Configuration
