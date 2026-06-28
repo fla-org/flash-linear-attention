@@ -15,7 +15,11 @@ from fla.ops.utils.op import safe_dot
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem
 
-NUM_WARPS = [2, 4] if IS_NVIDIA_HOPPER else [2, 4, 8]
+# Triton miscompiles `prepare_wy_repr_bwd_kernel` with num_warps=4 on Hopper
+# (sm_90) for BT=64: it produces incorrect dk/dbeta (and can raise an illegal
+# memory access), while num_warps=2 is correct (see #984). Restrict the Hopper
+# autotune configs to num_warps=2 until the upstream compiler issue is resolved.
+NUM_WARPS = [2] if IS_NVIDIA_HOPPER else [2, 4, 8]
 
 
 @triton.heuristics({
