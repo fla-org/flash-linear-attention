@@ -21,6 +21,35 @@ BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
 
 
+def _prune_gla_bwd_configs(configs, named_args, **kwargs):
+    """Drop configs whose block exceeds the tensor dims.
+
+    Triton's software-pipelined ``make_block_ptr`` can emit an out-of-bounds
+    prefetch when a block is larger than the tensor along a dimension (e.g.
+    ``BV=128`` for ``V=64``), even with ``boundary_check``. ``K`` and ``V`` are
+    kernel ``constexpr`` and are not forwarded to ``early_config_prune``, so we
+    recover them from the last dimension of the ``k``/``q`` and ``v``/``do``
+    tensors. Keep only configs whose block fits within ``K`` and ``V`` so
+    autotune never benchmarks those oversized configs. Always keep at least one
+    config.
+    """
+    K = V = None
+    for name in ('k', 'q'):
+        t = named_args.get(name)
+        if t is not None:
+            K = t.shape[-1]
+            break
+    for name in ('v', 'do', 'dv'):
+        t = named_args.get(name)
+        if t is not None:
+            V = t.shape[-1]
+            break
+    if K is None or V is None:
+        return configs
+    pruned = [c for c in configs if c.kwargs['BK'] <= K and c.kwargs['BV'] <= V]
+    return pruned or [min(configs, key=lambda c: (c.kwargs['BK'], c.kwargs['BV']))]
+
+
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
@@ -585,7 +614,8 @@ def chunk_gla_bwd_kernel_dA(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'STATE_V_FIRST'],
+    key=['BT', 'STATE_V_FIRST', 'K', 'V'],
+    prune_configs_by={'early_config_prune': _prune_gla_bwd_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
@@ -668,7 +698,8 @@ def chunk_gla_bwd_kernel_dv(
         for num_warps in [2, 4, 8]
         for num_stages in [2, 3, 4]
     ],
-    key=['BT', 'STATE_V_FIRST'],
+    key=['BT', 'STATE_V_FIRST', 'K', 'V'],
+    prune_configs_by={'early_config_prune': _prune_gla_bwd_configs},
     **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
