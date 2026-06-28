@@ -34,7 +34,7 @@ from fla.ops.gdn2.chunk_bwd import chunk_gdn2_bwd
 from fla.ops.gdn2.chunk_fwd import chunk_gdn2_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
-
+from fla.ops.backends import dispatch
 
 class ChunkGDN2Function(torch.autograd.Function):
     """Autograd-compatible wrapper around GDN-2 forward / backward."""
@@ -190,8 +190,9 @@ class ChunkGDN2Function(torch.autograd.Function):
             None,                    # state_v_first
         )
 
+@dispatch("gdn2")
 
-@torch.compiler.disable
+#@torch.compiler.disable
 def chunk_gdn2(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -361,3 +362,8 @@ def chunk_gdn2(
         return_intermediate_states,
         state_v_first,
     )
+
+@torch.inference_mode()
+def chunk_gdn2_infer(*args, **kwargs):
+    """Inference-only entry used by fused-backend benchmarks."""
+    return chunk_gdn2(*args, **kwargs)
