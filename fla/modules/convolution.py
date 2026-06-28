@@ -76,7 +76,8 @@ def fused_qkv_short_conv(
     """
     qkv = torch.cat([q, k, v], dim=-1)
     if mask is not None:
-        qkv.mul_(mask.unsqueeze(-1))
+        # Out-of-place for autograd safety (mirrors ShortConvolution.forward).
+        qkv = qkv * mask.unsqueeze(-1)
     qkv_weight = torch.cat(
         [
             q_conv.weight.squeeze(1),
