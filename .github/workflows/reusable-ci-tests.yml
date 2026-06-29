@@ -93,7 +93,15 @@ jobs:
         env:
           FLA_DISABLE_BACKEND_DISPATCH: "1"
         run: |
-          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }}
+          # Run each test file in its own pytest process (single concurrency).
+          # The op suite accumulates Triton JIT caches, PyTorch allocator state
+          # and Python objects in a single process until it exceeds the runner's
+          # ~15GB RAM and gets OOM-killed (exit 137). One file per process
+          # releases all memory between files. --exitfirst still stops a file at
+          # its first failure.
+          for f in ${{ steps.find-ops-tests.outputs.test_files }}; do
+            $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" || exit 1
+          done
 
       - name: Run pytest on ops test files (dispatch ENABLED, backend coverage)
         if: steps.find-ops-tests.outputs.test_files && steps.setup.outputs.skip_tests == 'false' && steps.check-dispatch.outputs.dispatch_changed == 'true'
@@ -101,8 +109,13 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          $CONDA_BIN_PATH/pytest -s -v --exitfirst ${{ steps.find-ops-tests.outputs.test_files }} 2>&1 | tee /tmp/fla-dispatch-coverage.log
-          exit ${PIPESTATUS[0]}
+          # Same per-file splitting as the baseline batch above (avoid runner OOM).
+          # Append each file's output to the coverage log.
+          : > /tmp/fla-dispatch-coverage.log
+          for f in ${{ steps.find-ops-tests.outputs.test_files }}; do
+            $CONDA_BIN_PATH/pytest -s -v --exitfirst "$f" 2>&1 | tee -a /tmp/fla-dispatch-coverage.log
+            test ${PIPESTATUS[0]} -eq 0 || exit 1
+          done
 
       - name: Comment on PR when dispatch coverage fails
         if: steps.dispatch-coverage.outcome == 'failure' && github.event_name == 'pull_request'
