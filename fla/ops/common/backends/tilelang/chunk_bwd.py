@@ -351,6 +351,9 @@ def chunk_bwd_dqkwg_tilelang(
     dtype_str = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}[q.dtype]
 
     # Cache key: B, H, HV, tile sizes, flags. T is dynamic (no recompilation for different seq lengths).
+    # Small head dims (< 64) cannot be warp-partitioned across 4 warps by TileLang's
+    # GEMM (tile too small); drop to 2 warps so the kernel still compiles.
+    num_warps = 4 if min(K, V) >= 64 else 2
     kernel = _build_kernel(
         B,
         H,
@@ -368,6 +371,7 @@ def chunk_bwd_dqkwg_tilelang(
         USE_DW,
         state_v_first,
         IS_VARLEN,
+        num_warps=num_warps,
     )
 
     # Unused optional params still need shape-matching tensors for TileLang
