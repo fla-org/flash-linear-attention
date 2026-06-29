@@ -37,7 +37,7 @@ import torch.nn.functional as F
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import assert_close, device
-
+from fla.ops.gdn2.chunk_fwd_infer import chunk_gdn2_fwd_infer
 
 def _activate_g(g, A_log, dt_bias, safe_gate, lower_bound):
     """Reference gate activation matching the kernel's use_gate_in_kernel path."""
@@ -387,6 +387,155 @@ def test_chunk_varlen(cu_seqlens, H, K, V, use_gate_in_kernel, dtype):
     assert_close("dg", ref_grads["g"], tri_grads["g"], 0.02)
     assert_close("dh0", ref_grads["h0"], tri_grads["h0"], 0.012)
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    (
+        "B",
+        "T",
+        "H",
+        "K",
+        "V",
+        "use_qk_l2norm_in_kernel",
+        "use_gate_in_kernel",
+        "has_dt_bias",
+        "safe_gate",
+        "state_v_first",
+        "dtype",
+    ),
+    [
+        pytest.param(
+            1, 64, 2, 32, 32,
+            False, False, False, False, False,
+            torch.float32,
+            id="small-fp32",
+        ),
+        pytest.param(
+            2, 257, 2, 64, 64,
+            True, False, False, False, False,
+            torch.float32,
+            id="l2norm-fp32",
+        ),
+        pytest.param(
+            2, 257, 2, 64, 64,
+            True, True, True, True, False,
+            torch.float32,
+            id="gate-dt-bias-fp32",
+        ),
+        pytest.param(
+            1, 257, 2, 64, 64,
+            True, True, False, True, False,
+            torch.bfloat16,
+            id="safe-gate-no-bias-bf16",
+        ),
+        pytest.param(
+            2, 257, 2, 64, 128,
+            True, False, False, False, True,
+            torch.float16,
+            id="state-v-first-v-ne-k-fp16",
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_chunk_gdn2_fwd_inference(
+    B,
+    T,
+    H,
+    K,
+    V,
+    use_qk_l2norm_in_kernel,
+    use_gate_in_kernel,
+    has_dt_bias,
+    safe_gate,
+    state_v_first,
+    dtype,
+):
+    """
+    Flash-style BT=16 GDN-2 inference kernel vs naive recurrent reference.
+
+    该测试直接调用 chunk_gdn2_fwd_infer，因此不会因为 dispatcher fallback
+    而误测到普通 chunk 路径。
+    """
+    q, k, v, g, b, w, A_log, dt_bias = _rand_inputs(
+        B,
+        T,
+        H,
+        K,
+        V,
+        dtype,
+        gate_in_kernel=use_gate_in_kernel,
+    )
+
+    if not has_dt_bias:
+        dt_bias = None
+
+    lower_bound = -5.0 if safe_gate else None
+    scale = K ** -0.5
+
+    # naive reference 不会在内部执行 L2Norm，因此始终显式传入归一化后的 q/k。
+    q_ref = F.normalize(q.float(), p=2, dim=-1).to(dtype)
+    k_ref = F.normalize(k.float(), p=2, dim=-1).to(dtype)
+
+    # gate-in-kernel 时，naive reference 显式复现 kernel 内的 gate activation。
+    g_ref = (
+        _activate_g(g, A_log, dt_bias, safe_gate, lower_bound).to(dtype)
+        if use_gate_in_kernel
+        else g
+    )
+
+    h0_kv = torch.randn(
+        B,
+        H,
+        K,
+        V,
+        device=device,
+        dtype=torch.float32,
+    )
+    h0_infer = (
+        h0_kv.transpose(-1, -2).contiguous()
+        if state_v_first
+        else h0_kv
+    )
+
+    ref_o, ref_ht = naive_recurrent_gdn2(
+        q=q_ref,
+        k=k_ref,
+        v=v,
+        g=g_ref,
+        b=b,
+        w=w,
+        scale=scale,
+        initial_state=h0_kv,
+        output_final_state=True,
+    )
+
+    tri_o, tri_ht = chunk_gdn2_fwd_infer(
+        # 内核 L2Norm 开启时传入原始 q/k；否则与 reference 一样传归一化 q/k。
+        q=q if use_qk_l2norm_in_kernel else q_ref,
+        k=k if use_qk_l2norm_in_kernel else k_ref,
+        v=v,
+        g=g,
+        b=b,
+        w=w,
+        scale=scale,
+        initial_state=h0_infer,
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        safe_gate=safe_gate,
+        lower_bound=lower_bound,
+        chunk_size=16,
+        state_v_first=state_v_first,
+        A_log=A_log if use_gate_in_kernel else None,
+        dt_bias=dt_bias if use_gate_in_kernel else None,
+    )
+
+    # state_v_first 的输出状态布局是 [B, H, V, K]；
+    # reference 始终是 [B, H, K, V]，比较前统一回 KV。
+    if state_v_first:
+        tri_ht = tri_ht.transpose(-1, -2).contiguous()
+
+    assert_close("o", ref_o, tri_o, 0.006)
+    assert_close("ht", ref_ht, tri_ht, 0.006)
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
