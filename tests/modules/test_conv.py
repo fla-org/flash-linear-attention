@@ -956,26 +956,39 @@ def test_conv_cache_backward(
         assert_close(name, g_ref, g_tri, ratio=1e-3)
 
 
-def test_conv_varlen_initial_state_backward_random():
+@pytest.mark.parametrize(
+    ('T', 'lengths', 'D'),
+    [
+        pytest.param(256, None, 128, id='random_split_T256'),
+        pytest.param(None, [32] * 128 + [8192], 4096, id='packed_128x32_8k'),
+    ],
+)
+def test_conv_varlen_initial_state_backward_random(T, lengths, D):
+    activation = "swish"
+    W = 4
     torch.manual_seed(1234)
     B = 1
-    T = 256
-    D = 128
-    W = 4
-    activation = "swish"
-
-    # Random but deterministic split into two sequences
-    l1 = int(torch.randint(low=W, high=T - W, size=(1,)).item())
-    cu_seqlens = torch.tensor([0, l1, T], device=device, dtype=torch.int32)
+    if lengths is None:
+        # Random but deterministic split into two sequences.
+        l1 = int(torch.randint(low=W, high=T - W, size=(1,)).item())
+        cu_seqlens = torch.tensor([0, l1, T], device=device, dtype=torch.int32)
+    else:
+        T = sum(lengths)
+        cu_seqlens = torch.tensor(
+            [0, *torch.cumsum(torch.tensor(lengths), 0).tolist()],
+            device=device,
+            dtype=torch.int32,
+        )
 
     x = torch.randn(B, T, D, device=device, dtype=torch.float32, requires_grad=True)
     weight = torch.randn(D, W, device=device, dtype=torch.float32, requires_grad=True)
     bias = torch.randn(D, device=device, dtype=torch.float32, requires_grad=True)
 
     # initial_state uses padded layout [N, D, W] with column 0 as padding
-    initial_state = torch.zeros(2, D, W, device=device, dtype=torch.float32, requires_grad=True)
+    num_seqs = cu_seqlens.numel() - 1
+    initial_state = torch.zeros(num_seqs, D, W, device=device, dtype=torch.float32, requires_grad=True)
     with torch.no_grad():
-        initial_state[:, :, 1:].copy_(torch.randn(2, D, W - 1, device=device, dtype=torch.float32))
+        initial_state[:, :, 1:].copy_(torch.randn(num_seqs, D, W - 1, device=device, dtype=torch.float32))
 
     dy = torch.randn_like(x)
 
@@ -1015,6 +1028,61 @@ def test_conv_varlen_initial_state_backward_random():
         bias=bias,
         activation=activation,
         cu_seqlens=cu_seqlens,
+        initial_state=initial_state,
+    )
+    loss_tri = (y_tri * dy).sum()
+    grads_tri = torch.autograd.grad(
+        loss_tri,
+        (x, weight, bias, initial_state),
+        retain_graph=False,
+        create_graph=False,
+    )
+
+    assert_close("dx", grads_ref[0], grads_tri[0], ratio=1e-3)
+    assert_close("dw", grads_ref[1], grads_tri[1], ratio=1e-3)
+    assert_close("db", grads_ref[2], grads_tri[2], ratio=1e-3)
+    assert_close("d_init", grads_ref[3], grads_tri[3], ratio=1e-3)
+
+
+def test_conv_dense_initial_state_backward_large_nt():
+    """Dense bwd with NT grid chunking (CHUNK_OFFSET + global i_tg indexing)."""
+    activation = "swish"
+    W = 4
+    B, T, D = 1, 8192, 4096
+    torch.manual_seed(1234)
+
+    x = torch.randn(B, T, D, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.randn(D, W, device=device, dtype=torch.float32, requires_grad=True)
+    bias = torch.randn(D, device=device, dtype=torch.float32, requires_grad=True)
+    initial_state = torch.zeros(B, D, W, device=device, dtype=torch.float32, requires_grad=True)
+    with torch.no_grad():
+        initial_state[:, :, 1:].copy_(torch.randn(B, D, W - 1, device=device, dtype=torch.float32))
+
+    dy = torch.randn_like(x)
+    cache = initial_state[:, :, 1:].contiguous()
+
+    out_ref, _ = causal_conv1d_ref_torch(
+        x.transpose(1, 2),
+        weight,
+        bias,
+        initial_state=cache,
+        output_final_state=True,
+        activation=activation,
+    )
+    y_ref = out_ref.transpose(1, 2)
+    loss_ref = (y_ref * dy).sum()
+    grads_ref = torch.autograd.grad(
+        loss_ref,
+        (x, weight, bias, initial_state),
+        retain_graph=False,
+        create_graph=False,
+    )
+
+    y_tri, _ = causal_conv1d(
+        x=x,
+        weight=weight,
+        bias=bias,
+        activation=activation,
         initial_state=initial_state,
     )
     loss_tri = (y_tri * dy).sum()
