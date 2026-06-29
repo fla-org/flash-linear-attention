@@ -9,9 +9,14 @@
 
 from __future__ import annotations
 
+from importlib.util import find_spec
+
 import torch
 
 from fla.ops.backends import BaseBackend
+
+# find_spec, not `import tilelang`: probe availability without triggering it
+_TILELANG_AVAILABLE = find_spec("tilelang") is not None
 
 
 class KDATileLangBackend(BaseBackend):
@@ -22,11 +27,7 @@ class KDATileLangBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        try:
-            import tilelang  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        return _TILELANG_AVAILABLE
 
     def chunk_kda_bwd_wy_dqkg_fused_verifier(
         self,
