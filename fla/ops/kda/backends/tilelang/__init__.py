@@ -9,14 +9,12 @@
 
 from __future__ import annotations
 
-from importlib.util import find_spec
-
 import torch
 
 from fla.ops.backends import BaseBackend
+from fla.utils import find_spec_cached
 
-# find_spec, not `import tilelang`: probe availability without triggering it
-_TILELANG_AVAILABLE = find_spec("tilelang") is not None
+_TILELANG_AVAILABLE = find_spec_cached("tilelang") is not None
 
 
 class KDATileLangBackend(BaseBackend):
