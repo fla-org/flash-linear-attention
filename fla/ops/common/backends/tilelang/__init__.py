@@ -14,11 +14,15 @@ hardware-specific regressions (see #640). Can also be forced via FLA_TILELANG=1.
 from __future__ import annotations
 
 import os
+from importlib.util import find_spec
 
 import torch
 
 from fla.ops.backends import BaseBackend
 from fla.utils import IS_NVIDIA_HOPPER, TRITON_ABOVE_3_4_0
+
+# find_spec, not `import tilelang`: probe availability without triggering it
+_TILELANG_AVAILABLE = find_spec("tilelang") is not None
 
 
 class TileLangBackend(BaseBackend):
@@ -29,11 +33,7 @@ class TileLangBackend(BaseBackend):
 
     @classmethod
     def is_available(cls) -> bool:
-        try:
-            import tilelang  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        return _TILELANG_AVAILABLE
 
     @classmethod
     def is_enabled(cls) -> bool:
