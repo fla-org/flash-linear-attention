@@ -15,10 +15,11 @@ import os
 import threading
 from collections.abc import Callable
 from functools import cache, wraps
-from importlib.util import find_spec
 from typing import Any, ClassVar, TypeVar
 
 import torch
+
+from fla.utils import find_spec_cached
 
 logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable)
@@ -60,7 +61,7 @@ class BaseBackend:
     def is_available(cls) -> bool:
         if cls.package_name is None:
             return True
-        return find_spec(cls.package_name) is not None
+        return find_spec_cached(cls.package_name) is not None
 
     @classmethod
     def is_enabled(cls) -> bool:
