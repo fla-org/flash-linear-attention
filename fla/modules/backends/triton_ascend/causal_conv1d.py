@@ -18,6 +18,13 @@ from fla.utils import input_guard
 STATIC_WARPS = 2
 # Ascend Triton rejects grids whose product exceeds 65535 (see fla/modules/token_shift.py).
 _NPU_MAX_TRITON_GRID = 65535
+_ELEM_BLOCK = 2048
+
+
+def _elementwise_launch_iters(numel: int):
+    n_blocks = triton.cdiv(numel, _ELEM_BLOCK)
+    for block_off in range(0, n_blocks, _NPU_MAX_TRITON_GRID):
+        yield min(_NPU_MAX_TRITON_GRID, n_blocks - block_off), block_off * _ELEM_BLOCK
 
 
 def _npu_chunk_size(T: int, BT: int) -> int:
@@ -56,7 +63,10 @@ def _npu_tile_config(
 ) -> tuple[int, int, int]:
     BT = _npu_chunk_size(T, BT)
     BD = 16
-    if D >= 1024:
+    if D >= 8192:
+        BD = 8
+        BT = min(BT, 8)
+    elif D >= 1024:
         # BD=4 overflows Ascend UB on large-D forward; cap BT to limit NT.
         BD = 8
         BT = min(BT, 32)
@@ -193,10 +203,11 @@ def _silu_kernel(
     x_ptr,
     y_ptr,
     n_elements,
+    ELEM_OFFSET: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     mask = offs < n_elements
     x = tl.load(x_ptr + offs, mask=mask, other=0.).to(tl.float32)
     y = x * tl.sigmoid(x)
@@ -209,10 +220,11 @@ def _add_kernel(
     b_ptr,
     out_ptr,
     n_elements,
+    ELEM_OFFSET: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     mask = offs < n_elements
     a = tl.load(a_ptr + offs, mask=mask, other=0.).to(tl.float32)
     b = tl.load(b_ptr + offs, mask=mask, other=0.).to(tl.float32)
@@ -220,20 +232,31 @@ def _add_kernel(
 
 
 def _launch_silu(y: torch.Tensor) -> torch.Tensor:
+    y = y.contiguous()
     out = torch.zeros_like(y)
     n = y.numel()
-    block = 1024
-    grid = (triton.cdiv(n, block),)
-    _silu_kernel[grid](y, out, n, BLOCK=block, num_warps=STATIC_WARPS)
+    for grid, elem_off in _elementwise_launch_iters(n):
+        _silu_kernel[(grid,)](
+            y, out, n,
+            ELEM_OFFSET=elem_off,
+            BLOCK=_ELEM_BLOCK,
+            num_warps=STATIC_WARPS,
+        )
     return out
 
 
 def _launch_add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a = a.contiguous()
+    b = b.contiguous()
     out = torch.zeros_like(a)
     n = a.numel()
-    block = 1024
-    grid = (triton.cdiv(n, block),)
-    _add_kernel[grid](a, b, out, n, BLOCK=block, num_warps=STATIC_WARPS)
+    for grid, elem_off in _elementwise_launch_iters(n):
+        _add_kernel[(grid,)](
+            a, b, out, n,
+            ELEM_OFFSET=elem_off,
+            BLOCK=_ELEM_BLOCK,
+            num_warps=STATIC_WARPS,
+        )
     return out
 
 
@@ -254,10 +277,11 @@ def _silu_bwd_kernel(
     B,
     T,
     D,
+    ELEM_OFFSET: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    offs = pid * BLOCK + tl.arange(0, BLOCK) + ELEM_OFFSET
     n_elements = B * T * D
     mask = offs < n_elements
     rem = offs % D
@@ -278,20 +302,21 @@ def _silu_bwd_kernel(
 def _launch_silu_bwd(y_pre: torch.Tensor, dy: torch.Tensor) -> torch.Tensor:
     out = torch.zeros_like(dy, memory_format=torch.contiguous_format)
     B, T, D = dy.shape
-    block = 1024
-    grid = (triton.cdiv(B * T * D, block),)
+    n = B * T * D
     sy_n, sy_t, sy_d = y_pre.stride()
     sdy_n, sdy_t, sdy_d = dy.stride()
     so_n, so_t, so_d = out.stride()
-    _silu_bwd_kernel[grid](
-        y_pre, dy, out,
-        sy_n, sy_t, sy_d,
-        sdy_n, sdy_t, sdy_d,
-        so_n, so_t, so_d,
-        B, T, D,
-        BLOCK=block,
-        num_warps=STATIC_WARPS,
-    )
+    for grid, elem_off in _elementwise_launch_iters(n):
+        _silu_bwd_kernel[(grid,)](
+            y_pre, dy, out,
+            sy_n, sy_t, sy_d,
+            sdy_n, sdy_t, sdy_d,
+            so_n, so_t, so_d,
+            B, T, D,
+            ELEM_OFFSET=elem_off,
+            BLOCK=_ELEM_BLOCK,
+            num_warps=STATIC_WARPS,
+        )
     return out
 
 
