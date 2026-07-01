@@ -9,11 +9,15 @@
 
 from fla.ops.backends import BackendRegistry, dispatch
 from fla.ops.kda.backends.flashkda import FlashKDABackend
+from fla.ops.kda.backends.fused_infer import KDAFusedInferBackend
 from fla.ops.kda.backends.tilelang import KDATileLangBackend
+from fla.ops.kda.backends.tle import KDATLEBackend
 
 kda_registry = BackendRegistry("kda")
 kda_registry.register(FlashKDABackend())
 kda_registry.register(KDATileLangBackend())
+kda_registry.register(KDAFusedInferBackend())
+kda_registry.register(KDATLEBackend())
 
 
 __all__ = ['dispatch', 'kda_registry']
