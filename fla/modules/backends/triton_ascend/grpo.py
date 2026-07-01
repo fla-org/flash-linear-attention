@@ -13,17 +13,15 @@ import triton.language as tl
 
 from fla.ops.utils.op import exp, log
 from fla.utils import input_guard
+from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_vocab_block_size, iter_axis_launch_chunks
 
+# GRPO: use conservative multiplier covering both fwd softmax and bwd grad paths.
+_GRPO_MEM_MULT = 8.0
 STATIC_WARPS = 2
 
 
 def _npu_vocab_block_size(vocab_size: int, num_rows: int) -> int:
-    block_size = 1024 if vocab_size <= 32768 else (2048 if vocab_size <= 131072 else 4096)
-    max_splits = max(1, 65535 // max(num_rows, 1))
-    return min(
-        max(block_size, triton.next_power_of_2((vocab_size + max_splits - 1) // max_splits)),
-        8192,
-    )
+    return compute_vocab_block_size(vocab_size, num_rows, _GRPO_MEM_MULT)
 
 
 @triton.jit
@@ -43,8 +41,9 @@ def grpo_fwd_kernel(
     L,
     start_idx,
     BLOCK_SIZE: tl.constexpr,
+    ROW_OFFSET: tl.constexpr,
 ):
-    row_idx = tl.program_id(0)
+    row_idx = tl.program_id(0) + ROW_OFFSET
 
     off_b = row_idx // L
     N = tl.cast(N, tl.int64)
@@ -108,8 +107,9 @@ def grpo_bwd_kernel(
     L,
     start_idx,
     BLOCK_SIZE: tl.constexpr,
+    ROW_OFFSET: tl.constexpr,
 ):
-    row_idx = tl.program_id(0)
+    row_idx = tl.program_id(0) + ROW_OFFSET
     off_b = row_idx // L
 
     N = tl.cast(N, tl.int64)
@@ -177,24 +177,26 @@ class GrpoLossNPU(torch.autograd.Function):
         else:
             loss[:B].masked_fill_(completion_mask.logical_not(), 0.0)
 
-        grpo_fwd_kernel[(M,)](
-            logits_ptr=logits,
-            ref_logp_ptr=ref_logp,
-            input_ids_ptr=input_ids,
-            advantages_ptr=advantages,
-            completion_mask_ptr=completion_mask,
-            loss_ptr=loss,
-            lse_ptr=lse,
-            beta=beta,
-            save_kl=save_kl,
-            B=B,
-            M=M,
-            N=N,
-            L=L,
-            start_idx=input_ids_start_index,
-            BLOCK_SIZE=block_size,
-            num_warps=STATIC_WARPS,
-        )
+        for row_off, row_len in iter_axis_launch_chunks(M, 1, max_grid=ASCEND_MAX_GRID_DIM):
+            grpo_fwd_kernel[(row_len,)](
+                logits_ptr=logits,
+                ref_logp_ptr=ref_logp,
+                input_ids_ptr=input_ids,
+                advantages_ptr=advantages,
+                completion_mask_ptr=completion_mask,
+                loss_ptr=loss,
+                lse_ptr=lse,
+                beta=beta,
+                save_kl=save_kl,
+                B=B,
+                M=M,
+                N=N,
+                L=L,
+                start_idx=input_ids_start_index,
+                BLOCK_SIZE=block_size,
+                ROW_OFFSET=row_off,
+                num_warps=STATIC_WARPS,
+            )
         ctx.beta = beta
         ctx.save_for_backward(lse, logits, input_ids, advantages, completion_mask)
         ctx.ref_logp = ref_logp
@@ -216,23 +218,25 @@ class GrpoLossNPU(torch.autograd.Function):
 
         dlogits = logits if inplace else torch.empty_like(logits)
 
-        grpo_bwd_kernel[(M,)](
-            dloss_ptr=dloss,
-            dlogits_ptr=dlogits,
-            logits_ptr=logits,
-            ref_logp_ptr=ctx.ref_logp,
-            input_ids_ptr=input_ids,
-            advantages_ptr=advantages,
-            completion_mask_ptr=completion_mask,
-            lse_ptr=lse,
-            beta=ctx.beta,
-            B=B,
-            N=N,
-            L=L,
-            BLOCK_SIZE=block_size,
-            start_idx=input_ids_start_index,
-            num_warps=STATIC_WARPS,
-        )
+        for row_off, row_len in iter_axis_launch_chunks(M, 1, max_grid=ASCEND_MAX_GRID_DIM):
+            grpo_bwd_kernel[(row_len,)](
+                dloss_ptr=dloss,
+                dlogits_ptr=dlogits,
+                logits_ptr=logits,
+                ref_logp_ptr=ctx.ref_logp,
+                input_ids_ptr=input_ids,
+                advantages_ptr=advantages,
+                completion_mask_ptr=completion_mask,
+                lse_ptr=lse,
+                beta=ctx.beta,
+                B=B,
+                N=N,
+                L=L,
+                BLOCK_SIZE=block_size,
+                start_idx=input_ids_start_index,
+                ROW_OFFSET=row_off,
+                num_warps=STATIC_WARPS,
+            )
         dlogits[:, -1, :].fill_(0.0)
         return dlogits.view(*ctx.input_shape), None, None, None, None, None, None, None
 

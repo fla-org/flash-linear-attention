@@ -14,6 +14,15 @@ from triton.language.math import tanh
 
 from fla.ops.utils.op import exp, log
 from fla.utils import input_guard
+from fla.utils.ascend_ub_manager import (
+    ASCEND_MAX_GRID_DIM,
+    compute_vocab_block_size,
+    iter_axis_launch_chunks,
+)
+
+# Cross-entropy fwd/bwd peak fp32 buffers along vocab dimension.
+_CE_FWD_MEM_MULT = 8.0
+_CE_BWD_MEM_MULT = 12.0
 
 
 @triton.heuristics({
@@ -36,12 +45,14 @@ def cross_entropy_fwd_kernel(
     n_cols,
     n_rows,
     logits_row_stride,
+    ROW_OFFSET,
     BLOCK_SIZE: tl.constexpr,
     HAS_SMOOTHING: tl.constexpr,
     HAS_SOFTCAPPING: tl.constexpr,
     SPLIT: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
+    abs_row_idx = row_idx + ROW_OFFSET
     col_block_idx = tl.program_id(1)
     logits_ptr = logits_ptr + row_idx * logits_row_stride.to(tl.int64)
     col_offsets = col_block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -54,7 +65,7 @@ def cross_entropy_fwd_kernel(
     if HAS_SMOOTHING:
         sum_logits = tl.sum(tl.where(col_offsets < n_cols, logits, 0.0), 0)
     lse = log(tl.sum(exp(logits - max_logits), 0)) + max_logits
-    tl.store(lse_ptr + col_block_idx * n_rows + row_idx, lse)
+    tl.store(lse_ptr + col_block_idx * n_rows + abs_row_idx, lse)
     if label_idx == ignore_index:
         loss = 0.0
         z_loss = 0.0
@@ -84,9 +95,9 @@ def cross_entropy_fwd_kernel(
             loss += z_loss
         else:
             z_loss = 0.0
-    tl.store(loss_ptr + col_block_idx * n_rows + row_idx, loss)
+    tl.store(loss_ptr + col_block_idx * n_rows + abs_row_idx, loss)
     if not SPLIT:
-        tl.store(z_loss_ptr + col_block_idx * n_rows + row_idx, z_loss)
+        tl.store(z_loss_ptr + col_block_idx * n_rows + abs_row_idx, z_loss)
 
 
 @triton.heuristics({
@@ -110,18 +121,20 @@ def cross_entropy_bwd_kernel(
     logits_row_stride,
     dlogits_row_stride,
     dloss_row_stride,
+    ROW_OFFSET,
     BLOCK_SIZE: tl.constexpr,
     HAS_SMOOTHING: tl.constexpr,
     HAS_SOFTCAPPING: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
+    abs_row_idx = row_idx + ROW_OFFSET
     col_block_idx = tl.program_id(1)
     logits_ptr = logits_ptr + row_idx * logits_row_stride.to(tl.int64)
     dlogits_ptr = dlogits_ptr + row_idx * dlogits_row_stride.to(tl.int64)
     col_offsets = col_block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     label_idx = tl.load(labels_ptr + row_idx)
     if label_idx != ignore_index:
-        dloss = tl.load(dloss_ptr + row_idx * dloss_row_stride)
+        dloss = tl.load(dloss_ptr + abs_row_idx * dloss_row_stride)
     else:
         dloss = 0.0
     logits = tl.load(logits_ptr + col_offsets, mask=col_offsets < n_cols, other=-float("inf")).to(
@@ -130,7 +143,7 @@ def cross_entropy_bwd_kernel(
     if HAS_SOFTCAPPING:
         t = tanh(logits / logit_softcapping)
         logits = logit_softcapping * t
-    lse = tl.load(lse_ptr + row_idx)
+    lse = tl.load(lse_ptr + abs_row_idx)
     probs = exp(logits - lse)
     probs += 2.0 * lse_square_scale * lse * probs
     label_idx -= class_start_idx
@@ -144,15 +157,108 @@ def cross_entropy_bwd_kernel(
     tl.store(dlogits_ptr + col_offsets, (dloss * logit_scale) * probs, mask=col_offsets < n_cols)
 
 
-def _npu_block_size(n_cols: int, n_rows: int) -> tuple[int, int]:
-    block_size = 1024 if n_cols <= 32768 else (2048 if n_cols <= 131072 else 4096)
-    max_splits = max(1, 65535 // max(n_rows, 1))
-    block_size = min(
-        max(block_size, triton.next_power_of_2((n_cols + max_splits - 1) // max_splits)),
-        8192,
-    )
+def _npu_block_size(n_cols: int, n_rows: int, is_backward: bool = False) -> tuple[int, int]:
+    memory_multiplier = _CE_BWD_MEM_MULT if is_backward else _CE_FWD_MEM_MULT
+    block_size = compute_vocab_block_size(n_cols, n_rows, memory_multiplier)
     num_warps = 2 if block_size <= 2048 else 4
     return block_size, num_warps
+
+
+def _launch_cross_entropy_fwd(
+    losses,
+    lse,
+    z_losses,
+    logits,
+    target,
+    *,
+    label_smoothing,
+    logit_scale,
+    lse_square_scale,
+    softcap_val,
+    ignore_index,
+    total_classes,
+    class_start_idx,
+    n_cols,
+    n_rows,
+    logits_stride,
+    BLOCK_SIZE,
+    has_softcapping,
+    num_warps,
+    split,
+):
+    n_splits = triton.cdiv(n_cols, BLOCK_SIZE)
+    for row_off, row_len in iter_axis_launch_chunks(n_rows, n_splits, max_grid=ASCEND_MAX_GRID_DIM):
+        cross_entropy_fwd_kernel[(row_len, n_splits)](
+            losses,
+            lse,
+            z_losses,
+            logits[row_off:row_off + row_len],
+            target[row_off:row_off + row_len],
+            label_smoothing,
+            logit_scale,
+            lse_square_scale,
+            softcap_val,
+            ignore_index,
+            total_classes,
+            class_start_idx,
+            n_cols,
+            n_rows,
+            logits_stride,
+            row_off,
+            BLOCK_SIZE=BLOCK_SIZE,
+            HAS_SOFTCAPPING=has_softcapping,
+            num_warps=num_warps,
+            SPLIT=split,
+        )
+
+
+def _launch_cross_entropy_bwd(
+    dlogits,
+    grad_losses,
+    logits,
+    lse,
+    target,
+    *,
+    label_smoothing,
+    logit_scale,
+    lse_square_scale,
+    softcap_val,
+    ignore_index,
+    total_classes,
+    class_start_idx,
+    n_cols,
+    n_rows,
+    logits_stride,
+    dlogits_stride,
+    grad_losses_stride,
+    BLOCK_SIZE,
+    has_softcapping,
+    num_warps,
+):
+    n_splits = triton.cdiv(n_cols, BLOCK_SIZE)
+    for row_off, row_len in iter_axis_launch_chunks(n_rows, n_splits, max_grid=ASCEND_MAX_GRID_DIM):
+        cross_entropy_bwd_kernel[(row_len, n_splits)](
+            dlogits[row_off:row_off + row_len],
+            grad_losses,
+            logits[row_off:row_off + row_len],
+            lse,
+            target[row_off:row_off + row_len],
+            label_smoothing,
+            logit_scale,
+            lse_square_scale,
+            softcap_val,
+            ignore_index,
+            total_classes,
+            class_start_idx,
+            n_cols,
+            logits_stride,
+            dlogits_stride,
+            grad_losses_stride,
+            row_off,
+            BLOCK_SIZE=BLOCK_SIZE,
+            HAS_SOFTCAPPING=has_softcapping,
+            num_warps=num_warps,
+        )
 
 
 def fused_cross_entropy_forward_npu(
@@ -186,26 +292,26 @@ def fused_cross_entropy_forward_npu(
     lse = torch.empty(*loss_shape, dtype=torch.float, device=logits.device)
     z_losses = torch.empty(*loss_shape, dtype=torch.float, device=logits.device)
 
-    cross_entropy_fwd_kernel[(n_rows, n_splits)](
+    _launch_cross_entropy_fwd(
         losses,
         lse,
         z_losses,
         logits,
         target,
-        label_smoothing,
-        logit_scale,
-        lse_square_scale,
-        softcap_val,
-        ignore_index,
-        total_classes,
-        class_start_idx,
-        n_cols,
-        n_rows,
-        logits.stride(0),
+        label_smoothing=label_smoothing,
+        logit_scale=logit_scale,
+        lse_square_scale=lse_square_scale,
+        softcap_val=softcap_val,
+        ignore_index=ignore_index,
+        total_classes=total_classes,
+        class_start_idx=class_start_idx,
+        n_cols=n_cols,
+        n_rows=n_rows,
+        logits_stride=logits.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
-        HAS_SOFTCAPPING=has_softcapping,
+        has_softcapping=has_softcapping,
         num_warps=num_warps,
-        SPLIT=split,
+        split=split,
     )
 
     if split:
@@ -247,30 +353,30 @@ def fused_cross_entropy_backward_npu(
     class_start_idx: int,
 ) -> torch.Tensor:
     n_rows, n_cols = logits.shape
-    BLOCK_SIZE, num_warps = _npu_block_size(n_cols, n_rows)
+    BLOCK_SIZE, num_warps = _npu_block_size(n_cols, n_rows, is_backward=True)
     has_softcapping = logit_softcapping is not None
     softcap_val = float(logit_softcapping) if has_softcapping else 0.0
 
-    def grid(META): return (n_rows, triton.cdiv(n_cols, META["BLOCK_SIZE"]))  # noqa
-    cross_entropy_bwd_kernel[grid](
+    _launch_cross_entropy_bwd(
         dlogits,
         grad_losses,
         logits,
         lse,
         target,
-        label_smoothing,
-        logit_scale,
-        lse_square_scale,
-        softcap_val,
-        ignore_index,
-        total_classes,
-        class_start_idx,
-        n_cols,
-        logits.stride(0),
-        dlogits.stride(0),
-        grad_losses.stride(0),
+        label_smoothing=label_smoothing,
+        logit_scale=logit_scale,
+        lse_square_scale=lse_square_scale,
+        softcap_val=softcap_val,
+        ignore_index=ignore_index,
+        total_classes=total_classes,
+        class_start_idx=class_start_idx,
+        n_cols=n_cols,
+        n_rows=n_rows,
+        logits_stride=logits.stride(0),
+        dlogits_stride=dlogits.stride(0),
+        grad_losses_stride=grad_losses.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
-        HAS_SOFTCAPPING=has_softcapping,
+        has_softcapping=has_softcapping,
         num_warps=num_warps,
     )
     return dlogits
