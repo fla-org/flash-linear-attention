@@ -391,6 +391,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             None, None, None, None,
         )
 
+
 @torch.compiler.disable
 @dispatch('gated_delta_rule')
 def chunk_gated_delta_rule(
