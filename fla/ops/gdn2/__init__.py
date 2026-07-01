@@ -14,4 +14,5 @@ __all__ = [
     "fused_recurrent_gdn2",
     "naive_chunk_gdn2",
     "naive_recurrent_gdn2",
+    "chunk_gdn2_infer",
 ]
