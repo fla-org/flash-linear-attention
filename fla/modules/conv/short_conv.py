@@ -157,7 +157,9 @@ class ShortConvolution(nn.Conv1d):
         if mask is not None:
             if cu_seqlens is not None:
                 raise ValueError("`mask` and `cu_seqlens` cannot be provided at the same time")
-            x = x.mul_(mask.unsqueeze(-1))
+            # Out-of-place: in-place `mul_` breaks autograd when `x` is a leaf
+            # tensor that requires grad (e.g. the fused q/k/v short-conv path).
+            x = x * mask.unsqueeze(-1)
 
         # in decoding phase, the cache (if provided) is updated inplace
         if B * T == N:
