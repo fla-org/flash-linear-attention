@@ -35,6 +35,8 @@ from .multiscale_retention import MultiScaleRetention
 from .nsa import NativeSparseAttention
 from .parallax import Parallax
 from .path_attn import PaTHAttention
+from .precond_gated_deltanet import PrecondGatedDeltaNet
+from .precond_kda import PrecondKDA
 from .raven import Raven
 from .rebased import ReBasedLinearAttention
 from .rodimus import RodimusAttention, SlidingWindowSharedKeyAttention
@@ -74,6 +76,8 @@ __all__ = [
     'NativeSparseAttention',
     'PaTHAttention',
     'Parallax',
+    'PrecondGatedDeltaNet',
+    'PrecondKDA',
     'RWKV6Attention',
     'RWKV7Attention',
     'Raven',
