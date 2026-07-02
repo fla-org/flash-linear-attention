@@ -108,4 +108,5 @@ class FlashQLABackend(BaseBackend):
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             state_v_first=state_v_first,
             cu_seqlens=cu_seqlens,
+            auto_cp=True,
         )
