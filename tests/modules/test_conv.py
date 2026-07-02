@@ -960,10 +960,12 @@ def test_conv_cache_backward(
     ('T', 'lengths', 'D'),
     [
         pytest.param(256, None, 128, id='random_split_T256'),
-        pytest.param(None, [32] * 128 + [8192], 4096, id='packed_128x32_8k'),
+        pytest.param(None, [32] * 128 + [8192], 4096, id='packed_128x32_D4096'),
+        pytest.param(None, [32] * 128 + [8192], 8192, id='packed_128x32_D8192'),
     ],
 )
 def test_conv_varlen_initial_state_backward_random(T, lengths, D):
+    """Varlen swish backward with initial state (random and packed layouts)."""
     activation = "swish"
     W = 4
     torch.manual_seed(1234)
@@ -1044,11 +1046,17 @@ def test_conv_varlen_initial_state_backward_random(T, lengths, D):
     assert_close("d_init", grads_ref[3], grads_tri[3], ratio=1e-3)
 
 
-def test_conv_dense_initial_state_backward_large_nt():
-    """Dense bwd with NT grid chunking (CHUNK_OFFSET + global i_tg indexing)."""
+@pytest.mark.parametrize(
+    ('B', 'T', 'D'),
+    [
+        pytest.param(1, 8192, 4096, id='B1_T8192_D4096'),
+        pytest.param(1, 8192, 8192, id='B1_T8192_D8192'),
+    ],
+)
+def test_conv_dense_initial_state_backward_large_nt(B, T, D):
+    """Dense swish backward with large T/D (conv tiling and activation launch limits)."""
     activation = "swish"
     W = 4
-    B, T, D = 1, 8192, 4096
     torch.manual_seed(1234)
 
     x = torch.randn(B, T, D, device=device, dtype=torch.float32, requires_grad=True)
