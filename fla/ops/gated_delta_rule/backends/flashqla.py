@@ -59,6 +59,10 @@ class FlashQLABackend(BaseBackend):
     ) -> tuple[bool, str | None]:
         if not (IS_NVIDIA_HOPPER or IS_NVIDIA_SM100):
             return False, "FlashQLA requires NVIDIA SM90 or SM100"
+        if q.dtype != torch.float16 and q.dtype != torch.bfloat16:
+            return False, f"FlashQLA requires dtype float16 or bfloat16, got {q.dtype}"
+        if not (q.dtype == k.dtype == v.dtype):
+            return False, f"FlashQLA requires q, k, v to have the same dtype, got {q.dtype}, {k.dtype}, {v.dtype}"
         if q.shape[-1] != 128:
             return False, f"FlashQLA requires K=128, got {q.shape[-1]}"
         if v.shape[-1] != 128:
