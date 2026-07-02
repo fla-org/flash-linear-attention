@@ -1500,14 +1500,14 @@ def test_flashqla_chunk_state_v_first(B, T, H, D, monkeypatch):
     ((ref_kv * do).sum() + (ref_ht_kv * dht_kv).sum()).backward(retain_graph=True)
     ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0_kv.grad
 
-    assert_close("o", ref_kv, tri_vk, 1e-4)
-    assert_close("ht", ref_ht_kv, tri_ht_vk.transpose(-1, -2), 1e-4)
-    assert_close("dq", ref_dq, tri_dq, 1e-4)
-    assert_close("dk", ref_dk, tri_dk, 1e-4)
-    assert_close("dv", ref_dv, tri_dv, 1e-4)
-    assert_close("dg", ref_dg, tri_dg, 1e-4)
-    assert_close("db", ref_dbeta, tri_dbeta, 1e-4)
-    assert_close("dh0", ref_dh0, tri_dh0.transpose(-1, -2), 1e-4)
+    assert_close("o", ref_kv, tri_vk, 0.0)
+    assert_close("ht", ref_ht_kv, tri_ht_vk.transpose(-1, -2), 0.0)
+    assert_close("dq", ref_dq, tri_dq, 0.0)
+    assert_close("dk", ref_dk, tri_dk, 0.0)
+    assert_close("dv", ref_dv, tri_dv, 0.0)
+    assert_close("dg", ref_dg, tri_dg, 0.0)
+    assert_close("db", ref_dbeta, tri_dbeta, 0.0)
+    assert_close("dh0", ref_dh0, tri_dh0.transpose(-1, -2), 0.0)
 
 
 @_SKIP_FLASHQLA
@@ -1569,14 +1569,15 @@ def test_flashqla_verifier_rejects():
     from fla.ops.gated_delta_rule.backends.flashqla import FlashQLABackend
     be = FlashQLABackend()
 
-    q128 = torch.empty(1, 64, 4, 128)
-    k128 = torch.empty(1, 64, 4, 128)
-    v128 = torch.empty(1, 64, 4, 128)
+    dtype = torch.bfloat16
+    q128 = torch.empty(1, 64, 4, 128, dtype=dtype)
+    k128 = torch.empty(1, 64, 4, 128, dtype=dtype)
+    v128 = torch.empty(1, 64, 4, 128, dtype=dtype)
     g = torch.empty(1, 64, 4)
     beta = torch.empty(1, 64, 4)
 
-    q64 = torch.empty(1, 64, 4, 64)
-    v64 = torch.empty(1, 64, 4, 64)
+    q64 = torch.empty(1, 64, 4, 64, dtype=dtype)
+    v64 = torch.empty(1, 64, 4, 64, dtype=dtype)
 
     ok_kwargs = dict(q=q128, k=k128, v=v128, g=g, beta=beta)
 
@@ -1601,3 +1602,56 @@ def test_flashqla_verifier_rejects():
     if IS_NVIDIA_HOPPER or IS_NVIDIA_SM100:
         passed, reason = be.chunk_gated_delta_rule_verifier(**ok_kwargs)
         assert passed and reason is None
+
+
+@_SKIP_FLASHQLA
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [
+            (1, 1024, 4, 128, torch.bfloat16),
+            (2, 2048, 8, 128, torch.bfloat16),
+            (1, 1024, 4, 128, torch.float16),
+            (2, 2048, 8, 128, torch.float16),
+        ]
+    ],
+)
+def test_flashqla_chunk_dtype(B, T, H, D, dtype, monkeypatch):
+    """FlashQLA produces correct fwd+bwd for both bfloat16 and float16 inputs."""
+    torch.manual_seed(42)
+    q = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    v = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    g = F.logsigmoid(torch.randn(B, T, H, dtype=torch.float32, device=device))
+    beta = torch.randn(B, T, H, dtype=torch.float32, device=device).sigmoid()
+    h0 = torch.randn(B, H, D, D, dtype=torch.float32, device=device)
+    scale = D ** -0.5
+    q, k, v, g, beta, h0 = (x.requires_grad_(True) for x in (q, k, v, g, beta, h0))
+
+    ref_o, ref_ht = _flashqla_gold(q, k, v, g, beta, scale, h0.clone())
+    do = torch.randn_like(ref_o)
+    dht = torch.randn_like(ref_ht)
+    ((ref_o * do).sum() + (ref_ht * dht).sum()).backward(retain_graph=True)
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_dbeta, ref_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+    q.grad = k.grad = v.grad = g.grad = beta.grad = h0.grad = None
+
+    tri_o, tri_ht = _flashqla_run(
+        monkeypatch,
+        q=q.clone(), k=k.clone(), v=v.clone(), g=g.clone(), beta=beta.clone(),
+        scale=scale,
+        initial_state=h0.clone(),
+        output_final_state=True,
+        use_qk_l2norm_in_kernel=True,
+    )
+    ((tri_o * do).sum() + (tri_ht * dht).sum()).backward(retain_graph=True)
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dbeta, tri_dh0 = q.grad, k.grad, v.grad, g.grad, beta.grad, h0.grad
+
+    assert_close("o", ref_o, tri_o, _FLASHQLA_RTOL)
+    assert_close("ht", ref_ht, tri_ht.to(ref_ht.dtype), _FLASHQLA_RTOL)
+    assert_close("dq", ref_dq, tri_dq, _FLASHQLA_RTOL)
+    assert_close("dk", ref_dk, tri_dk, _FLASHQLA_RTOL)
+    assert_close("dv", ref_dv, tri_dv, _FLASHQLA_RTOL)
+    assert_close("dg", ref_dg, tri_dg, 0.035)
+    assert_close("db", ref_dbeta, tri_dbeta, 0.008)
+    assert_close("dh0", ref_dh0, tri_dh0, _FLASHQLA_RTOL)
