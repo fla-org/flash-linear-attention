@@ -244,6 +244,68 @@ class TritonAscendBackend(BaseBackend):
         from fla.modules.backends.triton_ascend.l2norm import l2norm_bwd_npu
         return l2norm_bwd_npu(y, rstd, dy, eps)
 
+    def layer_norm_gated_fwd(
+        self,
+        x,
+        g,
+        weight,
+        bias,
+        activation="swish",
+        eps=1e-5,
+        residual=None,
+        out_dtype=None,
+        residual_dtype=None,
+        is_rms_norm=False,
+    ):
+        from fla.modules.backends.triton_ascend.fused_norm_gate import layer_norm_gated_fwd_npu
+        return layer_norm_gated_fwd_npu(
+            x,
+            g,
+            weight,
+            bias,
+            activation,
+            eps,
+            residual,
+            out_dtype,
+            residual_dtype,
+            is_rms_norm,
+        )
+
+    def layer_norm_gated_bwd(
+        self,
+        dy,
+        x,
+        g,
+        weight,
+        bias,
+        activation="swish",
+        eps=1e-5,
+        mean=None,
+        rstd=None,
+        dresidual=None,
+        has_residual=False,
+        is_rms_norm=False,
+        x_dtype=None,
+        recompute_output=False,
+    ):
+        from fla.modules.backends.triton_ascend.fused_norm_gate import layer_norm_gated_bwd_npu
+        return layer_norm_gated_bwd_npu(
+            dy,
+            x,
+            g,
+            weight,
+            bias,
+            activation,
+            eps,
+            mean,
+            rstd,
+            dresidual,
+            has_residual,
+            is_rms_norm,
+            x_dtype,
+            recompute_output,
+        )
+
     def layer_norm_fwd(
         self,
         x,
