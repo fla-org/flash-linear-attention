@@ -13,8 +13,10 @@ import triton
 import triton.language as tl
 
 from fla.ops.utils.op import exp, log
+from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_elementwise_block_size, compute_vocab_block_size
 
-MAX_FUSED_SIZE = 65536 // 2
+_KLD_FWD_MEM_MULT = 12.0
+_ELEMENTWISE_MEM_MULT = 2.5
 STATIC_WARPS = 2
 
 
@@ -92,12 +94,7 @@ def elementwise_mul_kernel(
 
 
 def _npu_vocab_block_size(vocab_size: int, num_rows: int) -> int:
-    block_size = 1024 if vocab_size <= 32768 else (2048 if vocab_size <= 131072 else 4096)
-    max_splits = max(1, 65535 // max(num_rows, 1))
-    return min(
-        max(block_size, triton.next_power_of_2((vocab_size + max_splits - 1) // max_splits)),
-        8192,
-    )
+    return compute_vocab_block_size(vocab_size, num_rows, _KLD_FWD_MEM_MULT)
 
 
 def fused_kl_div_forward_npu(
@@ -113,7 +110,7 @@ def fused_kl_div_forward_npu(
     N, H, V = *x.shape, weight.shape[0]
     BV = _npu_vocab_block_size(V, N)
     NC = min(8, triton.cdiv(V, H))
-    C = triton.next_power_of_2(triton.cdiv(N, NC))
+    C = min(triton.next_power_of_2(triton.cdiv(N, NC)), ASCEND_MAX_GRID_DIM)
     NC = triton.cdiv(N, C)
 
     grad_dtype = torch.float32 if accumulate_grad_in_fp32 else weight.dtype
@@ -167,7 +164,7 @@ def fused_kl_div_backward_npu(
 ):
     if torch.ne(do, torch.tensor(1.0, device=do.device)):
         N, H = dx.shape
-        B = min(MAX_FUSED_SIZE, max(1024, triton.next_power_of_2((N * H + 65534) // 65535)))
+        B = compute_elementwise_block_size(N * H, _ELEMENTWISE_MEM_MULT)
 
         elementwise_mul_kernel[(triton.cdiv(N * H, B),)](
             x=dx,
@@ -179,7 +176,7 @@ def fused_kl_div_backward_npu(
 
         if dw is not None:
             V, H = dw.shape
-            B_dw = min(MAX_FUSED_SIZE, max(1024, triton.next_power_of_2((V * H + 65534) // 65535)))
+            B_dw = compute_elementwise_block_size(V * H, _ELEMENTWISE_MEM_MULT)
             elementwise_mul_kernel[(triton.cdiv(V * H, B_dw),)](
                 x=dw,
                 g=do,

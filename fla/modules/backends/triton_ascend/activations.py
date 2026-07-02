@@ -14,20 +14,27 @@ import triton.language as tl
 
 from fla.ops.utils.op import exp, log
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_activation_block_size
 
 # Ascend launch limits: grid dim and per-core vector width.
-_PREFERRED_BLOCK_SIZES = (2048, 1024, 512)
-_MAX_GRID_DIM = 65535
 _MAX_CORE_DIM = 65535
 
 
-def _activation_launch_config(T: int) -> tuple[tuple[int], int]:
-    """Pick block size under Ascend launch limits."""
-    for B in _PREFERRED_BLOCK_SIZES:
-        if triton.cdiv(T, B) <= _MAX_GRID_DIM and B * 8 <= _MAX_CORE_DIM:
-            return (triton.cdiv(T, B),), B
-    B = min(triton.cdiv(T, _MAX_GRID_DIM), _MAX_CORE_DIM // 8)
-    return (triton.cdiv(T, B),), max(B, 1)
+def _activation_launch_config(
+    T: int,
+    is_backward: bool = False,
+    *,
+    memory_multiplier: float | None = None,
+) -> tuple[tuple[int], int]:
+    """Pick block size under Ascend launch and UB limits."""
+    B = compute_activation_block_size(
+        T,
+        is_backward,
+        max_grid=ASCEND_MAX_GRID_DIM,
+        max_core_dim=_MAX_CORE_DIM,
+        memory_multiplier=memory_multiplier,
+    )
+    return (triton.cdiv(T, B),), B
 
 
 @triton.jit
@@ -470,7 +477,7 @@ def gelu_bwd_npu(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     g = _ensure_inner_contiguous(g)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x)
-    grid, B = _activation_launch_config(T)
+    grid, B = _activation_launch_config(T, is_backward=True)
     gelu_bwd_kernel[grid](
         x, g, dx, T=T, D=D,
         stride_x_row=_get_stride(x),
@@ -502,7 +509,7 @@ def sqrelu_bwd_npu(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     g = _ensure_inner_contiguous(g)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x)
-    grid, B = _activation_launch_config(T)
+    grid, B = _activation_launch_config(T, is_backward=True)
     sqrelu_bwd_kernel[grid](
         x, g, dx, T=T, D=D,
         stride_x_row=_get_stride(x),
@@ -534,7 +541,7 @@ def sigmoid_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool =
     dy = _ensure_inner_contiguous(dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
-    grid, B = _activation_launch_config(T)
+    grid, B = _activation_launch_config(T, is_backward=True)
     sigmoid_bwd_kernel[grid](
         x, dy, dx, T=T, D=D,
         stride_x_row=_get_stride(x),
@@ -575,7 +582,7 @@ def logsigmoid_bwd_npu(
     dy = _ensure_inner_contiguous(dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
-    grid, B = _activation_launch_config(T)
+    grid, B = _activation_launch_config(T, is_backward=True)
     logsigmoid_bwd_kernel[grid](
         x=x,
         dx=dx,
@@ -612,7 +619,7 @@ def swish_bwd_npu(x: torch.Tensor, dy: torch.Tensor, output_contiguous: bool = F
     dy = _ensure_inner_contiguous(dy)
     T, D = x.numel(), x.shape[-1]
     dx = _alloc_output(x, output_contiguous)
-    grid, B = _activation_launch_config(T)
+    grid, B = _activation_launch_config(T, is_backward=True)
     swish_bwd_kernel[grid](
         x, dy, dx, T=T, D=D,
         stride_x_row=_get_stride(x),
@@ -660,7 +667,7 @@ def swiglu_fwdbwd_npu(
         z = _alloc_output(x, output_contiguous)
     else:
         z = None
-    grid, B = _activation_launch_config(T)
+    grid, B = _activation_launch_config(T, is_backward=True)
     swiglu_fwdbwd_kernel[grid](
         x, y, g, dx, dy, z, T=T, D=D,
         stride_x_row=_get_stride(x),
@@ -807,6 +814,11 @@ def powglu_fwdbwd_kernel(
         tl.store(z + z_off, b_z.to(z.dtype.element_ty), mask=mask)
 
 
+# Peak fp32 temporaries: sigmoid, sqrt, log, exp, pow, gate, output.
+_POWGLU_FWD_MEM_MULT = 8.0
+_POWGLU_BWD_MEM_MULT = 10.0
+
+
 @torch.compiler.disable
 def powglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_contiguous: bool = False) -> torch.Tensor:
     assert x.shape == y.shape, f"powglu_fwd: shape mismatch x={x.shape} y={y.shape}"
@@ -814,7 +826,7 @@ def powglu_fwd_npu(x: torch.Tensor, y: torch.Tensor, power: float = 3.0, output_
     y = _ensure_inner_contiguous(y)
     T, D = x.numel(), x.shape[-1]
     z = _alloc_output(x, output_contiguous)
-    grid, B = _activation_launch_config(T)
+    grid, B = _activation_launch_config(T, memory_multiplier=_POWGLU_FWD_MEM_MULT)
     powglu_fwd_kernel[grid](
         x=x,
         y=y,
@@ -850,7 +862,7 @@ def powglu_fwdbwd_npu(
         z = _alloc_output(x, output_contiguous)
     else:
         z = None
-    grid, B = _activation_launch_config(T)
+    grid, B = _activation_launch_config(T, is_backward=True, memory_multiplier=_POWGLU_BWD_MEM_MULT)
     powglu_fwdbwd_kernel[grid](
         x=x,
         y=y,
