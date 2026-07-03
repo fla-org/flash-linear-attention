@@ -341,6 +341,47 @@ register_op(OpConfig(
     category='gate_beta',
 ))
 
+#GDN2 
+register_op(
+    OpConfig(
+        name="chunk_gdn2",
+        import_path="fla.ops.gdn2",
+        func_name="chunk_gdn2",
+        inputs={
+            "q": TensorSpec(shape_BTHD, requires_grad=False),
+            "k": TensorSpec(shape_BTHD, requires_grad=False),
+            "v": TensorSpec(shape_BTHD, requires_grad=False),
+
+            # 已经是 log-space gate，避免 benchmark 还需要 A_log / dt_bias
+            "g": TensorSpec(
+                shape_BTHD,
+                requires_grad=False,
+                transform=logsigmoid,
+            ),
+
+            # GDN2 的 erase / write gate 是 post-activation gate
+            "b": TensorSpec(
+                shape_BTHD,
+                requires_grad=False,
+                transform=sigmoid_transform,
+            ),
+            "w": TensorSpec(
+                shape_BTHD,
+                requires_grad=False,
+                transform=sigmoid_transform,
+            ),
+        },
+        extra_kwargs={
+            "use_qk_l2norm_in_kernel": True,
+        },
+
+        # 不要写 chunk_size=16
+        # fused backend 缺省走 16；
+        # FLA_FUSED_INFER=0 时原路径缺省走 64。
+        skip_backward=True,
+        category="gdn2",
+    )
+)
 # --- +head gate (g=[B,T,H] with logsigmoid) ---
 
 register_op(OpConfig(

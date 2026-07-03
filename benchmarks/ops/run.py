@@ -249,6 +249,7 @@ def benchmark_op(
     if config.skip_backward and 'fwdbwd' in modes:
         modes = [m for m in modes if m != 'fwdbwd']
 
+
     # Per-op shape override (e.g., AttnRes uses an `L` axis not in B/T/H/D)
     if config.default_shapes is not None:
         shapes = config.default_shapes
@@ -285,19 +286,37 @@ def benchmark_op(
         extra_shape_kw = {k: v for k, v in shape_dict.items() if k not in ('B', 'T', 'H', 'D')}
         try:
             inputs = generate_inputs(config, B, T, H, D, dtype=dtype, device=device, **extra_shape_kw)
+            
+            #with ctx:
             out = op_fn(**inputs, **config.extra_kwargs)
             out_tensor = out[0] if config.output_is_tuple else out
-            do = torch.randn_like(out_tensor)
-
-            def _fwdbwd_fn(inputs=inputs, do=do):
+            #do = torch.randn_like(out_tensor)
+            #优化了判断逻辑，交PR
+            """ def _fwdbwd_fn(inputs=inputs, do=do):
                 result = op_fn(**inputs, **config.extra_kwargs)
                 t = result[0] if config.output_is_tuple else result
-                t.backward(do)
+                t.backward(do) """
+            if config.skip_backward:
+                def _warmup_fn(inputs=inputs):
+                    return op_fn(**inputs, **config.extra_kwargs)
+            else:
+                do = torch.randn_like(out_tensor)
 
-            _warmup_autotune(_fwdbwd_fn)
+                def _warmup_fn(inputs=inputs, do=do):
+                    result = op_fn(**inputs, **config.extra_kwargs)
+                    t = result[0] if config.output_is_tuple else result
+                    t.backward(do)
+
+            _warmup_autotune(_warmup_fn)
+
+            #_warmup_autotune(_fwdbwd_fn)
         except Exception as e:
-            logger.warning(f"Warmup failed for {op_name} @ {shape_name}: {e}")
-            failed_shapes.add(shape_name)
+            #插眼，打印报错结果
+            """ logger.warning(f"Warmup failed for {op_name} @ {shape_name}: {e}")
+            failed_shapes.add(shape_name) """
+            import traceback
+            print(f"Warmup failed: {type(e).__name__}: {repr(e)}")
+            traceback.print_exc()
 
     for name in failed_shapes:
         del valid_shapes[name]
@@ -314,6 +333,7 @@ def benchmark_op(
             logger.warning(f"Input generation failed for {op_name} @ {shape_name}: {e}")
             continue
 
+        #with ctx:
         out = op_fn(**inputs, **config.extra_kwargs)
         out_tensor = out[0] if config.output_is_tuple else out
         do = torch.randn_like(out_tensor)
@@ -321,9 +341,11 @@ def benchmark_op(
         for mode in modes:
             if mode == 'fwd':
                 def fn(inputs=inputs):
+                    #with ctx:
                     return op_fn(**inputs, **config.extra_kwargs)
             else:
                 def fn(inputs=inputs, do=do):
+                    #with ctx:
                     result = op_fn(**inputs, **config.extra_kwargs)
                     t = result[0] if config.output_is_tuple else result
                     t.backward(do)
