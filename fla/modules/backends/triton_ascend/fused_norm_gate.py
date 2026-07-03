@@ -14,10 +14,14 @@ import triton
 import triton.language as tl
 
 from fla.utils import get_multiprocessor_count
+from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_ub_block_size, iter_axis_launch_chunks
 
-# Ascend Triton rejects grids whose product exceeds 65535.
-_NPU_MAX_TRITON_GRID = 65535
-_STATIC_NUM_WARPS = 2
+# Peak live fp32 vectors in row-wise gated kernel1 (norm + gate tensors).
+_FWD_MEM_MULT = 7.0
+_BWD_MEM_MULT = 10.0
+_UB_SAFETY_MARGIN = 0.85
+# Legacy byte cap when UB capacity cannot be detected (65536 // fp32).
+_FALLBACK_MAX_BD = 65536 // 4
 
 # ACTIVATION constexpr: 0 = swish/silu, 1 = sigmoid
 _ACTIVATION_SWISH = 0
@@ -32,9 +36,24 @@ def _activation_id(activation: str) -> int:
     raise ValueError(f"Unsupported activation: {activation}")
 
 
-def _iter_grid_chunks(grid_size: int):
-    for grid_off in range(0, grid_size, _NPU_MAX_TRITON_GRID):
-        yield grid_off, min(_NPU_MAX_TRITON_GRID, grid_size - grid_off)
+def _get_layer_norm_gated_bd(D: int, is_forward: bool) -> int:
+    """Return power-of-2 block size for feature dim D under UB constraints."""
+    memory_multiplier = _FWD_MEM_MULT if is_forward else _BWD_MEM_MULT
+    return compute_ub_block_size(
+        D,
+        memory_multiplier,
+        safety_margin=_UB_SAFETY_MARGIN,
+        fallback=_FALLBACK_MAX_BD,
+        desired=triton.next_power_of_2(D),
+    )
+
+
+def _layer_norm_gated_bwd_launch_config(T: int, device_index: int) -> tuple[int, int]:
+    """Return (NS, BS) capped under Ascend grid limit."""
+    NS = min(get_multiprocessor_count(device_index), T)
+    NS = min(NS, ASCEND_MAX_GRID_DIM)
+    BS = math.ceil(T / NS) if NS > 0 else T
+    return NS, BS
 
 
 @triton.jit
@@ -51,7 +70,6 @@ def layer_norm_gated_fwd_kernel1(
     eps,
     D: tl.constexpr,
     BD: tl.constexpr,
-    ROW_OFFSET: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     STORE_RESIDUAL_OUT: tl.constexpr,
@@ -59,7 +77,7 @@ def layer_norm_gated_fwd_kernel1(
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + ROW_OFFSET
+    i_t = tl.program_id(0)
     x += i_t * D
     y += i_t * D
     g += i_t * D
@@ -124,7 +142,6 @@ def layer_norm_gated_bwd_kernel1(
     BS,
     D: tl.constexpr,
     BD: tl.constexpr,
-    PROGRAM_OFFSET: tl.constexpr,
     ACTIVATION: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     STORE_DRESIDUAL: tl.constexpr,
@@ -133,7 +150,7 @@ def layer_norm_gated_bwd_kernel1(
     HAS_BIAS: tl.constexpr,
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
-    i_s = tl.program_id(0) + PROGRAM_OFFSET
+    i_s = tl.program_id(0)
     o_d = tl.arange(0, BD)
     mask = o_d < D
     x += i_s * BS * D
@@ -216,6 +233,45 @@ def layer_norm_gated_bwd_kernel1(
         tl.store(db + i_s * D + o_d, b_db, mask=mask)
 
 
+def _launch_layer_norm_gated_fwd_kernel1(
+    x: torch.Tensor,
+    g: torch.Tensor,
+    y: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor,
+    residual_out: torch.Tensor,
+    mean: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    D: int,
+    BD: int,
+    act_id: int,
+    is_rms_norm: bool,
+):
+    chunk_T = x.shape[0]
+    layer_norm_gated_fwd_kernel1[(chunk_T,)](
+        x=x,
+        g=g,
+        y=y,
+        w=weight,
+        b=bias,
+        residual=residual,
+        residual_out=residual_out,
+        mean=mean,
+        rstd=rstd,
+        eps=eps,
+        D=D,
+        BD=BD,
+        ACTIVATION=act_id,
+        IS_RMS_NORM=is_rms_norm,
+        STORE_RESIDUAL_OUT=residual_out is not None,
+        HAS_RESIDUAL=residual is not None,
+        HAS_WEIGHT=weight is not None,
+        HAS_BIAS=bias is not None,
+    )
+
+
 def layer_norm_gated_fwd_npu(
     x: torch.Tensor,
     g: torch.Tensor,
@@ -246,37 +302,31 @@ def layer_norm_gated_fwd_npu(
     mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((T,), dtype=torch.float, device=x.device)
 
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
+    BD = _get_layer_norm_gated_bd(D, is_forward=True)
     if D > BD:
-        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+        raise RuntimeError(
+            f"LayerNormGated feature dim {D} exceeds UB-safe block size {BD}. "
+            "Column-tiled kernels are not yet implemented for this size."
+        )
 
     act_id = _activation_id(activation)
-    kernel_kwargs = dict(
-        x=x,
-        g=g,
-        y=y,
-        w=weight,
-        b=bias,
-        residual=residual,
-        residual_out=residual_out,
-        mean=mean,
-        rstd=rstd,
-        eps=eps,
-        D=D,
-        BD=BD,
-        ACTIVATION=act_id,
-        IS_RMS_NORM=is_rms_norm,
-        STORE_RESIDUAL_OUT=residual_out is not None,
-        HAS_RESIDUAL=residual is not None,
-        HAS_WEIGHT=weight is not None,
-        HAS_BIAS=bias is not None,
-        num_warps=_STATIC_NUM_WARPS,
-    )
-    for row_off, chunk in _iter_grid_chunks(T):
-        layer_norm_gated_fwd_kernel1[(chunk,)](
-            **kernel_kwargs,
-            ROW_OFFSET=row_off,
+    for row_start, row_len in iter_axis_launch_chunks(T, 1, max_grid=ASCEND_MAX_GRID_DIM):
+        row_end = row_start + row_len
+        _launch_layer_norm_gated_fwd_kernel1(
+            x[row_start:row_end],
+            g[row_start:row_end],
+            y[row_start:row_end],
+            weight,
+            bias,
+            None if residual is None else residual[row_start:row_end],
+            None if residual_out is None else residual_out[row_start:row_end],
+            None if mean is None else mean[row_start:row_end],
+            rstd[row_start:row_end],
+            eps,
+            D,
+            BD,
+            act_id,
+            is_rms_norm,
         )
     return y, mean, rstd, residual_out if residual_out is not None else x
 
@@ -311,19 +361,20 @@ def layer_norm_gated_bwd_npu(
     dresidual_in = torch.empty_like(x) if has_residual and dx.dtype != x.dtype else None
     y = torch.empty(T, D, dtype=dy.dtype, device=dy.device) if recompute_output else None
 
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
+    BD = _get_layer_norm_gated_bd(D, is_forward=False)
     if D > BD:
-        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+        raise RuntimeError(
+            f"LayerNormGated feature dim {D} exceeds UB-safe block size {BD}. "
+            "Column-tiled kernels are not yet implemented for this size."
+        )
 
-    NS = min(get_multiprocessor_count(x.device.index), T)
-    BS = math.ceil(T / NS)
+    NS, BS = _layer_norm_gated_bwd_launch_config(T, x.device.index)
 
     dw = torch.empty((NS, D), dtype=torch.float, device=weight.device) if weight is not None else None
     db = torch.empty((NS, D), dtype=torch.float, device=bias.device) if bias is not None else None
 
     act_id = _activation_id(activation)
-    kernel_kwargs = dict(
+    layer_norm_gated_bwd_kernel1[(NS,)](
         x=x,
         g=g,
         w=weight,
@@ -349,13 +400,7 @@ def layer_norm_gated_bwd_npu(
         HAS_WEIGHT=weight is not None,
         HAS_BIAS=bias is not None,
         RECOMPUTE_OUTPUT=y is not None,
-        num_warps=_STATIC_NUM_WARPS,
     )
-    for prog_off, chunk in _iter_grid_chunks(NS):
-        layer_norm_gated_bwd_kernel1[(chunk,)](
-            **kernel_kwargs,
-            PROGRAM_OFFSET=prog_off,
-        )
     dw = dw.sum(0).to(weight.dtype) if weight is not None else None
     db = db.sum(0).to(bias.dtype) if bias is not None else None
     if has_residual and dx.dtype == x.dtype:

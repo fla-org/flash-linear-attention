@@ -11,14 +11,26 @@ import torch
 import triton
 import triton.language as tl
 
-# Ascend Triton rejects grids whose product exceeds 65535.
-_NPU_MAX_TRITON_GRID = 65535
-_STATIC_NUM_WARPS = 2
+from fla.utils.ascend_ub_manager import ASCEND_MAX_GRID_DIM, compute_ub_block_size, iter_axis_launch_chunks
+
+# Peak live fp32 vectors in row-wise kernel1 (same order as layer_norm).
+_FWD_MEM_MULT = 6.0
+_BWD_MEM_MULT = 8.0
+_UB_SAFETY_MARGIN = 0.85
+# Legacy byte cap when UB capacity cannot be detected (65536 // fp32).
+_FALLBACK_MAX_BD = 65536 // 4
 
 
-def _iter_row_chunks(num_rows: int):
-    for row_off in range(0, num_rows, _NPU_MAX_TRITON_GRID):
-        yield row_off, min(_NPU_MAX_TRITON_GRID, num_rows - row_off)
+def _get_l2norm_bd(D: int, is_forward: bool) -> int:
+    """Return power-of-2 block size for feature dim D under UB constraints."""
+    memory_multiplier = _FWD_MEM_MULT if is_forward else _BWD_MEM_MULT
+    return compute_ub_block_size(
+        D,
+        memory_multiplier,
+        safety_margin=_UB_SAFETY_MARGIN,
+        fallback=_FALLBACK_MAX_BD,
+        desired=triton.next_power_of_2(D),
+    )
 
 
 @triton.jit
@@ -29,9 +41,8 @@ def l2norm_fwd_kernel1(
     eps,
     D,
     BD: tl.constexpr,
-    ROW_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + ROW_OFFSET
+    i_t = tl.program_id(0)
     x += i_t * D
     y += i_t * D
     cols = tl.arange(0, BD)
@@ -53,9 +64,8 @@ def l2norm_bwd_kernel1(
     eps,
     D,
     BD: tl.constexpr,
-    ROW_OFFSET: tl.constexpr,
 ):
-    i_t = tl.program_id(0) + ROW_OFFSET
+    i_t = tl.program_id(0)
     y += i_t * D
     dx += i_t * D
     dy += i_t * D
@@ -67,6 +77,46 @@ def l2norm_bwd_kernel1(
     b_dy = tl.load(dy + cols, mask=mask, other=0.0).to(tl.float32)
     b_dx = b_dy * b_rstd - tl.sum(b_dy * b_y) * b_y * b_rstd
     tl.store(dx + cols, b_dx, mask=mask)
+
+
+def _launch_l2norm_fwd_kernel1(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    rstd: torch.Tensor,
+    eps: float,
+    D: int,
+    BD: int,
+):
+    chunk_T = x.shape[0]
+    l2norm_fwd_kernel1[(chunk_T,)](
+        x=x,
+        y=y,
+        rstd=rstd,
+        eps=eps,
+        D=D,
+        BD=BD,
+    )
+
+
+def _launch_l2norm_bwd_kernel1(
+    y: torch.Tensor,
+    rstd: torch.Tensor,
+    dy: torch.Tensor,
+    dx: torch.Tensor,
+    eps: float,
+    D: int,
+    BD: int,
+):
+    chunk_T = y.shape[0]
+    l2norm_bwd_kernel1[(chunk_T,)](
+        y=y,
+        rstd=rstd,
+        dy=dy,
+        dx=dx,
+        eps=eps,
+        D=D,
+        BD=BD,
+    )
 
 
 def l2norm_fwd_npu(
@@ -83,22 +133,23 @@ def l2norm_fwd_npu(
     assert y.stride(-1) == 1
     T, D = x.shape[0], x.shape[-1]
 
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
+    BD = _get_l2norm_bd(D, is_forward=True)
     if D > BD:
-        raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
+        raise RuntimeError(
+            f"L2Norm feature dim {D} exceeds UB-safe block size {BD}. "
+            "Column-tiled kernels are not yet implemented for this size."
+        )
 
     rstd = torch.empty((T,), dtype=torch.float32, device=x.device)
-    for row_off, chunk in _iter_row_chunks(T):
-        l2norm_fwd_kernel1[(chunk,)](
-            x=x,
-            y=y,
-            rstd=rstd,
-            eps=eps,
-            D=D,
-            BD=BD,
-            ROW_OFFSET=row_off,
-            num_warps=_STATIC_NUM_WARPS,
+    for row_start, row_len in iter_axis_launch_chunks(T, 1, max_grid=ASCEND_MAX_GRID_DIM):
+        row_end = row_start + row_len
+        _launch_l2norm_fwd_kernel1(
+            x[row_start:row_end],
+            y[row_start:row_end],
+            rstd[row_start:row_end],
+            eps,
+            D,
+            BD,
         )
     return y.view(x_shape_og), rstd.view(x_shape_og[:-1])
 
@@ -116,21 +167,22 @@ def l2norm_bwd_npu(
     dx = torch.empty_like(y)
     T, D = y.shape[0], y.shape[-1]
 
-    MAX_FUSED_SIZE = 65536 // y.element_size()
-    BD = min(MAX_FUSED_SIZE, triton.next_power_of_2(D))
+    BD = _get_l2norm_bd(D, is_forward=False)
     if D > BD:
-        raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+        raise RuntimeError(
+            f"L2Norm feature dim {D} exceeds UB-safe block size {BD}. "
+            "Column-tiled kernels are not yet implemented for this size."
+        )
 
-    for row_off, chunk in _iter_row_chunks(T):
-        l2norm_bwd_kernel1[(chunk,)](
-            y=y,
-            rstd=rstd,
-            dy=dy,
-            dx=dx,
-            eps=eps,
-            D=D,
-            BD=BD,
-            ROW_OFFSET=row_off,
-            num_warps=_STATIC_NUM_WARPS,
+    for row_start, row_len in iter_axis_launch_chunks(T, 1, max_grid=ASCEND_MAX_GRID_DIM):
+        row_end = row_start + row_len
+        _launch_l2norm_bwd_kernel1(
+            y[row_start:row_end],
+            rstd[row_start:row_end],
+            dy[row_start:row_end],
+            dx[row_start:row_end],
+            eps,
+            D,
+            BD,
         )
     return dx.view(y_shape_og)
