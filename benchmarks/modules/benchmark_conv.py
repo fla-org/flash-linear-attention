@@ -11,6 +11,7 @@ from einops import rearrange
 
 from fla.modules.convolution import causal_conv1d
 from fla.ops.utils.index import prepare_sequence_ids
+from fla.utils import IS_NPU
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -18,27 +19,20 @@ except ImportError:
     causal_conv1d_fn = None
 
 
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        # argument names to use as an x-axis for the plot
-        x_names=['T', 'D'],
-        # different possible values for `x_name`
-        x_vals=[(128 * 2 ** i, d) for d in [256, 512, 1024, 2048, 4096] for i in range(1, 10)],
-        # argument name whose value corresponds to a different line in the plot
-        line_arg='provider',
-        # possible values for `line_arg``
-        line_vals=['causal_conv1d_fwd', 'causal_conv1d_cuda_fwd', 'causal_conv1d_fwdbwd', 'causal_conv1d_cuda_fwdbwd'],
-        # label name for the lines
-        line_names=['causal_conv1d_fwd', 'causal_conv1d_cuda_fwd', 'causal_conv1d_fwdbwd', 'causal_conv1d_cuda_fwdbwd'],
-        # line styles
-        styles=[('green', '-'), ('blue', '--'), ('red', '-.'),
-                ('cyan', ':'), ('yellow', 'dotted'), ('cyan', '--'), ('cyan', '-'), ('black', ':')],
-        ylabel="Execution Time (ms)",  # label name for the y-axis
-        # name for the plot. Used also as a file name for saving the plot.
-        plot_name="Performance",
-        args={},
-    ),
-)
+def _conv_benchmark_providers():
+    providers = ['causal_conv1d_fwd', 'causal_conv1d_fwdbwd']
+    if not IS_NPU and causal_conv1d_fn is not None:
+        providers.extend(['causal_conv1d_cuda_fwd', 'causal_conv1d_cuda_fwdbwd'])
+    return providers
+
+
+_LINE_VALS = _conv_benchmark_providers()
+_STYLES = [
+    ('green', '-'), ('blue', '--'), ('red', '-.'), ('cyan', ':'),
+    ('yellow', 'dotted'), ('cyan', '--'), ('cyan', '-'), ('black', ':'),
+]
+
+
 def benchmark(T, D, provider):
     from fla.utils import device
     dtype = torch.bfloat16
@@ -98,6 +92,28 @@ def benchmark(T, D, provider):
             quantiles=quantiles,
         )
     return results
+
+
+benchmark = triton.testing.perf_report(
+    triton.testing.Benchmark(
+        # argument names to use as an x-axis for the plot
+        x_names=['T', 'D'],
+        # different possible values for `x_name`
+        x_vals=[(128 * 2 ** i, d) for d in [256, 512, 1024, 2048, 4096] for i in range(1, 10)],
+        # argument name whose value corresponds to a different line in the plot
+        line_arg='provider',
+        # possible values for `line_arg``
+        line_vals=_LINE_VALS,
+        # label name for the lines
+        line_names=_LINE_VALS,
+        # line styles
+        styles=_STYLES[:len(_LINE_VALS)],
+        ylabel="Execution Time (ms)",  # label name for the y-axis
+        # name for the plot. Used also as a file name for saving the plot.
+        plot_name="Performance",
+        args={},
+    ),
+)(benchmark)
 
 
 if __name__ == '__main__':
