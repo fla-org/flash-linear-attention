@@ -108,9 +108,14 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             p_h0 = h0 + i_nh * K*V + o_v[:, None] * K + o_k[None, :]
         else:
             p_h0 = h0 + i_nh * K*V + o_k[:, None] * V + o_v[None, :]
-        b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
-    for _ in tl.range(0, T):
+    for i_t in tl.range(0, T):
+        # the initial state is added in the first iteration rather than before the
+        # loop: a pre-loop load anchors b_h to the load's register layout for the
+        # whole loop, costing ~40% on long sequences (l2norm/gate fused, H100)
+        if USE_INITIAL_STATE:
+            if i_t == 0:
+                b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
         b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
