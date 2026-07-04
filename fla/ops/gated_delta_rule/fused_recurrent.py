@@ -5,6 +5,7 @@
 # For a list of all contributors, visit:
 #   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
+import functools
 import warnings
 
 import torch
@@ -13,7 +14,7 @@ import triton.language as tl
 
 from fla.ops.utils.op import exp
 from fla.ops.utils.softplus import softplus
-from fla.utils import input_guard
+from fla.utils import input_guard, is_batch_invariant_mode_enabled
 
 
 @triton.heuristics({
@@ -248,6 +249,40 @@ def fused_recurrent_gated_delta_rule_fwd(
     return o, final_state
 
 
+@functools.lru_cache(maxsize=32)
+def _flat_cu_seqlens(batch_size: int, seq_len: int, device: torch.device) -> torch.Tensor:
+    """Cumulative sequence lengths of a fixed-length batch in flattened varlen form.
+
+    Cached so that steady-state decode does not pay an allocation + kernel launch
+    per call, and so the tensor is stable across calls for CUDA-graph capture.
+    """
+    return torch.arange(0, (batch_size + 1) * seq_len, seq_len, device=device, dtype=torch.long)
+
+
+def materialize_initial_state(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    initial_state: torch.Tensor | None,
+    state_v_first: bool,
+    cu_seqlens: torch.LongTensor | None,
+) -> torch.Tensor:
+    """Return an fp32 initial state, materializing zeros when none is given.
+
+    Passing `initial_state=None` compiles a `USE_INITIAL_STATE=False` kernel
+    specialization whose loop body the compiler may schedule differently from
+    the `True` one, breaking bitwise equality between a full-sequence call and
+    a prefill+decode split. Always materializing the state pins every call to
+    a single specialization. The fp32 cast makes the state handoff between
+    calls lossless, matching the fp32 accumulator inside the kernel.
+    """
+    if initial_state is not None:
+        return initial_state.float()
+    N = k.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
+    HV, K, V = v.shape[2], k.shape[-1], v.shape[-1]
+    shape = (N, HV, V, K) if state_v_first else (N, HV, K, V)
+    return k.new_zeros(shape, dtype=torch.float32)
+
+
 class FusedRecurrentFunction(torch.autograd.Function):
 
     @staticmethod
@@ -386,6 +421,13 @@ def fused_recurrent_gated_delta_rule(
         final_state (torch.Tensor):
             Final state of shape `[N, HV, K, V]` if `output_final_state=True` else `None`.
 
+    Note:
+        Under the batch-invariant mode (see :func:`fla.utils.batch_invariant_mode`),
+        this op guarantees bitwise-identical outputs regardless of batch size and of
+        how the sequence is split across calls: processing a full sequence in one call
+        equals a prefill call plus token-by-token decode calls, provided the fp32
+        `final_state` of each call is passed unmodified as the next `initial_state`.
+
     Examples::
         >>> import torch
         >>> import torch.nn.functional as F
@@ -453,6 +495,20 @@ def fused_recurrent_gated_delta_rule(
     if allow_neg_eigval and not use_beta_sigmoid_in_kernel:
         raise ValueError("`allow_neg_eigval=True` requires `use_beta_sigmoid_in_kernel=True`.")
 
+    final_state_requested = output_final_state
+    if is_batch_invariant_mode_enabled():
+        # Pin every call (prefill or decode, fixed-length or varlen, any batch size)
+        # to a single compiled kernel specialization: always pass an fp32 initial
+        # state (USE_INITIAL_STATE), store the final state (STORE_FINAL_STATE), and
+        # address fixed-length batches through cu_seqlens (IS_VARLEN). The latter
+        # needs no reshape: the kernel addresses tokens by linear offset, and a
+        # contiguous [B, T, ...] batch is laid out identically to a packed varlen
+        # batch of B equal-length sequences.
+        initial_state = materialize_initial_state(k, v, initial_state, state_v_first, cu_seqlens)
+        output_final_state = True
+        if cu_seqlens is None:
+            cu_seqlens = _flat_cu_seqlens(q.shape[0], q.shape[1], q.device)
+
     o, final_state = FusedRecurrentFunction.apply(
         q,
         k,
@@ -472,6 +528,8 @@ def fused_recurrent_gated_delta_rule(
         state_v_first,
         cu_seqlens,
     )
+    if not final_state_requested:
+        final_state = None
     return o, final_state
 
 

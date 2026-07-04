@@ -31,6 +31,7 @@ runtime. Variables are grouped by what they control:
 | -------------------- | ------- | ------------------------ | ---------------------------------------------------------------------------------------------------------- |
 | `FLA_TRIL_PRECISION` | `ieee`  | `ieee` / `tf32` / `tf32x3` | Precision used by `solve_tril`. `tf32x3` is NVIDIA-only and gives the best performance / accuracy trade-off on Ampere+. |
 | `FLA_USE_FAST_OPS`   | `0`     | `0` / `1`                | Enable faster but less accurate Triton math intrinsics in shared op helpers.                               |
+| `FLA_BATCH_INVARIANT` | `0`    | `0` / `1`, `true` / `yes` | Enable the batch-invariant execution mode: participating ops (currently `fused_recurrent_gated_delta_rule`) produce bitwise-identical outputs regardless of batch size and of how a sequence is split across calls (full-sequence vs. prefill + decode). Read once at import time; after importing `fla`, use `fla.utils.set_batch_invariant_mode` or the `fla.utils.batch_invariant_mode` context manager instead. |
 
 ---
 
